@@ -17,6 +17,14 @@ def test_settings_requires_api_key(tmp_path: Path, monkeypatch: pytest.MonkeyPat
 def test_settings_uses_defaults_and_resolves_relative_sqlite_path(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    for name in (
+        "TAKEALOT_BASE_URL",
+        "TAKEALOT_DATABASE_URL",
+        "TAKEALOT_REQUEST_TIMEOUT_SECONDS",
+        "TAKEALOT_DASHBOARD_HOST",
+        "TAKEALOT_DASHBOARD_PORT",
+    ):
+        monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("TAKEALOT_API_KEY", "test-api-key")
 
     settings = Settings.from_env(tmp_path)

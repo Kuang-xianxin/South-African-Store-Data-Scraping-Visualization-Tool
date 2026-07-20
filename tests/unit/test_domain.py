@@ -86,3 +86,25 @@ def test_sale_record_maps_api_payload_and_groups_by_sast_day() -> None:
 def test_sast_date_rejects_naive_datetimes() -> None:
     with pytest.raises(ValueError, match="timezone-aware"):
         sast_date(datetime(2026, 7, 20, 8, 0))
+
+
+def test_sale_record_rejects_a_naive_order_date_on_direct_construction() -> None:
+    with pytest.raises(ValueError, match="order_date must be timezone-aware"):
+        SaleRecord(
+            order_item_id="item-1",
+            order_id="order-1",
+            order_date=datetime(2026, 7, 20, 8, 0),
+            sale_status="completed",
+            offer_id="offer-1",
+            tsin_id="tsin-1",
+            sku="SKU-1",
+            selling_price=Decimal("199.99"),
+            quantity=2,
+            success_fee=Decimal("20.00"),
+            fulfillment_fee=Decimal("10.00"),
+            courier_collection_fee=Decimal("5.00"),
+            total_fees=Decimal("35.00"),
+            stock_transfer_fee=Decimal("0.00"),
+            sales_region="Gauteng",
+            stock_source_region="Western Cape",
+        )

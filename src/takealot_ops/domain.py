@@ -94,6 +94,10 @@ class SaleRecord:
     sales_region: str | None
     stock_source_region: str | None
 
+    def __post_init__(self) -> None:
+        """Reject naive timestamps regardless of how the record was constructed."""
+        _require_aware_datetime(self.order_date, "order_date")
+
     @classmethod
     def from_api(cls, payload: Mapping[str, Any]) -> SaleRecord:
         """Convert one Takealot Sales API payload into a typed record."""
