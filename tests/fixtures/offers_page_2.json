@@ -1,0 +1,27 @@
+{
+  "items": [
+    {
+      "offer_id": "offer-2",
+      "tsin_id": "tsin-2",
+      "sku": "SKU-2",
+      "barcode": "9876543210987",
+      "title": "Second example offer",
+      "selling_price": "99.99",
+      "rrp": "119.99",
+      "benchmark_price": "109.99",
+      "status": "buyable",
+      "image_url": "https://example.test/offer-2.jpg",
+      "productline_id": "productline-2",
+      "conversion_percentage_30_days": "4.0",
+      "conversion_percentage_previous_30_days": "3.5",
+      "page_views_30_days": 240,
+      "quantity_returned_30_days": 1,
+      "total_wishlist": 20,
+      "wishlist_30_days": 5,
+      "listing_quality": "excellent",
+      "discount_percentage": "10",
+      "updated_at": "2026-07-20T07:45:00+00:00"
+    }
+  ],
+  "continuation_token": ""
+}

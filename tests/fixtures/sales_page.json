@@ -1,0 +1,23 @@
+{
+  "items": [
+    {
+      "order_item_id": "order-item-1",
+      "order_id": "order-1",
+      "order_date": "2026-07-19T23:30:00+00:00",
+      "sale_status": "completed",
+      "offer_id": "offer-1",
+      "tsin_id": "tsin-1",
+      "sku": "SKU-1",
+      "selling_price": "199.99",
+      "quantity": 2,
+      "success_fee": "20.00",
+      "fulfillment_fee": "10.00",
+      "courier_collection_fee": "5.00",
+      "total_fees": "35.00",
+      "stock_transfer_fee": "0.00",
+      "sales_region": "Gauteng",
+      "stock_source_region": "Western Cape"
+    }
+  ],
+  "continuation_token": ""
+}
