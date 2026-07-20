@@ -1,0 +1,14 @@
+sales_drop:
+  baseline_days: 7
+  minimum_baseline_daily_quantity: 2
+  drop_percentage: 50
+sales_spike:
+  baseline_days: 7
+  minimum_daily_quantity: 3
+  increase_percentage: 100
+traffic_conversion:
+  high_page_views_percentile: 50
+  low_conversion_percentile: 25
+  low_page_views_percentile: 25
+  high_conversion_percentile: 75
+stale_offer_snapshot_hours: 26
