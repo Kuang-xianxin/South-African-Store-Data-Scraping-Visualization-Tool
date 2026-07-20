@@ -6,7 +6,7 @@
 
 **Architecture:** A synchronous HTTP API client feeds idempotent collectors backed by a SQLAlchemy repository. A separate metrics service produces typed dashboard datasets consumed by Streamlit and all export formats, ensuring one calculation path. SQLite is the default database, while SQLAlchemy boundaries preserve a later MySQL migration path.
 
-**Tech Stack:** Python 3.11+, HTTPX, SQLAlchemy 2, Alembic, Pandas, Streamlit, Plotly, OpenPyXL, Playwright, PyYAML, Pytest, Ruff, Mypy.
+**Tech Stack:** Python 3.11+, HTTPX, SQLAlchemy 2, Alembic, Pandas, Streamlit, Plotly, OpenPyXL, Playwright, PyYAML, tzdata, Pytest, Ruff, Mypy, Build.
 
 ## Global Constraints
 
@@ -99,7 +99,7 @@ Expected: collection fails because `takealot_ops.settings` and `takealot_ops.dom
 
 - [ ] **Step 3: Add package metadata and minimal domain implementation**
 
-`pyproject.toml` must define the `takealot-ops` console script as `takealot_ops.cli:main`, a `src` package layout, Python `>=3.11`, the runtime libraries in the plan header, and development dependencies `pytest`, `pytest-cov`, `ruff`, and `mypy`.
+`pyproject.toml` must define the `takealot-ops` console script as `takealot_ops.cli:main`, a `src` package layout, Python `>=3.11`, the runtime libraries in the plan header, and development dependencies `pytest`, `pytest-cov`, `ruff`, `mypy`, and `build`.
 
 `Settings` must contain these exact fields:
 
