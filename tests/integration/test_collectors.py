@@ -85,6 +85,7 @@ def test_collect_offers_persists_complete_snapshot_and_successful_run() -> None:
     assert run is not None
     assert run.status == "success"
     assert run.counts == {"records": 2}
+    assert run.scope_date == date(2026, 7, 20)
 
 
 def test_collect_offers_replaces_same_day_snapshot_and_current_offer_set() -> None:

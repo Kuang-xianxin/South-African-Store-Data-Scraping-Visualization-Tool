@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 import pytest
@@ -17,7 +18,7 @@ from takealot_ops.metrics.service import (
     classify_quadrants,
 )
 from takealot_ops.storage.migrations import create_schema
-from takealot_ops.storage.models import DataQualityEvent
+from takealot_ops.storage.models import AnomalyEvent, DataQualityEvent
 from takealot_ops.storage.repository import Repository
 
 
@@ -141,8 +142,31 @@ def _seed(
         repository = Repository(session)
         for sale in sales or []:
             repository.upsert_sale(sale, {"order_item_id": sale.order_item_id})
+        offers_by_date: dict[date, list[OfferRecord]] = {}
         for offer, snapshot_date in offers or []:
-            repository.upsert_offer_snapshot(offer, snapshot_date)
+            offers_by_date.setdefault(snapshot_date, []).append(offer)
+        for snapshot_date, dated_offers in offers_by_date.items():
+            run_id = repository.begin_run("offers", scope_date=snapshot_date)
+            repository.prune_offer_snapshot(
+                snapshot_date, [offer.offer_id for offer in dated_offers]
+            )
+            for offer in dated_offers:
+                repository.upsert_offer_snapshot(offer, snapshot_date)
+            repository.finish_run(
+                run_id, "success", {"records": len(dated_offers)}, None
+            )
+
+
+def _seed_offer_batch(
+    session: Session, batch_date: date, offers: list[OfferRecord]
+) -> None:
+    with session.begin():
+        repository = Repository(session)
+        run_id = repository.begin_run("offers", scope_date=batch_date)
+        repository.prune_offer_snapshot(batch_date, [offer.offer_id for offer in offers])
+        for offer in offers:
+            repository.upsert_offer_snapshot(offer, batch_date)
+        repository.finish_run(run_id, "success", {"records": len(offers)}, None)
 
 
 def test_sales_are_grouped_by_sast_day(tmp_path: Path) -> None:
@@ -337,7 +361,12 @@ def test_anomaly_rules_cover_spike_traffic_stock_status_and_staleness(tmp_path: 
     yesterday = datetime(2026, 7, 20, 8, tzinfo=UTC)
     sales = [
         _sale("spike-today", yesterday, offer_id="spike", quantity=4),
-        _sale("stock-sale", yesterday, offer_id="stock-sold", quantity=1),
+        _sale(
+            "stock-sale",
+            datetime(2026, 7, 19, 8, tzinfo=UTC),
+            offer_id="stock-sold",
+            quantity=1,
+        ),
     ]
     for offset in range(1, 8):
         day = as_of - timedelta(days=offset)
@@ -454,3 +483,139 @@ def test_rebuild_preserves_unrelated_quality_events(tmp_path: Path) -> None:
         dataset = service.dashboard_dataset(metric_date)
 
     assert dataset.quality_events["event_type"].tolist() == ["missing_sku"]
+
+
+def test_complete_offer_batches_control_historical_membership_and_empty_scope(
+    tmp_path: Path,
+) -> None:
+    day_one = date(2026, 7, 20)
+    day_two = date(2026, 7, 21)
+    day_three = date(2026, 7, 22)
+    engine = create_engine("sqlite://")
+    create_schema(engine)
+    with Session(engine) as session:
+        _seed_offer_batch(session, day_one, [_offer("a"), _offer("b")])
+        _seed_offer_batch(session, day_two, [_offer("a")])
+        _seed_offer_batch(session, day_three, [])
+        service = _service(session, tmp_path)
+
+        service.rebuild(day_one, day_three)
+        on_day_one = service.dashboard_dataset(day_one)
+        on_day_two = service.dashboard_dataset(day_two)
+        on_day_three = service.dashboard_dataset(day_three)
+
+    assert on_day_one.offer_current["offer_id"].tolist() == ["a", "b"]
+    assert on_day_two.offer_current["offer_id"].tolist() == ["a"]
+    assert on_day_three.offer_current.empty
+    day_two_rows = on_day_three.product_daily.loc[
+        on_day_three.product_daily["metric_date"] == day_two, "offer_id"
+    ].tolist()
+    day_three_rows = on_day_three.product_daily.loc[
+        on_day_three.product_daily["metric_date"] == day_three, "offer_id"
+    ].tolist()
+    assert day_two_rows == ["a"]
+    assert day_three_rows == []
+    assert "b" not in on_day_three.anomalies.loc[
+        on_day_three.anomalies["anomaly_type"] == "stale_offer_snapshot", "offer_id"
+    ].tolist()
+
+
+def test_rebuild_preserves_external_anomaly_events(tmp_path: Path) -> None:
+    metric_date = date(2026, 7, 20)
+    engine = create_engine("sqlite://")
+    create_schema(engine)
+    with Session(engine) as session:
+        with session.begin():
+            session.add(
+                AnomalyEvent(
+                    event_date=metric_date,
+                    offer_id="external",
+                    anomaly_type="external_check",
+                    severity="warning",
+                    explanation=None,
+                    details=None,
+                    created_at=datetime(2026, 7, 20, 8, tzinfo=UTC),
+                )
+            )
+        service = _service(session, tmp_path)
+
+        service.rebuild(metric_date, metric_date)
+        dataset = service.dashboard_dataset(metric_date)
+
+    assert dataset.anomalies["anomaly_type"].tolist() == ["external_check"]
+
+
+def test_stockout_uses_the_prior_seven_calendar_days(tmp_path: Path) -> None:
+    as_of = date(2026, 7, 20)
+    engine = create_engine("sqlite://")
+    create_schema(engine)
+    with Session(engine) as session:
+        _seed_offer_batch(
+            session,
+            as_of,
+            [_offer("stock", total_stock=0, status="paused")],
+        )
+        _seed(
+            session,
+            sales=[
+                _sale(
+                    "seven-days-prior",
+                    datetime(2026, 7, 13, 8, tzinfo=UTC),
+                    offer_id="stock",
+                )
+            ],
+        )
+        service = _service(session, tmp_path, included=("included",))
+
+        service.rebuild(as_of, as_of)
+        anomalies = service.dashboard_dataset(as_of).anomalies
+
+    assert ("stock", "suspected_stockout") in set(
+        anomalies[["offer_id", "anomaly_type"]].itertuples(index=False, name=None)
+    )
+
+
+def test_null_offer_status_is_non_buyable(tmp_path: Path) -> None:
+    as_of = date(2026, 7, 20)
+    engine = create_engine("sqlite://")
+    create_schema(engine)
+    with Session(engine) as session:
+        _seed_offer_batch(session, as_of, [_offer("missing-status", status=None)])
+        service = _service(session, tmp_path)
+
+        service.rebuild(as_of, as_of)
+        anomalies = service.dashboard_dataset(as_of).anomalies
+
+    assert ("missing-status", "non_buyable") in set(
+        anomalies[["offer_id", "anomaly_type"]].itertuples(index=False, name=None)
+    )
+
+
+def test_stale_snapshot_normalizes_sast_offset_before_comparison(tmp_path: Path) -> None:
+    as_of = date(2026, 7, 20)
+    sast = ZoneInfo("Africa/Johannesburg")
+    engine = create_engine("sqlite://")
+    create_schema(engine)
+    with Session(engine) as session:
+        _seed_offer_batch(
+            session,
+            as_of,
+            [
+                _offer(
+                    "offset-stale",
+                    captured_at=datetime(2026, 7, 19, 11, 30, tzinfo=sast),
+                )
+            ],
+        )
+        service = _service(
+            session,
+            tmp_path,
+            now=datetime(2026, 7, 20, 12, tzinfo=UTC),
+        )
+
+        service.rebuild(as_of, as_of)
+        anomalies = service.dashboard_dataset(as_of).anomalies
+
+    assert ("offset-stale", "stale_offer_snapshot") in set(
+        anomalies[["offer_id", "anomaly_type"]].itertuples(index=False, name=None)
+    )

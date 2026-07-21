@@ -52,6 +52,17 @@ METRIC_METADATA: dict[str, dict[str, str]] = {
     },
 }
 
+METRIC_ANOMALY_TYPES = (
+    "sales_drop",
+    "sales_spike",
+    "high_views_low_conversion",
+    "low_views_high_conversion",
+    "suspected_stockout",
+    "non_buyable",
+    "stale_offer_snapshot",
+    "unknown_sale_status",
+)
+
 _STORE_DAILY_COLUMNS = (
     "metric_date",
     "ordered_units",
@@ -159,8 +170,9 @@ class MetricService:
         with self._repository.transaction():
             sales = self._repository.list_sales(start - timedelta(days=lookback_days), end)
             snapshots = self._repository.list_offer_snapshots_through(end)
+            scope_dates = self._repository.list_successful_offer_scope_dates(end)
             product_rows, anomalies, quality_events = self._calculate(
-                start, end, sales, snapshots
+                start, end, sales, snapshots, scope_dates
             )
             self._repository.replace_metric_range(
                 start,
@@ -168,6 +180,7 @@ class MetricService:
                 product_metrics=product_rows,
                 anomalies=anomalies,
                 quality_events=quality_events,
+                anomaly_types=METRIC_ANOMALY_TYPES,
             )
         return len(product_rows)
 
@@ -176,10 +189,13 @@ class MetricService:
         with self._repository.transaction():
             product_rows = self._repository.list_daily_product_metrics(as_of)
             snapshots = self._repository.list_offer_snapshots_through(as_of)
+            scope_dates = self._repository.list_successful_offer_scope_dates(as_of)
             anomalies = self._repository.list_anomalies(as_of)
             quality_events = self._repository.list_quality_events(as_of)
             product_daily = _product_frame(product_rows)
-            offer_current = _offer_frame(list(_latest_snapshots(snapshots, as_of).values()))
+            offer_current = _offer_frame(
+                _batch_snapshots(snapshots, _latest_scope(scope_dates, as_of))
+            )
             anomaly_frame = _anomaly_frame(anomalies)
             quality_frame = _quality_frame(quality_events)
         return DashboardDataset(
@@ -196,6 +212,7 @@ class MetricService:
         end: date,
         sales: Sequence[SaleItem],
         snapshots: Sequence[OfferSnapshot],
+        scope_dates: Sequence[date],
     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
         aggregates: dict[tuple[date, str], _SaleAggregate] = {}
         unknown_statuses: dict[tuple[date, str], set[str | None]] = {}
@@ -216,24 +233,16 @@ class MetricService:
         snapshots_by_key = {
             (snapshot.snapshot_date, snapshot.offer_id): snapshot for snapshot in snapshots
         }
-        offer_ids = sorted(
-            {snapshot.offer_id for snapshot in snapshots}
-            | {offer_id for _, offer_id in aggregates}
-        )
-        first_known: dict[str, date] = {}
-        for snapshot in snapshots:
-            first_known[snapshot.offer_id] = min(
-                first_known.get(snapshot.offer_id, snapshot.snapshot_date),
-                snapshot.snapshot_date,
-            )
-        for sales_day, offer_id in aggregates:
-            first_known[offer_id] = min(first_known.get(offer_id, sales_day), sales_day)
         product_rows: list[dict[str, Any]] = []
         for metric_date in _date_range(start, end):
-            known_by_date = _latest_snapshots(snapshots, metric_date)
-            for offer_id in (
-                candidate for candidate in offer_ids if first_known[candidate] <= metric_date
-            ):
+            active_batch = _batch_snapshots(
+                snapshots, _latest_scope(scope_dates, metric_date)
+            )
+            known_by_date = {snapshot.offer_id: snapshot for snapshot in active_batch}
+            daily_sale_ids = {
+                offer_id for sales_day, offer_id in aggregates if sales_day == metric_date
+            }
+            for offer_id in sorted(set(known_by_date) | daily_sale_ids):
                 exact_snapshot = snapshots_by_key.get((metric_date, offer_id))
                 previous = snapshots_by_key.get((metric_date - timedelta(days=1), offer_id))
                 aggregate = aggregates.get((metric_date, offer_id), _SaleAggregate())
@@ -257,7 +266,12 @@ class MetricService:
             product_rows,
             aggregates,
             unknown_statuses,
-            _latest_snapshots(snapshots, end),
+            {
+                snapshot.offer_id: snapshot
+                for snapshot in _batch_snapshots(
+                    snapshots, _latest_scope(scope_dates, end)
+                )
+            },
             created_at,
         )
         return product_rows, anomalies, quality_events
@@ -355,7 +369,7 @@ class MetricService:
                     aggregates.get(
                         (metric_date - timedelta(days=offset), offer_id), _SaleAggregate()
                     ).ordered_units
-                    for offset in range(7)
+                    for offset in range(1, 8)
                 )
                 if total_stock == 0 and (offer_status == "buyable" or recent_sales > 0):
                     anomalies.append(
@@ -368,7 +382,7 @@ class MetricService:
                             created_at,
                         )
                     )
-                if offer_status is not None and offer_status != "buyable":
+                if offer_status != "buyable":
                     anomalies.append(
                         _anomaly(
                             metric_date,
@@ -702,16 +716,17 @@ def _offer_frame(rows: Sequence[OfferSnapshot]) -> pd.DataFrame:
     return pd.DataFrame(values, columns=_OFFER_CURRENT_COLUMNS)
 
 
-def _latest_snapshots(
-    snapshots: Sequence[OfferSnapshot], as_of: date
-) -> dict[str, OfferSnapshot]:
-    latest: dict[str, OfferSnapshot] = {}
-    for snapshot in snapshots:
-        if snapshot.snapshot_date <= as_of:
-            previous = latest.get(snapshot.offer_id)
-            if previous is None or snapshot.snapshot_date >= previous.snapshot_date:
-                latest[snapshot.offer_id] = snapshot
-    return latest
+def _latest_scope(scope_dates: Sequence[date], as_of: date) -> date | None:
+    eligible = [scope_date for scope_date in scope_dates if scope_date <= as_of]
+    return max(eligible) if eligible else None
+
+
+def _batch_snapshots(
+    snapshots: Sequence[OfferSnapshot], scope_date: date | None
+) -> list[OfferSnapshot]:
+    if scope_date is None:
+        return []
+    return [snapshot for snapshot in snapshots if snapshot.snapshot_date == scope_date]
 
 
 def _anomaly_frame(rows: Sequence[AnomalyEvent]) -> pd.DataFrame:

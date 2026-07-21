@@ -21,6 +21,7 @@ class CollectionRun(Base):
 
     run_id: Mapped[str] = mapped_column(String(36), primary_key=True)
     run_type: Mapped[str] = mapped_column(String(50), nullable=False)
+    scope_date: Mapped[date | None] = mapped_column(Date)
     started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     status: Mapped[str | None] = mapped_column(String(30))

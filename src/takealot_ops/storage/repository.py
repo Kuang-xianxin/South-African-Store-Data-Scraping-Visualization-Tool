@@ -35,13 +35,14 @@ class Repository:
         with self._session.begin():
             yield
 
-    def begin_run(self, run_type: str) -> str:
+    def begin_run(self, run_type: str, scope_date: date | None = None) -> str:
         """Stage a collection run and return its identifier without committing."""
         run_id = str(uuid4())
         self._session.add(
             CollectionRun(
                 run_id=run_id,
                 run_type=run_type,
+                scope_date=scope_date,
                 started_at=datetime.now(UTC),
                 finished_at=None,
                 status=None,
@@ -125,6 +126,21 @@ class Repository:
             )
         )
 
+    def list_successful_offer_scope_dates(self, as_of: date) -> list[date]:
+        """Return durable complete Offer batch dates through ``as_of``."""
+        values = self._session.scalars(
+            select(CollectionRun.scope_date)
+            .where(
+                CollectionRun.run_type == "offers",
+                CollectionRun.status == "success",
+                CollectionRun.scope_date.is_not(None),
+                CollectionRun.scope_date <= as_of,
+            )
+            .distinct()
+            .order_by(CollectionRun.scope_date)
+        ).all()
+        return [value for value in values if value is not None]
+
     def list_offer_current(self) -> list[OfferCurrent]:
         """Return the latest persisted row for every offer."""
         return list(self._session.scalars(select(OfferCurrent).order_by(OfferCurrent.offer_id)))
@@ -137,6 +153,7 @@ class Repository:
         product_metrics: Sequence[Mapping[str, Any]],
         anomalies: Sequence[Mapping[str, Any]],
         quality_events: Sequence[Mapping[str, Any]],
+        anomaly_types: Sequence[str],
     ) -> None:
         """Stage a complete replacement of calculated outputs for a date range."""
         self._session.execute(
@@ -149,6 +166,7 @@ class Repository:
             delete(AnomalyEvent).where(
                 AnomalyEvent.event_date >= start,
                 AnomalyEvent.event_date <= end,
+                AnomalyEvent.anomaly_type.in_(anomaly_types),
             )
         )
         self._session.execute(
@@ -235,7 +253,7 @@ def _offer_values(record: OfferRecord) -> dict[str, Any]:
         "listing_quality": record.listing_quality,
         "discount_percentage": record.discount_percentage,
         "updated_at": record.updated_at,
-        "captured_at": record.captured_at,
+        "captured_at": record.captured_at.astimezone(UTC),
         "total_stock": record.total_stock,
     }
 
