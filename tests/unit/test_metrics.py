@@ -223,6 +223,33 @@ def test_ordered_units_include_all_statuses(tmp_path: Path) -> None:
     assert row["effective_units"] == 1
 
 
+def test_ordered_revenue_uses_api_line_value_without_multiplying_quantity(
+    tmp_path: Path,
+) -> None:
+    metric_date = date(2026, 7, 20)
+    engine = create_engine("sqlite://")
+    create_schema(engine)
+    with Session(engine) as session:
+        _seed(
+            session,
+            sales=[
+                _sale(
+                    "two-units",
+                    datetime(2026, 7, 20, 8, tzinfo=UTC),
+                    quantity=2,
+                    price="704.00",
+                )
+            ],
+        )
+        service = _service(session, tmp_path, included=("included",))
+
+        service.rebuild(metric_date, metric_date)
+        row = service.dashboard_dataset(metric_date).product_daily.iloc[0]
+
+    assert row["ordered_units"] == 2
+    assert row["ordered_revenue"] == Decimal("704.00")
+
+
 def test_unknown_status_is_excluded_from_effective_units_and_flagged(tmp_path: Path) -> None:
     metric_date = date(2026, 7, 20)
     engine = create_engine("sqlite://")

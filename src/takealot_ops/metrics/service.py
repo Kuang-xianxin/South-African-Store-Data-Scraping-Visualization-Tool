@@ -223,7 +223,9 @@ class MetricService:
             key = (sale.sales_day, sale.offer_id)
             aggregate = aggregates.setdefault(key, _SaleAggregate())
             aggregate.ordered_units += sale.quantity
-            aggregate.ordered_revenue += (sale.selling_price or Decimal("0")) * sale.quantity
+            # The Sales API returns the full order-item line value, already
+            # reflecting ``quantity``. Multiplying it again overstates multi-unit sales.
+            aggregate.ordered_revenue += sale.selling_price or Decimal("0")
             if sale.sale_status in self._included:
                 aggregate.effective_units += sale.quantity
             elif sale.sale_status not in self._excluded:

@@ -448,7 +448,11 @@ def _build_metric_notes(sheet: Worksheet) -> None:
                 "label": "有效件数",
                 "definition": "仅计入已确认有效的状态；存在未确认状态时留白。",
             },
-            {"metric": "ordered_revenue", "label": "订购销售额", "definition": "销售价乘以订购数量；币种为 ZAR。"},
+            {
+                "metric": "ordered_revenue",
+                "label": "订购销售额",
+                "definition": "API 销售明细的 selling_price 已是明细总金额，按明细直接汇总；币种为 ZAR。",
+            },
             {"metric": "page_views_30_days", "label": "近30天浏览量", "definition": "API 返回的 30 天滚动窗口值。"},
             {"metric": "page_views_30_day_average", "label": "近30天日均浏览量", "definition": "近30天浏览量除以 30 的派生平均值。"},
             {"metric": "page_views_window_net_change", "label": "30天浏览量窗口净变化", "definition": "相邻快照的滚动窗口净变化，仅作趋势参考。"},
