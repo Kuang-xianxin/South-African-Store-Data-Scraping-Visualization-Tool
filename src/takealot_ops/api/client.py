@@ -16,6 +16,7 @@ from takealot_ops.settings import Settings
 
 
 RETRY_DELAYS = (2.0, 5.0, 15.0)
+_MISSING = object()
 
 
 class TakealotClient:
@@ -50,8 +51,14 @@ class TakealotClient:
                     raise ApiResponseError(self._sanitize("API response items must be objects"))
                 yield dict(item)
 
-            continuation_token = payload.get("continuation_token")
-            if not isinstance(continuation_token, str) or not continuation_token.strip():
+            continuation_token = payload.get("continuation_token", _MISSING)
+            if continuation_token is _MISSING:
+                return
+            if not isinstance(continuation_token, str):
+                raise ApiResponseError(
+                    self._sanitize("API response continuation_token must be a string")
+                )
+            if not continuation_token.strip():
                 return
             page_params["continuation_token"] = continuation_token
 
@@ -62,7 +69,9 @@ class TakealotClient:
             try:
                 yield OfferRecord.from_api(item, captured_at)
             except (KeyError, TypeError, ValueError) as error:
-                raise ApiResponseError(self._sanitize(f"Invalid offer API item: {error}")) from error
+                raise ApiResponseError(
+                    self._sanitize(f"Invalid offer API item: {error}")
+                ) from None
 
     def list_sales(self, start: date, end: date) -> Iterator[SaleRecord]:
         """Yield typed sale records within an inclusive SAST calendar-date range."""
@@ -75,7 +84,7 @@ class TakealotClient:
             try:
                 yield SaleRecord.from_api(item)
             except (KeyError, TypeError, ValueError) as error:
-                raise ApiResponseError(self._sanitize(f"Invalid sale API item: {error}")) from error
+                raise ApiResponseError(self._sanitize(f"Invalid sale API item: {error}")) from None
 
     def list_returns(self, start: date, end: date) -> Iterator[dict[str, Any]]:
         """Yield return payloads within an inclusive SAST calendar-date range."""

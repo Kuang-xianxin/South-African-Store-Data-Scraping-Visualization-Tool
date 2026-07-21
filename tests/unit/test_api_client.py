@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import traceback
 from collections.abc import Callable
 from datetime import date
 from pathlib import Path
@@ -17,6 +18,61 @@ from takealot_ops.settings import Settings
 
 FIXTURES_DIR = Path(__file__).parents[1] / "fixtures"
 API_KEY = "fixture-api-key"
+COLLECTION_ENVELOPE_FIELDS = {"items", "count", "limit", "continuation_token"}
+DOCUMENTED_DEFAULT_OFFER_FIELDS = {
+    "offer_id",
+    "tsin_id",
+    "sku",
+    "barcode",
+    "product_label",
+    "selling_price",
+    "rrp",
+    "minimum_leadtime_days",
+    "status",
+    "title",
+    "discount_percentage",
+    "storage_fee_eligible",
+    "created_at",
+    "updated_at",
+    "affected_by_vacation",
+    "disabled_by_seller",
+    "disabled_by_takealot",
+    "conversion_percentage_30_days",
+    "conversion_percentage_previous_30_days",
+    "page_views_30_days",
+    "quantity_returned_30_days",
+    "condition",
+    "image_url",
+    "productline_id",
+    "width_cm",
+    "length_cm",
+    "height_cm",
+    "weight_grams",
+    "is_conveyable",
+    "benchmark_price",
+    "total_wishlist",
+    "wishlist_30_days",
+    "listing_quality",
+    "replenishment_blocks",
+}
+DOCUMENTED_SALE_FIELDS = {
+    "order_item_id",
+    "order_id",
+    "order_date",
+    "sale_status",
+    "offer_id",
+    "tsin_id",
+    "sku",
+    "selling_price",
+    "quantity",
+    "success_fee",
+    "fulfillment_fee",
+    "courier_collection_fee",
+    "total_fees",
+    "stock_transfer_fee",
+    "sales_region",
+    "stock_source_region",
+}
 
 
 def _settings() -> Settings:
@@ -39,6 +95,104 @@ def _client(
     handler: Callable[[httpx.Request], httpx.Response], sleep: Callable[[float], None] | None = None
 ) -> TakealotClient:
     return TakealotClient(_settings(), transport=httpx.MockTransport(handler), sleep=sleep)
+
+
+def _assert_documented_collection_envelope(payload: dict[str, Any]) -> None:
+    assert set(payload) == COLLECTION_ENVELOPE_FIELDS
+    assert isinstance(payload["items"], list)
+    assert type(payload["count"]) is int
+    assert type(payload["limit"]) is int
+    assert isinstance(payload["continuation_token"], str)
+
+
+def test_offer_fixtures_match_documented_collection_schema() -> None:
+    integer_fields = {
+        "offer_id",
+        "tsin_id",
+        "selling_price",
+        "rrp",
+        "minimum_leadtime_days",
+        "page_views_30_days",
+        "quantity_returned_30_days",
+        "productline_id",
+        "benchmark_price",
+        "total_wishlist",
+        "wishlist_30_days",
+        "listing_quality",
+    }
+    number_fields = {
+        "discount_percentage",
+        "conversion_percentage_30_days",
+        "conversion_percentage_previous_30_days",
+        "width_cm",
+        "length_cm",
+        "height_cm",
+        "weight_grams",
+    }
+    boolean_fields = {
+        "storage_fee_eligible",
+        "affected_by_vacation",
+        "disabled_by_seller",
+        "disabled_by_takealot",
+        "is_conveyable",
+    }
+    string_fields = {
+        "sku",
+        "barcode",
+        "product_label",
+        "status",
+        "title",
+        "created_at",
+        "updated_at",
+        "condition",
+        "image_url",
+    }
+
+    for fixture_name in ("offers_page_1.json", "offers_page_2.json"):
+        page = _fixture(fixture_name)
+        _assert_documented_collection_envelope(page)
+        offer = page["items"][0]
+        assert set(offer) == DOCUMENTED_DEFAULT_OFFER_FIELDS
+        assert all(type(offer[field]) is int for field in integer_fields)
+        assert all(
+            isinstance(offer[field], (int, float)) and not isinstance(offer[field], bool)
+            for field in number_fields
+        )
+        assert all(type(offer[field]) is bool for field in boolean_fields)
+        assert all(isinstance(offer[field], str) for field in string_fields)
+        assert isinstance(offer["replenishment_blocks"], list)
+
+
+def test_sales_fixture_matches_documented_collection_schema() -> None:
+    page = _fixture("sales_page.json")
+    _assert_documented_collection_envelope(page)
+    sale = page["items"][0]
+
+    assert set(sale) == DOCUMENTED_SALE_FIELDS
+    assert all(
+        type(sale[field]) is int
+        for field in ("order_item_id", "order_id", "offer_id", "tsin_id", "selling_price", "quantity")
+    )
+    assert all(
+        isinstance(sale[field], (int, float)) and not isinstance(sale[field], bool)
+        for field in (
+            "success_fee",
+            "fulfillment_fee",
+            "courier_collection_fee",
+            "total_fees",
+            "stock_transfer_fee",
+        )
+    )
+    assert all(
+        isinstance(sale[field], str)
+        for field in (
+            "order_date",
+            "sale_status",
+            "sku",
+            "sales_region",
+            "stock_source_region",
+        )
+    )
 
 
 def test_client_sends_api_key_header_without_putting_it_in_url() -> None:
@@ -72,8 +226,55 @@ def test_iter_items_follows_continuation_token_until_empty() -> None:
     finally:
         client.close()
 
-    assert [item["offer_id"] for item in items] == ["offer-1", "offer-2"]
-    assert [request.url.params.get("continuation_token") for request in requests] == [None, "next-page"]
+    assert [item["offer_id"] for item in items] == [100001, 100002]
+    assert [request.url.params.get("continuation_token") for request in requests] == [
+        None,
+        "eyJvZmZzZXQiOiAxMDB9",
+    ]
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"items": []},
+        {"items": [], "continuation_token": ""},
+        {"items": [], "continuation_token": "   "},
+    ],
+    ids=["absent", "empty", "whitespace"],
+)
+def test_iter_items_stops_when_continuation_token_is_absent_or_blank(
+    payload: dict[str, Any],
+) -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, json=payload)
+
+    client = _client(handler)
+    try:
+        assert list(client.iter_items("/offers", {"limit": 100})) == []
+    finally:
+        client.close()
+
+    assert len(requests) == 1
+
+
+@pytest.mark.parametrize("continuation_token", [None, 0, False, []])
+def test_iter_items_rejects_present_non_string_continuation_token(
+    continuation_token: object,
+) -> None:
+    client = _client(
+        lambda request: httpx.Response(
+            200,
+            json={"items": [], "continuation_token": continuation_token},
+        )
+    )
+    try:
+        with pytest.raises(ApiResponseError, match="continuation_token"):
+            list(client.iter_items("/offers", {"limit": 100}))
+    finally:
+        client.close()
 
 
 def test_sales_query_uses_inclusive_sast_dates_and_limit_100() -> None:
@@ -102,7 +303,45 @@ def test_403_raises_authentication_error_without_retry() -> None:
 
     def handler(request: httpx.Request) -> httpx.Response:
         requests.append(request)
-        return httpx.Response(403, json={"detail": f"Key {API_KEY} is invalid"})
+        return httpx.Response(
+            403,
+            json={
+                "errors": [
+                    {
+                        "status": 403,
+                        "title": f"Forbidden for key {API_KEY}",
+                    }
+                ]
+            },
+        )
+
+    client = _client(handler)
+    try:
+        with pytest.raises(AuthenticationError) as error:
+            list(client.list_offers())
+    finally:
+        client.close()
+
+    assert len(requests) == 1
+    assert API_KEY not in str(error.value)
+
+
+def test_401_raises_authentication_error_without_retry() -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(
+            401,
+            json={
+                "errors": [
+                    {
+                        "status": 401,
+                        "title": f"Unauthorized for key {API_KEY}",
+                    }
+                ]
+            },
+        )
 
     client = _client(handler)
     try:
@@ -123,7 +362,11 @@ def test_429_uses_retry_after_then_retries() -> None:
         nonlocal calls
         calls += 1
         if calls == 1:
-            return httpx.Response(429, headers={"Retry-After": "7"})
+            return httpx.Response(
+                429,
+                headers={"Retry-After": "7"},
+                json={"errors": [{"status": 429, "title": "Too Many Requests"}]},
+            )
         return httpx.Response(200, json=_fixture("offers_page_2.json"))
 
     client = _client(handler, sleep=sleeps.append)
@@ -144,7 +387,7 @@ def test_500_retries_three_times_then_raises() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         nonlocal calls
         calls += 1
-        return httpx.Response(500, json={"detail": f"failure for {API_KEY}"})
+        return httpx.Response(500, json={"title": f"failure for {API_KEY}"})
 
     client = _client(handler, sleep=sleeps.append)
     try:
@@ -170,6 +413,28 @@ def test_typed_record_conversion_error_redacts_api_key() -> None:
         client.close()
 
     assert API_KEY not in str(error.value)
+
+
+def test_typed_record_conversion_error_does_not_leak_api_key_through_exception_chain() -> None:
+    payload = _fixture("sales_page.json")
+    payload["items"][0]["quantity"] = API_KEY
+
+    client = _client(lambda request: httpx.Response(200, json=payload))
+    try:
+        with pytest.raises(ApiResponseError) as error:
+            list(client.list_sales(date(2026, 7, 1), date(2026, 7, 20)))
+    finally:
+        client.close()
+
+    cause_messages: list[str] = []
+    cause = error.value.__cause__
+    while cause is not None:
+        cause_messages.append(str(cause))
+        cause = cause.__cause__
+    formatted_traceback = "".join(traceback.format_exception(error.value))
+
+    assert all(API_KEY not in message for message in cause_messages)
+    assert API_KEY not in formatted_traceback
 
 
 def test_client_rejects_non_get_requests() -> None:
