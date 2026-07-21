@@ -9,6 +9,7 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.exc import OperationalError
 
 from takealot_ops.dashboard.app import (
+    _calendar_window_sum,
     _sum_value,
     create_read_only_engine,
     filter_as_of,
@@ -25,7 +26,7 @@ from takealot_ops.dashboard.labels import (
     QUADRANT_LABELS,
     TRAFFIC_METRIC_LABELS,
 )
-from takealot_ops.settings import DashboardSettings
+from takealot_ops.settings import DashboardSettings, SettingsError
 
 
 def _product_rows() -> pd.DataFrame:
@@ -202,6 +203,17 @@ def test_dashboard_sqlite_engine_rejects_writes(tmp_path: Path) -> None:
     readonly.dispose()
 
 
+@pytest.mark.parametrize(
+    "database_url",
+    ["mysql+pymysql://localhost/takealot", "sqlite+aiosqlite:///takealot.db"],
+)
+def test_dashboard_engine_rejects_unsupported_dialect_before_driver_import(
+    database_url: str,
+) -> None:
+    with pytest.raises(SettingsError, match="SQLite"):
+        create_read_only_engine(database_url)
+
+
 def test_malformed_database_url_returns_friendly_load_error(tmp_path: Path) -> None:
     settings = DashboardSettings(
         project_root=tmp_path,
@@ -236,3 +248,21 @@ def test_quadrant_chart_skips_non_numeric_boundaries() -> None:
     figure = build_quadrant_figure(classified)
 
     assert not figure.layout.shapes
+
+
+def test_seven_day_kpi_uses_calendar_window_not_last_seven_rows() -> None:
+    sparse = pd.DataFrame(
+        {
+            "metric_date": [date(2026, 7, 1), date(2026, 7, 20)],
+            "ordered_units": [9, 2],
+        }
+    )
+    all_missing_recent = pd.DataFrame(
+        {
+            "metric_date": [date(2026, 7, 1), date(2026, 7, 19), date(2026, 7, 20)],
+            "ordered_units": [9, None, None],
+        }
+    )
+
+    assert _calendar_window_sum(sparse, "ordered_units", days=7) == 2
+    assert _calendar_window_sum(all_missing_recent, "ordered_units", days=7) is None

@@ -71,6 +71,21 @@ def test_dashboard_rejects_invalid_local_port_cleanly(
     assert app.title[0].value == "本地配置不可用"
 
 
+def test_dashboard_rejects_unsupported_database_dialect_cleanly(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("TAKEALOT_API_KEY", raising=False)
+    monkeypatch.setenv("TAKEALOT_DATABASE_URL", "mysql+pymysql://localhost/takealot")
+
+    with pytest.raises(SettingsError, match="SQLite"):
+        DashboardSettings.from_env(PROJECT_ROOT)
+
+    app = AppTest.from_file(str(APP_PATH), default_timeout=10).run()
+    assert not app.exception
+    assert app.title[0].value == "本地配置不可用"
+    assert "SQLite" in app.error[0].value
+
+
 def test_populated_dashboard_renders_every_data_page_without_api_key(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

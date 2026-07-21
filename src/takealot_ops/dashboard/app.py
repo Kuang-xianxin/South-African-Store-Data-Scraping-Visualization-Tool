@@ -12,7 +12,7 @@ import pandas as pd
 import streamlit as st
 import yaml
 from sqlalchemy import create_engine, event
-from sqlalchemy.engine import Connection, Engine, make_url
+from sqlalchemy.engine import Engine, make_url
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
@@ -108,20 +108,16 @@ def load_dashboard_dataset(
 
 def create_read_only_engine(database_url: str) -> Engine:
     """Create an engine whose dashboard connections reject write statements."""
-    engine = create_engine(database_url)
-    if engine.url.get_backend_name() == "sqlite":
+    url = make_url(database_url)
+    if url.drivername not in {"sqlite", "sqlite+pysqlite"}:
+        raise SettingsError("The dashboard currently supports synchronous SQLite URLs only")
+    engine = create_engine(url)
 
-        @event.listens_for(engine, "connect")
-        def _set_sqlite_query_only(dbapi_connection: Any, _: Any) -> None:
-            cursor = dbapi_connection.cursor()
-            cursor.execute("PRAGMA query_only=ON")
-            cursor.close()
-
-    else:
-
-        @event.listens_for(engine, "begin")
-        def _set_transaction_read_only(connection: Connection) -> None:
-            connection.exec_driver_sql("SET TRANSACTION READ ONLY")
+    @event.listens_for(engine, "connect")
+    def _set_sqlite_query_only(dbapi_connection: Any, _: Any) -> None:
+        cursor = dbapi_connection.cursor()
+        cursor.execute("PRAGMA query_only=ON")
+        cursor.close()
 
     return engine
 
@@ -136,6 +132,12 @@ def main() -> None:
         st.title("本地配置不可用")
         st.error(str(exc))
         st.info("请修正本地数据库、主机或端口环境变量；浏览看板无需设置 API Key。")
+        return
+    configured_address = st.get_option("server.address")
+    if configured_address not in {None, "127.0.0.1", "localhost"}:
+        st.title("本地安全设置冲突")
+        st.error("当前 Streamlit 服务不是 loopback 地址，页面已停止加载。")
+        st.info("请使用 takealot_ops.dashboard.launcher 官方入口启动本地看板。")
         return
 
     with st.sidebar:
@@ -251,7 +253,8 @@ def _render_product(
         "最新可用日下单件数", _number_or_missing(latest.get("ordered_units"))
     )
     metric_columns[1].metric(
-        "近7日下单件数", _number_or_missing(_tail_sum(history, "ordered_units", 7))
+        "近7日下单件数",
+        _number_or_missing(_calendar_window_sum(history, "ordered_units", days=7)),
     )
     metric_columns[2].metric(
         "近30天浏览量", _number_or_missing(latest.get("page_views_30_days"))
@@ -485,11 +488,29 @@ def _unique_count(frame: pd.DataFrame, column: str) -> int:
     return int(frame[column].dropna().nunique())
 
 
-def _tail_sum(frame: pd.DataFrame, column: str, days: int) -> float | None:
-    if frame.empty or column not in frame.columns:
+def _calendar_window_sum(
+    frame: pd.DataFrame,
+    column: str,
+    *,
+    days: int,
+    date_column: str = "metric_date",
+) -> float | None:
+    if days < 1:
+        raise ValueError("days must be positive")
+    if frame.empty or column not in frame.columns or date_column not in frame.columns:
         return None
-    values = pd.to_numeric(frame.tail(days)[column], errors="coerce")
-    return None if values.notna().sum() == 0 else float(values.sum())
+    metric_dates = pd.to_datetime(frame[date_column], errors="coerce").dt.date
+    valid_dates = metric_dates.dropna()
+    if valid_dates.empty:
+        return None
+    latest_date = valid_dates.max()
+    window_start = latest_date - timedelta(days=days - 1)
+    values = pd.to_numeric(
+        frame.loc[(metric_dates >= window_start) & (metric_dates <= latest_date), column],
+        errors="coerce",
+    )
+    total = values.sum(min_count=1)
+    return None if pd.isna(total) else float(total)
 
 
 def _percentage_median(frame: pd.DataFrame, column: str) -> str:

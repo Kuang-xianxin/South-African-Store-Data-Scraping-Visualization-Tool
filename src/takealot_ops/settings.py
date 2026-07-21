@@ -6,6 +6,9 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
+from sqlalchemy.engine import make_url
+from sqlalchemy.exc import SQLAlchemyError
+
 
 DEFAULT_BASE_URL = "https://marketplace-api.takealot.com/v1"
 DEFAULT_DATABASE_URL = "sqlite:///data/takealot.db"
@@ -68,6 +71,7 @@ class DashboardSettings:
         database_url = _resolve_sqlite_url(
             os.environ.get("TAKEALOT_DATABASE_URL", DEFAULT_DATABASE_URL), resolved_root
         )
+        _validate_dashboard_database_url(database_url)
         return cls(
             project_root=resolved_root,
             database_url=database_url,
@@ -92,6 +96,15 @@ def _dashboard_port_from_env() -> int:
     if not 1 <= port <= 65535:
         raise SettingsError("TAKEALOT_DASHBOARD_PORT must be between 1 and 65535")
     return port
+
+
+def _validate_dashboard_database_url(database_url: str) -> None:
+    try:
+        driver_name = make_url(database_url).drivername
+    except SQLAlchemyError as exc:
+        raise SettingsError("TAKEALOT_DATABASE_URL must be a valid SQLite URL") from exc
+    if driver_name not in {"sqlite", "sqlite+pysqlite"}:
+        raise SettingsError("The dashboard currently supports synchronous SQLite URLs only")
 
 
 def _resolve_sqlite_url(database_url: str, project_root: Path) -> str:
