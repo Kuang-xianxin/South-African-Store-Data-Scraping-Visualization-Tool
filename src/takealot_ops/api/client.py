@@ -66,12 +66,7 @@ class TakealotClient:
         """Yield typed current-offer records."""
         captured_at = datetime.now(UTC)
         for item in self.iter_items("/offers", {"limit": 100}):
-            try:
-                yield OfferRecord.from_api(item, captured_at)
-            except (KeyError, TypeError, ValueError) as error:
-                raise ApiResponseError(
-                    self._sanitize(f"Invalid offer API item: {error}")
-                ) from None
+            yield self._offer_record(item, captured_at)
 
     def list_sales(self, start: date, end: date) -> Iterator[SaleRecord]:
         """Yield typed sale records within an inclusive SAST calendar-date range."""
@@ -81,10 +76,7 @@ class TakealotClient:
             "limit": 100,
         }
         for item in self.iter_items("/sales", params):
-            try:
-                yield SaleRecord.from_api(item)
-            except (KeyError, TypeError, ValueError) as error:
-                raise ApiResponseError(self._sanitize(f"Invalid sale API item: {error}")) from None
+            yield self._sale_record(item)
 
     def list_returns(self, start: date, end: date) -> Iterator[dict[str, Any]]:
         """Yield return payloads within an inclusive SAST calendar-date range."""
@@ -101,15 +93,26 @@ class TakealotClient:
         """Close the owned HTTP client."""
         self._client.close()
 
+    def _offer_record(self, item: Mapping[str, Any], captured_at: datetime) -> OfferRecord:
+        try:
+            return OfferRecord.from_api(item, captured_at)
+        except (KeyError, TypeError, ValueError) as error:
+            error_message = self._sanitize(f"Invalid offer API item: {error}")
+        raise ApiResponseError(error_message)
+
+    def _sale_record(self, item: Mapping[str, Any]) -> SaleRecord:
+        try:
+            return SaleRecord.from_api(item)
+        except (KeyError, TypeError, ValueError) as error:
+            error_message = self._sanitize(f"Invalid sale API item: {error}")
+        raise ApiResponseError(error_message)
+
     def _request(self, method: str, path: str, params: Mapping[str, Any]) -> httpx.Response:
         if method != "GET":
             raise ValueError("TakealotClient permits only GET requests")
 
         for attempt in range(len(RETRY_DELAYS) + 1):
-            try:
-                response = self._client.request("GET", path.lstrip("/"), params=params)
-            except httpx.HTTPError as error:
-                raise ApiResponseError(self._sanitize(str(error))) from error
+            response = self._send_get(path, params)
 
             if response.status_code in {401, 403}:
                 raise AuthenticationError(self._error_message(response))
@@ -126,6 +129,13 @@ class TakealotClient:
             return response
 
         raise AssertionError("retry loop must return or raise")
+
+    def _send_get(self, path: str, params: Mapping[str, Any]) -> httpx.Response:
+        try:
+            return self._client.request("GET", path.lstrip("/"), params=params)
+        except httpx.HTTPError as error:
+            error_message = self._sanitize(str(error))
+        raise ApiResponseError(error_message)
 
     def _json_object(self, response: httpx.Response) -> Mapping[str, Any]:
         try:

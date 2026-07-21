@@ -18,7 +18,7 @@ from takealot_ops.settings import Settings
 
 FIXTURES_DIR = Path(__file__).parents[1] / "fixtures"
 API_KEY = "fixture-api-key"
-COLLECTION_ENVELOPE_FIELDS = {"items", "count", "limit", "continuation_token"}
+COLLECTION_ENVELOPE_FIELDS = {"items", "limit", "continuation_token"}
 DOCUMENTED_DEFAULT_OFFER_FIELDS = {
     "offer_id",
     "tsin_id",
@@ -97,10 +97,16 @@ def _client(
     return TakealotClient(_settings(), transport=httpx.MockTransport(handler), sleep=sleep)
 
 
+def _assert_exception_drops_api_key_references(error: BaseException) -> None:
+    assert API_KEY not in str(error)
+    assert error.__cause__ is None
+    assert error.__context__ is None
+    assert API_KEY not in "".join(traceback.format_exception(error))
+
+
 def _assert_documented_collection_envelope(payload: dict[str, Any]) -> None:
     assert set(payload) == COLLECTION_ENVELOPE_FIELDS
     assert isinstance(payload["items"], list)
-    assert type(payload["count"]) is int
     assert type(payload["limit"]) is int
     assert isinstance(payload["continuation_token"], str)
 
@@ -193,6 +199,13 @@ def test_sales_fixture_matches_documented_collection_schema() -> None:
             "stock_source_region",
         )
     )
+
+
+def test_continuation_page_fixture_omits_count_without_include_count() -> None:
+    page = _fixture("offers_page_1.json")
+
+    assert page["continuation_token"].strip()
+    assert "count" not in page
 
 
 def test_client_sends_api_key_header_without_putting_it_in_url() -> None:
@@ -426,15 +439,21 @@ def test_typed_record_conversion_error_does_not_leak_api_key_through_exception_c
     finally:
         client.close()
 
-    cause_messages: list[str] = []
-    cause = error.value.__cause__
-    while cause is not None:
-        cause_messages.append(str(cause))
-        cause = cause.__cause__
-    formatted_traceback = "".join(traceback.format_exception(error.value))
+    _assert_exception_drops_api_key_references(error.value)
 
-    assert all(API_KEY not in message for message in cause_messages)
-    assert API_KEY not in formatted_traceback
+
+def test_transport_error_does_not_leak_api_key_through_exception_chain() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ReadError(f"transport failed for key {API_KEY}", request=request)
+
+    client = _client(handler)
+    try:
+        with pytest.raises(ApiResponseError) as error:
+            list(client.list_offers())
+    finally:
+        client.close()
+
+    _assert_exception_drops_api_key_references(error.value)
 
 
 def test_client_rejects_non_get_requests() -> None:

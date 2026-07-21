@@ -37,7 +37,6 @@
       "replenishment_blocks": []
     }
   ],
-  "count": 2,
   "limit": 100,
   "continuation_token": ""
 }
