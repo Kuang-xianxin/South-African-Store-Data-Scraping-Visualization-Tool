@@ -13,7 +13,7 @@ from sqlalchemy.orm import Session
 from takealot_ops.domain import OfferRecord, SaleRecord
 from takealot_ops.settings import Settings
 from takealot_ops.storage.migrations import create_engine_for_settings, create_schema
-from takealot_ops.storage.models import OfferSnapshot, SaleItem
+from takealot_ops.storage.models import OfferCurrent, OfferSnapshot, SaleItem
 from takealot_ops.storage.repository import Repository
 
 
@@ -130,8 +130,10 @@ def test_failed_transaction_rolls_back_all_rows(engine: Engine, offer: OfferReco
                 raise RuntimeError("stop collection")
 
     with Session(engine) as session:
+        current_offers = session.scalars(select(OfferCurrent)).all()
         snapshots = session.scalars(select(OfferSnapshot)).all()
 
+    assert current_offers == []
     assert snapshots == []
 
 
@@ -139,9 +141,11 @@ def test_sqlite_engine_uses_wal_and_busy_timeout(engine: Engine) -> None:
     with engine.connect() as connection:
         journal_mode = connection.execute(text("PRAGMA journal_mode")).scalar_one()
         busy_timeout = connection.execute(text("PRAGMA busy_timeout")).scalar_one()
+        foreign_keys = connection.execute(text("PRAGMA foreign_keys")).scalar_one()
 
     assert str(journal_mode).lower() == "wal"
     assert busy_timeout == 5000
+    assert foreign_keys == 1
 
 
 def test_repository_works_with_plain_sqlalchemy_selects(
