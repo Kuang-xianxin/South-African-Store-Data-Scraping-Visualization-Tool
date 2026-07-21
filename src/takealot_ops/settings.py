@@ -52,6 +52,48 @@ class Settings:
         )
 
 
+@dataclass(frozen=True)
+class DashboardSettings:
+    """Database and local-server settings that never require API credentials."""
+
+    project_root: Path
+    database_url: str
+    dashboard_host: str
+    dashboard_port: int
+
+    @classmethod
+    def from_env(cls, project_root: Path) -> DashboardSettings:
+        """Build the read-only dashboard runtime boundary from environment values."""
+        resolved_root = project_root.resolve()
+        database_url = _resolve_sqlite_url(
+            os.environ.get("TAKEALOT_DATABASE_URL", DEFAULT_DATABASE_URL), resolved_root
+        )
+        return cls(
+            project_root=resolved_root,
+            database_url=database_url,
+            dashboard_host=_dashboard_host_from_env(),
+            dashboard_port=_dashboard_port_from_env(),
+        )
+
+
+def _dashboard_host_from_env() -> str:
+    host = os.environ.get("TAKEALOT_DASHBOARD_HOST", DEFAULT_DASHBOARD_HOST).strip()
+    if host not in {"127.0.0.1", "localhost"}:
+        raise SettingsError("TAKEALOT_DASHBOARD_HOST must be 127.0.0.1 or localhost")
+    return host
+
+
+def _dashboard_port_from_env() -> int:
+    raw_port = str(os.environ.get("TAKEALOT_DASHBOARD_PORT", DEFAULT_DASHBOARD_PORT))
+    try:
+        port = int(raw_port)
+    except ValueError as exc:
+        raise SettingsError("TAKEALOT_DASHBOARD_PORT must be an integer") from exc
+    if not 1 <= port <= 65535:
+        raise SettingsError("TAKEALOT_DASHBOARD_PORT must be between 1 and 65535")
+    return port
+
+
 def _resolve_sqlite_url(database_url: str, project_root: Path) -> str:
     """Resolve a relative SQLite URL against the project root."""
     prefix = "sqlite:///"
