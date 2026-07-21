@@ -53,7 +53,6 @@ DOCUMENTED_DEFAULT_OFFER_FIELDS = {
     "total_wishlist",
     "wishlist_30_days",
     "listing_quality",
-    "replenishment_blocks",
 }
 DOCUMENTED_SALE_FIELDS = {
     "order_item_id",
@@ -166,7 +165,19 @@ def test_offer_fixtures_match_documented_collection_schema() -> None:
         )
         assert all(type(offer[field]) is bool for field in boolean_fields)
         assert all(isinstance(offer[field], str) for field in string_fields)
-        assert isinstance(offer["replenishment_blocks"], list)
+
+
+def test_default_offer_fixtures_omit_unrequested_expands() -> None:
+    expanded_fields = {
+        "seller_warehouse_stock",
+        "takealot_warehouse_stock",
+        "offer_charges",
+        "replenishment_blocks",
+    }
+
+    for fixture_name in ("offers_page_1.json", "offers_page_2.json"):
+        offer = _fixture(fixture_name)["items"][0]
+        assert expanded_fields.isdisjoint(offer)
 
 
 def test_sales_fixture_matches_documented_collection_schema() -> None:

@@ -33,8 +33,7 @@
       "benchmark_price": 210,
       "total_wishlist": 10,
       "wishlist_30_days": 2,
-      "listing_quality": 85,
-      "replenishment_blocks": []
+      "listing_quality": 85
     }
   ],
   "limit": 100,
