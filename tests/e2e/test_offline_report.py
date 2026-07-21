@@ -37,7 +37,7 @@ def test_generated_workbook_reopens_without_repair(
         assert workbook["单品分析"]._charts
         workbook.close()
 
-    assert len(dimensions) == 8
+    assert len(dimensions) == 9
     with ZipFile(release_fixture.excel_path) as archive:
         names = set(archive.namelist())
     assert any(name.startswith("xl/charts/chart") for name in names)

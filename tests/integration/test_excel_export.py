@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import replace
 from pathlib import Path
 
+import pandas as pd
 import pytest
 from openpyxl import load_workbook
 
@@ -13,6 +14,7 @@ from takealot_ops.metrics.service import DashboardDataset
 SHEET_NAMES = [
     "运营总览",
     "单品分析",
+    "商品数据",
     "异常商品",
     "每日汇总",
     "销售明细",
@@ -89,6 +91,7 @@ def test_excel_has_filters_freezes_charts_and_conditional_formatting(
         assert product.freeze_panes is not None
         assert product.auto_filter.ref
         assert len(product._charts) == 1
+        assert workbook["商品数据"].auto_filter.ref
         assert any(len(sheet.conditional_formatting) for sheet in workbook.worksheets)
         assert workbook["销售明细"]["A1"].value == "商品每日销售明细/汇总"
     finally:
@@ -105,6 +108,89 @@ def test_excel_handles_empty_frames_and_preserves_blank_unknowns(
         assert workbook.sheetnames == SHEET_NAMES
         assert workbook["运营总览"]["A4"].value is None
         assert workbook["流量快照"].max_row == 3
+    finally:
+        workbook.close()
+
+
+def test_excel_uses_readable_details_and_real_product_fields(
+    tmp_path: Path, dashboard_dataset: DashboardDataset
+) -> None:
+    destination = export_excel(dashboard_dataset, tmp_path / "readable.xlsx")
+
+    workbook = load_workbook(destination, data_only=False)
+    try:
+        product = workbook["商品数据"]
+        assert product["E4"].value == "示例商品 A"
+        assert product["I4"].value == "可购买"
+        assert product["A4"].number_format == "@"
+
+        analysis = workbook["单品分析"]
+        assert analysis["D6"].value == "示例商品 A"
+        assert analysis["P6"].value == "可购买"
+
+        anomaly = workbook["异常商品"]
+        anomaly_headers = [cell.value for cell in anomaly[3]]
+        assert "详情" not in anomaly_headers
+        assert anomaly["C4"].value == "示例商品 B"
+        assert anomaly["D4"].value == "商品不可购买"
+
+        quality = workbook["数据质量"]
+        quality_headers = [cell.value for cell in quality[3]]
+        assert "详情" not in quality_headers
+        assert quality["F4"].value == "SKU 缺失"
+        for sheet in (anomaly, quality):
+            assert not any(
+                isinstance(cell.value, str) and cell.value.lstrip().startswith(("{", "["))
+                for row in sheet.iter_rows(min_row=4)
+                for cell in row
+            )
+    finally:
+        workbook.close()
+
+
+def test_excel_leaves_effective_units_blank_when_sale_status_is_unknown(
+    tmp_path: Path, dashboard_dataset: DashboardDataset
+) -> None:
+    unknown = dashboard_dataset.quality_events.iloc[0].copy()
+    unknown["event_id"] = "unknown-status"
+    unknown["event_type"] = "unknown_sale_status"
+    unknown["offer_id"] = "offer-a"
+    unknown["details"] = {"sale_statuses": ["New status"]}
+    quality_events = pd.concat(
+        [dashboard_dataset.quality_events, unknown.to_frame().T], ignore_index=True
+    )
+    dataset = replace(dashboard_dataset, quality_events=quality_events)
+
+    destination = export_excel(dataset, tmp_path / "unknown-status.xlsx")
+    workbook = load_workbook(destination, data_only=False)
+    try:
+        assert workbook["运营总览"]["C10"].value is None
+        assert workbook["单品分析"]["G7"].value is None
+        assert workbook["数据质量"]["G5"].value == "New status"
+    finally:
+        workbook.close()
+
+
+def test_excel_preserves_long_numeric_sku_without_scientific_notation(
+    tmp_path: Path, dashboard_dataset: DashboardDataset
+) -> None:
+    product_daily = dashboard_dataset.product_daily.copy(deep=True)
+    offer_current = dashboard_dataset.offer_current.copy(deep=True)
+    product_daily.loc[product_daily["offer_id"] == "offer-a", "sku"] = "9902240858421"
+    offer_current.loc[offer_current["offer_id"] == "offer-a", "sku"] = "9902240858421"
+    dataset = replace(
+        dashboard_dataset,
+        product_daily=product_daily,
+        offer_current=offer_current,
+    )
+
+    destination = export_excel(dataset, tmp_path / "numeric-sku.xlsx")
+    workbook = load_workbook(destination, data_only=False)
+    try:
+        assert workbook["单品分析"]["C6"].value == 9902240858421
+        assert workbook["单品分析"]["C6"].number_format == "0"
+        assert workbook["商品数据"]["C4"].value == 9902240858421
+        assert workbook["商品数据"]["C4"].number_format == "0"
     finally:
         workbook.close()
 

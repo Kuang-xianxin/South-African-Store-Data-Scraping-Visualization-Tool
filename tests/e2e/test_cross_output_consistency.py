@@ -43,7 +43,7 @@ def test_ten_sku_totals_match_database_html_and_excel(
     excel_totals: defaultdict[str, int] = defaultdict(int)
     for row in workbook["销售明细"].iter_rows(min_row=4, values_only=True):
         if row[2] is not None:
-            excel_totals[str(row[2])] += int(row[3] or 0)
+            excel_totals[str(row[2])] += int(row[5] or 0)
     workbook.close()
 
     assert len(database_totals) == 10
