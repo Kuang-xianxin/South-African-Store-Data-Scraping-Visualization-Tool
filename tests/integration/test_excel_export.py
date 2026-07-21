@@ -90,7 +90,8 @@ def test_excel_has_filters_freezes_charts_and_conditional_formatting(
         assert overview._charts[0].anchor._from.row == 8
         assert product.freeze_panes is not None
         assert product.auto_filter.ref
-        assert len(product._charts) == 1
+        assert len(product._charts) == 0
+        assert product["A4"].value == "日期"
         assert workbook["商品数据"].auto_filter.ref
         assert any(len(sheet.conditional_formatting) for sheet in workbook.worksheets)
         assert workbook["销售明细"]["A1"].value == "商品每日销售明细/汇总"
@@ -125,8 +126,8 @@ def test_excel_uses_readable_details_and_real_product_fields(
         assert product["A4"].number_format == "@"
 
         analysis = workbook["单品分析"]
-        assert analysis["D6"].value == "示例商品 A"
-        assert analysis["P6"].value == "可购买"
+        assert analysis["D5"].value == "示例商品 A"
+        assert analysis["P5"].value == "可购买"
 
         anomaly = workbook["异常商品"]
         anomaly_headers = [cell.value for cell in anomaly[3]]
@@ -165,7 +166,7 @@ def test_excel_leaves_effective_units_blank_when_sale_status_is_unknown(
     workbook = load_workbook(destination, data_only=False)
     try:
         assert workbook["运营总览"]["C10"].value is None
-        assert workbook["单品分析"]["G7"].value is None
+        assert workbook["单品分析"]["G6"].value is None
         assert workbook["数据质量"]["G5"].value == "New status"
     finally:
         workbook.close()
@@ -187,8 +188,8 @@ def test_excel_preserves_long_numeric_sku_without_scientific_notation(
     destination = export_excel(dataset, tmp_path / "numeric-sku.xlsx")
     workbook = load_workbook(destination, data_only=False)
     try:
-        assert workbook["单品分析"]["C6"].value == 9902240858421
-        assert workbook["单品分析"]["C6"].number_format == "0"
+        assert workbook["单品分析"]["C5"].value == 9902240858421
+        assert workbook["单品分析"]["C5"].number_format == "0"
         assert workbook["商品数据"]["C4"].value == 9902240858421
         assert workbook["商品数据"]["C4"].number_format == "0"
     finally:

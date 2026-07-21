@@ -401,83 +401,21 @@ def _build_overview(
 
 def _build_product_analysis(sheet: Worksheet, frame: pd.DataFrame) -> None:
     _base_sheet(sheet)
-    sheet.merge_cells("A1:Z1")
+    sheet.merge_cells("A1:P1")
     sheet["A1"] = "单品分析"
     _style_title(sheet["A1"])
-    sheet.merge_cells("A2:Z2")
+    sheet.merge_cells("A2:P2")
     sheet["A2"] = (
         "商品名称、售价和状态来自当前 Offer 快照；历史未采集字段保持空白。"
-        "图表默认选择首个 Offer ID。"
     )
     _style_subtitle(sheet["A2"])
     ordered = frame.sort_values(["offer_id", "metric_date"], na_position="last") if not frame.empty else frame
-    selected: str | None = None
-    if not ordered.empty and not ordered["offer_id"].dropna().empty:
-        selected = str(ordered["offer_id"].dropna().astype(str).iloc[0])
-    sheet["A3"] = "图表商品"
-    sheet["B3"] = selected
-    selected_title: object = None
-    if selected is not None and "product_title_current" in ordered:
-        titles = ordered.loc[
-            ordered["offer_id"].astype(str) == selected, "product_title_current"
-        ].dropna()
-        if not titles.empty:
-            selected_title = titles.iloc[0]
-    sheet["D3"] = "商品名称"
-    sheet["E3"] = _excel_value(selected_title)
-    sheet["A3"].font = Font(name="Microsoft YaHei", bold=True, color=_MUTED)
-    sheet["B3"].font = Font(name="Microsoft YaHei", bold=True, color=_NAVY)
-    sheet["D3"].font = Font(name="Microsoft YaHei", bold=True, color=_MUTED)
-    sheet["E3"].font = Font(name="Microsoft YaHei", bold=True, color=_NAVY)
-    last_row = _write_table(sheet, ordered, _PRODUCT_COLUMNS, header_row=5)
-    sheet.freeze_panes = "D6"
+    last_row = _write_table(sheet, ordered, _PRODUCT_COLUMNS, header_row=4)
+    sheet.freeze_panes = "D5"
     sheet.sheet_view.zoomScale = 85
     last_data_column = len(_PRODUCT_COLUMNS)
-    sheet.auto_filter.ref = f"A5:{get_column_letter(last_data_column)}{last_row}"
-    if selected is not None:
-        selected_count = int((ordered["offer_id"].astype(str) == selected).sum())
-        chart_last_row = 5 + selected_count
-        helper_column = last_data_column + 2
-        helper_letter = get_column_letter(helper_column)
-        sheet.cell(5, helper_column, "图表日期标签")
-        sheet.cell(5, helper_column).fill = PatternFill("solid", fgColor=_NAVY)
-        sheet.cell(5, helper_column).font = _HEADER_FONT
-        sheet.cell(5, helper_column).alignment = Alignment(vertical="center", wrap_text=True)
-        for row_index in range(6, chart_last_row + 1):
-            sheet.cell(row_index, helper_column, f'=TEXT(A{row_index},"yyyy-mm-dd")')
-            sheet.cell(row_index, helper_column).font = _BODY_FONT
-            sheet.cell(row_index, helper_column).border = _THIN_BOTTOM
-        chart = LineChart()
-        chart.title = f"商品 {selected} 订购件数趋势"
-        chart.style = 13
-        chart.height = 7.2
-        chart.width = 14.5
-        chart.y_axis.title = "件数"
-        chart.x_axis.title = "日期"
-        ordered_units_column = _column_index(_PRODUCT_COLUMNS, "ordered_units")
-        chart.add_data(
-            Reference(
-                sheet,
-                min_col=ordered_units_column,
-                min_row=5,
-                max_row=chart_last_row,
-            ),
-            titles_from_data=True,
-        )
-        chart.set_categories(
-            Reference(
-                sheet,
-                min_col=helper_column,
-                min_row=6,
-                max_row=chart_last_row,
-            )
-        )
-        chart.legend = None
-        sheet.add_chart(chart, f"{get_column_letter(helper_column + 2)}4")
-        sheet.column_dimensions[helper_letter].width = 16
+    sheet.auto_filter.ref = f"A4:{get_column_letter(last_data_column)}{last_row}"
     _set_widths(sheet, _PRODUCT_COLUMNS)
-    sheet.column_dimensions[get_column_letter(last_data_column + 1)].width = 3
-    sheet.column_dimensions[get_column_letter(last_data_column + 3)].width = 3
 
 
 def _build_frame_sheet(

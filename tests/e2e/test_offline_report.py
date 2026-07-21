@@ -34,7 +34,7 @@ def test_generated_workbook_reopens_without_repair(
         ]
         assert all(rows >= 3 and columns >= 1 for _, rows, columns in dimensions)
         assert workbook["运营总览"]._charts
-        assert workbook["单品分析"]._charts
+        assert not workbook["单品分析"]._charts
         workbook.close()
 
     assert len(dimensions) == 9
