@@ -25,9 +25,11 @@ dependencies = [
 dev = [
     "build>=1.2",
     "mypy>=1.11",
+    "pandas-stubs>=2.2",
     "pytest>=8.3",
     "pytest-cov>=5.0",
     "ruff>=0.6",
+    "types-PyYAML>=6.0",
 ]
 
 [project.scripts]

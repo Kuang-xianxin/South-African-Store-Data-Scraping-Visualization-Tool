@@ -56,6 +56,7 @@ class OfferCurrent(Base):
     discount_percentage: Mapped[Decimal | None] = mapped_column(Numeric(10, 4))
     updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     captured_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    total_stock: Mapped[int | None] = mapped_column(Integer)
 
 
 class OfferSnapshot(Base):
@@ -89,6 +90,7 @@ class OfferSnapshot(Base):
     discount_percentage: Mapped[Decimal | None] = mapped_column(Numeric(10, 4))
     updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     captured_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    total_stock: Mapped[int | None] = mapped_column(Integer)
 
 
 class SaleItem(Base):

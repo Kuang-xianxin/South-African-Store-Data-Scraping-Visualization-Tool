@@ -42,6 +42,7 @@ class OfferRecord:
     discount_percentage: Decimal | None
     updated_at: datetime | None
     captured_at: datetime
+    total_stock: int | None = None
 
     @classmethod
     def from_api(cls, payload: Mapping[str, Any], captured_at: datetime) -> OfferRecord:
@@ -72,6 +73,7 @@ class OfferRecord:
             discount_percentage=_optional_decimal(payload.get("discount_percentage")),
             updated_at=_optional_datetime(payload.get("updated_at")),
             captured_at=_require_aware_datetime(captured_at, "captured_at"),
+            total_stock=_optional_int(payload.get("total_stock")),
         )
 
 

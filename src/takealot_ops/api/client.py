@@ -94,18 +94,10 @@ class TakealotClient:
         self._client.close()
 
     def _offer_record(self, item: Mapping[str, Any], captured_at: datetime) -> OfferRecord:
-        try:
-            return OfferRecord.from_api(item, captured_at)
-        except (KeyError, TypeError, ValueError) as error:
-            error_message = self._sanitize(f"Invalid offer API item: {error}")
-        raise ApiResponseError(error_message)
+        return _offer_record_from_api(item, captured_at)
 
     def _sale_record(self, item: Mapping[str, Any]) -> SaleRecord:
-        try:
-            return SaleRecord.from_api(item)
-        except (KeyError, TypeError, ValueError) as error:
-            error_message = self._sanitize(f"Invalid sale API item: {error}")
-        raise ApiResponseError(error_message)
+        return _sale_record_from_api(item)
 
     def _request(self, method: str, path: str, params: Mapping[str, Any]) -> httpx.Response:
         if method != "GET":
@@ -163,3 +155,21 @@ class TakealotClient:
 
     def _sanitize(self, message: str) -> str:
         return message.replace(self._api_key, "[REDACTED]")
+
+
+def _offer_record_from_api(item: Mapping[str, Any], captured_at: datetime) -> OfferRecord:
+    """Convert an offer item without retaining unsafe conversion exception context."""
+    try:
+        return OfferRecord.from_api(item, captured_at)
+    except (KeyError, TypeError, ValueError):
+        error_message = "Invalid offer API item"
+    raise ApiResponseError(error_message)
+
+
+def _sale_record_from_api(item: Mapping[str, Any]) -> SaleRecord:
+    """Convert a sale item without retaining unsafe conversion exception context."""
+    try:
+        return SaleRecord.from_api(item)
+    except (KeyError, TypeError, ValueError):
+        error_message = "Invalid sale API item"
+    raise ApiResponseError(error_message)
