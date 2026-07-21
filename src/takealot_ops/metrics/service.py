@@ -469,6 +469,7 @@ def _product_values(
     current: OfferSnapshot | None,
     sale_sku: str | None,
 ) -> dict[str, Any]:
+    offer_state = snapshot or current
     page_views = snapshot.page_views_30_days if snapshot is not None else None
     previous_views = previous.page_views_30_days if previous is not None else None
     conversion = snapshot.conversion_percentage_30_days if snapshot is not None else None
@@ -502,8 +503,8 @@ def _product_values(
             if conversion is not None and previous_conversion is not None
             else None
         ),
-        "total_stock": snapshot.total_stock if snapshot is not None else None,
-        "offer_status": snapshot.status if snapshot is not None else None,
+        "total_stock": offer_state.total_stock if offer_state is not None else None,
+        "offer_status": offer_state.status if offer_state is not None else None,
     }
 
 

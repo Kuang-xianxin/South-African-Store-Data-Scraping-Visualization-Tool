@@ -619,3 +619,52 @@ def test_stale_snapshot_normalizes_sast_offset_before_comparison(tmp_path: Path)
     assert ("offset-stale", "stale_offer_snapshot") in set(
         anomalies[["offer_id", "anomaly_type"]].itertuples(index=False, name=None)
     )
+
+
+def test_collection_gap_carries_offer_state_without_fabricating_traffic(
+    tmp_path: Path,
+) -> None:
+    day_one = date(2026, 7, 20)
+    day_two = date(2026, 7, 21)
+    engine = create_engine("sqlite://")
+    create_schema(engine)
+    with Session(engine) as session:
+        _seed_offer_batch(
+            session,
+            day_one,
+            [
+                _offer(
+                    "gap-offer",
+                    page_views=900,
+                    conversion="4.5",
+                    previous_conversion="3.5",
+                    total_stock=5,
+                    status="buyable",
+                )
+            ],
+        )
+        service = _service(
+            session,
+            tmp_path,
+            now=datetime(2026, 7, 21, 12, tzinfo=UTC),
+        )
+
+        service.rebuild(day_two, day_two)
+        dataset = service.dashboard_dataset(day_two)
+
+    row = dataset.product_daily.loc[
+        dataset.product_daily["metric_date"] == day_two
+    ].iloc[0]
+    current = dataset.offer_current.iloc[0]
+    assert row["offer_status"] == current["status"] == "buyable"
+    assert row["total_stock"] == current["total_stock"] == 5
+    assert row["sku"] == current["sku"] == "SKU-gap-offer"
+    assert row["page_views_30_days"] is None
+    assert row["page_views_30_day_average"] is None
+    assert row["page_views_window_net_change"] is None
+    assert row["conversion_percentage_30_days"] is None
+    assert row["conversion_percentage_previous_30_days"] is None
+    assert row["conversion_change_points"] is None
+    anomaly_types = dataset.anomalies["anomaly_type"].tolist()
+    assert "non_buyable" not in anomaly_types
+    assert "stale_offer_snapshot" in anomaly_types
