@@ -2,16 +2,28 @@
 
 from __future__ import annotations
 
-from typing import Any
+from pathlib import Path
+from typing import Any, Protocol
 
 from sqlalchemy import Engine, create_engine, event
+from sqlalchemy.engine import make_url
 
-from takealot_ops.settings import Settings
 from takealot_ops.storage.models import Base
 
 
-def create_engine_for_settings(settings: Settings) -> Engine:
+class DatabaseSettings(Protocol):
+    @property
+    def database_url(self) -> str: ...
+
+
+def create_engine_for_settings(settings: DatabaseSettings) -> Engine:
     """Create an engine, applying SQLite's local-operation safety settings."""
+    url = make_url(settings.database_url)
+    if url.drivername in {"sqlite", "sqlite+pysqlite"} and url.database not in {
+        None,
+        ":memory:",
+    }:
+        Path(url.database).parent.mkdir(parents=True, exist_ok=True)
     engine = create_engine(settings.database_url)
     if settings.database_url.startswith("sqlite"):
         _configure_sqlite(engine)

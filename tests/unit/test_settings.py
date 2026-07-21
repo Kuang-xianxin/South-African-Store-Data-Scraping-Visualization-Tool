@@ -14,6 +14,17 @@ def test_settings_requires_api_key(tmp_path: Path, monkeypatch: pytest.MonkeyPat
         Settings.from_env(tmp_path)
 
 
+def test_settings_loads_api_key_from_project_dotenv(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("TAKEALOT_API_KEY", raising=False)
+    (tmp_path / ".env").write_text("TAKEALOT_API_KEY=local-file-key\n", encoding="utf-8")
+
+    settings = Settings.from_env(tmp_path)
+
+    assert settings.api_key == "local-file-key"
+
+
 def test_settings_uses_defaults_and_resolves_relative_sqlite_path(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

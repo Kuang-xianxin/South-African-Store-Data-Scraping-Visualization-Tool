@@ -6,6 +6,7 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
+from dotenv import load_dotenv
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import SQLAlchemyError
 
@@ -34,11 +35,12 @@ class Settings:
     @classmethod
     def from_env(cls, project_root: Path) -> Settings:
         """Build validated settings from the current process environment."""
+        resolved_root = project_root.resolve()
+        load_dotenv(resolved_root / ".env", override=False)
         api_key = os.environ.get("TAKEALOT_API_KEY", "").strip()
         if not api_key:
             raise SettingsError("TAKEALOT_API_KEY must be set to a non-blank value")
 
-        resolved_root = project_root.resolve()
         database_url = _resolve_sqlite_url(
             os.environ.get("TAKEALOT_DATABASE_URL", DEFAULT_DATABASE_URL), resolved_root
         )
@@ -68,6 +70,7 @@ class DashboardSettings:
     def from_env(cls, project_root: Path) -> DashboardSettings:
         """Build the read-only dashboard runtime boundary from environment values."""
         resolved_root = project_root.resolve()
+        load_dotenv(resolved_root / ".env", override=False)
         database_url = _resolve_sqlite_url(
             os.environ.get("TAKEALOT_DATABASE_URL", DEFAULT_DATABASE_URL), resolved_root
         )

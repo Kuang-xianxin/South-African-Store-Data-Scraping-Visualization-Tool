@@ -1,1 +1,148 @@
-# South-African-Store-Data-Scraping-Visualization-Tool
+# Takealot 店铺运营数据工具
+
+这是一个在 Windows 本机运行的只读数据工具，用于采集 Takealot Seller API 的 Offer 与 Sales 数据，查看单品销量和 30 天滚动浏览量趋势，并生成便于分享的独立 HTML、Excel 和 PNG 日报。
+
+## 1. 安装
+
+在 PowerShell 中进入项目目录：
+
+```powershell
+Set-Location -LiteralPath 'D:\南非店铺数据抓取'
+uv venv --python 3.11 .venv
+uv pip install --python .\.venv\Scripts\python.exe -e ".[dev]"
+.\.venv\Scripts\python.exe -m playwright install chromium
+```
+
+检查五个命令是否已安装：
+
+```powershell
+.\.venv\Scripts\python.exe -m takealot_ops.cli --help
+```
+
+## 2. 配置 API Key
+
+复制模板，生成项目根目录下的 `.env` 文件：
+
+```powershell
+Copy-Item .env.example .env
+notepad .env
+```
+
+只修改这一行：
+
+```env
+TAKEALOT_API_KEY=在这里粘贴真实Key
+```
+
+程序会自动读取 `D:\南非店铺数据抓取\.env`。已经存在的系统环境变量优先于 `.env`。不要把真实 Key 写进 `.env.example`，也不要把 `.env` 发给他人或提交到 GitHub。
+
+## 3. 首次采集与检查
+
+采集当前 Offer 和最近七个南非标准时间（SAST）自然日的 Sales：
+
+```powershell
+.\.venv\Scripts\python.exe -m takealot_ops.cli collect
+```
+
+也可以指定销售日期范围：
+
+```powershell
+.\.venv\Scripts\python.exe -m takealot_ops.cli collect --start 2026-07-01 --end 2026-07-21
+```
+
+检查数据库完整性和当天数据质量：
+
+```powershell
+.\.venv\Scripts\python.exe -m takealot_ops.cli verify
+```
+
+如果出现未知销售状态，命令会返回非零状态。先在 `config/sale_status_rules.yaml` 中确认该状态应计入还是排除，再重新计算。
+
+## 4. 本地看板
+
+```powershell
+.\.venv\Scripts\python.exe -m takealot_ops.cli dashboard
+```
+
+浏览器打开 `http://127.0.0.1:8501`。看板默认只监听本机回环地址，不允许绑定局域网地址。看板只读取 SQLite，不调用 API，因此查看历史数据时不需要 API Key。
+
+## 5. 生成分享报表
+
+```powershell
+.\.venv\Scripts\python.exe -m takealot_ops.cli export
+```
+
+指定报告日期：
+
+```powershell
+.\.venv\Scripts\python.exe -m takealot_ops.cli export --date 2026-07-21
+```
+
+文件保存到 `exports\YYYY-MM-DD\`：
+
+- 独立 HTML：可直接发送给运营人员，用浏览器打开，不依赖外网脚本。
+- Excel：包含运营总览、单品分析、异常商品、每日汇总、销售明细、流量快照、指标说明和数据质量。
+- PNG：适合发送到聊天群或日报。
+
+## 6. 每日完整运行
+
+```powershell
+.\.venv\Scripts\python.exe -m takealot_ops.cli daily-run
+```
+
+执行顺序为：完整分页采集 → 七个 SAST 自然日指标重建 → 数据质量检查 → 报表导出 → SQLite 完整性检查 → 数据库备份。任何分页失败都不会发布不完整快照或报表。日志写入 `logs\takealot-ops.log`，不会记录 API Key。
+
+## 7. 安装 Windows 每日计划任务
+
+安装脚本本身不会自动运行；只有运营人员明确执行后才会创建计划任务。默认每天 `08:30`：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\install_scheduled_task.ps1 `
+  -ProjectPath 'D:\南非店铺数据抓取' `
+  -DailyAt '08:30'
+```
+
+计划任务使用项目自己的 `.venv`，工作目录固定为项目根目录，并强制设置 `TAKEALOT_DASHBOARD_HOST=127.0.0.1`。
+
+## 8. 备份与恢复
+
+每次 `daily-run` 会在 `backups\` 中生成一致性 SQLite 备份，只保留最新 8 份。
+
+恢复步骤：
+
+1. 停止正在运行的看板和每日任务。
+2. 将当前 `data\takealot.db` 复制到安全位置留档。
+3. 把选定的 `backups\takealot-*.db` 复制为 `data\takealot.db`。
+4. 运行 `.\.venv\Scripts\python.exe -m takealot_ops.cli verify`。
+5. 验证通过后再启动看板。
+
+## 9. 流量指标口径
+
+`page_views_30_days` 只能称为“近30天浏览量”；不得将其或每日快照差值标注为精确日流量或访客数。
+
+“近30天日均浏览量”只是滚动窗口值除以 30；“30天浏览量窗口净变化”只是相邻快照的窗口差值。缺失值保持为空，不补零。
+
+## 10. 什么时候考虑 MySQL
+
+当前单机、单店、单运营人员场景优先使用 SQLite，不需要安装 MySQL。出现以下任一情况再启动迁移评估：
+
+- 多人或多个任务需要同时写入数据库；
+- 看板需要部署到另一台服务器；
+- 管理多个店铺并需要统一权限控制；
+- SQLite 文件和备份窗口已经明显影响每日运行；
+- 需要数据库级高可用、集中备份或审计。
+
+业务代码通过 SQLAlchemy 隔离数据库访问，但当前看板和自动备份明确只支持同步 SQLite；切换 MySQL 前必须补充迁移脚本、方言测试、只读看板事务和新的备份方案。
+
+## 常用命令
+
+```powershell
+# 完整测试
+.\.venv\Scripts\python.exe -m pytest -q
+
+# 代码检查
+.\.venv\Scripts\python.exe -m ruff check src tests
+.\.venv\Scripts\python.exe -m mypy src
+```
+
+项目状态和后续工作见 `docs\PROJECT_STATUS.md`。
