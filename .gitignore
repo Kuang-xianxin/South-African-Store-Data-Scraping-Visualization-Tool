@@ -15,6 +15,7 @@ htmlcov/
 data/
 backups/
 /exports/
+/outputs/
 logs/
 *.db
 *.sqlite

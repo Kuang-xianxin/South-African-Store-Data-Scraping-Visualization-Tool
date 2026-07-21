@@ -55,14 +55,20 @@ def test_excel_key_totals_match_dataset(
     workbook = load_workbook(destination, data_only=False)
     try:
         overview = workbook["运营总览"]
-        assert overview["A3"].value == "订购件数"
+        latest_date = dashboard_dataset.product_daily["metric_date"].max()
+        latest_views = dashboard_dataset.product_daily.loc[
+            dashboard_dataset.product_daily["metric_date"] == latest_date,
+            "page_views_30_days",
+        ].sum(min_count=1)
+        assert overview["A3"].value == "近7天订购件数"
         assert overview["A4"].value == dashboard_dataset.store_daily["ordered_units"].sum()
-        assert overview["C3"].value == "有效件数"
-        assert overview["C4"].value == dashboard_dataset.store_daily["effective_units"].sum()
-        assert overview["E3"].value == "订购销售额"
+        assert overview["C3"].value == "近30天浏览量（商品汇总）"
+        assert overview["C4"].value == latest_views
+        assert overview["E3"].value == "近7天订购销售额"
         assert overview["E4"].value == dashboard_dataset.store_daily["ordered_revenue"].sum()
-        assert overview["G3"].value == "异常数"
+        assert overview["G3"].value == "异常记录数"
         assert overview["G4"].value == len(dashboard_dataset.anomalies)
+        assert overview["A5"].value.startswith("口径提示：")
     finally:
         workbook.close()
 
@@ -79,6 +85,7 @@ def test_excel_has_filters_freezes_charts_and_conditional_formatting(
         assert overview.freeze_panes is not None
         assert overview.auto_filter.ref
         assert len(overview._charts) == 1
+        assert overview._charts[0].anchor._from.row == 8
         assert product.freeze_panes is not None
         assert product.auto_filter.ref
         assert len(product._charts) == 1

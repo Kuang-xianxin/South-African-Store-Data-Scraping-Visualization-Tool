@@ -158,26 +158,84 @@ def _build_overview(sheet: Worksheet, dataset: DashboardDataset) -> None:
     sheet["A2"] = "只读日报 · KPI 来源于同一 DashboardDataset · 空白表示未知"
     _style_subtitle(sheet["A2"])
     cards = [
-        ("A3", "A4", "订购件数", _sum_or_none(dataset.store_daily, "ordered_units"), "#,##0"),
-        ("C3", "C4", "有效件数", _sum_or_none(dataset.store_daily, "effective_units"), "#,##0"),
-        ("E3", "E4", "订购销售额", _sum_or_none(dataset.store_daily, "ordered_revenue"), '"R" #,##0.00'),
-        ("G3", "G4", "异常数", len(dataset.anomalies), "#,##0"),
+        (
+            "A3",
+            "A4",
+            "近7天订购件数",
+            _sum_or_none(dataset.store_daily, "ordered_units"),
+            "#,##0",
+            _PALE_BLUE,
+        ),
+        (
+            "C3",
+            "C4",
+            "近30天浏览量（商品汇总）",
+            _latest_sum_or_none(dataset.product_daily, "metric_date", "page_views_30_days"),
+            "#,##0",
+            "ECFDF5",
+        ),
+        (
+            "E3",
+            "E4",
+            "近7天订购销售额",
+            _sum_or_none(dataset.store_daily, "ordered_revenue"),
+            '"R" #,##0.00',
+            _PALE_BLUE,
+        ),
+        ("G3", "G4", "异常记录数", len(dataset.anomalies), "#,##0", "FFF7ED"),
     ]
-    for label_cell, value_cell, label, value, number_format in cards:
+    card_border = Border(
+        left=Side(style="thin", color="CBD5E1"),
+        right=Side(style="thin", color="CBD5E1"),
+        top=Side(style="thin", color="CBD5E1"),
+        bottom=Side(style="thin", color="CBD5E1"),
+    )
+    for label_cell, value_cell, label, value, number_format, fill_color in cards:
+        first_column = sheet[label_cell].column
+        last_column = first_column + 1
+        sheet.merge_cells(
+            start_row=sheet[label_cell].row,
+            start_column=first_column,
+            end_row=sheet[label_cell].row,
+            end_column=last_column,
+        )
+        sheet.merge_cells(
+            start_row=sheet[value_cell].row,
+            start_column=first_column,
+            end_row=sheet[value_cell].row,
+            end_column=last_column,
+        )
         sheet[label_cell] = label
         sheet[label_cell].font = Font(name="Microsoft YaHei", size=10, bold=True, color=_MUTED)
+        sheet[label_cell].alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
         sheet[value_cell] = _excel_value(value)
         sheet[value_cell].font = Font(name="Microsoft YaHei", size=18, bold=True, color=_NAVY)
+        sheet[value_cell].alignment = Alignment(horizontal="center", vertical="center")
         sheet[value_cell].number_format = number_format
         for row in sheet.iter_rows(
             min_row=sheet[label_cell].row,
             max_row=sheet[value_cell].row,
-            min_col=sheet[label_cell].column,
-            max_col=sheet[label_cell].column + 1,
+            min_col=first_column,
+            max_col=last_column,
         ):
             for cell in row:
-                cell.fill = PatternFill("solid", fgColor=_PALE_BLUE)
-    sheet["A6"] = "趋势数据源（可审计）"
+                cell.fill = PatternFill("solid", fgColor=fill_color)
+                cell.border = card_border
+    sheet.merge_cells("A5:N5")
+    sheet["A5"] = (
+        "口径提示：近30天浏览量为各商品 page_views_30_days 的汇总，不代表独立访客；"
+        "有效销量需完成销售状态规则确认。"
+    )
+    sheet["A5"].fill = PatternFill("solid", fgColor=_PALE_AMBER)
+    sheet["A5"].font = Font(name="Microsoft YaHei", size=9, color="92400E")
+    sheet["A5"].alignment = Alignment(vertical="center", wrap_text=True)
+    sheet["A5"].border = Border(
+        left=Side(style="thin", color="F59E0B"),
+        right=Side(style="thin", color="F59E0B"),
+        top=Side(style="thin", color="F59E0B"),
+        bottom=Side(style="thin", color="F59E0B"),
+    )
+    sheet["A6"] = "近7天订购件数趋势（可审计）"
     sheet["A6"].font = Font(name="Microsoft YaHei", size=11, bold=True, color=_NAVY)
     columns = [
         ("metric_date", "日期"),
@@ -198,20 +256,25 @@ def _build_overview(sheet: Worksheet, dataset: DashboardDataset) -> None:
     sheet.auto_filter.ref = f"A8:E{last_row}"
     if last_row >= 9:
         chart = LineChart()
-        chart.title = "店铺订购销售额趋势（ZAR）"
+        chart.title = "近7天每日订购件数趋势"
         chart.style = 13
         chart.height = 7.2
         chart.width = 14.5
-        chart.y_axis.title = "金额（ZAR）"
+        chart.y_axis.title = "件数"
         chart.x_axis.title = "日期"
-        chart.add_data(Reference(sheet, min_col=4, min_row=8, max_row=last_row), titles_from_data=True)
+        chart.add_data(Reference(sheet, min_col=2, min_row=8, max_row=last_row), titles_from_data=True)
         chart.set_categories(Reference(sheet, min_col=5, min_row=9, max_row=last_row))
         chart.legend = None
-        sheet.add_chart(chart, "G7")
+        # Keep the chart below the A9 freeze boundary to avoid a visual split while scrolling.
+        sheet.add_chart(chart, "G9")
     for column, width in {"A": 14, "B": 14, "C": 14, "D": 20, "E": 17, "F": 14, "G": 14, "H": 14, "I": 14, "J": 14, "K": 14, "L": 14, "M": 14, "N": 14}.items():
         sheet.column_dimensions[column].width = width
     sheet.row_dimensions[1].height = 34
     sheet.row_dimensions[2].height = 24
+    sheet.row_dimensions[3].height = 24
+    sheet.row_dimensions[4].height = 38
+    sheet.row_dimensions[5].height = 30
+    sheet.row_dimensions[6].height = 26
 
 
 def _build_product_analysis(sheet: Worksheet, frame: pd.DataFrame) -> None:
@@ -425,6 +488,22 @@ def _sum_or_none(frame: pd.DataFrame, column: str) -> int | float | None:
     if frame.empty or column not in frame:
         return None
     value = frame[column].sum(min_count=1)
+    if _is_missing(value):
+        return None
+    if hasattr(value, "item"):
+        value = value.item()
+    return value if isinstance(value, (int, float)) else float(value)
+
+
+def _latest_sum_or_none(
+    frame: pd.DataFrame, date_column: str, value_column: str
+) -> int | float | None:
+    if frame.empty or date_column not in frame or value_column not in frame:
+        return None
+    dates = frame[date_column].dropna()
+    if dates.empty:
+        return None
+    value = frame.loc[frame[date_column] == dates.max(), value_column].sum(min_count=1)
     if _is_missing(value):
         return None
     if hasattr(value, "item"):
