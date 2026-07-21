@@ -12,7 +12,7 @@ htmlcov/
 .env
 data/
 backups/
-exports/
+/exports/
 logs/
 *.db
 *.sqlite
