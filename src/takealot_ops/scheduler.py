@@ -106,7 +106,7 @@ def run_daily(settings: Settings, clock: Clock) -> DailyRunResult:
             )
             try:
                 metric_rows = service.rebuild(start_date, end_date)
-                quality = verify_quality(repository, end_date)
+                quality = verify_quality(repository, end_date, start_date=start_date)
                 dataset = service.dashboard_dataset(end_date)
             except Exception as exc:
                 return DailyRunResult(

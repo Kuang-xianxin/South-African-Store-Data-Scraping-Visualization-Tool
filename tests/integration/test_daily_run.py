@@ -47,6 +47,16 @@ class RecordingClient:
         return None
 
 
+class FixtureSaleClient(RecordingClient):
+    def iter_items(
+        self, path: str, params: Mapping[str, Any]
+    ) -> Iterator[dict[str, Any]]:
+        self.calls.append((path, dict(params)))
+        fixture = "offers_page_1.json" if path == "/offers" else "sales_page.json"
+        payload = json.loads((FIXTURES / fixture).read_text(encoding="utf-8"))
+        yield dict(payload["items"][0])
+
+
 def _settings(tmp_path: Path) -> Settings:
     config_dir = tmp_path / "config"
     config_dir.mkdir()
@@ -140,6 +150,26 @@ def test_daily_run_does_not_publish_reports_after_incomplete_pagination(
     assert published == []
 
 
+def test_daily_run_checks_quality_across_the_full_refresh_window(
+    tmp_path: Path, monkeypatch
+) -> None:
+    client = FixtureSaleClient()
+    monkeypatch.setattr("takealot_ops.scheduler.TakealotClient", lambda _: client)
+    monkeypatch.setattr(
+        "takealot_ops.scheduler.generate_daily_reports",
+        lambda _dataset, _root, report_date: _fake_reports(tmp_path, report_date),
+    )
+
+    result = run_daily(
+        _settings(tmp_path), FixedClock(datetime(2026, 7, 20, 22, 30, tzinfo=UTC))
+    )
+
+    assert result.status == "quality_failed", result.error
+    assert result.quality is not None
+    assert result.quality.issue_count == 1
+    assert result.quality.unknown_sales_status_count == 1
+
+
 def test_verify_reports_unknown_sales_statuses() -> None:
     engine = create_engine("sqlite://")
     create_schema(engine)
@@ -161,4 +191,3 @@ def test_verify_reports_unknown_sales_statuses() -> None:
     assert result.issue_count == 1
     assert result.unknown_sales_status_count == 1
     assert not result.passed
-
