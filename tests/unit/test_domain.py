@@ -38,6 +38,23 @@ def test_offer_record_maps_api_payload_and_keeps_capture_time() -> None:
         "listing_quality": "good",
         "discount_percentage": "20",
         "updated_at": "2026-07-20T07:30:00+00:00",
+        "seller_warehouse_stock": [
+            {"seller_warehouse_id": 1, "quantity_available": 4}
+        ],
+        "takealot_warehouse_stock": [
+            {
+                "region": "CPT",
+                "quantity_available": 2,
+                "stock_in_receiving": 3,
+                "stock_on_way": 1,
+            },
+            {
+                "region": "JHB",
+                "quantity_available": 5,
+                "stock_in_receiving": 0,
+                "stock_on_way": 2,
+            },
+        ],
     }
 
     record = OfferRecord.from_api(payload, captured_at)
@@ -48,9 +65,23 @@ def test_offer_record_maps_api_payload_and_keeps_capture_time() -> None:
     assert record.page_views_30_days == 120
     assert record.updated_at == datetime(2026, 7, 20, 7, 30, tzinfo=UTC)
     assert record.captured_at == captured_at
+    assert record.takealot_available_stock == 7
+    assert record.total_stock == 7
+    assert record.seller_available_stock == 4
+    assert record.takealot_stock_in_receiving == 3
+    assert record.takealot_stock_on_way == 3
 
     with pytest.raises(FrozenInstanceError):
         record.sku = "changed"  # type: ignore[misc]
+
+
+def test_offer_record_keeps_stock_unknown_when_expands_were_not_requested() -> None:
+    captured_at = datetime(2026, 7, 20, 8, 0, tzinfo=UTC)
+    record = OfferRecord.from_api({"offer_id": "offer-1"}, captured_at)
+
+    assert record.total_stock is None
+    assert record.takealot_available_stock is None
+    assert record.seller_available_stock is None
 
 
 def test_sale_record_maps_api_payload_and_groups_by_sast_day() -> None:

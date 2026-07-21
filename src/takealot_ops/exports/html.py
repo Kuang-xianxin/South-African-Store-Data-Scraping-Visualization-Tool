@@ -142,7 +142,7 @@ def _document(
             _TRAFFIC_LABELS["page_views_window_net_change"],
         ),
         ("conversion_percentage_30_days", "近30天转化率（%）"),
-        ("total_stock", "当前库存"),
+        ("total_stock", "平台可售库存"),
         ("offer_status", "商品状态"),
     ]
     anomaly_columns = [

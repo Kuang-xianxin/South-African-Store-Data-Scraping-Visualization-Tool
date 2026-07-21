@@ -255,6 +255,10 @@ def _offer_values(record: OfferRecord) -> dict[str, Any]:
         "updated_at": record.updated_at,
         "captured_at": record.captured_at.astimezone(UTC),
         "total_stock": record.total_stock,
+        "takealot_available_stock": record.takealot_available_stock,
+        "seller_available_stock": record.seller_available_stock,
+        "takealot_stock_in_receiving": record.takealot_stock_in_receiving,
+        "takealot_stock_on_way": record.takealot_stock_on_way,
     }
 
 

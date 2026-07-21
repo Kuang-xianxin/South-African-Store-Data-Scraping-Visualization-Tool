@@ -43,10 +43,19 @@ class OfferRecord:
     updated_at: datetime | None
     captured_at: datetime
     total_stock: int | None = None
+    takealot_available_stock: int | None = None
+    seller_available_stock: int | None = None
+    takealot_stock_in_receiving: int | None = None
+    takealot_stock_on_way: int | None = None
 
     @classmethod
     def from_api(cls, payload: Mapping[str, Any], captured_at: datetime) -> OfferRecord:
         """Convert one Takealot Offers API payload into a typed record."""
+        takealot_available_stock = _sum_stock_field(
+            payload.get("takealot_warehouse_stock"), "quantity_available"
+        )
+        if takealot_available_stock is None:
+            takealot_available_stock = _optional_int(payload.get("total_stock"))
         return cls(
             offer_id=str(payload["offer_id"]),
             tsin_id=_optional_string(payload.get("tsin_id")),
@@ -73,7 +82,19 @@ class OfferRecord:
             discount_percentage=_optional_decimal(payload.get("discount_percentage")),
             updated_at=_optional_datetime(payload.get("updated_at")),
             captured_at=_require_aware_datetime(captured_at, "captured_at"),
-            total_stock=_optional_int(payload.get("total_stock")),
+            # Keep total_stock as the backwards-compatible platform sellable
+            # stock metric used by dashboards and anomaly rules.
+            total_stock=takealot_available_stock,
+            takealot_available_stock=takealot_available_stock,
+            seller_available_stock=_sum_stock_field(
+                payload.get("seller_warehouse_stock"), "quantity_available"
+            ),
+            takealot_stock_in_receiving=_sum_stock_field(
+                payload.get("takealot_warehouse_stock"), "stock_in_receiving"
+            ),
+            takealot_stock_on_way=_sum_stock_field(
+                payload.get("takealot_warehouse_stock"), "stock_on_way"
+            ),
         )
 
 
@@ -144,6 +165,22 @@ def _optional_int(value: Any) -> int | None:
     if value is None or value == "":
         return None
     return int(value)
+
+
+def _sum_stock_field(value: Any, field_name: str) -> int | None:
+    """Sum one numeric field from a requested warehouse-stock expansion."""
+    if value is None:
+        return None
+    if not isinstance(value, list):
+        raise TypeError("warehouse stock expansion must be a list")
+    total = 0
+    for item in value:
+        if not isinstance(item, Mapping):
+            raise TypeError("warehouse stock entries must be objects")
+        quantity = _optional_int(item.get(field_name))
+        if quantity is not None:
+            total += quantity
+    return total
 
 
 def _optional_datetime(value: Any) -> datetime | None:

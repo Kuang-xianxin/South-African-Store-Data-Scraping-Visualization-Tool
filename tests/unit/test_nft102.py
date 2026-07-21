@@ -83,6 +83,8 @@ def test_payload_uses_today_traffic_and_yesterday_sales_without_faking_fields(
                 sku="9902253460734",
                 captured_at=now,
                 page_views_30_days=88,
+                total_stock=7,
+                takealot_available_stock=7,
             )
         )
         session.add(
@@ -107,9 +109,10 @@ def test_payload_uses_today_traffic_and_yesterday_sales_without_faking_fields(
     assert no_sku["active"] is False
     assert active_duplicate["traffic_value"] == 88
     assert active_duplicate["order_value"] == 3
+    assert active_duplicate["platform_stock_value"] == 7
     assert payload["sales_date"] == "2026-07-20"
     assert payload["field_policy"]["当天访客数"].endswith("留空")
-    assert payload["field_policy"]["平台库存数量"].endswith("留空")
+    assert "quantity_available" in payload["field_policy"]["平台库存数量"]
 
 
 def test_writer_changes_only_nft102_xml_and_appends_four_rows(tmp_path: Path) -> None:
@@ -122,9 +125,24 @@ def test_writer_changes_only_nft102_xml_and_appends_four_rows(tmp_path: Path) ->
         "report_date": "2026-07-21",
         "max_column_letter": "E",
         "columns": [
-            {"column_letter": "C", "traffic_value": 10, "order_value": 2},
-            {"column_letter": "D", "traffic_value": None, "order_value": None},
-            {"column_letter": "E", "traffic_value": 20, "order_value": 3},
+            {
+                "column_letter": "C",
+                "traffic_value": 10,
+                "order_value": 2,
+                "platform_stock_value": 4,
+            },
+            {
+                "column_letter": "D",
+                "traffic_value": None,
+                "order_value": None,
+                "platform_stock_value": None,
+            },
+            {
+                "column_letter": "E",
+                "traffic_value": 20,
+                "order_value": 3,
+                "platform_stock_value": 6,
+            },
         ],
         "summary": {"ordered_units_mapped": 5},
     }
@@ -146,7 +164,8 @@ def test_writer_changes_only_nft102_xml_and_appends_four_rows(tmp_path: Path) ->
         assert worksheet["C6"].value == 10
         assert worksheet["C7"].value is None
         assert worksheet["C8"].value == 2
-        assert worksheet["C9"].value is None
+        assert worksheet["C9"].value == 4
+        assert worksheet["E9"].value == 6
         assert worksheet["B8"].value == "=SUM(C8:E8)"
         assert worksheet.max_row == 11
         assert worksheet["E11"].number_format == "0"

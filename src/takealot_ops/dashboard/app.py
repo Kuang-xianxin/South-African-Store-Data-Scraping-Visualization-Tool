@@ -244,7 +244,9 @@ def _render_product(
     identity_columns = st.columns(4)
     identity_columns[0].metric("当前售价", _currency_or_missing(identity.get("selling_price")))
     identity_columns[1].metric("RRP", _currency_or_missing(identity.get("rrp")))
-    identity_columns[2].metric("总可见库存", _display(identity.get("total_stock")))
+    identity_columns[2].metric(
+        "Takealot平台可售库存", _display(identity.get("total_stock"))
+    )
     identity_columns[3].metric("Offer 状态", _display(identity.get("status")))
     metric_columns = st.columns(4)
     latest_metric_date = _display(latest.get("metric_date"))

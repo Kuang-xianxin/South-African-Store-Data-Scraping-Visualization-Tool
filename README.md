@@ -143,7 +143,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\install_scheduled_task.ps1 `
 - 表格日期使用当天日期；“当天订单数”使用前一天完整的 Sales quantity。
 - “访客总数”填写 `page_views_30_days`，含义是近30天滚动浏览量。
 - 接口不提供精确“当天访客数”，因此该行留空。
-- 当前项目尚未采集仓库库存扩展字段，“平台库存数量”留空。
+- “平台库存数量”填写 Takealot 各地区 `quantity_available` 合计；收货中和在途库存不计入可售库存。
 - 仅按表头中的完整 13 位 SKU 自动匹配；无法识别、无法匹配和重复旧列会留空并写入核对报告。
 
 每次会同时生成 `.核对报告.txt`（供运营查看）和 `.核对报告.json`（供程序审计）。

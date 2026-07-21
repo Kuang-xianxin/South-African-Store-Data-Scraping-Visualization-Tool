@@ -32,7 +32,18 @@ def collect_offers(
     snapshot_date = sast_date(captured_at)
     run_id = _persist_run_start(repository, "offers", snapshot_date)
     try:
-        raw_items = list(client.iter_items("/offers", {"limit": 100}))
+        raw_items = list(
+            client.iter_items(
+                "/offers",
+                {
+                    "limit": 100,
+                    "expands": [
+                        "seller_warehouse_stock",
+                        "takealot_warehouse_stock",
+                    ],
+                },
+            )
+        )
         records = [_offer_record_from_api(item, captured_at) for item in raw_items]
         counts = {"records": len(records)}
         with repository.transaction():

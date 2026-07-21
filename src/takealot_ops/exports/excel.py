@@ -62,7 +62,7 @@ _PRODUCT_COLUMNS = [
     ("conversion_percentage_30_days", "近30天转化率（%）"),
     ("conversion_percentage_previous_30_days", "前30天转化率（%）"),
     ("conversion_change_points", "转化率变化（百分点）"),
-    ("total_stock_current", "当前库存"),
+    ("total_stock_current", "平台可售库存"),
     ("offer_status_current", "商品状态（当前）"),
 ]
 
@@ -98,7 +98,7 @@ _OFFER_COLUMNS = [
     ("wishlist_30_days", "近30天收藏数"),
     ("listing_quality", "Listing Quality 原值"),
     ("discount_percentage", "折扣率（%）"),
-    ("total_stock", "当前库存"),
+    ("total_stock", "平台可售库存"),
     ("updated_at", "商品更新时间"),
     ("captured_at", "采集时间"),
     ("productline_id", "Product Line ID"),

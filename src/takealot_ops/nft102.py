@@ -38,6 +38,7 @@ class ColumnUpdate:
     active: bool
     traffic_value: int | None
     order_value: int | None
+    platform_stock_value: int | None
     reason: str | None
 
 
@@ -126,8 +127,10 @@ def build_update_payload(
 
         traffic_value: int | None = None
         order_value: int | None = None
+        platform_stock_value: int | None = None
         if active and snapshot is not None:
             traffic_value = snapshot.page_views_30_days
+            platform_stock_value = snapshot.takealot_available_stock
             if sales_data_complete:
                 order_value = units_by_sku.get(column.sku or "", 0)
             elif column.sku is not None and column.sku in units_by_sku:
@@ -142,6 +145,7 @@ def build_update_payload(
                 active=active,
                 traffic_value=traffic_value,
                 order_value=order_value,
+                platform_stock_value=platform_stock_value,
                 reason=reason,
             )
         )
@@ -162,6 +166,9 @@ def build_update_payload(
             "matched_active_columns": len(matched),
             "traffic_values": sum(item.traffic_value is not None for item in matched),
             "order_values": sum(item.order_value is not None for item in matched),
+            "platform_stock_values": sum(
+                item.platform_stock_value is not None for item in matched
+            ),
             "columns_without_sku": sum(item.sku is None for item in updates),
             "duplicate_sku_columns_skipped": sum(
                 item.sku in duplicate_skus and not item.active for item in updates
@@ -179,6 +186,8 @@ def build_update_payload(
             "访客总数": "Takealot page_views_30_days（近30天滚动浏览量）",
             "当天访客数": "接口不提供精确单日访客数，留空",
             "当天订单数": "表格日期前一天的 Sales quantity；采集完整时无订单写0",
-            "平台库存数量": "当前尚未采集仓库库存扩展字段，留空",
+            "平台库存数量": (
+                "Takealot各地区takealot_warehouse_stock.quantity_available合计"
+            ),
         },
     }

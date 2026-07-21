@@ -58,6 +58,10 @@ class OfferCurrent(Base):
     updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     captured_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     total_stock: Mapped[int | None] = mapped_column(Integer)
+    takealot_available_stock: Mapped[int | None] = mapped_column(Integer)
+    seller_available_stock: Mapped[int | None] = mapped_column(Integer)
+    takealot_stock_in_receiving: Mapped[int | None] = mapped_column(Integer)
+    takealot_stock_on_way: Mapped[int | None] = mapped_column(Integer)
 
 
 class OfferSnapshot(Base):
@@ -92,6 +96,10 @@ class OfferSnapshot(Base):
     updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     captured_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     total_stock: Mapped[int | None] = mapped_column(Integer)
+    takealot_available_stock: Mapped[int | None] = mapped_column(Integer)
+    seller_available_stock: Mapped[int | None] = mapped_column(Integer)
+    takealot_stock_in_receiving: Mapped[int | None] = mapped_column(Integer)
+    takealot_stock_on_way: Mapped[int | None] = mapped_column(Integer)
 
 
 class SaleItem(Base):

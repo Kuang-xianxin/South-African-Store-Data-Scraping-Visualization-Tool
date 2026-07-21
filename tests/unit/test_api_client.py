@@ -236,6 +236,25 @@ def test_client_sends_api_key_header_without_putting_it_in_url() -> None:
     assert API_KEY not in str(captured_requests[0].url)
 
 
+def test_list_offers_requests_seller_and_takealot_stock_expands() -> None:
+    captured_requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured_requests.append(request)
+        return httpx.Response(200, json={"items": []})
+
+    client = _client(handler)
+    try:
+        assert list(client.list_offers()) == []
+    finally:
+        client.close()
+
+    assert captured_requests[0].url.params.get_list("expands") == [
+        "seller_warehouse_stock",
+        "takealot_warehouse_stock",
+    ]
+
+
 def test_iter_items_follows_continuation_token_until_empty() -> None:
     requests: list[httpx.Request] = []
     pages = [_fixture("offers_page_1.json"), _fixture("offers_page_2.json")]

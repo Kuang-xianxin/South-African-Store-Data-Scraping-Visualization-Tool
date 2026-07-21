@@ -254,7 +254,10 @@ def patch_workbook(source: Path, output: Path, payload: dict[str, Any]) -> None:
                 _clear(order_cell)
             else:
                 _set_number(order_cell, int(item["order_value"]))
-            _clear(stock_cell)
+            if item["platform_stock_value"] is None:
+                _clear(stock_cell)
+            else:
+                _set_number(stock_cell, int(item["platform_stock_value"]))
 
         total = int(payload["summary"]["ordered_units_mapped"])
         order_total_cell = _ensure_cell(

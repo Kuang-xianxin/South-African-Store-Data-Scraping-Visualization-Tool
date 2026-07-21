@@ -45,7 +45,7 @@ FIELD_LABELS = {
     "conversion_percentage_30_days": "近30天转化率",
     "conversion_percentage_previous_30_days": "上一周期转化率",
     "conversion_change_points": "转化率周期变化",
-    "total_stock": "总可见库存",
+    "total_stock": "Takealot平台可售库存",
     "offer_status": "Offer 状态",
     "status": "Offer 状态",
     "selling_price": "当前售价",

@@ -62,7 +62,23 @@ def test_collect_offers_persists_complete_snapshot_and_successful_run() -> None:
     engine = _engine()
     captured_at = datetime(2026, 7, 20, 8, tzinfo=UTC)
     items = _items("offers_page_1.json") + _items("offers_page_2.json")
-    items[0]["total_stock"] = 0
+    items[0]["seller_warehouse_stock"] = [
+        {"seller_warehouse_id": 1, "quantity_available": 4}
+    ]
+    items[0]["takealot_warehouse_stock"] = [
+        {
+            "region": "CPT",
+            "quantity_available": 2,
+            "stock_in_receiving": 3,
+            "stock_on_way": 1,
+        },
+        {
+            "region": "JHB",
+            "quantity_available": 5,
+            "stock_in_receiving": 0,
+            "stock_on_way": 2,
+        },
+    ]
     client = FakeClient(items)
     with Session(engine) as session:
         result = collect_offers(client, Repository(session), captured_at)
@@ -77,10 +93,25 @@ def test_collect_offers_persists_complete_snapshot_and_successful_run() -> None:
     assert isinstance(result, CollectionResult)
     assert result.status == "success"
     assert result.counts == {"records": 2}
-    assert client.calls == [("/offers", {"limit": 100})]
+    assert client.calls == [
+        (
+            "/offers",
+            {
+                "limit": 100,
+                "expands": [
+                    "seller_warehouse_stock",
+                    "takealot_warehouse_stock",
+                ],
+            },
+        )
+    ]
     assert [row.offer_id for row in current] == ["100001", "100002"]
     assert [row.snapshot_date for row in snapshots] == [date(2026, 7, 20)] * 2
-    assert snapshots[0].total_stock == 0
+    assert snapshots[0].total_stock == 7
+    assert snapshots[0].takealot_available_stock == 7
+    assert snapshots[0].seller_available_stock == 4
+    assert snapshots[0].takealot_stock_in_receiving == 3
+    assert snapshots[0].takealot_stock_on_way == 3
     assert snapshots[1].total_stock is None
     assert run is not None
     assert run.status == "success"

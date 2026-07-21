@@ -65,7 +65,13 @@ class TakealotClient:
     def list_offers(self) -> Iterator[OfferRecord]:
         """Yield typed current-offer records."""
         captured_at = datetime.now(UTC)
-        for item in self.iter_items("/offers", {"limit": 100}):
+        for item in self.iter_items(
+            "/offers",
+            {
+                "limit": 100,
+                "expands": ["seller_warehouse_stock", "takealot_warehouse_stock"],
+            },
+        ):
             yield self._offer_record(item, captured_at)
 
     def list_sales(self, start: date, end: date) -> Iterator[SaleRecord]:

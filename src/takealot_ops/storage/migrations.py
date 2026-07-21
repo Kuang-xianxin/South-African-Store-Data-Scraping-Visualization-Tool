@@ -31,8 +31,33 @@ def create_engine_for_settings(settings: DatabaseSettings) -> Engine:
 
 
 def create_schema(engine: Engine) -> None:
-    """Create the current schema for a new local database."""
+    """Create the current schema and apply additive SQLite upgrades."""
     Base.metadata.create_all(engine)
+    if engine.dialect.name == "sqlite":
+        _add_sqlite_offer_stock_columns(engine)
+
+
+def _add_sqlite_offer_stock_columns(engine: Engine) -> None:
+    columns = {
+        "takealot_available_stock": "INTEGER",
+        "seller_available_stock": "INTEGER",
+        "takealot_stock_in_receiving": "INTEGER",
+        "takealot_stock_on_way": "INTEGER",
+    }
+    with engine.begin() as connection:
+        for table_name in ("offer_current", "offer_snapshots"):
+            existing = {
+                str(row[1])
+                for row in connection.exec_driver_sql(
+                    f'PRAGMA table_info("{table_name}")'
+                ).fetchall()
+            }
+            for column_name, column_type in columns.items():
+                if column_name not in existing:
+                    connection.exec_driver_sql(
+                        f'ALTER TABLE "{table_name}" ADD COLUMN '
+                        f'"{column_name}" {column_type}'
+                    )
 
 
 def _configure_sqlite(engine: Engine) -> None:
