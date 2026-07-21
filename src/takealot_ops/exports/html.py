@@ -22,6 +22,13 @@ _TRAFFIC_LABELS = {
     "page_views_30_day_average": "近30天日均浏览量",
     "page_views_window_net_change": "30天浏览量窗口净变化",
 }
+_PLOT_COMPLETION_POST_SCRIPT = """
+window.__takealotCompletedPlots = window.__takealotCompletedPlots || {};
+window.__takealotCompletedPlots["{plot_id}"] = true;
+window.dispatchEvent(new CustomEvent("takealot-plot-complete", {
+  detail: "{plot_id}"
+}));
+"""
 
 
 def export_html(dataset: DashboardDataset, destination: Path) -> Path:
@@ -35,6 +42,7 @@ def export_html(dataset: DashboardDataset, destination: Path) -> Path:
         include_plotlyjs=True,
         div_id="store-trend",
         config={"displaylogo": False, "responsive": True},
+        post_script=_PLOT_COMPLETION_POST_SCRIPT,
     )
     product_plot = pio.to_html(
         product_figure,
@@ -42,6 +50,7 @@ def export_html(dataset: DashboardDataset, destination: Path) -> Path:
         include_plotlyjs=False,
         div_id="product-trend",
         config={"displaylogo": False, "responsive": True},
+        post_script=_PLOT_COMPLETION_POST_SCRIPT,
     )
     serialized = _serialize_dataset(dataset)
     document = _document(dataset, serialized, store_plot, product_plot)
@@ -212,12 +221,14 @@ def _document(
   search.addEventListener("input", filterRows);
   offer.addEventListener("change", filterRows);
   const plotIds = ["store-trend", "product-trend"];
-  const waitForPlots = () => new Promise((resolve) => {{
-    const check = () => plotIds.every((id) => document.getElementById(id)?._fullLayout)
-      ? resolve() : requestAnimationFrame(check);
-    check();
-  }});
-  waitForPlots().then(() => document.getElementById("report-root").setAttribute("data-report-ready", "true"));
+  const markReportReady = () => {{
+    const completed = window.__takealotCompletedPlots || {{}};
+    if (plotIds.every((id) => completed[id] === true)) {{
+      document.getElementById("report-root").setAttribute("data-report-ready", "true");
+    }}
+  }};
+  window.addEventListener("takealot-plot-complete", markReportReady);
+  markReportReady();
 }})();
 </script>
 </body>

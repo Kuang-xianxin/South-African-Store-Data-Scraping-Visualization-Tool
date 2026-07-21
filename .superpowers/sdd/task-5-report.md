@@ -122,3 +122,69 @@ Focused repairs and recheck:
 
 - The bundled `@oai/artifact-tool` successfully imported, inspected, formula-scanned, and wrote all eight QA PNGs, but its Node process returned Windows status `0xC0000409` during teardown after every requested output had been fully written. The rendered artifacts were complete and individually viewable, so this was not an import/render availability blocker; it appears limited to runtime cleanup.
 - PNG availability remains installation-dependent by design. The typed fallback is covered, and Chromium was available for the representative end-to-end run.
+
+---
+
+## 2026-07-21 readiness-race follow-up
+
+### Root cause and correction
+
+The original report-ready script polled Plotly divs for the private `_fullLayout` property. That property can exist before the public `Plotly.newPlot()` promise has settled, so the PNG waiter could observe `data-report-ready="true"` while one or both plots were still completing.
+
+Each `pio.to_html` call now receives a Plotly `post_script`. Plotly inserts that script inside the corresponding public `Plotly.newPlot(...).then(...)`; it records the specific completed plot ID and emits a completion event. The root marker changes to `true` only when the state map contains completion flags for both `store-trend` and `product-trend`. The final listener also checks existing state once, covering promises that settled before listener registration. No `_fullLayout`, animation-frame polling, or other private Plotly state remains.
+
+### Delayed-render TDD evidence
+
+The regression generates the real offline HTML and uses Playwright to wrap `Plotly.newPlot`. Both plots render normally, but their returned promises are deliberately held unresolved by deterministic release functions.
+
+RED command:
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest tests/integration/test_html_export.py::test_html_ready_waits_for_both_plotly_newplot_promises -v
+```
+
+Observed against the old implementation:
+
+```text
+1 failed in 3.70s
+AssertionError: assert 'true' == 'false'
+```
+
+The failure occurred before either held promise was released, proving `_fullLayout` caused premature readiness.
+
+GREEN after the promise-based correction:
+
+```text
+1 passed in 3.50s
+```
+
+The test proves all three required states: both promises held means marker `false`; store promise released means the store completion flag is true while the marker remains `false`; product promise released means the marker becomes `true`.
+
+### Final verification
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest tests/integration/test_html_export.py tests/integration/test_excel_export.py tests/integration/test_reporting.py -v
+# 17 passed in 7.82s
+
+.\.venv\Scripts\python.exe -m pytest -q
+# 77 passed in 9.37s
+
+.\.venv\Scripts\python.exe -m ruff check src tests
+# All checks passed!
+
+.\.venv\Scripts\python.exe -m mypy src
+# Success: no issues found in 20 source files
+
+git diff --check
+# exit 0; only Windows LF-to-CRLF advisories were printed
+```
+
+Normal smoke used the representative dataset with unmodified HTML and PNG exporters. Chromium waited on `[data-report-ready="true"]` and wrote a valid PNG signature; generated sizes were 4,880,209 bytes for HTML and 201,764 bytes for PNG. A source scan found no `_fullLayout`, old animation-frame check, or `waitForPlots` reference.
+
+### Follow-up self-review
+
+- Confirmed both exact plot IDs get completion flags only from their own `newPlot` promise continuation.
+- Confirmed the state check plus event listener is race-safe if either promise resolves before or after the listener is registered.
+- Confirmed the existing resource parser, Plotly script-only Unicode escaping, filters, embedded dataset, formula-injection protection, PNG typed fallback, and screenshot selector are unchanged and remain covered by the focused suite.
+- Confirmed the delayed browser test skips only when Chromium launch itself raises `PlaywrightError`; HTML or readiness failures remain real test failures.
+- No new artifact-tool visual QA was necessary because this follow-up changes only HTML readiness coordination and its browser regression, not workbook content or formatting.
