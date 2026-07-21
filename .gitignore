@@ -1,5 +1,6 @@
 .worktrees/
 .superpowers/
+/archive/
 .venv/
 __pycache__/
 .pytest_cache/

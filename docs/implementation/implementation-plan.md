@@ -1,6 +1,6 @@
 # Takealot Operations Dashboard Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> 本计划作为项目实施清单保留。后续由单个 Agent 按任务顺序执行；每完成一项再进入下一项。
 
 **Goal:** Build a Windows-local, read-only Takealot operations system that collects Offer and Sales data, stores auditable history, presents an interactive dashboard, and exports shareable offline HTML, Excel, and PNG reports.
 
