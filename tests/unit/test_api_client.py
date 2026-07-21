@@ -11,7 +11,7 @@ import httpx
 import pytest
 
 from takealot_ops.api.client import TakealotClient
-from takealot_ops.api.errors import ApiResponseError, AuthenticationError
+from takealot_ops.api.errors import ApiResponseError, AuthenticationError, RateLimitError
 from takealot_ops.domain import OfferRecord, SaleRecord
 from takealot_ops.settings import Settings
 
@@ -320,6 +320,66 @@ def test_sales_query_uses_inclusive_sast_dates_and_limit_100() -> None:
         "order_date__lte": "2026-07-20",
         "limit": "100",
     }
+
+
+def test_returns_query_uses_inclusive_dates_and_limit_100() -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, json={"items": []})
+
+    client = _client(handler)
+    try:
+        assert list(client.list_returns(date(2026, 7, 1), date(2026, 7, 20))) == []
+    finally:
+        client.close()
+
+    assert dict(requests[0].url.params) == {
+        "return_date__gte": "2026-07-01",
+        "return_date__lte": "2026-07-20",
+        "limit": "100",
+    }
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        httpx.Response(200, json={}),
+        httpx.Response(200, json={"items": ["not-an-object"]}),
+        httpx.Response(200, json=[]),
+        httpx.Response(200, content=b"not-json"),
+    ],
+    ids=["missing-items", "non-object-item", "non-object-payload", "invalid-json"],
+)
+def test_client_rejects_malformed_collection_payloads(response: httpx.Response) -> None:
+    client = _client(lambda request: response)
+    try:
+        with pytest.raises(ApiResponseError):
+            list(client.iter_items("/offers", {"limit": 100}))
+    finally:
+        client.close()
+
+
+def test_429_exhaustion_raises_typed_rate_limit_error() -> None:
+    client = _client(
+        lambda request: httpx.Response(429, json={"title": "rate limited"}),
+        sleep=lambda _: None,
+    )
+    try:
+        with pytest.raises(RateLimitError):
+            list(client.list_offers())
+    finally:
+        client.close()
+
+
+def test_non_retryable_http_error_raises_api_response_error() -> None:
+    client = _client(lambda request: httpx.Response(404, json={"title": "missing"}))
+    try:
+        with pytest.raises(ApiResponseError):
+            list(client.list_offers())
+    finally:
+        client.close()
 
 
 def test_403_raises_authentication_error_without_retry() -> None:

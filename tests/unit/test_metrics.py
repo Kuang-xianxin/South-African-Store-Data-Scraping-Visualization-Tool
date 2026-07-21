@@ -243,9 +243,13 @@ def test_unknown_status_is_excluded_from_effective_units_and_flagged(tmp_path: P
 
         service.rebuild(metric_date, metric_date)
         dataset = service.dashboard_dataset(metric_date)
+        first_event_id = dataset.quality_events.iloc[0]["event_id"]
+        service.rebuild(metric_date, metric_date)
+        rebuilt = service.dashboard_dataset(metric_date)
 
     assert dataset.product_daily.iloc[0]["effective_units"] == 0
     assert dataset.quality_events["event_type"].tolist() == ["unknown_sale_status"]
+    assert rebuilt.quality_events.iloc[0]["event_id"] == first_event_id
     assert "unknown_sale_status" in dataset.anomalies["anomaly_type"].tolist()
 
 

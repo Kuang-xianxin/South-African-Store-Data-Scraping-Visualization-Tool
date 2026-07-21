@@ -8,7 +8,7 @@ from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
-from uuid import uuid4
+from uuid import NAMESPACE_URL, uuid5
 
 import pandas as pd
 import yaml
@@ -584,7 +584,14 @@ def _quality_values(
 ) -> list[dict[str, Any]]:
     return [
         {
-            "event_id": str(uuid4()),
+            "event_id": str(
+                uuid5(
+                    NAMESPACE_URL,
+                    "takealot-ops:unknown_sale_status:"
+                    f"{event_date.isoformat()}:{offer_id}:"
+                    f"{','.join(_display_statuses(statuses))}",
+                )
+            ),
             "event_date": event_date,
             "event_type": "unknown_sale_status",
             "severity": "warning",
