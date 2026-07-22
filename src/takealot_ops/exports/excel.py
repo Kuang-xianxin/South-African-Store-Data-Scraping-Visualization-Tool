@@ -197,12 +197,13 @@ def export_excel(dataset: DashboardDataset, destination: Path) -> Path:
         workbook.create_sheet(name)
 
     store_daily = _store_daily_for_excel(dataset)
+    recent_store_daily = _recent_store_daily(store_daily)
     product_daily = _product_daily_for_excel(dataset)
     offer_current = _offer_current_for_excel(dataset.offer_current)
     anomalies = _anomalies_for_excel(dataset)
     quality_events = _quality_events_for_excel(dataset)
 
-    _build_overview(overview, dataset, store_daily)
+    _build_overview(overview, dataset, recent_store_daily)
     _build_product_analysis(workbook["单品分析"], product_daily)
     _build_frame_sheet(
         workbook["商品数据"],
@@ -284,7 +285,7 @@ def _build_overview(
             "A3",
             "A4",
             "近7天订购件数",
-            _sum_or_none(dataset.store_daily, "ordered_units"),
+            _sum_or_none(store_daily, "ordered_units"),
             "#,##0",
             _PALE_BLUE,
         ),
@@ -300,7 +301,7 @@ def _build_overview(
             "E3",
             "E4",
             "近7天订购销售额",
-            _sum_or_none(dataset.store_daily, "ordered_revenue"),
+            _sum_or_none(store_daily, "ordered_revenue"),
             '"R" #,##0.00',
             _PALE_BLUE,
         ),
@@ -346,7 +347,7 @@ def _build_overview(
     sheet.merge_cells("A5:N5")
     sheet["A5"] = (
         "口径提示：近30天浏览量为各商品 page_views_30_days 的汇总，不代表独立访客；"
-        "有效销量需完成销售状态规则确认。"
+        "有效件数按本地销售状态规则计算。"
     )
     sheet["A5"].fill = PatternFill("solid", fgColor=_PALE_AMBER)
     sheet["A5"].font = Font(name="Microsoft YaHei", size=9, color="92400E")
@@ -716,6 +717,15 @@ def _store_daily_for_excel(dataset: DashboardDataset) -> pd.DataFrame:
     if not frame.empty and "effective_units" in frame and unknown_dates:
         frame.loc[frame["metric_date"].isin(unknown_dates), "effective_units"] = pd.NA
     return frame
+
+
+def _recent_store_daily(frame: pd.DataFrame, days: int = 7) -> pd.DataFrame:
+    if frame.empty or "metric_date" not in frame:
+        return frame.copy(deep=True)
+    metric_dates = pd.to_datetime(frame["metric_date"], errors="coerce")
+    latest_date = metric_dates.max()
+    first_date = latest_date - pd.Timedelta(days=days - 1)
+    return frame.loc[metric_dates.between(first_date, latest_date)].copy(deep=True)
 
 
 def _product_daily_for_excel(dataset: DashboardDataset) -> pd.DataFrame:

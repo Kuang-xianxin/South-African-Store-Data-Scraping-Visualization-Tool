@@ -71,6 +71,35 @@ def test_excel_key_totals_match_dataset(
         assert overview["G3"].value == "异常记录数"
         assert overview["G4"].value == len(dashboard_dataset.anomalies)
         assert overview["A5"].value.startswith("口径提示：")
+        assert "有效件数按本地销售状态规则计算" in overview["A5"].value
+        assert "需完成销售状态规则确认" not in overview["A5"].value
+    finally:
+        workbook.close()
+
+
+def test_excel_overview_limits_recent_kpis_and_trend_to_seven_days(
+    tmp_path: Path, dashboard_dataset: DashboardDataset
+) -> None:
+    dates = pd.date_range("2026-07-15", periods=8, freq="D").date
+    store_daily = pd.DataFrame(
+        {
+            "metric_date": dates,
+            "ordered_units": [100, 1, 2, 3, 4, 5, 6, 7],
+            "effective_units": [100, 1, 2, 3, 4, 5, 6, 7],
+            "ordered_revenue": [1000, 10, 20, 30, 40, 50, 60, 70],
+        }
+    )
+    dataset = replace(dashboard_dataset, store_daily=store_daily)
+
+    destination = export_excel(dataset, tmp_path / "report.xlsx")
+
+    workbook = load_workbook(destination, data_only=False)
+    try:
+        overview = workbook["运营总览"]
+        assert overview["A4"].value == 28
+        assert overview["E4"].value == 280
+        assert [overview.cell(row, 1).value.date() for row in range(9, 16)] == list(dates[-7:])
+        assert overview["A16"].value is None
     finally:
         workbook.close()
 
