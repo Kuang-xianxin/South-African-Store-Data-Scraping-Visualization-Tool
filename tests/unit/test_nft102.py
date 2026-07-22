@@ -6,6 +6,7 @@ import zipfile
 from pathlib import Path
 
 from openpyxl import Workbook, load_workbook
+from openpyxl.styles import PatternFill
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
@@ -36,6 +37,10 @@ def _template(path: Path) -> None:
     worksheet.cell(3, 1, "当天访客数")
     worksheet.cell(4, 1, "当天订单数")
     worksheet.cell(4, 2, "=SUM(C4:E4)")
+    worksheet.cell(4, 3, 5)
+    worksheet.cell(4, 3).fill = PatternFill(
+        fill_type="solid", fgColor="FFFBE5D6"
+    )
     worksheet.cell(5, 1, "平台库存数量")
     worksheet["E7"].number_format = "0"
     other = workbook.create_sheet("其他店铺")
@@ -128,13 +133,13 @@ def test_writer_changes_only_nft102_xml_and_appends_four_rows(tmp_path: Path) ->
             {
                 "column_letter": "C",
                 "traffic_value": 10,
-                "order_value": 2,
+                "order_value": 0,
                 "platform_stock_value": 4,
             },
             {
                 "column_letter": "D",
                 "traffic_value": None,
-                "order_value": None,
+                "order_value": 2,
                 "platform_stock_value": None,
             },
             {
@@ -163,7 +168,10 @@ def test_writer_changes_only_nft102_xml_and_appends_four_rows(tmp_path: Path) ->
         assert worksheet["B6"].value.date() == date(2026, 7, 21)
         assert worksheet["C6"].value == 10
         assert worksheet["C7"].value is None
-        assert worksheet["C8"].value == 2
+        assert worksheet["C8"].value == 0
+        assert worksheet["C8"].fill.fgColor.rgb != "FFFBE5D6"
+        assert worksheet["D8"].value == 2
+        assert worksheet["D8"].fill.fgColor.rgb == "FFFBE5D6"
         assert worksheet["C9"].value == 4
         assert worksheet["E9"].value == 6
         assert worksheet["B8"].value == "=SUM(C8:E8)"

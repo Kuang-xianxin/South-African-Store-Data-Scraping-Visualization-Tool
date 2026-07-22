@@ -11,7 +11,7 @@ import tempfile
 import zipfile
 from datetime import date, datetime, timedelta
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import Any, cast
 from xml.etree import ElementTree as ET
 
 
@@ -20,6 +20,78 @@ DOC_REL_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationship
 PKG_REL_NS = "http://schemas.openxmlformats.org/package/2006/relationships"
 Q = f"{{{MAIN_NS}}}"
 CELL_REF = re.compile(r"([A-Z]+)(\d+)")
+ORDER_HIGHLIGHT_RGB = "FBE5D6"
+
+
+def _style_signature(style: ET.Element) -> bytes:
+    """Return an xf signature that ignores only its fill selection."""
+    comparable = copy.deepcopy(style)
+    comparable.attrib.pop("fillId", None)
+    comparable.attrib.pop("applyFill", None)
+    return cast(bytes, ET.tostring(comparable, encoding="utf-8"))
+
+
+def _find_fill_id(styles_root: ET.Element, rgb: str) -> int:
+    fills = styles_root.find(f"{Q}fills")
+    if fills is None:
+        raise ValueError("工作簿样式表缺少 fills")
+    target = rgb.upper().removeprefix("FF")
+    for index, fill in enumerate(fills.findall(f"{Q}fill")):
+        foreground = fill.find(f"{Q}patternFill/{Q}fgColor")
+        candidate = foreground.attrib.get("rgb", "") if foreground is not None else ""
+        if candidate.upper().removeprefix("FF") == target:
+            return index
+    raise ValueError(f"工作簿中未找到订单高亮色 #{rgb}")
+
+
+class _OrderStyleResolver:
+    """Select matching normal/highlight xf styles without changing other formatting."""
+
+    def __init__(self, styles_root: ET.Element) -> None:
+        self.styles_root = styles_root
+        cell_xfs = styles_root.find(f"{Q}cellXfs")
+        if cell_xfs is None:
+            raise ValueError("工作簿样式表缺少 cellXfs")
+        self.cell_xfs: ET.Element = cell_xfs
+        self.highlight_fill_id = _find_fill_id(styles_root, ORDER_HIGHLIGHT_RGB)
+        self.changed = False
+
+    def _styles(self) -> list[ET.Element]:
+        return self.cell_xfs.findall(f"{Q}xf")
+
+    def style_for(self, current_style_id: int, highlighted: bool) -> int:
+        styles = self._styles()
+        if current_style_id < 0 or current_style_id >= len(styles):
+            raise ValueError(f"无效的单元格样式 ID: {current_style_id}")
+        current = styles[current_style_id]
+        signature = _style_signature(current)
+        desired_fill_id = self.highlight_fill_id if highlighted else 0
+
+        for index, candidate in enumerate(styles):
+            if (
+                int(candidate.attrib.get("fillId", "0")) == desired_fill_id
+                and _style_signature(candidate) == signature
+            ):
+                return index
+
+        # Some custom templates may not contain both variants. Add the missing
+        # xf while retaining the font, border, number format and alignment.
+        created = copy.deepcopy(current)
+        created.attrib["fillId"] = str(desired_fill_id)
+        created.attrib["applyFill"] = "1"
+        self.cell_xfs.append(created)
+        self.cell_xfs.attrib["count"] = str(len(self._styles()))
+        self.changed = True
+        return len(self._styles()) - 1
+
+
+def _apply_order_style(
+    cell: ET.Element, value: int | None, resolver: _OrderStyleResolver
+) -> None:
+    current_style_id = int(cell.attrib.get("s", "0"))
+    cell.attrib["s"] = str(
+        resolver.style_for(current_style_id, highlighted=value is not None and value > 0)
+    )
 
 
 def _column_number(reference: str) -> int:
@@ -211,6 +283,8 @@ def patch_workbook(source: Path, output: Path, payload: dict[str, Any]) -> None:
         worksheet_part = _sheet_part(source_zip, payload["sheet_name"])
         shared_strings = _shared_strings(source_zip)
         worksheet_root = ET.fromstring(source_zip.read(worksheet_part))
+        styles_root = ET.fromstring(source_zip.read("xl/styles.xml"))
+        order_style_resolver = _OrderStyleResolver(styles_root)
         target_start, rows = _find_or_append_block(
             worksheet_root, shared_strings, report_date
         )
@@ -250,10 +324,13 @@ def patch_workbook(source: Path, output: Path, payload: dict[str, Any]) -> None:
             else:
                 _set_number(traffic_cell, int(item["traffic_value"]))
             _clear(daily_cell)
-            if item["order_value"] is None:
+            order_value = item["order_value"]
+            if order_value is None:
                 _clear(order_cell)
             else:
-                _set_number(order_cell, int(item["order_value"]))
+                order_value = int(order_value)
+                _set_number(order_cell, order_value)
+            _apply_order_style(order_cell, order_value, order_style_resolver)
             if item["platform_stock_value"] is None:
                 _clear(stock_cell)
             else:
@@ -266,13 +343,23 @@ def patch_workbook(source: Path, output: Path, payload: dict[str, Any]) -> None:
         last_column = payload["max_column_letter"]
         _set_formula(order_total_cell, f"SUM(C{target_start + 2}:{last_column}{target_start + 2})", total)
         updated_xml = ET.tostring(worksheet_root, encoding="utf-8", xml_declaration=True)
+        updated_styles_xml = (
+            ET.tostring(styles_root, encoding="utf-8", xml_declaration=True)
+            if order_style_resolver.changed
+            else None
+        )
 
         with tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx") as temp_file:
             temp_path = Path(temp_file.name)
         try:
             with zipfile.ZipFile(temp_path, "w") as output_zip:
                 for entry in source_zip.infolist():
-                    content = updated_xml if entry.filename == worksheet_part else source_zip.read(entry.filename)
+                    if entry.filename == worksheet_part:
+                        content = updated_xml
+                    elif entry.filename == "xl/styles.xml" and updated_styles_xml is not None:
+                        content = updated_styles_xml
+                    else:
+                        content = source_zip.read(entry.filename)
                     output_zip.writestr(entry, content)
             shutil.move(temp_path, output)
         finally:
