@@ -64,7 +64,9 @@ TAKEALOT_API_KEY=在这里粘贴真实Key
 .\.venv\Scripts\python.exe -m takealot_ops.cli dashboard
 ```
 
-浏览器打开 `http://127.0.0.1:8501`。看板默认只监听本机回环地址，不允许绑定局域网地址。看板只读取 SQLite，不调用 API，因此查看历史数据时不需要 API Key。
+浏览器打开 `http://127.0.0.1:8501`。看板默认只监听本机回环地址，不允许绑定局域网地址。浏览、筛选和切换页面时只读取 SQLite，不调用 API，因此查看已有历史数据不需要 API Key。
+
+侧边栏会显示“最近成功采集”和“最新指标日期”，用于判断当前看到的数据是否已经更新。需要立即更新时，可点击“立即刷新看板数据”；该按钮会调用项目根目录 `.env` 中的 API Key，依次完成只读采集、指标重建、日报导出、完整性检查和备份，通常需要 1 至 3 分钟。刷新期间不要重复点击或关闭页面；失败时可查看 `logs\takealot-ops.log`，页面不会显示或记录 API Key。
 
 ## 5. 生成分享报表
 
@@ -94,12 +96,12 @@ TAKEALOT_API_KEY=在这里粘贴真实Key
 
 ## 7. 安装 Windows 每日计划任务
 
-安装脚本本身不会自动运行；只有运营人员明确执行后才会创建计划任务。默认每天 `08:30`：
+安装脚本本身不会自动运行；只有运营人员明确执行后才会创建计划任务。默认每天中国时间 `10:10`，避开平台 10 点切日窗口。自动任务与页面手动刷新执行的是同一套完整流程：
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\install_scheduled_task.ps1 `
   -ProjectPath 'D:\南非店铺数据抓取' `
-  -DailyAt '08:30'
+  -DailyAt '10:10'
 ```
 
 计划任务使用项目自己的 `.venv`，工作目录固定为项目根目录，并强制设置 `TAKEALOT_DASHBOARD_HOST=127.0.0.1`。

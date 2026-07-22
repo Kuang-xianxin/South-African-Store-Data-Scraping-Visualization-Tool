@@ -51,6 +51,7 @@ def test_dashboard_navigates_all_pages_without_api_key(
 
     assert not app.exception
     assert tuple(app.radio[0].options) == PAGE_NAMES
+    assert app.button[0].label == "立即刷新看板数据"
     for page_name in PAGE_NAMES:
         app.radio[0].set_value(page_name).run()
         assert not app.exception

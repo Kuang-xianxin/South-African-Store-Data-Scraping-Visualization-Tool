@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import os
 from collections.abc import Callable
-from datetime import date, datetime, time, timedelta
+from dataclasses import dataclass
+from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -12,7 +13,7 @@ from zoneinfo import ZoneInfo
 import pandas as pd
 import streamlit as st
 import yaml
-from sqlalchemy import create_engine, event
+from sqlalchemy import create_engine, event, func, select
 from sqlalchemy.engine import Engine, make_url
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
@@ -34,6 +35,7 @@ from takealot_ops.dashboard.labels import (
     SALE_STATUS_LABELS,
     SEVERITY_LABELS,
 )
+from takealot_ops.dashboard.refresh import run_dashboard_refresh
 from takealot_ops.metrics.service import DashboardDataset, MetricService, classify_quadrants
 from takealot_ops.nft102_portal import (
     Nft102GenerationResult,
@@ -42,6 +44,7 @@ from takealot_ops.nft102_portal import (
     persist_nft102_baseline,
 )
 from takealot_ops.settings import DashboardSettings, SettingsError
+from takealot_ops.storage.models import CollectionRun, DailyProductMetric
 from takealot_ops.storage.repository import Repository
 
 
@@ -73,6 +76,14 @@ header[data-testid="stHeader"],
 }
 </style>
 """
+
+
+@dataclass(frozen=True)
+class DashboardFreshness:
+    """Latest durable collection and metric timestamps shown to operators."""
+
+    last_successful_collection_at: datetime | None
+    latest_metric_date: date | None
 
 
 def filter_as_of(frame: pd.DataFrame, as_of: date, date_column: str) -> pd.DataFrame:
@@ -148,6 +159,30 @@ def load_dashboard_dataset(
     return _dataset_as_of(dataset, as_of), None
 
 
+def load_dashboard_freshness(settings: DashboardSettings) -> DashboardFreshness:
+    """Read freshness markers without creating or writing the local database."""
+    database_path = _sqlite_database_path(settings.database_url)
+    if database_path is not None and not database_path.exists():
+        return DashboardFreshness(None, None)
+    engine: Engine | None = None
+    try:
+        engine = create_read_only_engine(settings.database_url)
+        with Session(engine) as session:
+            last_collection = session.scalar(
+                select(func.max(CollectionRun.finished_at)).where(
+                    CollectionRun.status == "success",
+                    CollectionRun.run_type.in_(("offers", "sales")),
+                )
+            )
+            latest_metric = session.scalar(select(func.max(DailyProductMetric.metric_date)))
+    except (OSError, ValueError, SQLAlchemyError):
+        return DashboardFreshness(None, None)
+    finally:
+        if engine is not None:
+            engine.dispose()
+    return DashboardFreshness(last_collection, latest_metric)
+
+
 def create_read_only_engine(database_url: str) -> Engine:
     """Create an engine whose dashboard connections reject write statements."""
     url = make_url(database_url)
@@ -183,11 +218,44 @@ def main() -> None:
         st.info("请使用项目提供的本地看板启动入口重新启动。")
         return
 
+    freshness = load_dashboard_freshness(settings)
     with st.sidebar:
         st.header("南非店铺运营看板")
         page_name = st.radio("页面", PAGE_NAMES)
         as_of = st.date_input("数据截止日期", value=date.today())
-        st.caption("本地运行 · 仅日报更新按钮会调用平台只读接口")
+        st.caption("本地运行 · 数据刷新和日报更新只调用平台只读接口")
+        st.divider()
+        st.caption(
+            f"最近成功采集：{_format_china_datetime(freshness.last_successful_collection_at)}"
+        )
+        st.caption(
+            "最新指标日期："
+            + (
+                freshness.latest_metric_date.isoformat()
+                if freshness.latest_metric_date is not None
+                else "暂无"
+            )
+        )
+        refresh_notice = st.session_state.pop("dashboard_refresh_notice", None)
+        if isinstance(refresh_notice, str):
+            st.success(refresh_notice)
+        refresh_clicked = st.button(
+            "立即刷新看板数据",
+            type="primary",
+            width="stretch",
+        )
+        st.caption(
+            "平台每日切日后使用；通常需要1至3分钟。刷新包含完整采集、指标重建、"
+            "日报导出、完整性检查和备份。"
+        )
+        if refresh_clicked:
+            with st.spinner("正在采集并重建指标，请勿关闭页面……"):
+                refresh_result = run_dashboard_refresh(settings.project_root)
+            if refresh_result.succeeded:
+                st.session_state["dashboard_refresh_notice"] = refresh_result.message
+                st.rerun()
+            else:
+                st.error(refresh_result.message)
 
     dataset, load_error = load_dashboard_dataset(settings, as_of)
     renderers: dict[str, Callable[[DashboardDataset | None, str | None, DashboardSettings, date], None]] = {
@@ -659,6 +727,14 @@ def _localized_value(value: object, labels: dict[str, str]) -> str:
     if value is None or str(value).strip().casefold() in {"nan", "nat", "<na>", "none"}:
         return "—"
     return labels.get(str(value), "未识别状态")
+
+
+def _format_china_datetime(value: datetime | None) -> str:
+    if value is None:
+        return "暂无"
+    normalized = value.replace(tzinfo=UTC) if value.tzinfo is None else value
+    china_time = normalized.astimezone(ZoneInfo("Asia/Shanghai"))
+    return china_time.strftime("%Y-%m-%d %H:%M")
 
 
 def _quality_detail(row: pd.Series) -> str:

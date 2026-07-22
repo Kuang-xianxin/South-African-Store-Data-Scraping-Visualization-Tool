@@ -46,6 +46,16 @@ def test_launcher_builds_exact_loopback_streamlit_command_without_api_key(
     ]
 
 
+def test_daily_schedule_defaults_to_china_time_after_platform_rollover() -> None:
+    script = (PROJECT_ROOT / "scripts" / "install_scheduled_task.ps1").read_text(
+        encoding="utf-8"
+    )
+
+    assert "[string]$DailyAt = '10:10'" in script
+    assert '$TaskName = "Takealot $ChineseTaskSuffix"' in script
+    assert "0x5E97, 0x94FA, 0x6570, 0x636E" in script
+
+
 def test_launcher_rejects_non_loopback_settings_before_subprocess() -> None:
     settings = DashboardSettings(
         project_root=PROJECT_ROOT,

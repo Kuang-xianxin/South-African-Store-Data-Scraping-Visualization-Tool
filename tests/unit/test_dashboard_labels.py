@@ -1,20 +1,23 @@
 from __future__ import annotations
 
-from datetime import date
+from datetime import UTC, date, datetime
 from pathlib import Path
 
 import pandas as pd
 import pytest
 from sqlalchemy import create_engine, text
 from sqlalchemy.exc import OperationalError
+from sqlalchemy.orm import Session
 
 from takealot_ops.dashboard.app import (
     CHINESE_UI_STYLES,
     PLOTLY_CHART_CONFIG,
+    _format_china_datetime,
     _calendar_window_sum,
     _sum_value,
     create_read_only_engine,
     filter_as_of,
+    load_dashboard_freshness,
     load_dashboard_dataset,
     search_products,
 )
@@ -30,6 +33,8 @@ from takealot_ops.dashboard.labels import (
     TRAFFIC_METRIC_LABELS,
 )
 from takealot_ops.settings import DashboardSettings, SettingsError
+from takealot_ops.storage.migrations import create_schema
+from takealot_ops.storage.models import CollectionRun, DailyProductMetric
 
 
 def _product_rows() -> pd.DataFrame:
@@ -177,6 +182,60 @@ def test_frontend_controls_and_identifiers_use_chinese_labels() -> None:
     assert FIELD_LABELS["sku"] == "库存编码"
     assert FIELD_LABELS["tsin_id"] == "平台商品编号"
     assert FIELD_LABELS["rrp"] == "建议零售价"
+
+
+def test_dashboard_freshness_reads_latest_collection_and_metric_date(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "freshness.db"
+    engine = create_engine(f"sqlite:///{database.as_posix()}")
+    create_schema(engine)
+    finished_at = datetime(2026, 7, 22, 2, 10, tzinfo=UTC)
+    with Session(engine) as session, session.begin():
+        session.add(
+            CollectionRun(
+                run_id="freshness-run",
+                run_type="offers",
+                scope_date=date(2026, 7, 22),
+                started_at=finished_at,
+                finished_at=finished_at,
+                status="success",
+                counts={"records": 1},
+                error=None,
+            )
+        )
+        session.add(
+            DailyProductMetric(metric_date=date(2026, 7, 22), offer_id="offer-a")
+        )
+    engine.dispose()
+    settings = DashboardSettings(
+        project_root=tmp_path,
+        database_url=f"sqlite:///{database.as_posix()}",
+        dashboard_host="127.0.0.1",
+        dashboard_port=8501,
+    )
+
+    freshness = load_dashboard_freshness(settings)
+
+    assert freshness.last_successful_collection_at is not None
+    assert freshness.latest_metric_date == date(2026, 7, 22)
+    assert _format_china_datetime(freshness.last_successful_collection_at) == (
+        "2026-07-22 10:10"
+    )
+
+
+def test_dashboard_freshness_is_unknown_before_database_exists(tmp_path: Path) -> None:
+    settings = DashboardSettings(
+        project_root=tmp_path,
+        database_url=f"sqlite:///{(tmp_path / 'missing.db').as_posix()}",
+        dashboard_host="127.0.0.1",
+        dashboard_port=8501,
+    )
+
+    freshness = load_dashboard_freshness(settings)
+
+    assert freshness.last_successful_collection_at is None
+    assert freshness.latest_metric_date is None
 
 
 def test_quadrant_chart_labels_traffic_axis_accurately() -> None:
