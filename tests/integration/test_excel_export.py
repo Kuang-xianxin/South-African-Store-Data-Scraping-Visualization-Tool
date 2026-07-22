@@ -178,6 +178,42 @@ def test_excel_uses_readable_details_and_real_product_fields(
         workbook.close()
 
 
+def test_excel_translates_all_supported_anomaly_types(
+    tmp_path: Path, dashboard_dataset: DashboardDataset
+) -> None:
+    source = dashboard_dataset.anomalies.iloc[0]
+    anomaly_types = [
+        "high_views_low_conversion",
+        "suspected_stockout",
+        "stale_offer_snapshot",
+    ]
+    anomalies = pd.DataFrame(
+        [
+            {
+                **source.to_dict(),
+                "anomaly_type": anomaly_type,
+                "explanation": "English fallback that must not be exported.",
+            }
+            for anomaly_type in anomaly_types
+        ]
+    )
+    dataset = replace(dashboard_dataset, anomalies=anomalies)
+
+    destination = export_excel(dataset, tmp_path / "translated-anomalies.xlsx")
+
+    workbook = load_workbook(destination, data_only=False)
+    try:
+        anomaly = workbook["异常商品"]
+        assert anomaly["D4"].value == "高浏览、低转化"
+        assert anomaly["F4"].value == "近30天浏览量较高但转化率较低，建议检查商品页、价格和转化环节。"
+        assert anomaly["D5"].value == "疑似断货"
+        assert anomaly["F5"].value == "显示库存为 0，但商品仍可购买或最近 7 天有销量。"
+        assert anomaly["D6"].value == "商品数据停止更新"
+        assert anomaly["F6"].value == "最新商品快照早于配置的时效阈值，建议检查数据采集。"
+    finally:
+        workbook.close()
+
+
 def test_excel_leaves_effective_units_blank_when_sale_status_is_unknown(
     tmp_path: Path, dashboard_dataset: DashboardDataset
 ) -> None:

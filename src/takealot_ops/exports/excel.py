@@ -140,18 +140,24 @@ _OFFER_STATUS_LABELS = {
 }
 
 _ANOMALY_LABELS = {
+    "high_views_low_conversion": "高浏览、低转化",
     "low_views_high_conversion": "低浏览、高转化",
     "non_buyable": "商品不可购买",
     "sales_drop": "销量下降",
     "sales_spike": "销量突增",
+    "stale_offer_snapshot": "商品数据停止更新",
+    "suspected_stockout": "疑似断货",
     "unknown_sale_status": "销售状态未配置",
 }
 
 _ANOMALY_EXPLANATIONS = {
+    "high_views_low_conversion": "近30天浏览量较高但转化率较低，建议检查商品页、价格和转化环节。",
     "low_views_high_conversion": "浏览量较低但转化率较高，建议检查曝光机会。",
     "non_buyable": "商品状态不是可购买状态。",
     "sales_drop": "当日订购件数低于历史基准。",
     "sales_spike": "当日订购件数高于历史基准。",
+    "stale_offer_snapshot": "最新商品快照早于配置的时效阈值，建议检查数据采集。",
+    "suspected_stockout": "显示库存为 0，但商品仍可购买或最近 7 天有销量。",
     "unknown_sale_status": "销售状态尚未配置，有效件数暂不计算。",
 }
 
