@@ -9,6 +9,8 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.exc import OperationalError
 
 from takealot_ops.dashboard.app import (
+    CHINESE_UI_STYLES,
+    PLOTLY_CHART_CONFIG,
     _calendar_window_sum,
     _sum_value,
     create_read_only_engine,
@@ -22,6 +24,7 @@ from takealot_ops.dashboard.charts import (
     build_traffic_figure,
 )
 from takealot_ops.dashboard.labels import (
+    FIELD_LABELS,
     PAGE_NAMES,
     QUADRANT_LABELS,
     TRAFFIC_METRIC_LABELS,
@@ -166,6 +169,16 @@ def test_navigation_and_quadrant_labels_are_closed_approved_mappings() -> None:
     }
 
 
+def test_frontend_controls_and_identifiers_use_chinese_labels() -> None:
+    assert "选择文件" in CHINESE_UI_STYLES
+    assert "单个文件不超过100兆字节" in CHINESE_UI_STYLES
+    assert PLOTLY_CHART_CONFIG["displayModeBar"] is False
+    assert FIELD_LABELS["offer_id"] == "商品编号"
+    assert FIELD_LABELS["sku"] == "库存编码"
+    assert FIELD_LABELS["tsin_id"] == "平台商品编号"
+    assert FIELD_LABELS["rrp"] == "建议零售价"
+
+
 def test_quadrant_chart_labels_traffic_axis_accurately() -> None:
     classified = pd.DataFrame(
         [
@@ -211,7 +224,7 @@ def test_dashboard_sqlite_engine_rejects_writes(tmp_path: Path) -> None:
 def test_dashboard_engine_rejects_unsupported_dialect_before_driver_import(
     database_url: str,
 ) -> None:
-    with pytest.raises(SettingsError, match="SQLite"):
+    with pytest.raises(SettingsError, match="本机文件数据库"):
         create_read_only_engine(database_url)
 
 

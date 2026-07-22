@@ -50,7 +50,7 @@ def test_inspect_upload_finds_latest_date_and_next_day() -> None:
     ("filename", "content", "message"),
     [
         ("wrong.xls", b"not-xlsx", "只支持上传"),
-        ("broken.xlsx", b"not-xlsx", "有效的 .xlsx"),
+        ("broken.xlsx", b"not-xlsx", "有效的电子表格"),
         ("empty.xlsx", b"", "为空"),
     ],
 )

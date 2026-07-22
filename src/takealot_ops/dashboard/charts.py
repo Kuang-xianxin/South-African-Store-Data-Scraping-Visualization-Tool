@@ -99,7 +99,7 @@ def build_quadrant_figure(classified: pd.DataFrame) -> go.Figure:
             mode="markers",
             marker={"color": colors[quadrant], "size": 12, "opacity": 0.85},
             hovertemplate=(
-                "Offer ID：%{text}<br>近30天浏览量：%{x}<br>下单件数：%{y}<extra></extra>"
+                "商品编号：%{text}<br>近30天浏览量：%{x}<br>下单件数：%{y}<extra></extra>"
             ),
         )
     view_boundary = classified.attrs.get("page_views_boundary")

@@ -39,7 +39,7 @@ class Settings:
         load_dotenv(resolved_root / ".env", override=False)
         api_key = os.environ.get("TAKEALOT_API_KEY", "").strip()
         if not api_key:
-            raise SettingsError("TAKEALOT_API_KEY must be set to a non-blank value")
+            raise SettingsError("接口密钥不能为空")
 
         database_url = _resolve_sqlite_url(
             os.environ.get("TAKEALOT_DATABASE_URL", DEFAULT_DATABASE_URL), resolved_root
@@ -86,7 +86,7 @@ class DashboardSettings:
 def _dashboard_host_from_env() -> str:
     host = os.environ.get("TAKEALOT_DASHBOARD_HOST", DEFAULT_DASHBOARD_HOST).strip()
     if host not in {"127.0.0.1", "localhost"}:
-        raise SettingsError("TAKEALOT_DASHBOARD_HOST must be 127.0.0.1 or localhost")
+        raise SettingsError("看板地址必须是本机回环地址")
     return host
 
 
@@ -95,9 +95,9 @@ def _dashboard_port_from_env() -> int:
     try:
         port = int(raw_port)
     except ValueError as exc:
-        raise SettingsError("TAKEALOT_DASHBOARD_PORT must be an integer") from exc
+        raise SettingsError("看板端口必须是整数") from exc
     if not 1 <= port <= 65535:
-        raise SettingsError("TAKEALOT_DASHBOARD_PORT must be between 1 and 65535")
+        raise SettingsError("看板端口必须是1到65535之间的整数")
     return port
 
 
@@ -105,9 +105,9 @@ def _validate_dashboard_database_url(database_url: str) -> None:
     try:
         driver_name = make_url(database_url).drivername
     except SQLAlchemyError as exc:
-        raise SettingsError("TAKEALOT_DATABASE_URL must be a valid SQLite URL") from exc
+        raise SettingsError("数据库地址必须是有效的本机文件数据库地址") from exc
     if driver_name not in {"sqlite", "sqlite+pysqlite"}:
-        raise SettingsError("The dashboard currently supports synchronous SQLite URLs only")
+        raise SettingsError("当前看板仅支持本机文件数据库地址")
 
 
 def _resolve_sqlite_url(database_url: str, project_root: Path) -> str:

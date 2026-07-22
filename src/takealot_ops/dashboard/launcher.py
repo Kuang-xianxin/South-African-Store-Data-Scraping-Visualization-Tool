@@ -117,7 +117,7 @@ def build_dashboard_command(
     _validate_launch_settings(settings)
     app_path = settings.project_root / "src" / "takealot_ops" / "dashboard" / "app.py"
     if not app_path.is_file():
-        raise SettingsError(f"dashboard app was not found: {app_path}")
+        raise SettingsError(f"未找到本地看板程序：{app_path}")
     return [
         python_executable,
         "-m",
@@ -128,6 +128,7 @@ def build_dashboard_command(
         f"--server.port={settings.dashboard_port}",
         "--server.headless=true",
         "--browser.gatherUsageStats=false",
+        "--server.maxUploadSize=100",
     ]
 
 
@@ -154,15 +155,15 @@ def main() -> int:
         settings = DashboardSettings.from_env(project_root)
         return launch_dashboard(settings)
     except SettingsError as exc:
-        print(f"Dashboard configuration error: {exc}", file=sys.stderr)
+        print(f"看板配置错误：{exc}", file=sys.stderr)
         return 2
 
 
 def _validate_launch_settings(settings: DashboardSettings) -> None:
     if settings.dashboard_host not in {"127.0.0.1", "localhost"}:
-        raise SettingsError("dashboard launcher requires a loopback host")
+        raise SettingsError("看板启动地址必须是本机回环地址")
     if not 1 <= settings.dashboard_port <= 65535:
-        raise SettingsError("dashboard launcher port must be between 1 and 65535")
+        raise SettingsError("看板端口必须是1到65535之间的整数")
 
 
 if __name__ == "__main__":

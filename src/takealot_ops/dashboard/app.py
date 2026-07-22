@@ -24,10 +24,15 @@ from takealot_ops.dashboard.charts import (
     build_traffic_figure,
 )
 from takealot_ops.dashboard.labels import (
+    ANOMALY_EXPLANATIONS,
     ANOMALY_LABELS,
+    EVENT_LABELS,
     FIELD_LABELS,
+    OFFER_STATUS_LABELS,
     PAGE_NAMES,
     QUADRANT_LABELS,
+    SALE_STATUS_LABELS,
+    SEVERITY_LABELS,
 )
 from takealot_ops.metrics.service import DashboardDataset, MetricService, classify_quadrants
 from takealot_ops.nft102_portal import (
@@ -38,6 +43,36 @@ from takealot_ops.nft102_portal import (
 )
 from takealot_ops.settings import DashboardSettings, SettingsError
 from takealot_ops.storage.repository import Repository
+
+
+PLOTLY_CHART_CONFIG = {
+    "displayModeBar": False,
+    "displaylogo": False,
+    "responsive": True,
+}
+
+CHINESE_UI_STYLES = """
+<style>
+header[data-testid="stHeader"],
+[data-testid="stHeaderActionElements"],
+[data-testid="stElementToolbar"] {
+    display: none !important;
+}
+[data-testid="stFileUploaderDropzone"] button p,
+[data-testid="stFileUploaderDropzone"] button [data-testid="stIconMaterial"],
+[data-testid="stFileUploaderDropzoneInstructions"] span {
+    display: none !important;
+}
+[data-testid="stFileUploaderDropzone"] button::after {
+    content: "选择文件";
+    font-size: 0.875rem;
+}
+[data-testid="stFileUploaderDropzoneInstructions"]::after {
+    content: "单个文件不超过100兆字节 · 电子表格";
+    font-size: 0.875rem;
+}
+</style>
+"""
 
 
 def filter_as_of(frame: pd.DataFrame, as_of: date, date_column: str) -> pd.DataFrame:
@@ -117,7 +152,7 @@ def create_read_only_engine(database_url: str) -> Engine:
     """Create an engine whose dashboard connections reject write statements."""
     url = make_url(database_url)
     if url.drivername not in {"sqlite", "sqlite+pysqlite"}:
-        raise SettingsError("The dashboard currently supports synchronous SQLite URLs only")
+        raise SettingsError("当前看板仅支持本机文件数据库地址")
     engine = create_engine(url)
 
     @event.listens_for(engine, "connect")
@@ -131,27 +166,28 @@ def create_read_only_engine(database_url: str) -> Engine:
 
 def main() -> None:
     """Render the local dashboard; only the NFT102 action invokes collection."""
-    st.set_page_config(page_title="Takealot 运营看板", page_icon="📊", layout="wide")
+    st.set_page_config(page_title="南非店铺运营看板", page_icon="📊", layout="wide")
+    st.markdown(CHINESE_UI_STYLES, unsafe_allow_html=True)
     project_root = Path(os.environ.get("TAKEALOT_PROJECT_ROOT", Path.cwd())).resolve()
     try:
         settings = DashboardSettings.from_env(project_root)
     except SettingsError as exc:
         st.title("本地配置不可用")
         st.error(str(exc))
-        st.info("请修正本地数据库、主机或端口环境变量；浏览看板无需设置 API Key。")
+        st.info("请修正本地数据库、主机或端口设置；浏览看板无需设置接口密钥。")
         return
     configured_address = st.get_option("server.address")
     if configured_address not in {None, "127.0.0.1", "localhost"}:
         st.title("本地安全设置冲突")
-        st.error("当前 Streamlit 服务不是 loopback 地址，页面已停止加载。")
-        st.info("请使用 takealot_ops.dashboard.launcher 官方入口启动本地看板。")
+        st.error("当前页面服务不是本机回环地址，页面已停止加载。")
+        st.info("请使用项目提供的本地看板启动入口重新启动。")
         return
 
     with st.sidebar:
-        st.header("Takealot 运营看板")
+        st.header("南非店铺运营看板")
         page_name = st.radio("页面", PAGE_NAMES)
         as_of = st.date_input("数据截止日期", value=date.today())
-        st.caption("本地运行 · 仅日报更新按钮会调用 Takealot API")
+        st.caption("本地运行 · 仅日报更新按钮会调用平台只读接口")
 
     dataset, load_error = load_dashboard_dataset(settings, as_of)
     renderers: dict[str, Callable[[DashboardDataset | None, str | None, DashboardSettings, date], None]] = {
@@ -208,7 +244,11 @@ def _render_overview(
         else pd.Series(dtype="float64")
     )
     second[3].metric("缺货商品数", int((stock == 0).sum()))
-    st.plotly_chart(build_store_sales_figure(store.tail(30)), width="stretch")
+    st.plotly_chart(
+        build_store_sales_figure(store.tail(30)),
+        width="stretch",
+        config=PLOTLY_CHART_CONFIG,
+    )
     _effective_units_notice(settings.project_root)
 
 
@@ -224,9 +264,9 @@ def _render_product(
         return
     assert dataset is not None
     if dataset.product_daily.empty:
-        _empty_state("暂无单品指标", "采集并计算指标后，可按 SKU、Offer ID、TSIN、条码或名称搜索。")
+        _empty_state("暂无单品指标", "采集并计算指标后，可按库存编码、商品编号、条码或名称搜索。")
         return
-    query = st.text_input("搜索商品", placeholder="输入 SKU、Offer ID、TSIN、条码或商品名称")
+    query = st.text_input("搜索商品", placeholder="输入库存编码、商品编号、条码或商品名称")
     matches = search_products(dataset.product_daily, dataset.offer_current, query)
     if matches.empty:
         st.info("没有找到匹配商品，请检查搜索词。")
@@ -242,20 +282,22 @@ def _render_product(
     st.caption(
         " · ".join(
             [
-                f"SKU: {_display(identity.get('sku', latest.get('sku')))}",
-                f"Offer ID: {selected_offer}",
-                f"TSIN: {_display(identity.get('tsin_id'))}",
-                f"条码: {_display(identity.get('barcode'))}",
+                f"库存编码：{_display(identity.get('sku', latest.get('sku')))}",
+                f"商品编号：{selected_offer}",
+                f"平台商品编号：{_display(identity.get('tsin_id'))}",
+                f"条码：{_display(identity.get('barcode'))}",
             ]
         )
     )
     identity_columns = st.columns(4)
     identity_columns[0].metric("当前售价", _currency_or_missing(identity.get("selling_price")))
-    identity_columns[1].metric("RRP", _currency_or_missing(identity.get("rrp")))
+    identity_columns[1].metric("建议零售价", _currency_or_missing(identity.get("rrp")))
     identity_columns[2].metric(
-        "Takealot平台可售库存", _display(identity.get("total_stock"))
+        "平台可售库存", _display(identity.get("total_stock"))
     )
-    identity_columns[3].metric("Offer 状态", _display(identity.get("status")))
+    identity_columns[3].metric(
+        "商品状态", _localized_value(identity.get("status"), OFFER_STATUS_LABELS)
+    )
     metric_columns = st.columns(4)
     latest_metric_date = _display(latest.get("metric_date"))
     st.caption(f"当前商品最新可用指标日：{latest_metric_date}")
@@ -272,8 +314,12 @@ def _render_product(
     metric_columns[3].metric(
         "近30天转化率", _percentage_or_missing(latest.get("conversion_percentage_30_days"))
     )
-    st.plotly_chart(build_traffic_figure(history), width="stretch")
-    st.plotly_chart(build_sales_figure(history), width="stretch")
+    st.plotly_chart(
+        build_traffic_figure(history), width="stretch", config=PLOTLY_CHART_CONFIG
+    )
+    st.plotly_chart(
+        build_sales_figure(history), width="stretch", config=PLOTLY_CHART_CONFIG
+    )
     _effective_units_notice(settings.project_root)
 
 
@@ -300,7 +346,9 @@ def _render_quadrants(
     columns = st.columns(5)
     for column, (key, label) in zip(columns, QUADRANT_LABELS.items(), strict=True):
         column.metric(label, int(counts.get(key, 0)))
-    st.plotly_chart(build_quadrant_figure(classified), width="stretch")
+    st.plotly_chart(
+        build_quadrant_figure(classified), width="stretch", config=PLOTLY_CHART_CONFIG
+    )
     display = classified.copy()
     display["quadrant"] = display["quadrant"].map(QUADRANT_LABELS).fillna("未分类")
     _dataframe(display, ["offer_id", "sku", "page_views_30_days", "ordered_units", "quadrant"])
@@ -330,8 +378,8 @@ def _render_anomalies(
         format_func=lambda value: ANOMALY_LABELS.get(value, value),
     )
     filtered = anomalies.loc[anomalies["anomaly_type"].isin(selected)].copy()
-    filtered["anomaly_type"] = filtered["anomaly_type"].map(ANOMALY_LABELS).fillna(
-        filtered["anomaly_type"]
+    filtered["explanation"] = filtered["anomaly_type"].map(ANOMALY_EXPLANATIONS).fillna(
+        "暂无中文说明"
     )
     st.metric("异常商品数", _unique_count(filtered, "offer_id"))
     _dataframe(
@@ -367,6 +415,8 @@ def _render_quality(
     metrics[1].metric("涉及商品数", _unique_count(events, "offer_id"))
     unknown = events.loc[events["event_type"] == "unknown_sale_status"]
     metrics[2].metric("未知销售状态事件", len(unknown))
+    events = events.copy()
+    events["details"] = events.apply(_quality_detail, axis=1)
     _dataframe(events, ["event_date", "event_type", "severity", "offer_id", "details"])
 
 
@@ -378,23 +428,23 @@ def _render_exports(
 ) -> None:
     del dataset, load_error
     st.title("导出中心")
-    st.caption("这里只检查现有日报，不生成、不刷新，也不调用 API。")
+    st.caption("这里只检查现有日报，不生成、不刷新，也不调用平台接口。")
     export_root = settings.project_root / "exports"
     partition = export_root / as_of.isoformat()
     basename = f"Takealot运营日报_{as_of.isoformat()}"
     rows = []
-    for label, suffix in (("离线 HTML", ".html"), ("Excel", ".xlsx"), ("PNG", ".png")):
+    for label, suffix in (("离线网页", ".html"), ("电子表格", ".xlsx"), ("图片", ".png")):
         path = partition / f"{basename}{suffix}"
         rows.append(
             {
                 "格式": label,
                 "状态": "已生成" if path.is_file() else "未生成",
-                "路径": str(path.relative_to(settings.project_root)),
+                "保存位置": f"项目日报导出目录 / {as_of.isoformat()}",
             }
         )
     st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
     if any(row["状态"] == "已生成" for row in rows):
-        st.success("已找到部分或全部日报文件，可从上方本地路径打开。")
+        st.success("已找到部分或全部日报文件，可在项目日报导出目录中打开。")
     else:
         st.info("所选日期暂无日报。请在命令行运行既有导出工作流；看板不会写入数据或生成文件。")
 
@@ -408,20 +458,19 @@ def _render_nft102_update(
     del dataset, load_error, as_of
     st.title("NFT102 日报更新")
     st.caption(
-        "上传运营同事当天修改完成的 Excel，系统以它为唯一基准生成下一日副本；"
+        "上传运营同事当天修改完成的电子表格，系统以它为唯一基准生成下一日副本；"
         "上传文件不会被覆盖。"
     )
     st.info(
         "使用顺序：运营完成备注并保存 → 上传最终版 → 核对识别日期 → 点击生成 → 下载新表格。"
     )
     uploaded = st.file_uploader(
-        "上传运营回传的 Excel",
+        "上传运营回传的电子表格",
         type=["xlsx"],
-        help="必须包含 NFT102 工作表和原有日报日期；最大 100 MB。",
         key="nft102_operator_baseline",
     )
     if uploaded is None:
-        st.warning("请先上传运营同事修改后的最终版 .xlsx 文件。")
+        st.warning("请先上传运营同事修改后的最终版电子表格。")
         return
 
     content = uploaded.getvalue()
@@ -432,7 +481,7 @@ def _render_nft102_update(
         return
 
     metrics = st.columns(4)
-    metrics[0].metric("文件大小", f"{inspection.size_bytes / 1024 / 1024:.2f} MB")
+    metrics[0].metric("文件大小", f"{inspection.size_bytes / 1024 / 1024:.2f} 兆字节")
     metrics[1].metric("识别商品列", inspection.product_columns)
     metrics[2].metric("表内最新日期", inspection.latest_report_date.isoformat())
     metrics[3].metric("建议新增日期", inspection.suggested_report_date.isoformat())
@@ -441,7 +490,7 @@ def _render_nft102_update(
         "本次新增的表格日期",
         value=inspection.suggested_report_date,
         key=f"nft102_report_date_{inspection.sha256}",
-        help="当天订单数会读取该日期前一天的完整 Sales quantity。",
+        help="当天订单数会读取该日期前一天的完整销售件数。",
     )
     now_china = datetime.now(ZoneInfo("Asia/Shanghai"))
     date_is_valid = (
@@ -459,7 +508,7 @@ def _render_nft102_update(
         st.warning("建议中国时间 10:05 后生成，避开平台每日销量切日刷新窗口。")
 
     st.caption(
-        "生成时会读取 Takealot API，并在项目内存档本次上传基准、输出新 Excel 和核对报告。"
+        "生成时会读取平台只读接口，并在项目内存档本次上传基准、输出新表格和核对报告。"
     )
     generate_clicked = st.button(
         "保存基准并生成下一日表格",
@@ -491,15 +540,12 @@ def _render_nft102_update(
         and stored_result.report_date == report_date
         and stored_result.workbook_path.is_file()
     ):
-        _show_nft102_generation_result(stored_result, settings.project_root)
+        _show_nft102_generation_result(stored_result)
 
 
-def _show_nft102_generation_result(
-    result: Nft102GenerationResult, project_root: Path
-) -> None:
+def _show_nft102_generation_result(result: Nft102GenerationResult) -> None:
     st.success(f"{result.report_date.isoformat()} 的 NFT102 新表格已生成。")
-    st.caption(f"基准存档：{result.baseline_path.relative_to(project_root)}")
-    st.caption(f"新表格：{result.workbook_path.relative_to(project_root)}")
+    st.caption("本次上传的运营最终版已原样存档，新表格不会覆盖原文件。")
     st.download_button(
         "下载新表格",
         data=result.workbook_path.read_bytes(),
@@ -582,7 +628,7 @@ def _require_dataset(dataset: DashboardDataset | None, load_error: str | None) -
     if dataset is not None:
         return True
     st.warning(load_error or "本地数据暂不可用。")
-    st.info("请确认数据库已由采集/指标任务创建，且 config 下的规则文件完整。无需为浏览看板设置 API Key。")
+    st.info("请确认数据库已由采集和指标任务创建，且配置目录中的规则文件完整。浏览看板无需设置接口密钥。")
     return False
 
 
@@ -592,8 +638,41 @@ def _empty_state(title: str, guidance: str) -> None:
 
 def _dataframe(frame: pd.DataFrame, columns: list[str]) -> None:
     available = [column for column in columns if column in frame.columns]
-    display = frame.loc[:, available].rename(columns=FIELD_LABELS)
+    display = frame.loc[:, available].copy()
+    translations = {
+        "anomaly_type": ANOMALY_LABELS,
+        "event_type": EVENT_LABELS,
+        "severity": SEVERITY_LABELS,
+        "offer_status": OFFER_STATUS_LABELS,
+        "status": OFFER_STATUS_LABELS,
+    }
+    for column, labels in translations.items():
+        if column in display.columns:
+            display[column] = display[column].map(
+                lambda value, mapping=labels: _localized_value(value, mapping)
+            )
+    display = display.rename(columns=FIELD_LABELS)
     st.dataframe(display, width="stretch", hide_index=True)
+
+
+def _localized_value(value: object, labels: dict[str, str]) -> str:
+    if value is None or str(value).strip().casefold() in {"nan", "nat", "<na>", "none"}:
+        return "—"
+    return labels.get(str(value), "未识别状态")
+
+
+def _quality_detail(row: pd.Series) -> str:
+    if row.get("event_type") == "unknown_sale_status":
+        details = row.get("details")
+        statuses = details.get("sale_statuses") if isinstance(details, dict) else None
+        if isinstance(statuses, list):
+            rendered = "、".join(
+                SALE_STATUS_LABELS.get(str(value), "未识别状态") for value in statuses
+            )
+            if rendered:
+                return f"涉及销售状态：{rendered}；有效件数暂不计算。"
+        return "销售状态尚未配置，有效件数暂不计算。"
+    return "暂无中文说明"
 
 
 def _sum_numeric(frame: pd.DataFrame, column: str) -> float | None:

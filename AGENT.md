@@ -51,6 +51,7 @@
 - 缺失流量必须保持缺失，不得补零或伪造。
 - Offer 分页必须完整获取后再原子发布快照，任何分页失败都不能发布不完整数据。
 - 看板默认只绑定 `127.0.0.1`，不得在没有明确需求和安全设计的情况下扩大监听范围。
+- 看板的导航、按钮、上传提示、字段名、状态和说明必须使用中文；框架自带的英文工具栏应隐藏。平台原始商品名称、店铺代码、商品编码和南非货币符号属于真实业务数据，保持原值，不得擅自翻译或伪造。
 - HTML、Excel、PNG 与看板指标必须来自同一指标数据集，避免跨输出口径漂移。
 - 项目生成的 Excel 中，所有有内容的单元格必须水平、垂直居中；NFT102 更新副本只对目标工作表应用此规则，其他店铺工作表保持原样。
 - 不覆盖用户源文件；NFT102 更新必须输出新副本及核对报告。
@@ -90,6 +91,7 @@
 
 | 日期 | 修改摘要 | 主要文件 | 验证与结论 |
 |---|---|---|---|
+| 2026-07-22 | 修复运行中的旧看板未重新载入新增模块；将页面固定控件、业务字段、状态和说明统一为中文，隐藏框架与图表英文工具栏，并把网页上传上限固定为100兆字节 | `src/takealot_ops/dashboard/app.py`、`src/takealot_ops/dashboard/labels.py`、`src/takealot_ops/dashboard/charts.py`、`src/takealot_ops/dashboard/launcher.py`、`src/takealot_ops/settings.py`、`src/takealot_ops/nft102_portal.py`、相关测试与文档 | 中文界面重点测试 `39 passed`；完整测试 `148 passed`；Ruff、Mypy、`takealot_ops.cli verify` 通过；浏览器确认新模块可见，顶部、图表、表格和上传控件无可见英文 |
 | 2026-07-22 | 新增 NFT102 前端续写流程：上传运营最终版、校验并原样归档、识别下一日期、一键调用既有生成脚本、下载新 Excel 与核对说明；上传基准和生成结果均不覆盖；连续续写时替换旧日期后缀，避免文件名逐日增长 | `src/takealot_ops/nft102_portal.py`、`src/takealot_ops/dashboard/app.py`、`scripts/update_nft102_daily.ps1`、`tests/unit/test_nft102_portal.py`、`tests/unit/test_nft102.py`、`README.md`、`docs/PROJECT_STATUS.md` | 重点测试 `34 passed`；完整测试 `147 passed`；Ruff、Mypy、`takealot_ops.cli verify` 通过 |
 | 2026-07-22 | 统一 Excel 输出对齐规则：运营日报全部有内容单元格水平、垂直居中；NFT102 仅居中目标工作表并保持其他店铺工作表不变 | `src/takealot_ops/exports/excel.py`、`scripts/write_nft102_workbook.py`、`tests/integration/test_excel_export.py`、`tests/unit/test_nft102.py` | 完整测试 `138 passed`；Ruff、Mypy、`takealot_ops.cli verify` 通过；9 个日报工作表完成样式与视觉检查，公式错误扫描为 0 |
 | 2026-07-22 | 补齐 Excel 异常商品表的中文导出映射；`high_views_low_conversion`、`suspected_stockout`、`stale_offer_snapshot` 的异常类型和说明不再回退为英文 | `src/takealot_ops/exports/excel.py`、`tests/integration/test_excel_export.py` | 完整测试 `137 passed`；Ruff、Mypy、`takealot_ops.cli verify` 通过；修正版 Excel 的未翻译异常字段扫描为 0，公式错误扫描为 0 |

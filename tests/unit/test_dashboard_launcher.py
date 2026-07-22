@@ -42,6 +42,7 @@ def test_launcher_builds_exact_loopback_streamlit_command_without_api_key(
         "--server.port=8765",
         "--server.headless=true",
         "--browser.gatherUsageStats=false",
+        "--server.maxUploadSize=100",
     ]
 
 
@@ -58,7 +59,7 @@ def test_launcher_rejects_non_loopback_settings_before_subprocess() -> None:
         calls.append(command)
         return subprocess.CompletedProcess(command, 0)
 
-    with pytest.raises(SettingsError, match="loopback"):
+    with pytest.raises(SettingsError, match="本机回环地址"):
         launch_dashboard(settings, runner=runner)
 
     assert calls == []

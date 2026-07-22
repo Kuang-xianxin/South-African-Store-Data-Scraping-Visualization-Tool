@@ -56,10 +56,10 @@ def inspect_nft102_upload(filename: str, content: bytes) -> Nft102UploadInspecti
     if not content:
         raise ValueError("上传文件为空。")
     if len(content) > MAX_UPLOAD_BYTES:
-        raise ValueError("上传文件超过 100 MB，请确认选择了正确的 Excel 文件。")
+        raise ValueError("上传文件超过100兆字节，请确认选择了正确的电子表格。")
     stream = BytesIO(content)
     if not is_zipfile(stream):
-        raise ValueError("文件不是有效的 .xlsx 工作簿。")
+        raise ValueError("文件不是有效的电子表格工作簿。")
     stream.seek(0)
 
     try:
@@ -86,7 +86,7 @@ def inspect_nft102_upload(filename: str, content: bytes) -> Nft102UploadInspecti
         if not report_dates:
             raise ValueError("NFT102 工作表中没有可识别的历史日报日期。")
         if product_columns == 0:
-            raise ValueError("NFT102 表头中没有识别到 13 位 SKU。")
+            raise ValueError("NFT102 表头中没有识别到13位库存编码。")
         latest = max(report_dates)
     finally:
         workbook.close()
@@ -174,19 +174,17 @@ def generate_nft102_from_baseline(
     except subprocess.TimeoutExpired as exc:
         raise RuntimeError("生成超过 4 分钟仍未完成，请检查网络后重试。") from exc
     if completed.returncode != 0:
-        detail = _last_nonempty_line(completed.stderr) or _last_nonempty_line(completed.stdout)
-        suffix = f"：{detail}" if detail else "。"
-        raise RuntimeError(f"NFT102 日报生成失败{suffix}")
+        raise RuntimeError("NFT102 日报生成失败，请检查网络、接口密钥和本地日志。")
 
     after = set(output_folder.glob("*.xlsx")) if output_folder.is_dir() else set()
     created = sorted(after - before, key=lambda path: path.stat().st_mtime, reverse=True)
     if not created:
-        raise RuntimeError("生成脚本已结束，但没有找到新的 Excel 文件。")
+        raise RuntimeError("生成脚本已结束，但没有找到新的电子表格。")
     workbook_path = created[0]
     audit_json = workbook_path.with_suffix(".核对报告.json")
     audit_text = workbook_path.with_suffix(".核对报告.txt")
     if not audit_json.is_file() or not audit_text.is_file():
-        raise RuntimeError("Excel 已生成，但核对报告不完整，请不要交付运营使用。")
+        raise RuntimeError("电子表格已生成，但核对报告不完整，请不要交付运营使用。")
     return Nft102GenerationResult(
         baseline_path=baseline,
         workbook_path=workbook_path,
@@ -199,7 +197,7 @@ def generate_nft102_from_baseline(
 def _safe_xlsx_filename(filename: str) -> str:
     name = Path(filename).name.strip()
     if Path(name).suffix.casefold() != ".xlsx":
-        raise ValueError("只支持上传 .xlsx 文件。")
+        raise ValueError("只支持上传电子表格文件。")
     cleaned = SAFE_FILENAME.sub("_", name).strip(" .")
     if not cleaned or cleaned.casefold() == ".xlsx":
         raise ValueError("文件名无效。")
@@ -224,8 +222,3 @@ def _workbook_date(value: Any, epoch: datetime) -> date | None:
         except ValueError:
             return None
     return None
-
-
-def _last_nonempty_line(value: str | None) -> str | None:
-    lines = [line.strip() for line in (value or "").splitlines() if line.strip()]
-    return lines[-1] if lines else None
