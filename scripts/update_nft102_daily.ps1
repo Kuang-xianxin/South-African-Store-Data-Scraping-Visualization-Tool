@@ -44,6 +44,14 @@ if (-not $SkipCollect) {
 }
 
 $baseName = [IO.Path]::GetFileNameWithoutExtension($TemplatePath)
+# The previous day's generated workbook is the next day's baseline. Remove its
+# generated suffix so filenames do not grow by another date on every run.
+$baseName = [regex]::Replace(
+    $baseName,
+    '_NFT102_\d{4}-\d{2}-\d{2}(?:_\d+)?$',
+    '',
+    [System.Text.RegularExpressions.RegexOptions]::IgnoreCase
+)
 $outputPath = Join-Path $dayOutput "${baseName}_NFT102_${dateText}.xlsx"
 $suffix = 2
 while (Test-Path -LiteralPath $outputPath) {

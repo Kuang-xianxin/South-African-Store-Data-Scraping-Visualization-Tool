@@ -41,7 +41,7 @@ def test_dashboard_defaults_to_localhost_without_api_key(
     assert settings.dashboard_port == 8501
 
 
-def test_dashboard_navigates_all_six_pages_without_api_key(
+def test_dashboard_navigates_all_pages_without_api_key(
     tmp_path: Path, monkeypatch
 ) -> None:
     monkeypatch.delenv("TAKEALOT_API_KEY", raising=False)

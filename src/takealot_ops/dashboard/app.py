@@ -1,12 +1,13 @@
-"""Streamlit entrypoint for the local read-only operations dashboard."""
+"""Streamlit entrypoint for the local operations dashboard."""
 
 from __future__ import annotations
 
 import os
 from collections.abc import Callable
-from datetime import date, timedelta
+from datetime import date, datetime, time, timedelta
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 import streamlit as st
@@ -29,6 +30,12 @@ from takealot_ops.dashboard.labels import (
     QUADRANT_LABELS,
 )
 from takealot_ops.metrics.service import DashboardDataset, MetricService, classify_quadrants
+from takealot_ops.nft102_portal import (
+    Nft102GenerationResult,
+    generate_nft102_from_baseline,
+    inspect_nft102_upload,
+    persist_nft102_baseline,
+)
 from takealot_ops.settings import DashboardSettings, SettingsError
 from takealot_ops.storage.repository import Repository
 
@@ -123,7 +130,7 @@ def create_read_only_engine(database_url: str) -> Engine:
 
 
 def main() -> None:
-    """Render the six-page local dashboard without collection credentials."""
+    """Render the local dashboard; only the NFT102 action invokes collection."""
     st.set_page_config(page_title="Takealot 运营看板", page_icon="📊", layout="wide")
     project_root = Path(os.environ.get("TAKEALOT_PROJECT_ROOT", Path.cwd())).resolve()
     try:
@@ -144,7 +151,7 @@ def main() -> None:
         st.header("Takealot 运营看板")
         page_name = st.radio("页面", PAGE_NAMES)
         as_of = st.date_input("数据截止日期", value=date.today())
-        st.caption("本地只读 · 不调用 Takealot API")
+        st.caption("本地运行 · 仅日报更新按钮会调用 Takealot API")
 
     dataset, load_error = load_dashboard_dataset(settings, as_of)
     renderers: dict[str, Callable[[DashboardDataset | None, str | None, DashboardSettings, date], None]] = {
@@ -153,6 +160,7 @@ def main() -> None:
         "经营四象限": _render_quadrants,
         "异常商品": _render_anomalies,
         "数据质量": _render_quality,
+        "NFT102 日报更新": _render_nft102_update,
         "导出中心": _render_exports,
     }
     renderers[page_name](dataset, load_error, settings, as_of)
@@ -389,6 +397,124 @@ def _render_exports(
         st.success("已找到部分或全部日报文件，可从上方本地路径打开。")
     else:
         st.info("所选日期暂无日报。请在命令行运行既有导出工作流；看板不会写入数据或生成文件。")
+
+
+def _render_nft102_update(
+    dataset: DashboardDataset | None,
+    load_error: str | None,
+    settings: DashboardSettings,
+    as_of: date,
+) -> None:
+    del dataset, load_error, as_of
+    st.title("NFT102 日报更新")
+    st.caption(
+        "上传运营同事当天修改完成的 Excel，系统以它为唯一基准生成下一日副本；"
+        "上传文件不会被覆盖。"
+    )
+    st.info(
+        "使用顺序：运营完成备注并保存 → 上传最终版 → 核对识别日期 → 点击生成 → 下载新表格。"
+    )
+    uploaded = st.file_uploader(
+        "上传运营回传的 Excel",
+        type=["xlsx"],
+        help="必须包含 NFT102 工作表和原有日报日期；最大 100 MB。",
+        key="nft102_operator_baseline",
+    )
+    if uploaded is None:
+        st.warning("请先上传运营同事修改后的最终版 .xlsx 文件。")
+        return
+
+    content = uploaded.getvalue()
+    try:
+        inspection = inspect_nft102_upload(uploaded.name, content)
+    except ValueError as exc:
+        st.error(str(exc))
+        return
+
+    metrics = st.columns(4)
+    metrics[0].metric("文件大小", f"{inspection.size_bytes / 1024 / 1024:.2f} MB")
+    metrics[1].metric("识别商品列", inspection.product_columns)
+    metrics[2].metric("表内最新日期", inspection.latest_report_date.isoformat())
+    metrics[3].metric("建议新增日期", inspection.suggested_report_date.isoformat())
+
+    report_date = st.date_input(
+        "本次新增的表格日期",
+        value=inspection.suggested_report_date,
+        key=f"nft102_report_date_{inspection.sha256}",
+        help="当天订单数会读取该日期前一天的完整 Sales quantity。",
+    )
+    now_china = datetime.now(ZoneInfo("Asia/Shanghai"))
+    date_is_valid = (
+        report_date > inspection.latest_report_date
+        and report_date <= now_china.date()
+    )
+    if report_date <= inspection.latest_report_date:
+        st.error("新增日期必须晚于表内最新日期，不能覆盖或重复已有日期。")
+    elif report_date > now_china.date():
+        st.error("不能提前生成未来日期；请在该日期中国时间 10:05 后再操作。")
+    elif report_date != inspection.suggested_report_date:
+        st.warning("所选日期不是连续下一天，请确认中间日期确实不需要补录。")
+
+    if now_china.time() < time(10, 5):
+        st.warning("建议中国时间 10:05 后生成，避开平台每日销量切日刷新窗口。")
+
+    st.caption(
+        "生成时会读取 Takealot API，并在项目内存档本次上传基准、输出新 Excel 和核对报告。"
+    )
+    generate_clicked = st.button(
+        "保存基准并生成下一日表格",
+        type="primary",
+        disabled=not date_is_valid,
+        key=f"nft102_generate_{inspection.sha256}",
+    )
+    result_key = f"nft102_generation_result_{inspection.sha256}"
+    baseline_key = f"nft102_baseline_path_{inspection.sha256}"
+    if generate_clicked:
+        try:
+            saved_baseline = Path(str(st.session_state.get(baseline_key, "")))
+            if not saved_baseline.is_file():
+                saved_baseline = persist_nft102_baseline(
+                    settings.project_root, inspection, content
+                )
+                st.session_state[baseline_key] = str(saved_baseline)
+            with st.spinner("正在拉取数据并生成新表格，请勿关闭页面……"):
+                result = generate_nft102_from_baseline(
+                    settings.project_root, saved_baseline, report_date
+                )
+            st.session_state[result_key] = result
+        except (OSError, RuntimeError, ValueError) as exc:
+            st.error(str(exc))
+
+    stored_result = st.session_state.get(result_key)
+    if (
+        isinstance(stored_result, Nft102GenerationResult)
+        and stored_result.report_date == report_date
+        and stored_result.workbook_path.is_file()
+    ):
+        _show_nft102_generation_result(stored_result, settings.project_root)
+
+
+def _show_nft102_generation_result(
+    result: Nft102GenerationResult, project_root: Path
+) -> None:
+    st.success(f"{result.report_date.isoformat()} 的 NFT102 新表格已生成。")
+    st.caption(f"基准存档：{result.baseline_path.relative_to(project_root)}")
+    st.caption(f"新表格：{result.workbook_path.relative_to(project_root)}")
+    st.download_button(
+        "下载新表格",
+        data=result.workbook_path.read_bytes(),
+        file_name=result.workbook_path.name,
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        type="primary",
+        key=f"nft102_download_{result.workbook_path.name}",
+    )
+    st.download_button(
+        "下载运营核对说明",
+        data=result.audit_text_path.read_bytes(),
+        file_name=result.audit_text_path.name,
+        mime="text/plain",
+        key=f"nft102_audit_{result.audit_text_path.name}",
+    )
 
 
 def _dataset_as_of(dataset: DashboardDataset, as_of: date) -> DashboardDataset:

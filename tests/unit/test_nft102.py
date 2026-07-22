@@ -6,6 +6,7 @@ import zipfile
 from pathlib import Path
 
 from openpyxl import Workbook, load_workbook
+from openpyxl.comments import Comment
 from openpyxl.styles import Border, PatternFill, Side
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
@@ -30,6 +31,7 @@ def _template(path: Path) -> None:
     worksheet.cell(1, 1, "访客")
     worksheet.cell(1, 2, "日期")
     worksheet.cell(1, 3, "商品A\n9902253460734")
+    worksheet.cell(1, 3).comment = Comment("运营已确认标题", "运营")
     worksheet.cell(1, 4, "无SKU商品")
     worksheet.cell(1, 5, "旧列\n9902253460734")
     worksheet.cell(2, 1, "访客总数")
@@ -55,6 +57,8 @@ def _template(path: Path) -> None:
     worksheet["E7"].number_format = "0"
     other = workbook.create_sheet("其他店铺")
     other["A1"] = "不得改变"
+    other["B2"] = "运营手工备注"
+    other["B2"].comment = Comment("明日继续跟进", "运营")
     workbook.save(path)
 
 
@@ -197,6 +201,8 @@ def test_writer_changes_only_nft102_xml_and_appends_four_rows(tmp_path: Path) ->
         assert worksheet["D9"].fill.fill_type is None
         assert worksheet["E9"].value == 6
         assert worksheet["B8"].value == "=SUM(C8:E8)"
+        assert worksheet["C1"].comment is not None
+        assert worksheet["C1"].comment.text == "运营已确认标题"
         assert worksheet.max_row == 11
         assert worksheet["E11"].number_format == "0"
         populated_cells = [
@@ -210,6 +216,9 @@ def test_writer_changes_only_nft102_xml_and_appends_four_rows(tmp_path: Path) ->
         assert all(cell.alignment.vertical == "center" for cell in populated_cells)
         assert workbook["其他店铺"]["A1"].value == "不得改变"
         assert workbook["其他店铺"]["A1"].alignment.horizontal is None
+        assert workbook["其他店铺"]["B2"].value == "运营手工备注"
+        assert workbook["其他店铺"]["B2"].comment is not None
+        assert workbook["其他店铺"]["B2"].comment.text == "明日继续跟进"
     finally:
         workbook.close()
 
