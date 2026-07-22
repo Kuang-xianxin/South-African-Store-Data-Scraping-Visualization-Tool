@@ -24,6 +24,7 @@ from takealot_ops.storage.repository import Repository
 
 PROJECT_ROOT = Path(__file__).parents[2]
 ANOMALY_RULES = PROJECT_ROOT / "config" / "anomaly_rules.yaml"
+STATUS_RULES = PROJECT_ROOT / "config" / "sale_status_rules.yaml"
 
 
 def _sale(
@@ -130,6 +131,55 @@ def _service(
         ),
         now=lambda: now,
     )
+
+
+def test_project_status_rules_classify_observed_takealot_statuses(tmp_path: Path) -> None:
+    as_of = date(2026, 7, 20)
+    sales = [
+        _sale(
+            "shipped",
+            datetime(2026, 7, 20, 8, tzinfo=UTC),
+            status="Shipped to Customer",
+            quantity=2,
+        ),
+        _sale(
+            "preparing",
+            datetime(2026, 7, 20, 8, tzinfo=UTC),
+            status="Preparing for Customer",
+            quantity=3,
+        ),
+        _sale(
+            "transfer",
+            datetime(2026, 7, 20, 8, tzinfo=UTC),
+            status="Inter DC Transfer",
+            quantity=4,
+        ),
+        _sale(
+            "returned",
+            datetime(2026, 7, 20, 8, tzinfo=UTC),
+            status="Returned",
+            quantity=5,
+        ),
+    ]
+    engine = create_engine("sqlite://")
+    create_schema(engine)
+    with Session(engine) as session:
+        _seed(session, sales=sales, offers=[(_offer(), as_of)])
+        service = MetricService(
+            Repository(session),
+            anomaly_rules_path=ANOMALY_RULES,
+            sale_status_rules_path=STATUS_RULES,
+            now=lambda: datetime(2026, 7, 20, 12, tzinfo=UTC),
+        )
+
+        service.rebuild(as_of, as_of)
+        dataset = service.dashboard_dataset(as_of)
+
+    row = dataset.product_daily.iloc[0]
+    assert row["ordered_units"] == 14
+    assert row["effective_units"] == 9
+    assert "unknown_sale_status" not in dataset.anomalies["anomaly_type"].tolist()
+    assert "unknown_sale_status" not in dataset.quality_events["event_type"].tolist()
 
 
 def _seed(

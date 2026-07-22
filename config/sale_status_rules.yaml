@@ -1,3 +1,7 @@
-included: []
-excluded: []
+included:
+  - Shipped to Customer
+  - Preparing for Customer
+  - Inter DC Transfer
+excluded:
+  - Returned
 unknown: []
