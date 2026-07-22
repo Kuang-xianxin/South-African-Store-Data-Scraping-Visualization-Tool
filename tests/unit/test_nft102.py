@@ -181,10 +181,13 @@ def test_writer_changes_only_nft102_xml_and_appends_four_rows(tmp_path: Path) ->
             assert border_side.style == "thin"
             assert border_side.color is not None
             assert border_side.color.rgb == "FFFF0000"
+        assert worksheet["C9"].fill.fill_type == "solid"
+        assert worksheet["C9"].fill.fgColor.rgb == "FFFF0000"
         assert all(
             getattr(worksheet["D9"].border, side).style is None
             for side in ("left", "right", "top", "bottom")
         )
+        assert worksheet["D9"].fill.fill_type is None
         assert worksheet["E9"].value == 6
         assert worksheet["B8"].value == "=SUM(C8:E8)"
         assert worksheet.max_row == 11
@@ -245,5 +248,6 @@ def test_writer_removes_inherited_inventory_alert_when_stock_reconciles(
                 getattr(worksheet[coordinate].border, side).style is None
                 for side in ("left", "right", "top", "bottom")
             )
+            assert worksheet[coordinate].fill.fill_type is None
     finally:
         workbook.close()

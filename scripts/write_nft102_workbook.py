@@ -32,11 +32,13 @@ def _style_signature(style: ET.Element) -> bytes:
     return cast(bytes, ET.tostring(comparable, encoding="utf-8"))
 
 
-def _border_style_signature(style: ET.Element) -> bytes:
-    """Return an xf signature that ignores only its border selection."""
+def _inventory_style_signature(style: ET.Element) -> bytes:
+    """Return an xf signature that ignores the inventory alert border and fill."""
     comparable = copy.deepcopy(style)
     comparable.attrib.pop("borderId", None)
     comparable.attrib.pop("applyBorder", None)
+    comparable.attrib.pop("fillId", None)
+    comparable.attrib.pop("applyFill", None)
     return cast(bytes, ET.tostring(comparable, encoding="utf-8"))
 
 
@@ -105,8 +107,8 @@ def _border_is_red_box(border: ET.Element) -> bool:
     return True
 
 
-class _InventoryBorderResolver:
-    """Select normal/red-box stock styles while preserving all other formatting."""
+class _InventoryAlertStyleResolver:
+    """Select normal/red stock styles while preserving all other formatting."""
 
     def __init__(self, styles_root: ET.Element) -> None:
         cell_xfs = styles_root.find(f"{Q}cellXfs")
@@ -117,6 +119,7 @@ class _InventoryBorderResolver:
         self.borders: ET.Element = borders
         self.changed = False
         self.alert_border_id = self._find_or_add_alert_border()
+        self.alert_fill_id = self._find_or_add_alert_fill(styles_root)
 
     def _styles(self) -> list[ET.Element]:
         return self.cell_xfs.findall(f"{Q}xf")
@@ -137,23 +140,52 @@ class _InventoryBorderResolver:
         self.changed = True
         return len(existing)
 
+    def _find_or_add_alert_fill(self, styles_root: ET.Element) -> int:
+        fills = styles_root.find(f"{Q}fills")
+        if fills is None:
+            raise ValueError("工作簿样式表缺少 fills")
+        existing = fills.findall(f"{Q}fill")
+        for index, fill in enumerate(existing):
+            pattern = fill.find(f"{Q}patternFill")
+            foreground = pattern.find(f"{Q}fgColor") if pattern is not None else None
+            if (
+                pattern is not None
+                and pattern.attrib.get("patternType") == "solid"
+                and foreground is not None
+                and foreground.attrib.get("rgb", "").upper() == INVENTORY_ALERT_RGB
+            ):
+                return index
+
+        fill = ET.Element(f"{Q}fill")
+        pattern = ET.SubElement(fill, f"{Q}patternFill", {"patternType": "solid"})
+        ET.SubElement(pattern, f"{Q}fgColor", {"rgb": INVENTORY_ALERT_RGB})
+        ET.SubElement(pattern, f"{Q}bgColor", {"indexed": "64"})
+        fills.append(fill)
+        fills.attrib["count"] = str(len(existing) + 1)
+        self.changed = True
+        return len(existing)
+
     def style_for(self, current_style_id: int, alerted: bool) -> int:
         styles = self._styles()
         if current_style_id < 0 or current_style_id >= len(styles):
             raise ValueError(f"无效的单元格样式 ID: {current_style_id}")
         current = styles[current_style_id]
-        signature = _border_style_signature(current)
+        signature = _inventory_style_signature(current)
         desired_border_id = self.alert_border_id if alerted else 0
+        desired_fill_id = self.alert_fill_id if alerted else 0
         for index, candidate in enumerate(styles):
             if (
                 int(candidate.attrib.get("borderId", "0")) == desired_border_id
-                and _border_style_signature(candidate) == signature
+                and int(candidate.attrib.get("fillId", "0")) == desired_fill_id
+                and _inventory_style_signature(candidate) == signature
             ):
                 return index
 
         created = copy.deepcopy(current)
         created.attrib["borderId"] = str(desired_border_id)
         created.attrib["applyBorder"] = "1"
+        created.attrib["fillId"] = str(desired_fill_id)
+        created.attrib["applyFill"] = "1"
         self.cell_xfs.append(created)
         self.cell_xfs.attrib["count"] = str(len(self._styles()))
         self.changed = True
@@ -169,8 +201,8 @@ def _apply_order_style(
     )
 
 
-def _apply_inventory_border(
-    cell: ET.Element, alerted: bool, resolver: _InventoryBorderResolver
+def _apply_inventory_alert_style(
+    cell: ET.Element, alerted: bool, resolver: _InventoryAlertStyleResolver
 ) -> None:
     current_style_id = int(cell.attrib.get("s", "0"))
     cell.attrib["s"] = str(resolver.style_for(current_style_id, alerted))
@@ -379,7 +411,7 @@ def patch_workbook(source: Path, output: Path, payload: dict[str, Any]) -> None:
         worksheet_root = ET.fromstring(source_zip.read(worksheet_part))
         styles_root = ET.fromstring(source_zip.read("xl/styles.xml"))
         order_style_resolver = _OrderStyleResolver(styles_root)
-        inventory_border_resolver = _InventoryBorderResolver(styles_root)
+        inventory_alert_style_resolver = _InventoryAlertStyleResolver(styles_root)
         target_start, rows = _find_or_append_block(
             worksheet_root, shared_strings, report_date
         )
@@ -441,8 +473,8 @@ def patch_workbook(source: Path, output: Path, payload: dict[str, Any]) -> None:
                 and platform_stock_value is not None
                 and previous_stock_value - order_value != platform_stock_value
             )
-            _apply_inventory_border(
-                stock_cell, inventory_alerted, inventory_border_resolver
+            _apply_inventory_alert_style(
+                stock_cell, inventory_alerted, inventory_alert_style_resolver
             )
 
         total = int(payload["summary"]["ordered_units_mapped"])
@@ -454,7 +486,7 @@ def patch_workbook(source: Path, output: Path, payload: dict[str, Any]) -> None:
         updated_xml = ET.tostring(worksheet_root, encoding="utf-8", xml_declaration=True)
         updated_styles_xml = (
             ET.tostring(styles_root, encoding="utf-8", xml_declaration=True)
-            if order_style_resolver.changed or inventory_border_resolver.changed
+            if order_style_resolver.changed or inventory_alert_style_resolver.changed
             else None
         )
 
