@@ -21,6 +21,7 @@ PKG_REL_NS = "http://schemas.openxmlformats.org/package/2006/relationships"
 Q = f"{{{MAIN_NS}}}"
 CELL_REF = re.compile(r"([A-Z]+)(\d+)")
 ORDER_HIGHLIGHT_RGB = "FBE5D6"
+INVENTORY_ALERT_RGB = "FFFF0000"
 
 
 def _style_signature(style: ET.Element) -> bytes:
@@ -28,6 +29,14 @@ def _style_signature(style: ET.Element) -> bytes:
     comparable = copy.deepcopy(style)
     comparable.attrib.pop("fillId", None)
     comparable.attrib.pop("applyFill", None)
+    return cast(bytes, ET.tostring(comparable, encoding="utf-8"))
+
+
+def _border_style_signature(style: ET.Element) -> bytes:
+    """Return an xf signature that ignores only its border selection."""
+    comparable = copy.deepcopy(style)
+    comparable.attrib.pop("borderId", None)
+    comparable.attrib.pop("applyBorder", None)
     return cast(bytes, ET.tostring(comparable, encoding="utf-8"))
 
 
@@ -85,6 +94,72 @@ class _OrderStyleResolver:
         return len(self._styles()) - 1
 
 
+def _border_is_red_box(border: ET.Element) -> bool:
+    for side_name in ("left", "right", "top", "bottom"):
+        side = border.find(f"{Q}{side_name}")
+        color = side.find(f"{Q}color") if side is not None else None
+        if side is None or side.attrib.get("style") != "thin" or color is None:
+            return False
+        if color.attrib.get("rgb", "").upper() != INVENTORY_ALERT_RGB:
+            return False
+    return True
+
+
+class _InventoryBorderResolver:
+    """Select normal/red-box stock styles while preserving all other formatting."""
+
+    def __init__(self, styles_root: ET.Element) -> None:
+        cell_xfs = styles_root.find(f"{Q}cellXfs")
+        borders = styles_root.find(f"{Q}borders")
+        if cell_xfs is None or borders is None:
+            raise ValueError("工作簿样式表缺少 cellXfs 或 borders")
+        self.cell_xfs: ET.Element = cell_xfs
+        self.borders: ET.Element = borders
+        self.changed = False
+        self.alert_border_id = self._find_or_add_alert_border()
+
+    def _styles(self) -> list[ET.Element]:
+        return self.cell_xfs.findall(f"{Q}xf")
+
+    def _find_or_add_alert_border(self) -> int:
+        existing = self.borders.findall(f"{Q}border")
+        for index, border in enumerate(existing):
+            if _border_is_red_box(border):
+                return index
+
+        border = ET.Element(f"{Q}border")
+        for side_name in ("left", "right", "top", "bottom"):
+            side = ET.SubElement(border, f"{Q}{side_name}", {"style": "thin"})
+            ET.SubElement(side, f"{Q}color", {"rgb": INVENTORY_ALERT_RGB})
+        ET.SubElement(border, f"{Q}diagonal")
+        self.borders.append(border)
+        self.borders.attrib["count"] = str(len(existing) + 1)
+        self.changed = True
+        return len(existing)
+
+    def style_for(self, current_style_id: int, alerted: bool) -> int:
+        styles = self._styles()
+        if current_style_id < 0 or current_style_id >= len(styles):
+            raise ValueError(f"无效的单元格样式 ID: {current_style_id}")
+        current = styles[current_style_id]
+        signature = _border_style_signature(current)
+        desired_border_id = self.alert_border_id if alerted else 0
+        for index, candidate in enumerate(styles):
+            if (
+                int(candidate.attrib.get("borderId", "0")) == desired_border_id
+                and _border_style_signature(candidate) == signature
+            ):
+                return index
+
+        created = copy.deepcopy(current)
+        created.attrib["borderId"] = str(desired_border_id)
+        created.attrib["applyBorder"] = "1"
+        self.cell_xfs.append(created)
+        self.cell_xfs.attrib["count"] = str(len(self._styles()))
+        self.changed = True
+        return len(self._styles()) - 1
+
+
 def _apply_order_style(
     cell: ET.Element, value: int | None, resolver: _OrderStyleResolver
 ) -> None:
@@ -92,6 +167,13 @@ def _apply_order_style(
     cell.attrib["s"] = str(
         resolver.style_for(current_style_id, highlighted=value is not None and value > 0)
     )
+
+
+def _apply_inventory_border(
+    cell: ET.Element, alerted: bool, resolver: _InventoryBorderResolver
+) -> None:
+    current_style_id = int(cell.attrib.get("s", "0"))
+    cell.attrib["s"] = str(resolver.style_for(current_style_id, alerted))
 
 
 def _column_number(reference: str) -> int:
@@ -182,6 +264,18 @@ def _cell_text(cell: ET.Element | None, shared_strings: list[str]) -> str | None
     if cell.attrib.get("t") == "s":
         return shared_strings[int(value.text)]
     return value.text
+
+
+def _cell_number(cell: ET.Element | None) -> float | None:
+    if cell is None or cell.attrib.get("t") in {"inlineStr", "s", "str"}:
+        return None
+    value = cell.find(f"{Q}v")
+    if value is None or value.text is None:
+        return None
+    try:
+        return float(value.text)
+    except ValueError:
+        return None
 
 
 def _sheet_part(archive: zipfile.ZipFile, sheet_name: str) -> str:
@@ -285,6 +379,7 @@ def patch_workbook(source: Path, output: Path, payload: dict[str, Any]) -> None:
         worksheet_root = ET.fromstring(source_zip.read(worksheet_part))
         styles_root = ET.fromstring(source_zip.read("xl/styles.xml"))
         order_style_resolver = _OrderStyleResolver(styles_root)
+        inventory_border_resolver = _InventoryBorderResolver(styles_root)
         target_start, rows = _find_or_append_block(
             worksheet_root, shared_strings, report_date
         )
@@ -331,10 +426,24 @@ def patch_workbook(source: Path, output: Path, payload: dict[str, Any]) -> None:
                 order_value = int(order_value)
                 _set_number(order_cell, order_value)
             _apply_order_style(order_cell, order_value, order_style_resolver)
-            if item["platform_stock_value"] is None:
+            platform_stock_value = item["platform_stock_value"]
+            if platform_stock_value is None:
                 _clear(stock_cell)
             else:
-                _set_number(stock_cell, int(item["platform_stock_value"]))
+                platform_stock_value = int(platform_stock_value)
+                _set_number(stock_cell, platform_stock_value)
+            previous_stock_value = _cell_number(
+                _cell(prior_rows[3], letter) if prior_rows[3] is not None else None
+            )
+            inventory_alerted = (
+                previous_stock_value is not None
+                and order_value is not None
+                and platform_stock_value is not None
+                and previous_stock_value - order_value != platform_stock_value
+            )
+            _apply_inventory_border(
+                stock_cell, inventory_alerted, inventory_border_resolver
+            )
 
         total = int(payload["summary"]["ordered_units_mapped"])
         order_total_cell = _ensure_cell(
@@ -345,7 +454,7 @@ def patch_workbook(source: Path, output: Path, payload: dict[str, Any]) -> None:
         updated_xml = ET.tostring(worksheet_root, encoding="utf-8", xml_declaration=True)
         updated_styles_xml = (
             ET.tostring(styles_root, encoding="utf-8", xml_declaration=True)
-            if order_style_resolver.changed
+            if order_style_resolver.changed or inventory_border_resolver.changed
             else None
         )
 

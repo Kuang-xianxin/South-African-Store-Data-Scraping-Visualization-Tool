@@ -42,6 +42,9 @@ def _template(path: Path) -> None:
         fill_type="solid", fgColor="FFFBE5D6"
     )
     worksheet.cell(5, 1, "平台库存数量")
+    worksheet.cell(5, 3, 5)
+    worksheet.cell(5, 4, 5)
+    worksheet.cell(5, 5, 5)
     worksheet["E7"].number_format = "0"
     other = workbook.create_sheet("其他店铺")
     other["A1"] = "不得改变"
@@ -140,7 +143,7 @@ def test_writer_changes_only_nft102_xml_and_appends_four_rows(tmp_path: Path) ->
                 "column_letter": "D",
                 "traffic_value": None,
                 "order_value": 2,
-                "platform_stock_value": None,
+                "platform_stock_value": 3,
             },
             {
                 "column_letter": "E",
@@ -160,7 +163,7 @@ def test_writer_changes_only_nft102_xml_and_appends_four_rows(tmp_path: Path) ->
             for name in source_zip.namelist()
             if source_zip.read(name) != output_zip.read(name)
         ]
-    assert changed == ["xl/worksheets/sheet1.xml"]
+    assert set(changed) == {"xl/worksheets/sheet1.xml", "xl/styles.xml"}
 
     workbook = load_workbook(output, data_only=False)
     try:
@@ -173,10 +176,74 @@ def test_writer_changes_only_nft102_xml_and_appends_four_rows(tmp_path: Path) ->
         assert worksheet["D8"].value == 2
         assert worksheet["D8"].fill.fgColor.rgb == "FFFBE5D6"
         assert worksheet["C9"].value == 4
+        for side in ("left", "right", "top", "bottom"):
+            border_side = getattr(worksheet["C9"].border, side)
+            assert border_side.style == "thin"
+            assert border_side.color is not None
+            assert border_side.color.rgb == "FFFF0000"
+        assert all(
+            getattr(worksheet["D9"].border, side).style is None
+            for side in ("left", "right", "top", "bottom")
+        )
         assert worksheet["E9"].value == 6
         assert worksheet["B8"].value == "=SUM(C8:E8)"
         assert worksheet.max_row == 11
         assert worksheet["E11"].number_format == "0"
         assert workbook["其他店铺"]["A1"].value == "不得改变"
+    finally:
+        workbook.close()
+
+
+def test_writer_removes_inherited_inventory_alert_when_stock_reconciles(
+    tmp_path: Path,
+) -> None:
+    template = tmp_path / "template.xlsx"
+    first_output = tmp_path / "first-output.xlsx"
+    second_output = tmp_path / "second-output.xlsx"
+    _template(template)
+    writer = _load_writer_module()
+
+    first_payload = {
+        "sheet_name": "NFT102",
+        "report_date": "2026-07-21",
+        "max_column_letter": "E",
+        "columns": [
+            {
+                "column_letter": letter,
+                "traffic_value": None,
+                "order_value": 0,
+                "platform_stock_value": 4,
+            }
+            for letter in ("C", "D", "E")
+        ],
+        "summary": {"ordered_units_mapped": 0},
+    }
+    writer.patch_workbook(template, first_output, first_payload)
+
+    second_payload = {
+        "sheet_name": "NFT102",
+        "report_date": "2026-07-22",
+        "max_column_letter": "E",
+        "columns": [
+            {
+                "column_letter": letter,
+                "traffic_value": None,
+                "order_value": 1,
+                "platform_stock_value": 3,
+            }
+            for letter in ("C", "D", "E")
+        ],
+        "summary": {"ordered_units_mapped": 3},
+    }
+    writer.patch_workbook(first_output, second_output, second_payload)
+
+    workbook = load_workbook(second_output, data_only=False)
+    try:
+        worksheet = workbook["NFT102"]
+        for coordinate in ("C13", "D13", "E13"):
+            assert all(
+                getattr(worksheet[coordinate].border, side).style is None
+                for side in ("left", "right", "top", "bottom")
+            )
     finally:
         workbook.close()
