@@ -164,6 +164,58 @@ class _InventoryAlertStyleResolver:
         return len(self._styles()) - 1
 
 
+class _CenteredStyleResolver:
+    """Create centered variants of existing cell styles without changing other formatting."""
+
+    def __init__(self, styles_root: ET.Element) -> None:
+        cell_xfs = styles_root.find(f"{Q}cellXfs")
+        if cell_xfs is None:
+            raise ValueError("工作簿样式表缺少 cellXfs")
+        self.cell_xfs: ET.Element = cell_xfs
+        self.changed = False
+        self._resolved: dict[int, int] = {}
+
+    def _styles(self) -> list[ET.Element]:
+        return self.cell_xfs.findall(f"{Q}xf")
+
+    def style_for(self, current_style_id: int) -> int:
+        resolved = self._resolved.get(current_style_id)
+        if resolved is not None:
+            return resolved
+        styles = self._styles()
+        if current_style_id < 0 or current_style_id >= len(styles):
+            raise ValueError(f"无效的单元格样式 ID: {current_style_id}")
+        current = styles[current_style_id]
+        alignment = current.find(f"{Q}alignment")
+        if (
+            alignment is not None
+            and alignment.attrib.get("horizontal") == "center"
+            and alignment.attrib.get("vertical") == "center"
+        ):
+            self._resolved[current_style_id] = current_style_id
+            return current_style_id
+
+        centered = copy.deepcopy(current)
+        centered.attrib["applyAlignment"] = "1"
+        alignment = centered.find(f"{Q}alignment")
+        if alignment is None:
+            alignment = ET.Element(f"{Q}alignment")
+            insert_at = len(centered)
+            for index, child in enumerate(centered):
+                if child.tag in {f"{Q}protection", f"{Q}extLst"}:
+                    insert_at = index
+                    break
+            centered.insert(insert_at, alignment)
+        alignment.attrib["horizontal"] = "center"
+        alignment.attrib["vertical"] = "center"
+        self.cell_xfs.append(centered)
+        self.cell_xfs.attrib["count"] = str(len(self._styles()))
+        centered_style_id = len(self._styles()) - 1
+        self._resolved[current_style_id] = centered_style_id
+        self.changed = True
+        return centered_style_id
+
+
 def _apply_order_style(
     cell: ET.Element, value: int | None, resolver: _OrderStyleResolver
 ) -> None:
@@ -178,6 +230,17 @@ def _apply_inventory_alert_style(
 ) -> None:
     current_style_id = int(cell.attrib.get("s", "0"))
     cell.attrib["s"] = str(resolver.style_for(current_style_id, alerted))
+
+
+def _center_worksheet_cells(
+    worksheet_root: ET.Element, resolver: _CenteredStyleResolver
+) -> None:
+    sheet_data = worksheet_root.find(f"{Q}sheetData")
+    if sheet_data is None:
+        raise ValueError("NFT102 工作表缺少 sheetData")
+    for cell in sheet_data.iter(f"{Q}c"):
+        current_style_id = int(cell.attrib.get("s", "0"))
+        cell.attrib["s"] = str(resolver.style_for(current_style_id))
 
 
 def _column_number(reference: str) -> int:
@@ -384,6 +447,7 @@ def patch_workbook(source: Path, output: Path, payload: dict[str, Any]) -> None:
         styles_root = ET.fromstring(source_zip.read("xl/styles.xml"))
         order_style_resolver = _OrderStyleResolver(styles_root)
         inventory_alert_style_resolver = _InventoryAlertStyleResolver(styles_root)
+        centered_style_resolver = _CenteredStyleResolver(styles_root)
         target_start, rows = _find_or_append_block(
             worksheet_root, shared_strings, report_date
         )
@@ -455,10 +519,15 @@ def patch_workbook(source: Path, output: Path, payload: dict[str, Any]) -> None:
         )
         last_column = payload["max_column_letter"]
         _set_formula(order_total_cell, f"SUM(C{target_start + 2}:{last_column}{target_start + 2})", total)
+        _center_worksheet_cells(worksheet_root, centered_style_resolver)
         updated_xml = ET.tostring(worksheet_root, encoding="utf-8", xml_declaration=True)
         updated_styles_xml = (
             ET.tostring(styles_root, encoding="utf-8", xml_declaration=True)
-            if order_style_resolver.changed or inventory_alert_style_resolver.changed
+            if (
+                order_style_resolver.changed
+                or inventory_alert_style_resolver.changed
+                or centered_style_resolver.changed
+            )
             else None
         )
 

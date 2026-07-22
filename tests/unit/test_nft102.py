@@ -199,7 +199,17 @@ def test_writer_changes_only_nft102_xml_and_appends_four_rows(tmp_path: Path) ->
         assert worksheet["B8"].value == "=SUM(C8:E8)"
         assert worksheet.max_row == 11
         assert worksheet["E11"].number_format == "0"
+        populated_cells = [
+            cell
+            for row in worksheet.iter_rows()
+            for cell in row
+            if cell.value is not None
+        ]
+        assert populated_cells
+        assert all(cell.alignment.horizontal == "center" for cell in populated_cells)
+        assert all(cell.alignment.vertical == "center" for cell in populated_cells)
         assert workbook["其他店铺"]["A1"].value == "不得改变"
+        assert workbook["其他店铺"]["A1"].alignment.horizontal is None
     finally:
         workbook.close()
 

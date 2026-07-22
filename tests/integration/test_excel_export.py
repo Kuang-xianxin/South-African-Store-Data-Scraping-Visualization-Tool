@@ -128,6 +128,27 @@ def test_excel_has_filters_freezes_charts_and_conditional_formatting(
         workbook.close()
 
 
+def test_excel_centers_every_populated_cell(
+    tmp_path: Path, dashboard_dataset: DashboardDataset
+) -> None:
+    destination = export_excel(dashboard_dataset, tmp_path / "centered.xlsx")
+
+    workbook = load_workbook(destination, data_only=False)
+    try:
+        populated_cells = [
+            cell
+            for sheet in workbook.worksheets
+            for row in sheet.iter_rows()
+            for cell in row
+            if cell.value is not None
+        ]
+        assert populated_cells
+        assert all(cell.alignment.horizontal == "center" for cell in populated_cells)
+        assert all(cell.alignment.vertical == "center" for cell in populated_cells)
+    finally:
+        workbook.close()
+
+
 def test_excel_handles_empty_frames_and_preserves_blank_unknowns(
     tmp_path: Path, empty_dashboard_dataset: DashboardDataset
 ) -> None:

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Mapping
+from copy import copy
 from datetime import date, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -270,6 +271,7 @@ def export_excel(dataset: DashboardDataset, destination: Path) -> Path:
     _wrap_data_column(workbook["数据质量"], _QUALITY_COLUMNS, "product_title_current")
     workbook["数据质量"].freeze_panes = "D4"
     _add_conditional_formatting(workbook)
+    _center_populated_cells(workbook)
     workbook.calculation.fullCalcOnLoad = True
     workbook.calculation.forceFullCalc = True
     workbook.save(destination)
@@ -551,6 +553,18 @@ def _base_sheet(sheet: Worksheet) -> None:
     sheet.page_setup.fitToWidth = 1
     sheet.page_setup.fitToHeight = 0
     sheet.sheet_properties.outlinePr.summaryBelow = True
+
+
+def _center_populated_cells(workbook: Workbook) -> None:
+    for sheet in workbook.worksheets:
+        for row in sheet.iter_rows():
+            for cell in row:
+                if cell.value is None:
+                    continue
+                alignment = copy(cell.alignment)
+                alignment.horizontal = "center"
+                alignment.vertical = "center"
+                cell.alignment = alignment
 
 
 def _style_title(cell: Any) -> None:
