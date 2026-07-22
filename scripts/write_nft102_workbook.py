@@ -96,49 +96,19 @@ class _OrderStyleResolver:
         return len(self._styles()) - 1
 
 
-def _border_is_red_box(border: ET.Element) -> bool:
-    for side_name in ("left", "right", "top", "bottom"):
-        side = border.find(f"{Q}{side_name}")
-        color = side.find(f"{Q}color") if side is not None else None
-        if side is None or side.attrib.get("style") != "thin" or color is None:
-            return False
-        if color.attrib.get("rgb", "").upper() != INVENTORY_ALERT_RGB:
-            return False
-    return True
-
-
 class _InventoryAlertStyleResolver:
-    """Select normal/red stock styles while preserving all other formatting."""
+    """Select normal/red-fill stock styles with the original border appearance."""
 
     def __init__(self, styles_root: ET.Element) -> None:
         cell_xfs = styles_root.find(f"{Q}cellXfs")
-        borders = styles_root.find(f"{Q}borders")
-        if cell_xfs is None or borders is None:
-            raise ValueError("工作簿样式表缺少 cellXfs 或 borders")
+        if cell_xfs is None:
+            raise ValueError("工作簿样式表缺少 cellXfs")
         self.cell_xfs: ET.Element = cell_xfs
-        self.borders: ET.Element = borders
         self.changed = False
-        self.alert_border_id = self._find_or_add_alert_border()
         self.alert_fill_id = self._find_or_add_alert_fill(styles_root)
 
     def _styles(self) -> list[ET.Element]:
         return self.cell_xfs.findall(f"{Q}xf")
-
-    def _find_or_add_alert_border(self) -> int:
-        existing = self.borders.findall(f"{Q}border")
-        for index, border in enumerate(existing):
-            if _border_is_red_box(border):
-                return index
-
-        border = ET.Element(f"{Q}border")
-        for side_name in ("left", "right", "top", "bottom"):
-            side = ET.SubElement(border, f"{Q}{side_name}", {"style": "thin"})
-            ET.SubElement(side, f"{Q}color", {"rgb": INVENTORY_ALERT_RGB})
-        ET.SubElement(border, f"{Q}diagonal")
-        self.borders.append(border)
-        self.borders.attrib["count"] = str(len(existing) + 1)
-        self.changed = True
-        return len(existing)
 
     def _find_or_add_alert_fill(self, styles_root: ET.Element) -> int:
         fills = styles_root.find(f"{Q}fills")
@@ -171,7 +141,9 @@ class _InventoryAlertStyleResolver:
             raise ValueError(f"无效的单元格样式 ID: {current_style_id}")
         current = styles[current_style_id]
         signature = _inventory_style_signature(current)
-        desired_border_id = self.alert_border_id if alerted else 0
+        # Stock cells use the workbook's default border (ID 0). Keeping that
+        # border lets Excel/WPS show the same grey gridline as neighbouring cells.
+        desired_border_id = 0
         desired_fill_id = self.alert_fill_id if alerted else 0
         for index, candidate in enumerate(styles):
             if (

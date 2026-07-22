@@ -6,7 +6,7 @@ import zipfile
 from pathlib import Path
 
 from openpyxl import Workbook, load_workbook
-from openpyxl.styles import PatternFill
+from openpyxl.styles import Border, PatternFill, Side
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
@@ -43,6 +43,13 @@ def _template(path: Path) -> None:
     )
     worksheet.cell(5, 1, "平台库存数量")
     worksheet.cell(5, 3, 5)
+    old_alert_side = Side(style="thin", color="FFFF0000")
+    worksheet.cell(5, 3).border = Border(
+        left=old_alert_side,
+        right=old_alert_side,
+        top=old_alert_side,
+        bottom=old_alert_side,
+    )
     worksheet.cell(5, 4, 5)
     worksheet.cell(5, 5, 5)
     worksheet["E7"].number_format = "0"
@@ -176,11 +183,11 @@ def test_writer_changes_only_nft102_xml_and_appends_four_rows(tmp_path: Path) ->
         assert worksheet["D8"].value == 2
         assert worksheet["D8"].fill.fgColor.rgb == "FFFBE5D6"
         assert worksheet["C9"].value == 4
-        for side in ("left", "right", "top", "bottom"):
-            border_side = getattr(worksheet["C9"].border, side)
-            assert border_side.style == "thin"
-            assert border_side.color is not None
-            assert border_side.color.rgb == "FFFF0000"
+        assert all(
+            getattr(worksheet["C9"].border, side).style is None
+            for side in ("left", "right", "top", "bottom")
+        )
+        assert worksheet["C9"]._style.borderId == worksheet["D9"]._style.borderId == 0
         assert worksheet["C9"].fill.fill_type == "solid"
         assert worksheet["C9"].fill.fgColor.rgb == "FFFF0000"
         assert all(
