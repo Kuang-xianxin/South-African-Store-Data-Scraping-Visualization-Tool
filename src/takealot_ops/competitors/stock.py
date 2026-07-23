@@ -29,6 +29,9 @@ WAREHOUSE_STOCK_PATTERN = re.compile(
     r"current\s+stock\s*=\s*(?P<quantity>[\d,]+)",
     re.IGNORECASE,
 )
+CUSTOM_QUANTITY_INPUT = (
+    'input[name="quantity"]:not([aria-hidden="true"]):visible'
+)
 
 
 def skipped_stock_probe() -> StockProbeResult:
@@ -174,7 +177,7 @@ def _probe_page_stock(
     _clear_isolated_cart(page)
     _goto(page, url)
     _wait_for_product(page, plid, title)
-    _find_main_add_to_cart_button(page).click()
+    _add_main_product_to_cart(page)
 
     _goto(page, "https://www.takealot.com/cart")
     quantity, exact, note = _find_exact_quantity(page, plid)
@@ -236,6 +239,26 @@ def _find_main_add_to_cart_button(page: Page) -> Locator:
     return button
 
 
+def _add_main_product_to_cart(page: Page) -> None:
+    """Click the verified target button and let Takealot persist the async cart add."""
+    _dismiss_marketing_overlay(page)
+    _find_main_add_to_cart_button(page).click()
+    page.wait_for_timeout(1500)
+
+
+def _dismiss_marketing_overlay(page: Page) -> None:
+    """Remove Braze marketing modals that randomly block isolated cart controls."""
+    page.evaluate(
+        """() => {
+            document
+                .querySelectorAll(".ab-iam-root, .ab-page-blocker")
+                .forEach((element) => element.remove());
+            document.documentElement.classList.remove("ab-pause-scrolling");
+            document.body.classList.remove("ab-pause-scrolling");
+        }"""
+    )
+
+
 def _goto(page: Page, url: str) -> None:
     last_error: PlaywrightError | None = None
     for attempt in range(3):
@@ -252,6 +275,7 @@ def _goto(page: Page, url: str) -> None:
 
 def _clear_isolated_cart(page: Page) -> None:
     _goto(page, "https://www.takealot.com/cart")
+    _dismiss_marketing_overlay(page)
     deadline = time.monotonic() + 12
     while time.monotonic() < deadline:
         body = page.locator("body").inner_text()
@@ -261,18 +285,13 @@ def _clear_isolated_cart(page: Page) -> None:
         page.wait_for_timeout(500)
     buttons = page.locator('button[title="Remove product from cart"]:visible')
     while buttons.count() > 0:
+        _dismiss_marketing_overlay(page)
         buttons.first.click(force=True)
         page.wait_for_timeout(500)
 
 
 def _choose_quantity(page: Page, combo: Locator, quantity: int) -> bool:
-    combo.click()
-    option = page.locator('[role="option"]:visible').filter(
-        has_text=re.compile(rf"^{quantity}$")
-    )
-    if option.count() != 1 or not option.is_visible():
-        raise RuntimeError(f"购物车没有提供数量 {quantity} 的测试选项")
-    option.click()
+    _select_quantity_option(page, combo, quantity)
 
     deadline = time.monotonic() + 9
     while time.monotonic() < deadline:
@@ -285,6 +304,44 @@ def _choose_quantity(page: Page, combo: Locator, quantity: int) -> bool:
             raise RuntimeError("Takealot 拒绝了购物车数量更新，请稍后重试")
         page.wait_for_timeout(300)
     raise RuntimeError(f"等待数量 {quantity} 的库存校验结果超时")
+
+
+def _select_quantity_option(
+    page: Page,
+    combo: Locator,
+    quantity: int,
+) -> None:
+    """Open the animated quantity menu and select one exact numeric option."""
+    selected = _select_quantity_menu_option(
+        page,
+        combo,
+        re.compile(rf"^{quantity}$"),
+    )
+    if not selected:
+        raise RuntimeError(f"购物车没有提供数量 {quantity} 的测试选项")
+
+
+def _select_quantity_menu_option(
+    page: Page,
+    combo: Locator,
+    option_pattern: re.Pattern[str],
+) -> bool:
+    """Retry an animated quantity-menu option whose first click may be swallowed."""
+    for _ in range(3):
+        _dismiss_marketing_overlay(page)
+        combo.click()
+        for _ in range(8):
+            option = page.locator('[role="option"]:visible').filter(
+                has_text=option_pattern
+            )
+            if option.count() == 1 and option.is_visible():
+                _dismiss_marketing_overlay(page)
+                option.click()
+                return True
+            page.wait_for_timeout(250)
+        page.keyboard.press("Escape")
+        page.wait_for_timeout(300)
+    return False
 
 
 def _find_product_quantity_combo(page: Page, plid: str) -> Locator:
@@ -320,24 +377,14 @@ def _probe_above_quick_menu(
     combo: Locator,
 ) -> tuple[int, bool] | None:
     """Switch to custom quantity input and parse the explicit warehouse limit."""
-    combo.click()
-    custom_options = page.locator('[role="option"]:visible').filter(has_text="10+")
-    if custom_options.count() != 1 or not custom_options.first.is_visible():
-        page.keyboard.press("Escape")
-        return None
-    custom_options.first.click()
-
-    deadline = time.monotonic() + 8
-    quantity_input = page.locator('input[name="quantity"]:visible')
-    while time.monotonic() < deadline and quantity_input.count() != 1:
-        page.wait_for_timeout(250)
-    if quantity_input.count() != 1:
-        return None
-
     low = 9
     probe = HIGH_QUANTITY_PROBE
     while True:
-        accepted, explicit_quantity = _submit_custom_quantity(page, probe)
+        accepted, explicit_quantity = _probe_custom_quantity_with_retry(
+            page,
+            combo,
+            probe,
+        )
         if explicit_quantity is not None:
             return explicit_quantity, True
         if accepted is None:
@@ -352,7 +399,11 @@ def _probe_above_quick_menu(
 
     while low < high:
         middle = (low + high + 1) // 2
-        accepted, explicit_quantity = _submit_custom_quantity(page, middle)
+        accepted, explicit_quantity = _probe_custom_quantity_with_retry(
+            page,
+            combo,
+            middle,
+        )
         if explicit_quantity is not None:
             return explicit_quantity, True
         if accepted is None:
@@ -364,16 +415,53 @@ def _probe_above_quick_menu(
     return low, True
 
 
-def _submit_custom_quantity(
+def _probe_custom_quantity_with_retry(
     page: Page,
+    combo: Locator,
     quantity: int,
 ) -> tuple[bool | None, int | None]:
-    quantity_input = page.locator('input[name="quantity"]:visible')
+    """Retry transient cart-update errors without changing the target product."""
+    for attempt in range(3):
+        if not _ensure_custom_quantity_input(page, combo):
+            return None, None
+        result = _submit_custom_quantity(page, combo, quantity)
+        if result[0] is not None or result[1] is not None:
+            page.wait_for_timeout(1200)
+            return result
+        if attempt < 2:
+            page.reload(wait_until="domcontentloaded")
+            page.wait_for_timeout(2000)
+    return None, None
+
+
+def _ensure_custom_quantity_input(page: Page, combo: Locator) -> bool:
+    quantity_input = page.locator(CUSTOM_QUANTITY_INPUT)
+    if quantity_input.count() == 1:
+        return True
+    if not _select_quantity_menu_option(
+        page,
+        combo,
+        re.compile(r"^10\+$"),
+    ):
+        return False
+    deadline = time.monotonic() + 8
+    while time.monotonic() < deadline and quantity_input.count() != 1:
+        page.wait_for_timeout(250)
+    return quantity_input.count() == 1
+
+
+def _submit_custom_quantity(
+    page: Page,
+    combo: Locator,
+    quantity: int,
+) -> tuple[bool | None, int | None]:
+    quantity_input = page.locator(CUSTOM_QUANTITY_INPUT)
     if quantity_input.count() != 1:
         return None, None
-    quantity_input.click()
-    quantity_input.press("Control+A")
-    quantity_input.type(str(quantity), delay=30)
+    # Takealot renders a full-card product link over the custom quantity
+    # editor.  The editor is still the unique target-cart input, but normal
+    # pointer clicks can be intercepted by that link.
+    quantity_input.fill(str(quantity), force=True)
     quantity_input.press("Tab")
 
     update_button = page.locator("button:visible").filter(has_text="Update")
@@ -382,6 +470,7 @@ def _submit_custom_quantity(
         page.wait_for_timeout(250)
     if update_button.count() != 1:
         return None, None
+    _dismiss_marketing_overlay(page)
     update_button.click()
 
     page.wait_for_timeout(900)
@@ -395,6 +484,8 @@ def _submit_custom_quantity(
             return False, None
         if "An error occurred while trying to update your cart" in cart_text:
             return None, None
+        if combo.is_visible() and combo.inner_text().strip() == f"Qty: {quantity}":
+            return True, None
         if quantity_input.count() == 1:
             current_value = quantity_input.input_value().strip()
             if current_value == str(quantity):
@@ -417,6 +508,7 @@ def _find_exact_quantity(
         if text.isdigit():
             numeric_options.append(int(text))
     page.keyboard.press("Escape")
+    page.wait_for_timeout(300)
     if not numeric_options:
         raise RuntimeError("购物车数量菜单没有可识别的数字选项")
     if 9 not in numeric_options:
