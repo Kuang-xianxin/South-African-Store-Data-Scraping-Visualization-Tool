@@ -15,6 +15,7 @@ from takealot_ops.metrics.service import (
     METRIC_METADATA,
     PRODUCT_DAILY_COLUMNS,
     MetricService,
+    build_quadrant_window,
     classify_quadrants,
 )
 from takealot_ops.storage.migrations import create_schema
@@ -126,9 +127,7 @@ def _service(
     return MetricService(
         Repository(session),
         anomaly_rules_path=ANOMALY_RULES,
-        sale_status_rules_path=_write_status_rules(
-            tmp_path, included=included, excluded=excluded
-        ),
+        sale_status_rules_path=_write_status_rules(tmp_path, included=included, excluded=excluded),
         now=lambda: now,
     )
 
@@ -202,14 +201,10 @@ def _seed(
             )
             for offer in dated_offers:
                 repository.upsert_offer_snapshot(offer, snapshot_date)
-            repository.finish_run(
-                run_id, "success", {"records": len(dated_offers)}, None
-            )
+            repository.finish_run(run_id, "success", {"records": len(dated_offers)}, None)
 
 
-def _seed_offer_batch(
-    session: Session, batch_date: date, offers: list[OfferRecord]
-) -> None:
+def _seed_offer_batch(session: Session, batch_date: date, offers: list[OfferRecord]) -> None:
     with session.begin():
         repository = Repository(session)
         run_id = repository.begin_run("offers", scope_date=batch_date)
@@ -262,9 +257,7 @@ def test_ordered_units_include_all_statuses(tmp_path: Path) -> None:
                 ),
             ],
         )
-        service = _service(
-            session, tmp_path, included=("included",), excluded=("excluded",)
-        )
+        service = _service(session, tmp_path, included=("included",), excluded=("excluded",))
 
         service.rebuild(metric_date, metric_date)
         row = service.dashboard_dataset(metric_date).product_daily.iloc[0]
@@ -347,10 +340,7 @@ def test_traffic_daily_average_is_page_views_divided_by_30(tmp_path: Path) -> No
 def test_window_net_change_is_not_named_daily_traffic() -> None:
     assert METRIC_METADATA["page_views_30_days"]["label"] == "近30天浏览量"
     assert METRIC_METADATA["page_views_30_day_average"]["label"] == "近30天日均浏览量"
-    assert (
-        METRIC_METADATA["page_views_window_net_change"]["label"]
-        == "30天浏览量窗口净变化"
-    )
+    assert METRIC_METADATA["page_views_window_net_change"]["label"] == "30天浏览量窗口净变化"
     exported_text = " ".join(
         value for metadata in METRIC_METADATA.values() for value in metadata.values()
     )
@@ -435,6 +425,31 @@ def test_four_quadrants_handle_empty_and_constant_data_deterministically() -> No
         "percentile": 50,
     }
     assert constant_result["quadrant"].tolist() == ["star", "star"]
+
+
+def test_quadrant_window_uses_latest_traffic_and_seven_calendar_day_units() -> None:
+    frame = pd.DataFrame(
+        {
+            "metric_date": [
+                date(2026, 7, 15),
+                date(2026, 7, 16),
+                date(2026, 7, 22),
+                date(2026, 7, 22),
+            ],
+            "offer_id": ["a", "a", "a", "b"],
+            "sku": ["sku-a", "sku-a", "sku-a", "sku-b"],
+            "page_views_30_days": [70, 80, 100, 50],
+            "ordered_units": [9, 2, 3, None],
+        }
+    )
+
+    result = build_quadrant_window(frame, date(2026, 7, 23), days=7).set_index("offer_id")
+
+    assert result.loc["a", "page_views_30_days"] == 100
+    assert result.loc["a", "ordered_units"] == 5
+    assert pd.isna(result.loc["b", "ordered_units"])
+    assert result.attrs["window_start"] == date(2026, 7, 16)
+    assert result.attrs["window_end"] == date(2026, 7, 22)
 
 
 def test_anomaly_rules_cover_spike_traffic_stock_status_and_staleness(tmp_path: Path) -> None:
@@ -596,9 +611,12 @@ def test_complete_offer_batches_control_historical_membership_and_empty_scope(
     ].tolist()
     assert day_two_rows == ["a"]
     assert day_three_rows == []
-    assert "b" not in on_day_three.anomalies.loc[
-        on_day_three.anomalies["anomaly_type"] == "stale_offer_snapshot", "offer_id"
-    ].tolist()
+    assert (
+        "b"
+        not in on_day_three.anomalies.loc[
+            on_day_three.anomalies["anomaly_type"] == "stale_offer_snapshot", "offer_id"
+        ].tolist()
+    )
 
 
 def test_rebuild_preserves_external_anomaly_events(tmp_path: Path) -> None:
@@ -733,9 +751,7 @@ def test_collection_gap_carries_offer_state_without_fabricating_traffic(
         service.rebuild(day_two, day_two)
         dataset = service.dashboard_dataset(day_two)
 
-    row = dataset.product_daily.loc[
-        dataset.product_daily["metric_date"] == day_two
-    ].iloc[0]
+    row = dataset.product_daily.loc[dataset.product_daily["metric_date"] == day_two].iloc[0]
     current = dataset.offer_current.iloc[0]
     assert row["offer_status"] == current["status"] == "buyable"
     assert row["total_stock"] == current["total_stock"] == 5

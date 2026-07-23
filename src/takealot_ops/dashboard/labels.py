@@ -36,13 +36,12 @@ FIELD_LABELS = {
     "barcode": "条码",
     "title": "商品名称",
     "ordered_units": "下单件数",
+    "ordered_units_7_days": "近7日下单件数",
     "effective_units": "有效销售件数",
     "ordered_revenue": "下单金额",
     "page_views_30_days": TRAFFIC_METRIC_LABELS["page_views_30_days"],
     "page_views_30_day_average": TRAFFIC_METRIC_LABELS["page_views_30_day_average"],
-    "page_views_window_net_change": TRAFFIC_METRIC_LABELS[
-        "page_views_window_net_change"
-    ],
+    "page_views_window_net_change": TRAFFIC_METRIC_LABELS["page_views_window_net_change"],
     "conversion_percentage_30_days": "近30天转化率",
     "conversion_percentage_previous_30_days": "上一周期转化率",
     "conversion_change_points": "转化率周期变化",

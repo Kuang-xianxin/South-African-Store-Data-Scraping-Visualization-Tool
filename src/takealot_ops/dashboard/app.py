@@ -36,7 +36,12 @@ from takealot_ops.dashboard.labels import (
     SEVERITY_LABELS,
 )
 from takealot_ops.dashboard.refresh import run_dashboard_refresh
-from takealot_ops.metrics.service import DashboardDataset, MetricService, classify_quadrants
+from takealot_ops.metrics.service import (
+    DashboardDataset,
+    MetricService,
+    build_quadrant_window,
+    classify_quadrants,
+)
 from takealot_ops.nft102_portal import (
     Nft102GenerationResult,
     generate_nft102_from_baseline,
@@ -146,9 +151,7 @@ def load_dashboard_dataset(
             service = MetricService(
                 Repository(session),
                 anomaly_rules_path=settings.project_root / "config" / "anomaly_rules.yaml",
-                sale_status_rules_path=settings.project_root
-                / "config"
-                / "sale_status_rules.yaml",
+                sale_status_rules_path=settings.project_root / "config" / "sale_status_rules.yaml",
             )
             dataset = service.dashboard_dataset(as_of)
     except (OSError, ValueError, SQLAlchemyError) as exc:
@@ -258,7 +261,9 @@ def main() -> None:
                 st.error(refresh_result.message)
 
     dataset, load_error = load_dashboard_dataset(settings, as_of)
-    renderers: dict[str, Callable[[DashboardDataset | None, str | None, DashboardSettings, date], None]] = {
+    renderers: dict[
+        str, Callable[[DashboardDataset | None, str | None, DashboardSettings, date], None]
+    ] = {
         "店铺总览": _render_overview,
         "单品分析": _render_product,
         "经营四象限": _render_quadrants,
@@ -295,7 +300,9 @@ def _render_overview(
     recent = recent.loc[recent_dates >= recent_start]
     metrics = st.columns(4)
     metrics[0].metric("最新可用日下单件数", _sum_value(latest, "ordered_units", integer=True))
-    metrics[1].metric("最新可用日下单金额", _currency_or_missing(_sum_numeric(latest, "ordered_revenue")))
+    metrics[1].metric(
+        "最新可用日下单金额", _currency_or_missing(_sum_numeric(latest, "ordered_revenue"))
+    )
     metrics[2].metric("近7日下单件数", _sum_value(recent, "ordered_units", integer=True))
     metrics[3].metric("异常商品数", _unique_count(dataset.anomalies, "offer_id"))
     second = st.columns(4)
@@ -360,34 +367,24 @@ def _render_product(
     identity_columns = st.columns(4)
     identity_columns[0].metric("当前售价", _currency_or_missing(identity.get("selling_price")))
     identity_columns[1].metric("建议零售价", _currency_or_missing(identity.get("rrp")))
-    identity_columns[2].metric(
-        "平台可售库存", _display(identity.get("total_stock"))
-    )
+    identity_columns[2].metric("平台可售库存", _display(identity.get("total_stock")))
     identity_columns[3].metric(
         "商品状态", _localized_value(identity.get("status"), OFFER_STATUS_LABELS)
     )
     metric_columns = st.columns(4)
     latest_metric_date = _display(latest.get("metric_date"))
     st.caption(f"当前商品最新可用指标日：{latest_metric_date}")
-    metric_columns[0].metric(
-        "最新可用日下单件数", _number_or_missing(latest.get("ordered_units"))
-    )
+    metric_columns[0].metric("最新可用日下单件数", _number_or_missing(latest.get("ordered_units")))
     metric_columns[1].metric(
         "近7日下单件数",
         _number_or_missing(_calendar_window_sum(history, "ordered_units", days=7)),
     )
-    metric_columns[2].metric(
-        "近30天浏览量", _number_or_missing(latest.get("page_views_30_days"))
-    )
+    metric_columns[2].metric("近30天浏览量", _number_or_missing(latest.get("page_views_30_days")))
     metric_columns[3].metric(
         "近30天转化率", _percentage_or_missing(latest.get("conversion_percentage_30_days"))
     )
-    st.plotly_chart(
-        build_traffic_figure(history), width="stretch", config=PLOTLY_CHART_CONFIG
-    )
-    st.plotly_chart(
-        build_sales_figure(history), width="stretch", config=PLOTLY_CHART_CONFIG
-    )
+    st.plotly_chart(build_traffic_figure(history), width="stretch", config=PLOTLY_CHART_CONFIG)
+    st.plotly_chart(build_sales_figure(history), width="stretch", config=PLOTLY_CHART_CONFIG)
     _effective_units_notice(settings.project_root)
 
 
@@ -399,27 +396,48 @@ def _render_quadrants(
 ) -> None:
     del settings
     st.title("经营四象限")
-    st.caption("使用近30天浏览量与下单件数的分位数边界；缺失任一指标时明确列为未分类。")
+    st.caption(
+        "使用最新近30天浏览量与近7日下单件数进行相对排名；销量为0始终归入低销量侧，"
+        "缺失任一指标时明确列为未分类。"
+    )
     if not _require_dataset(dataset, load_error):
         return
     assert dataset is not None
-    latest = _latest_rows(dataset.product_daily, as_of)
+    latest = build_quadrant_window(dataset.product_daily, as_of, days=7)
     if latest.empty:
         _empty_state("暂无可分类商品", "需要同一截止日期下的商品指标后才能计算四象限。")
         return
-    percentile = st.select_slider("分位数边界", options=[25, 50, 75], value=50)
+    percentile = st.select_slider("分组严格程度（分位数）", options=[25, 50, 75], value=50)
     classified = classify_quadrants(latest, percentile=percentile)
     classified["quadrant"] = classified["quadrant"].fillna("unclassified")
     counts = classified["quadrant"].value_counts()
     columns = st.columns(5)
     for column, (key, label) in zip(columns, QUADRANT_LABELS.items(), strict=True):
         column.metric(label, int(counts.get(key, 0)))
-    st.plotly_chart(
-        build_quadrant_figure(classified), width="stretch", config=PLOTLY_CHART_CONFIG
+    view_boundary = classified.attrs["page_views_boundary"]
+    unit_boundary = classified.attrs["ordered_units_boundary"]
+    view_boundary_label = "暂无" if pd.isna(view_boundary) else str(int(view_boundary))
+    unit_boundary_label = "暂无" if pd.isna(unit_boundary) else str(int(unit_boundary))
+    st.caption(
+        "当前分界：近30天浏览量 ≥ "
+        f"{view_boundary_label}；近7日下单件数 ≥ {unit_boundary_label}。"
+        "图中位置是相对排名，"
+        "鼠标移到商品点上可查看真实数值。"
     )
+    st.plotly_chart(build_quadrant_figure(classified), width="stretch", config=PLOTLY_CHART_CONFIG)
     display = classified.copy()
     display["quadrant"] = display["quadrant"].map(QUADRANT_LABELS).fillna("未分类")
-    _dataframe(display, ["offer_id", "sku", "page_views_30_days", "ordered_units", "quadrant"])
+    display = display.rename(columns={"ordered_units": "ordered_units_7_days"})
+    _dataframe(
+        display,
+        [
+            "offer_id",
+            "sku",
+            "page_views_30_days",
+            "ordered_units_7_days",
+            "quadrant",
+        ],
+    )
 
 
 def _render_anomalies(
@@ -446,8 +464,8 @@ def _render_anomalies(
         format_func=lambda value: ANOMALY_LABELS.get(value, value),
     )
     filtered = anomalies.loc[anomalies["anomaly_type"].isin(selected)].copy()
-    filtered["explanation"] = filtered["anomaly_type"].map(ANOMALY_EXPLANATIONS).fillna(
-        "暂无中文说明"
+    filtered["explanation"] = (
+        filtered["anomaly_type"].map(ANOMALY_EXPLANATIONS).fillna("暂无中文说明")
     )
     st.metric("异常商品数", _unique_count(filtered, "offer_id"))
     _dataframe(
@@ -526,12 +544,9 @@ def _render_nft102_update(
     del dataset, load_error, as_of
     st.title("NFT102 日报更新")
     st.caption(
-        "上传运营同事当天修改完成的电子表格，系统以它为唯一基准生成下一日副本；"
-        "上传文件不会被覆盖。"
+        "上传运营同事当天修改完成的电子表格，系统以它为唯一基准生成下一日副本；上传文件不会被覆盖。"
     )
-    st.info(
-        "使用顺序：运营完成备注并保存 → 上传最终版 → 核对识别日期 → 点击生成 → 下载新表格。"
-    )
+    st.info("使用顺序：运营完成备注并保存 → 上传最终版 → 核对识别日期 → 点击生成 → 下载新表格。")
     uploaded = st.file_uploader(
         "上传运营回传的电子表格",
         type=["xlsx"],
@@ -561,10 +576,7 @@ def _render_nft102_update(
         help="当天订单数会读取该日期前一天的完整销售件数。",
     )
     now_china = datetime.now(ZoneInfo("Asia/Shanghai"))
-    date_is_valid = (
-        report_date > inspection.latest_report_date
-        and report_date <= now_china.date()
-    )
+    date_is_valid = report_date > inspection.latest_report_date and report_date <= now_china.date()
     if report_date <= inspection.latest_report_date:
         st.error("新增日期必须晚于表内最新日期，不能覆盖或重复已有日期。")
     elif report_date > now_china.date():
@@ -575,9 +587,7 @@ def _render_nft102_update(
     if now_china.time() < time(10, 5):
         st.warning("建议中国时间 10:05 后生成，避开平台每日销量切日刷新窗口。")
 
-    st.caption(
-        "生成时会读取平台只读接口，并在项目内存档本次上传基准、输出新表格和核对报告。"
-    )
+    st.caption("生成时会读取平台只读接口，并在项目内存档本次上传基准、输出新表格和核对报告。")
     generate_clicked = st.button(
         "保存基准并生成下一日表格",
         type="primary",
@@ -590,9 +600,7 @@ def _render_nft102_update(
         try:
             saved_baseline = Path(str(st.session_state.get(baseline_key, "")))
             if not saved_baseline.is_file():
-                saved_baseline = persist_nft102_baseline(
-                    settings.project_root, inspection, content
-                )
+                saved_baseline = persist_nft102_baseline(settings.project_root, inspection, content)
                 st.session_state[baseline_key] = str(saved_baseline)
             with st.spinner("正在拉取数据并生成新表格，请勿关闭页面……"):
                 result = generate_nft102_from_baseline(
@@ -696,7 +704,9 @@ def _require_dataset(dataset: DashboardDataset | None, load_error: str | None) -
     if dataset is not None:
         return True
     st.warning(load_error or "本地数据暂不可用。")
-    st.info("请确认数据库已由采集和指标任务创建，且配置目录中的规则文件完整。浏览看板无需设置接口密钥。")
+    st.info(
+        "请确认数据库已由采集和指标任务创建，且配置目录中的规则文件完整。浏览看板无需设置接口密钥。"
+    )
     return False
 
 

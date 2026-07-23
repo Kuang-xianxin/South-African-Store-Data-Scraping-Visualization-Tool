@@ -35,6 +35,7 @@ from takealot_ops.dashboard.labels import (
 from takealot_ops.settings import DashboardSettings, SettingsError
 from takealot_ops.storage.migrations import create_schema
 from takealot_ops.storage.models import CollectionRun, DailyProductMetric
+from takealot_ops.metrics.service import classify_quadrants
 
 
 def _product_rows() -> pd.DataFrame:
@@ -112,7 +113,9 @@ def test_missing_values_remain_plotly_gaps_instead_of_zeroes() -> None:
     traffic = build_traffic_figure(_product_rows())
 
     assert pd.isna(list(sales.data[0].y)[1])
-    assert pd.isna(list(sales.data[1].y)[1])
+    assert len(sales.data) == 1
+    assert sales.layout.yaxis.dtick == 1
+    assert sales.layout.yaxis.tickformat == ",d"
     assert pd.isna(list(traffic.data[0].y)[1])
     assert all(value != 0 for trace in traffic.data for value in trace.y if pd.notna(value))
 
@@ -204,9 +207,7 @@ def test_dashboard_freshness_reads_latest_collection_and_metric_date(
                 error=None,
             )
         )
-        session.add(
-            DailyProductMetric(metric_date=date(2026, 7, 22), offer_id="offer-a")
-        )
+        session.add(DailyProductMetric(metric_date=date(2026, 7, 22), offer_id="offer-a"))
     engine.dispose()
     settings = DashboardSettings(
         project_root=tmp_path,
@@ -219,9 +220,7 @@ def test_dashboard_freshness_reads_latest_collection_and_metric_date(
 
     assert freshness.last_successful_collection_at is not None
     assert freshness.latest_metric_date == date(2026, 7, 22)
-    assert _format_china_datetime(freshness.last_successful_collection_at) == (
-        "2026-07-22 10:10"
-    )
+    assert _format_china_datetime(freshness.last_successful_collection_at) == ("2026-07-22 10:10")
 
 
 def test_dashboard_freshness_is_unknown_before_database_exists(tmp_path: Path) -> None:
@@ -239,20 +238,24 @@ def test_dashboard_freshness_is_unknown_before_database_exists(tmp_path: Path) -
 
 
 def test_quadrant_chart_labels_traffic_axis_accurately() -> None:
-    classified = pd.DataFrame(
-        [
-            {
-                "offer_id": "offer-a",
-                "page_views_30_days": 900,
-                "ordered_units": 3,
-                "quadrant": "star",
-            }
-        ]
+    classified = classify_quadrants(
+        pd.DataFrame(
+            [
+                {
+                    "offer_id": "offer-a",
+                    "page_views_30_days": 900,
+                    "ordered_units": 3,
+                }
+            ]
+        )
     )
 
     figure = build_quadrant_figure(classified)
 
-    assert figure.layout.xaxis.title.text == "近30天浏览量"
+    assert figure.layout.xaxis.title.text == "近30天浏览量相对位置（%）"
+    assert figure.layout.yaxis.title.text == "近7日下单件数相对位置（%）"
+    assert figure.layout.yaxis.tickformat == ",d"
+    assert len(figure.layout.shapes) == 6
 
 
 def test_all_missing_kpi_value_stays_unknown_instead_of_becoming_zero() -> None:

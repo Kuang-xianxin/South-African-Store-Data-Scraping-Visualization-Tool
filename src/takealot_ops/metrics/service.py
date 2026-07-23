@@ -237,9 +237,7 @@ class MetricService:
         }
         product_rows: list[dict[str, Any]] = []
         for metric_date in _date_range(start, end):
-            active_batch = _batch_snapshots(
-                snapshots, _latest_scope(scope_dates, metric_date)
-            )
+            active_batch = _batch_snapshots(snapshots, _latest_scope(scope_dates, metric_date))
             known_by_date = {snapshot.offer_id: snapshot for snapshot in active_batch}
             daily_sale_ids = {
                 offer_id for sales_day, offer_id in aggregates if sales_day == metric_date
@@ -270,9 +268,7 @@ class MetricService:
             unknown_statuses,
             {
                 snapshot.offer_id: snapshot
-                for snapshot in _batch_snapshots(
-                    snapshots, _latest_scope(scope_dates, end)
-                )
+                for snapshot in _batch_snapshots(snapshots, _latest_scope(scope_dates, end))
             },
             created_at,
         )
@@ -297,7 +293,11 @@ class MetricService:
 
         for metric_date in _date_range(start, end):
             dated_rows = rows_by_date.get(metric_date, [])
-            views = [float(row["page_views_30_days"]) for row in dated_rows if row["page_views_30_days"] is not None]
+            views = [
+                float(row["page_views_30_days"])
+                for row in dated_rows
+                if row["page_views_30_days"] is not None
+            ]
             conversions = [
                 float(row["conversion_percentage_30_days"])
                 for row in dated_rows
@@ -305,15 +305,13 @@ class MetricService:
             ]
             high_views = _quantile(views, self._rules.high_views_percentile)
             low_views = _quantile(views, self._rules.low_views_percentile)
-            low_conversion = _quantile(
-                conversions, self._rules.low_conversion_percentile
-            )
-            high_conversion = _quantile(
-                conversions, self._rules.high_conversion_percentile
-            )
+            low_conversion = _quantile(conversions, self._rules.low_conversion_percentile)
+            high_conversion = _quantile(conversions, self._rules.high_conversion_percentile)
             for row in dated_rows:
                 offer_id = str(row["offer_id"])
-                today_units = aggregates.get((metric_date, offer_id), _SaleAggregate()).ordered_units
+                today_units = aggregates.get(
+                    (metric_date, offer_id), _SaleAggregate()
+                ).ordered_units
                 drop_baseline = _average_units(
                     aggregates,
                     offer_id,
@@ -439,8 +437,17 @@ def classify_quadrants(frame: pd.DataFrame, percentile: int = 50) -> pd.DataFram
         return result
     view_values = pd.to_numeric(result["page_views_30_days"], errors="coerce")
     unit_values = pd.to_numeric(result["ordered_units"], errors="coerce")
-    view_boundary = float(view_values.quantile(percentile / 100))
-    unit_boundary = float(unit_values.quantile(percentile / 100))
+    view_boundary = float(view_values.dropna().quantile(percentile / 100, interpolation="lower"))
+    positive_units = unit_values.loc[unit_values > 0].dropna()
+    unit_boundary = (
+        float(positive_units.quantile(percentile / 100, interpolation="lower"))
+        if not positive_units.empty
+        else 1.0
+    )
+    view_ranks = view_values.rank(method="average", pct=True).mul(100)
+    unit_ranks = pd.Series(float("nan"), index=result.index, dtype="float64")
+    unit_ranks.loc[unit_values.notna() & (unit_values <= 0)] = 0.0
+    unit_ranks.loc[positive_units.index] = positive_units.rank(method="average", pct=True).mul(100)
     quadrants: list[str] = []
     for view_value, unit_value in zip(view_values, unit_values, strict=True):
         if pd.isna(view_value) or pd.isna(unit_value):
@@ -454,12 +461,57 @@ def classify_quadrants(frame: pd.DataFrame, percentile: int = 50) -> pd.DataFram
         else:
             quadrants.append("optimize")
     result["quadrant"] = quadrants
+    result["page_views_rank"] = view_ranks
+    result["ordered_units_rank"] = unit_ranks
+    view_rank_boundary = view_ranks.loc[view_values >= view_boundary].min()
+    unit_rank_boundary = unit_ranks.loc[unit_values >= unit_boundary].min()
     result.attrs = {
         "page_views_boundary": view_boundary,
         "ordered_units_boundary": unit_boundary,
+        "page_views_rank_boundary": float(view_rank_boundary),
+        "ordered_units_rank_boundary": (
+            float(unit_rank_boundary) if pd.notna(unit_rank_boundary) else 50.0
+        ),
         "percentile": percentile,
     }
     return result
+
+
+def build_quadrant_window(frame: pd.DataFrame, as_of: date, days: int = 7) -> pd.DataFrame:
+    """Combine latest traffic snapshots with calendar-window ordered-unit totals."""
+    required = {"metric_date", "offer_id", "ordered_units", "page_views_30_days"}
+    if frame.empty or not required.issubset(frame.columns):
+        return frame.iloc[0:0].copy()
+    scoped = frame.copy()
+    metric_dates = pd.to_datetime(scoped["metric_date"], errors="coerce").dt.date
+    scoped = scoped.loc[metric_dates <= as_of].copy()
+    metric_dates = metric_dates.loc[scoped.index]
+    if scoped.empty or metric_dates.dropna().empty:
+        return scoped.iloc[0:0].copy()
+    window_end = metric_dates.dropna().max()
+    window_start = window_end - timedelta(days=days - 1)
+    latest = (
+        scoped.assign(_metric_date=metric_dates)
+        .sort_values("_metric_date")
+        .drop_duplicates("offer_id", keep="last")
+        .drop(columns="_metric_date")
+    )
+    window = scoped.loc[(metric_dates >= window_start) & (metric_dates <= window_end)].copy()
+    window["ordered_units"] = pd.to_numeric(window["ordered_units"], errors="coerce")
+    totals = (
+        window.groupby("offer_id")["ordered_units"]
+        .sum(min_count=1)
+        .rename("ordered_units_window")
+        .reset_index()
+    )
+    latest = latest.drop(columns="ordered_units").merge(totals, on="offer_id", how="left")
+    latest = latest.rename(columns={"ordered_units_window": "ordered_units"})
+    latest.attrs = {
+        "window_start": window_start,
+        "window_end": window_end,
+        "window_days": days,
+    }
+    return latest
 
 
 def _product_values(
@@ -484,7 +536,9 @@ def _product_values(
         "sku": (
             snapshot.sku
             if snapshot is not None
-            else current.sku if current is not None else sale_sku
+            else current.sku
+            if current is not None
+            else sale_sku
         ),
         "ordered_units": aggregate.ordered_units,
         "effective_units": aggregate.effective_units,
@@ -648,9 +702,7 @@ def _load_anomaly_rules(path: Path) -> _AnomalyRules:
     traffic = _mapping_value(config, "traffic_conversion")
     return _AnomalyRules(
         drop_baseline_days=_integer_value(drop, "baseline_days"),
-        drop_minimum_baseline=float(
-            _integer_value(drop, "minimum_baseline_daily_quantity")
-        ),
+        drop_minimum_baseline=float(_integer_value(drop, "minimum_baseline_daily_quantity")),
         drop_fraction=_integer_value(drop, "drop_percentage") / 100,
         spike_baseline_days=_integer_value(spike, "baseline_days"),
         spike_minimum_quantity=_integer_value(spike, "minimum_daily_quantity"),
@@ -702,11 +754,7 @@ def _string_list(config: Mapping[str, object], key: str) -> list[str]:
 
 def _product_frame(rows: Sequence[DailyProductMetric]) -> pd.DataFrame:
     values = [
-        {
-            column: _metric_attribute(row, column)
-            for column in PRODUCT_DAILY_COLUMNS
-        }
-        for row in rows
+        {column: _metric_attribute(row, column) for column in PRODUCT_DAILY_COLUMNS} for row in rows
     ]
     return pd.DataFrame(values, columns=PRODUCT_DAILY_COLUMNS)
 
@@ -720,8 +768,7 @@ def _metric_attribute(row: DailyProductMetric, column: str) -> object:
 
 def _offer_frame(rows: Sequence[OfferSnapshot]) -> pd.DataFrame:
     values = [
-        {column: _plain_attribute(row, column) for column in _OFFER_CURRENT_COLUMNS}
-        for row in rows
+        {column: _plain_attribute(row, column) for column in _OFFER_CURRENT_COLUMNS} for row in rows
     ]
     return pd.DataFrame(values, columns=_OFFER_CURRENT_COLUMNS)
 
@@ -741,16 +788,14 @@ def _batch_snapshots(
 
 def _anomaly_frame(rows: Sequence[AnomalyEvent]) -> pd.DataFrame:
     values = [
-        {column: _plain_attribute(row, column) for column in _ANOMALY_COLUMNS}
-        for row in rows
+        {column: _plain_attribute(row, column) for column in _ANOMALY_COLUMNS} for row in rows
     ]
     return pd.DataFrame(values, columns=_ANOMALY_COLUMNS)
 
 
 def _quality_frame(rows: Sequence[DataQualityEvent]) -> pd.DataFrame:
     values = [
-        {column: _plain_attribute(row, column) for column in _QUALITY_COLUMNS}
-        for row in rows
+        {column: _plain_attribute(row, column) for column in _QUALITY_COLUMNS} for row in rows
     ]
     return pd.DataFrame(values, columns=_QUALITY_COLUMNS)
 
@@ -765,10 +810,7 @@ def _plain_attribute(row: object, column: str) -> object:
 def _store_frame(product_daily: pd.DataFrame) -> pd.DataFrame:
     if product_daily.empty:
         return pd.DataFrame(columns=_STORE_DAILY_COLUMNS)
-    grouped = (
-        product_daily.groupby("metric_date", as_index=False)[
-            ["ordered_units", "effective_units", "ordered_revenue"]
-        ]
-        .sum()
-    )
+    grouped = product_daily.groupby("metric_date", as_index=False)[
+        ["ordered_units", "effective_units", "ordered_revenue"]
+    ].sum()
     return pd.DataFrame(grouped, columns=_STORE_DAILY_COLUMNS)
