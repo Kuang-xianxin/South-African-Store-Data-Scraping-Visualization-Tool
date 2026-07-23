@@ -273,3 +273,28 @@ class CompetitorReview(Base):
     review_date: Mapped[str | None] = mapped_column(String(100))
     first_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class CompetitorVariantSnapshot(Base):
+    """One variant's stock result attached to a product collection snapshot."""
+
+    __tablename__ = "competitor_variant_snapshots"
+    __table_args__ = (UniqueConstraint("snapshot_id", "variant_key"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    snapshot_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    plid: Mapped[str] = mapped_column(String(30), nullable=False, index=True)
+    collected_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    variant_key: Mapped[str] = mapped_column(String(500), nullable=False)
+    variant_label: Mapped[str] = mapped_column(Text, nullable=False)
+    url: Mapped[str] = mapped_column(Text, nullable=False)
+    sku: Mapped[str | None] = mapped_column(String(100))
+    seller_id: Mapped[str | None] = mapped_column(String(100))
+    seller_name: Mapped[str | None] = mapped_column(String(255))
+    price: Mapped[Decimal | None] = mapped_column(Numeric(14, 2))
+    stock_status: Mapped[str | None] = mapped_column(String(100))
+    is_leadtime: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    stock_quantity: Mapped[int | None] = mapped_column(Integer)
+    stock_exact: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    stock_method: Mapped[str] = mapped_column(String(100), nullable=False)
+    stock_note: Mapped[str | None] = mapped_column(Text)

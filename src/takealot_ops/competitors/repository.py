@@ -15,11 +15,13 @@ from takealot_ops.competitors.domain import (
     ReviewSummary,
     SalesSignal,
     StockProbeResult,
+    VariantStockObservation,
 )
 from takealot_ops.storage.models import (
     CompetitorReview,
     CompetitorSnapshot,
     CompetitorTarget,
+    CompetitorVariantSnapshot,
 )
 
 
@@ -33,16 +35,28 @@ class CompetitorRepository:
         self,
         product: CompetitorProduct,
     ) -> PreviousObservation | None:
-        row = self._session.scalar(
+        candidates = self._session.scalars(
             select(CompetitorSnapshot)
-            .where(
-                CompetitorSnapshot.plid == product.plid,
-                CompetitorSnapshot.sku == product.sku,
-                CompetitorSnapshot.seller_id == product.seller_id,
-            )
+            .where(CompetitorSnapshot.plid == product.plid)
             .order_by(CompetitorSnapshot.collected_at.desc())
-            .limit(1)
         )
+        current_scope = {
+            (variant.key, variant.sku, variant.seller_id)
+            for variant in product.variants
+        }
+        row: CompetitorSnapshot | None = None
+        for candidate in candidates:
+            prior_scope = {
+                (variant.variant_key, variant.sku or "", variant.seller_id or "")
+                for variant in self._session.scalars(
+                    select(CompetitorVariantSnapshot).where(
+                        CompetitorVariantSnapshot.snapshot_id == candidate.id
+                    )
+                )
+            }
+            if prior_scope == current_scope:
+                row = candidate
+                break
         if row is None:
             return None
         return PreviousObservation(
@@ -60,6 +74,7 @@ class CompetitorRepository:
         reviews: list[CompetitorReviewRecord],
         review_summary: ReviewSummary,
         stock: StockProbeResult,
+        variant_stocks: list[VariantStockObservation],
         lifetime_sales: tuple[int, int],
         signal: SalesSignal,
         collected_at: datetime,
@@ -125,6 +140,30 @@ class CompetitorRepository:
             ],
         )
         self._session.add(snapshot)
+        self._session.flush()
+        for observation in variant_stocks:
+            variant = observation.variant
+            variant_stock = observation.stock
+            self._session.add(
+                CompetitorVariantSnapshot(
+                    snapshot_id=snapshot.id,
+                    plid=product.plid,
+                    collected_at=now,
+                    variant_key=variant.key,
+                    variant_label=variant.label,
+                    url=variant.url,
+                    sku=variant.sku,
+                    seller_id=variant.seller_id,
+                    seller_name=variant.seller_name,
+                    price=Decimal(str(variant.price)),
+                    stock_status=variant.stock_status,
+                    is_leadtime=variant.is_leadtime,
+                    stock_quantity=variant_stock.quantity,
+                    stock_exact=variant_stock.exact,
+                    stock_method=variant_stock.method,
+                    stock_note=variant_stock.note,
+                )
+            )
         self._upsert_reviews(product.plid, reviews, now)
         self._session.flush()
         return snapshot

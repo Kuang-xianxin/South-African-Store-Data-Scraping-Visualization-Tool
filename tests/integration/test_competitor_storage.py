@@ -11,6 +11,8 @@ from takealot_ops.competitors.domain import (
     CompetitorOffer,
     CompetitorProduct,
     CompetitorReviewRecord,
+    CompetitorVariant,
+    VariantStockObservation,
     analyze_sales_signal,
     estimate_lifetime_sales,
     summarize_reviews,
@@ -50,6 +52,21 @@ def test_competitor_observation_persists_snapshot_and_deduplicated_reviews(
                 stock_status="In stock",
             ),
         ),
+        variants=(
+            CompetitorVariant(
+                key="default",
+                label="默认款",
+                url="https://www.takealot.com/example/PLID72189176",
+                title="Laser Lipo",
+                sku="SKU-1",
+                seller_id="seller-1",
+                seller_name="Seller One",
+                price=6597.0,
+                stock_status="In stock",
+                is_leadtime=False,
+                is_add_to_cart_available=True,
+            ),
+        ),
     )
     reviews = [
         CompetitorReviewRecord(
@@ -74,6 +91,12 @@ def test_competitor_observation_persists_snapshot_and_deduplicated_reviews(
                 reviews=reviews,
                 review_summary=summarize_reviews(reviews),
                 stock=skipped_stock_probe(),
+                variant_stocks=[
+                    VariantStockObservation(
+                        variant=product.variants[0],
+                        stock=skipped_stock_probe(),
+                    )
+                ],
                 lifetime_sales=estimate_lifetime_sales(product.review_count),
                 signal=analyze_sales_signal(
                     previous,
@@ -90,6 +113,8 @@ def test_competitor_observation_persists_snapshot_and_deduplicated_reviews(
     assert len(dataset.current) == 1
     assert len(dataset.history) == 2
     assert len(dataset.reviews) == 1
+    assert len(dataset.variants) == 2
+    assert dataset.variants.iloc[0]["变体"] == "默认款"
     assert dataset.current.iloc[0]["累计销量估算"] == "20–50"
     assert dataset.current.iloc[0]["趋势判断"] == "暂未观察到净流出"
 

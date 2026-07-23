@@ -7,6 +7,7 @@ import re
 import time
 from collections.abc import Mapping
 from typing import Any
+from urllib.parse import parse_qsl, urlencode, urlsplit
 
 import httpx
 
@@ -14,6 +15,7 @@ from takealot_ops.competitors.domain import (
     CompetitorOffer,
     CompetitorProduct,
     CompetitorReviewRecord,
+    CompetitorVariant,
 )
 
 
@@ -67,16 +69,35 @@ class CompetitorPublicClient:
     def fetch_product(self, url: str) -> CompetitorProduct:
         plid = extract_plid(url)
         detail = self._get_json(f"{PUBLIC_API_BASE}/product-details/PLID{plid}")
-        buybox = _mapping(detail.get("buybox"))
-        items = _mapping_list(buybox.get("items"))
-        selected = next((item for item in items if item.get("is_selected")), None)
-        offer = selected or (items[0] if items else None)
-        if offer is None:
-            raise ValueError("商品当前没有可用报价，无法继续采集")
-
-        seller = _mapping(detail.get("seller_detail"))
-        compact_offers = [_offer_record(offer, seller, selected=True)]
-        other_offers = _mapping(detail.get("other_offers"))
+        variant_details = self._fetch_variant_details(detail)
+        variants = tuple(_variant_record(item, plid) for item in variant_details)
+        requested_key = _variant_key(url)
+        selected_index = next(
+            (
+                index
+                for index, item in enumerate(variant_details)
+                if requested_key
+                and _variant_key(str(item.get("desktop_href") or "")) == requested_key
+            ),
+            -1,
+        )
+        if selected_index < 0:
+            selected_index = next(
+                (
+                    index
+                    for index, item in enumerate(variant_details)
+                    if bool(_selected_offer(item).get("is_add_to_cart_available"))
+                ),
+                0,
+            )
+        selected_detail = variant_details[selected_index]
+        selected_variant = variants[selected_index]
+        offer = _selected_offer(selected_detail)
+        seller = _mapping(selected_detail.get("seller_detail"))
+        compact_offers: list[CompetitorOffer] = []
+        if offer:
+            compact_offers.append(_offer_record(offer, seller, selected=True))
+        other_offers = _mapping(selected_detail.get("other_offers"))
         for condition in _mapping_list(other_offers.get("conditions")):
             for other_offer in _mapping_list(condition.get("items")):
                 compact_offers.append(
@@ -91,27 +112,57 @@ class CompetitorPublicClient:
         gallery = _mapping(detail.get("gallery"))
         images = gallery.get("images")
         image_url = str(images[0]).replace("{size}", "zoom") if isinstance(images, list) and images else None
-        stock = _mapping(offer.get("stock_availability"))
-        is_leadtime = bool(stock.get("is_leadtime"))
         return CompetitorProduct(
             plid=plid,
             url=str(detail.get("desktop_href") or url),
             title=str(core.get("title") or detail.get("title") or f"PLID{plid}"),
             image_url=image_url,
-            sku=str(offer.get("sku") or buybox.get("tsin") or ""),
-            seller_id=str(seller.get("seller_id") or ""),
-            seller_name=str(seller.get("display_name") or "未知卖家"),
-            price=_number(offer.get("price")),
-            stock_status=(
-                "没货（非平台仓/供应商调货）"
-                if is_leadtime
-                else str(stock.get("status") or "未知")
-            ),
-            is_leadtime=is_leadtime,
+            sku=selected_variant.sku,
+            seller_id=selected_variant.seller_id,
+            seller_name=selected_variant.seller_name,
+            price=selected_variant.price,
+            stock_status=selected_variant.stock_status,
+            is_leadtime=selected_variant.is_leadtime,
             review_count=int(_number(reviews.get("count") or core.get("reviews"))),
             rating=_number(reviews.get("star_rating") or core.get("star_rating")),
             offers=tuple(compact_offers),
+            variants=variants,
         )
+
+    def _fetch_variant_details(
+        self,
+        root: Mapping[str, Any],
+    ) -> list[Mapping[str, Any]]:
+        """Resolve every selector combination while keeping one product-level PLID."""
+        queue: list[Mapping[str, Any]] = [root]
+        terminal: dict[str, Mapping[str, Any]] = {}
+        visited: set[str] = set()
+        while queue:
+            detail = queue.pop(0)
+            detail_url = str(detail.get("desktop_href") or "")
+            state_key = _variant_key(detail_url) or "__default__"
+            selectors = _mapping_list(_mapping(detail.get("variants")).get("selectors"))
+            pending = next(
+                (
+                    selector
+                    for selector in selectors
+                    if not any(
+                        bool(option.get("is_selected"))
+                        for option in _mapping_list(selector.get("options"))
+                    )
+                ),
+                None,
+            )
+            if pending is None:
+                terminal[state_key] = detail
+                continue
+            for option in _mapping_list(pending.get("options")):
+                href = str(option.get("href") or "")
+                if not href or href in visited:
+                    continue
+                visited.add(href)
+                queue.append(self._get_json(href))
+        return list(terminal.values()) or [root]
 
     def fetch_all_reviews(self, plid: str, *, page_delay_seconds: float = 0.1) -> list[CompetitorReviewRecord]:
         first = self._get_json(f"{PUBLIC_API_BASE}/product-reviews/plid/{plid}?page=0")
@@ -186,6 +237,65 @@ def _offer_record(
         price=_number(offer.get("price")),
         stock_status=str(stock.get("status") or "未知"),
     )
+
+
+def _selected_offer(detail: Mapping[str, Any]) -> Mapping[str, Any]:
+    buybox = _mapping(detail.get("buybox"))
+    items = _mapping_list(buybox.get("items"))
+    return next(
+        (item for item in items if item.get("is_selected")),
+        items[0] if items else {},
+    )
+
+
+def _variant_record(detail: Mapping[str, Any], plid: str) -> CompetitorVariant:
+    buybox = _mapping(detail.get("buybox"))
+    offer = _selected_offer(detail)
+    seller = _mapping(detail.get("seller_detail"))
+    stock = _mapping(offer.get("stock_availability"))
+    is_leadtime = bool(stock.get("is_leadtime"))
+    selected_values: list[str] = []
+    selectors = _mapping_list(_mapping(detail.get("variants")).get("selectors"))
+    for selector in selectors:
+        selected = next(
+            (
+                option
+                for option in _mapping_list(selector.get("options"))
+                if option.get("is_selected")
+            ),
+            None,
+        )
+        if selected is not None:
+            title = str(selector.get("title") or selector.get("selector_type") or "选项")
+            selected_values.append(f"{title}：{selected.get('value') or ''}")
+    url = str(detail.get("desktop_href") or f"https://www.takealot.com/PLID{plid}")
+    return CompetitorVariant(
+        key=_variant_key(url) or "default",
+        label=" / ".join(selected_values) if selected_values else "默认款",
+        url=url,
+        title=str(detail.get("title") or f"PLID{plid}"),
+        sku=str(offer.get("sku") or buybox.get("tsin") or ""),
+        seller_id=str(seller.get("seller_id") or ""),
+        seller_name=str(seller.get("display_name") or "未知卖家"),
+        price=_number(offer.get("price")),
+        stock_status=(
+            "没货（非平台仓/供应商调货）"
+            if is_leadtime
+            else str(stock.get("status") or "未知")
+        ),
+        is_leadtime=is_leadtime,
+        is_add_to_cart_available=bool(offer.get("is_add_to_cart_available")),
+    )
+
+
+def _variant_key(url: str) -> str:
+    parts = urlsplit(url)
+    values = [
+        (key, value)
+        for key, value in parse_qsl(parts.query, keep_blank_values=True)
+        if key.lower() != "platform"
+    ]
+    return urlencode(sorted(values))
 
 
 def _mapping(value: object) -> Mapping[str, Any]:

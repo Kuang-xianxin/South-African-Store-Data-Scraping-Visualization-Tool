@@ -14,20 +14,21 @@ from takealot_ops.competitors.api import CompetitorPublicClient, extract_plid
 from takealot_ops.competitors.domain import (
     CompetitorProduct,
     StockProbeResult,
+    VariantStockObservation,
     analyze_sales_signal,
     estimate_lifetime_sales,
     summarize_reviews,
 )
 from takealot_ops.competitors.repository import CompetitorRepository
 from takealot_ops.competitors.stock import (
-    non_platform_stock_probe,
-    probe_stock,
+    probe_variant_stocks,
     skipped_stock_probe,
 )
 from takealot_ops.storage.models import (
     CompetitorReview,
     CompetitorSnapshot,
     CompetitorTarget,
+    CompetitorVariantSnapshot,
 )
 
 
@@ -48,6 +49,7 @@ class CompetitorDataset:
     current: pd.DataFrame
     history: pd.DataFrame
     reviews: pd.DataFrame
+    variants: pd.DataFrame
 
 
 class CompetitorCollector:
@@ -86,11 +88,12 @@ class CompetitorCollector:
         try:
             product = self._client.fetch_product(url)
             reviews = self._client.fetch_all_reviews(product.plid)
-            stock = self._collect_stock(
+            variant_stocks = self._collect_variant_stocks(
                 product,
                 enabled=with_stock_probe,
                 visible_browser=visible_browser,
             )
+            stock = _aggregate_variant_stock(variant_stocks)
             collected_at = datetime.now(UTC)
             with Session(self._engine) as session:
                 repository = CompetitorRepository(session)
@@ -109,6 +112,7 @@ class CompetitorCollector:
                         reviews=reviews,
                         review_summary=summary,
                         stock=stock,
+                        variant_stocks=variant_stocks,
                         lifetime_sales=lifetime_sales,
                         signal=signal,
                         collected_at=collected_at,
@@ -117,7 +121,7 @@ class CompetitorCollector:
                 plid=plid,
                 title=product.title,
                 succeeded=True,
-                message=_collection_message(stock),
+                message=_collection_message(stock, len(variant_stocks)),
             )
         except (OSError, RuntimeError, ValueError, SQLAlchemyError) as exc:
             return CompetitorCollectionResult(
@@ -127,30 +131,32 @@ class CompetitorCollector:
                 message=str(exc),
             )
 
-    def _collect_stock(
+    def _collect_variant_stocks(
         self,
         product: CompetitorProduct,
         *,
         enabled: bool,
         visible_browser: bool,
-    ) -> StockProbeResult:
-        if product.is_leadtime:
-            return non_platform_stock_probe()
+    ) -> list[VariantStockObservation]:
         if not enabled:
-            return skipped_stock_probe()
+            return [
+                VariantStockObservation(variant=variant, stock=skipped_stock_probe())
+                for variant in product.variants
+            ]
         try:
-            return probe_stock(
+            return probe_variant_stocks(
                 product,
                 profile_dir=self._project_root / "data" / "competitor-browser-profile",
                 visible=visible_browser,
             )
         except (OSError, RuntimeError) as exc:
-            return StockProbeResult(
-                quantity=None,
-                exact=False,
-                method="failed",
-                note=str(exc),
+            failed = StockProbeResult(
+                quantity=None, exact=False, method="failed", note=str(exc)
             )
+            return [
+                VariantStockObservation(variant=variant, stock=failed)
+                for variant in product.variants
+            ]
 
 
 def parse_competitor_urls(raw: str) -> list[str]:
@@ -165,12 +171,44 @@ def parse_competitor_urls(raw: str) -> list[str]:
     return list(by_plid.values())
 
 
-def _collection_message(stock: StockProbeResult) -> str:
+def _aggregate_variant_stock(
+    observations: list[VariantStockObservation],
+) -> StockProbeResult:
+    if not observations:
+        return StockProbeResult(
+            quantity=None,
+            exact=False,
+            method="failed",
+            note="公开接口没有返回可识别的变体。",
+        )
+    stocks = [item.stock for item in observations]
+    if all(stock.method == "skipped" for stock in stocks):
+        return skipped_stock_probe()
+    quantities = [stock.quantity for stock in stocks]
+    quantity = (
+        sum(value for value in quantities if value is not None)
+        if all(value is not None for value in quantities)
+        else None
+    )
+    exact = quantity is not None and all(stock.exact for stock in stocks)
+    all_unavailable = all(
+        stock.method in {"not-platform-stock", "out-of-stock"} for stock in stocks
+    )
+    return StockProbeResult(
+        quantity=quantity,
+        exact=exact,
+        method="all-variants-out-of-stock" if all_unavailable else "variant-aggregate",
+        note=(
+            f"汇总 {len(observations)} 个变体的平台仓有效库存；"
+            "供应商调货与长时效到货按0计。"
+        ),
+    )
+
+
+def _collection_message(stock: StockProbeResult, variant_count: int) -> str:
     if stock.method == "failed":
         return f"公开数据已保存；库存探测未取得：{stock.note}"
-    if stock.method == "not-platform-stock":
-        return "采集成功；供应商调货/长时效到货不计平台仓库存，已标记没货"
-    return "采集成功"
+    return f"采集成功；已记录 {variant_count} 个变体，评论按商品共用一份"
 
 
 def load_competitor_dataset(engine: Engine) -> CompetitorDataset:
@@ -198,8 +236,18 @@ def load_competitor_dataset(engine: Engine) -> CompetitorDataset:
                     )
                 )
             )
+            variants = list(
+                session.scalars(
+                    select(CompetitorVariantSnapshot).order_by(
+                        CompetitorVariantSnapshot.collected_at.desc(),
+                        CompetitorVariantSnapshot.id.asc(),
+                    )
+                )
+            )
     except SQLAlchemyError:
-        return CompetitorDataset(pd.DataFrame(), pd.DataFrame(), pd.DataFrame())
+        return CompetitorDataset(
+            pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+        )
 
     latest_by_plid: dict[str, CompetitorSnapshot] = {}
     for snapshot in snapshots:
@@ -222,12 +270,18 @@ def load_competitor_dataset(engine: Engine) -> CompetitorDataset:
             for row in reviews
         ]
     )
-    return CompetitorDataset(current=current, history=history, reviews=review_frame)
+    variant_frame = pd.DataFrame([_variant_row(row) for row in variants])
+    return CompetitorDataset(
+        current=current,
+        history=history,
+        reviews=review_frame,
+        variants=variant_frame,
+    )
 
 
 def _snapshot_row(row: CompetitorSnapshot) -> dict[str, object]:
     stock_text = "未探测"
-    if row.stock_method == "not-platform-stock":
+    if row.stock_method in {"not-platform-stock", "all-variants-out-of-stock"}:
         stock_text = "没货"
     elif row.stock_quantity is not None:
         stock_text = (
@@ -264,5 +318,34 @@ def _snapshot_row(row: CompetitorSnapshot) -> dict[str, object]:
         "新增评论": row.review_delta,
         "趋势判断": row.trend_label,
         "判断说明": row.trend_note,
+        "链接": row.url,
+    }
+
+
+def _variant_row(row: CompetitorVariantSnapshot) -> dict[str, object]:
+    stock_text = "未探测"
+    if row.stock_method in {"not-platform-stock", "out-of-stock"}:
+        stock_text = "没货"
+    elif row.stock_quantity is not None:
+        stock_text = (
+            str(row.stock_quantity)
+            if row.stock_exact
+            else f"至少{row.stock_quantity}"
+        )
+    return {
+        "plid": row.plid,
+        "快照ID": row.snapshot_id,
+        "采集时间": row.collected_at,
+        "变体键": row.variant_key,
+        "变体": row.variant_label,
+        "SKU": row.sku,
+        "卖家": row.seller_name,
+        "价格": float(row.price) if row.price is not None else None,
+        "库存": stock_text,
+        "库存数量": row.stock_quantity,
+        "库存精确": row.stock_exact,
+        "库存方式": row.stock_method,
+        "库存说明": row.stock_note,
+        "非平台仓": row.is_leadtime,
         "链接": row.url,
     }

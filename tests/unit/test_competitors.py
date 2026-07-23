@@ -164,8 +164,100 @@ def test_public_client_parses_product_offers_and_all_review_pages() -> None:
     assert product.is_leadtime is True
     assert product.stock_status == "没货（非平台仓/供应商调货）"
     assert len(product.offers) == 2
+    assert len(product.variants) == 1
+    assert product.variants[0].label == "默认款"
     assert product.image_url == "https://img/zoom.jpg"
     assert [review.rating for review in reviews] == [2, 5]
+
+
+def test_public_client_enumerates_variants_under_one_plid() -> None:
+    def variant_detail(size: str, *, available: bool) -> dict[str, object]:
+        return {
+            "title": f"Brace - {size}",
+            "desktop_href": f"https://www.takealot.com/brace/PLID96909926?size={size}",
+            "buybox": {
+                "tsin": f"TSIN-{size}",
+                "items": [
+                    {
+                        "is_selected": True,
+                        "is_add_to_cart_available": available,
+                        "sku": f"SKU-{size}",
+                        "price": 100,
+                        "stock_availability": {"status": "In stock"},
+                    }
+                ],
+            },
+            "variants": {
+                "selectors": [
+                    {
+                        "title": "Size",
+                        "options": [
+                            {
+                                "value": value,
+                                "is_selected": value == size,
+                                "href": (
+                                    "https://api.takealot.com/rest/v-1-13-0/"
+                                    f"product-details/PLID96909926?size={value}"
+                                ),
+                            }
+                            for value in ("Right", "Left")
+                        ],
+                    }
+                ]
+            },
+        }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        size = request.url.params.get("size")
+        if size:
+            return httpx.Response(
+                200,
+                json=variant_detail(size, available=size == "Right"),
+            )
+        return httpx.Response(
+            200,
+            json={
+                "title": "Brace",
+                "desktop_href": "https://www.takealot.com/brace/PLID96909926",
+                "core": {"title": "Brace"},
+                "reviews": {"count": 8, "star_rating": 4.2},
+                "variants": {
+                    "selectors": [
+                        {
+                            "title": "Size",
+                            "options": [
+                                {
+                                    "value": value,
+                                    "is_selected": False,
+                                    "href": (
+                                        "https://api.takealot.com/rest/v-1-13-0/"
+                                        f"product-details/PLID96909926?size={value}"
+                                    ),
+                                }
+                                for value in ("Right", "Left")
+                            ],
+                        }
+                    ]
+                },
+            },
+        )
+
+    with CompetitorPublicClient(transport=httpx.MockTransport(handler)) as client:
+        product = client.fetch_product(
+            "https://www.takealot.com/brace/PLID96909926?size=Left"
+        )
+
+    assert product.plid == "96909926"
+    assert product.title == "Brace"
+    assert [variant.label for variant in product.variants] == [
+        "Size：Right",
+        "Size：Left",
+    ]
+    assert [variant.sku for variant in product.variants] == [
+        "SKU-Right",
+        "SKU-Left",
+    ]
+    assert product.sku == "SKU-Left"
 
 
 def test_parse_explicit_warehouse_stock_warning() -> None:

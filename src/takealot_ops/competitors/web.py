@@ -60,13 +60,19 @@ def create_app(project_root: Path | None = None) -> FastAPI:
         dataset = _load_dataset(root)
         history = dataset.history
         reviews = dataset.reviews
+        variants = dataset.variants
         if not history.empty:
             history = history.loc[history["plid"].astype(str) == plid]
         if not reviews.empty:
             reviews = reviews.loc[reviews["plid"].astype(str) == plid]
+        if not variants.empty:
+            variants = variants.loc[variants["plid"].astype(str) == plid]
+            latest_snapshot_id = variants["快照ID"].max()
+            variants = variants.loc[variants["快照ID"] == latest_snapshot_id]
         return {
             "history": _frame_records(history),
             "reviews": _frame_records(reviews),
+            "variants": _frame_records(variants),
         }
 
     @app.post("/api/competitors/collect")
@@ -112,7 +118,9 @@ def _load_dataset(project_root: Path) -> CompetitorDataset:
     settings = DashboardSettings.from_env(project_root)
     database_path = _sqlite_database_path(settings.database_url)
     if database_path is not None and not database_path.exists():
-        return CompetitorDataset(pd.DataFrame(), pd.DataFrame(), pd.DataFrame())
+        return CompetitorDataset(
+            pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+        )
     engine = create_engine(settings.database_url)
     if engine.dialect.name == "sqlite":
         @event.listens_for(engine, "connect")

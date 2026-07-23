@@ -9,7 +9,12 @@ from pathlib import Path
 from playwright.sync_api import Error as PlaywrightError
 from playwright.sync_api import Locator, Page, sync_playwright
 
-from takealot_ops.competitors.domain import CompetitorProduct, StockProbeResult
+from takealot_ops.competitors.domain import (
+    CompetitorProduct,
+    CompetitorVariant,
+    StockProbeResult,
+    VariantStockObservation,
+)
 
 
 BROWSER_PATHS = (
@@ -40,9 +45,19 @@ def non_platform_stock_probe() -> StockProbeResult:
     """Return the excluded state for supplier/lead-time stock."""
     return StockProbeResult(
         quantity=0,
-        exact=False,
+        exact=True,
         method="not-platform-stock",
         note="商品为供应商调货/长时效到货，不计入平台仓有效库存，已标记没货。",
+    )
+
+
+def unavailable_stock_probe() -> StockProbeResult:
+    """Return an exact effective zero when the variant cannot be added to cart."""
+    return StockProbeResult(
+        quantity=0,
+        exact=True,
+        method="out-of-stock",
+        note="该变体当前不可加入购物车，已标记平台仓没货。",
     )
 
 
@@ -69,27 +84,11 @@ def probe_stock(
         )
         page = context.pages[0] if context.pages else context.new_page()
         try:
-            _clear_isolated_cart(page)
-            _goto(page, product.url)
-            _wait_for_product(page, product.title)
-            add_buttons = page.locator("button").filter(has_text="Add to Cart")
-            clicked = False
-            for index in range(add_buttons.count()):
-                button = add_buttons.nth(index)
-                if button.is_visible():
-                    button.click()
-                    clicked = True
-                    break
-            if not clicked:
-                raise RuntimeError("商品页的 Add to Cart 按钮当前不可见")
-
-            _goto(page, "https://www.takealot.com/cart")
-            quantity, exact, note = _find_exact_quantity(page, product)
-            return StockProbeResult(
-                quantity=quantity,
-                exact=exact,
-                method="anonymous-cart-limit",
-                note=note,
+            return _probe_page_stock(
+                page,
+                plid=product.plid,
+                url=product.url,
+                title=product.title,
             )
         finally:
             try:
@@ -98,6 +97,102 @@ def probe_stock(
                 # The isolated profile is cleared again before the next probe.
                 pass
             context.close()
+
+
+def probe_variant_stocks(
+    product: CompetitorProduct,
+    *,
+    profile_dir: Path,
+    visible: bool = False,
+) -> list[VariantStockObservation]:
+    """Probe every purchasable variant in one isolated browser session."""
+    results: dict[str, StockProbeResult] = {}
+    purchasable: list[CompetitorVariant] = []
+    for variant in product.variants:
+        if variant.is_leadtime:
+            results[variant.key] = non_platform_stock_probe()
+        elif not variant.is_add_to_cart_available:
+            results[variant.key] = unavailable_stock_probe()
+        else:
+            purchasable.append(variant)
+
+    if purchasable:
+        executable = _find_browser_executable()
+        profile_dir.mkdir(parents=True, exist_ok=True)
+        with sync_playwright() as playwright:
+            context = playwright.chromium.launch_persistent_context(
+                str(profile_dir),
+                executable_path=str(executable),
+                headless=False,
+                locale="en-ZA",
+                viewport={"width": 1365, "height": 900},
+                args=[
+                    "--window-position=100,100"
+                    if visible
+                    else "--window-position=-32000,-32000",
+                    "--disable-background-timer-throttling",
+                ],
+            )
+            page = context.pages[0] if context.pages else context.new_page()
+            try:
+                for variant in purchasable:
+                    try:
+                        results[variant.key] = _probe_page_stock(
+                            page,
+                            plid=product.plid,
+                            url=variant.url,
+                            title=variant.title,
+                        )
+                    except (OSError, RuntimeError, PlaywrightError) as exc:
+                        results[variant.key] = StockProbeResult(
+                            quantity=None,
+                            exact=False,
+                            method="failed",
+                            note=str(exc),
+                        )
+                    finally:
+                        try:
+                            _clear_isolated_cart(page)
+                        except Exception:
+                            pass
+            finally:
+                context.close()
+
+    return [
+        VariantStockObservation(variant=variant, stock=results[variant.key])
+        for variant in product.variants
+    ]
+
+
+def _probe_page_stock(
+    page: Page,
+    *,
+    plid: str,
+    url: str,
+    title: str,
+) -> StockProbeResult:
+    _clear_isolated_cart(page)
+    _goto(page, url)
+    _wait_for_product(page, title)
+    add_buttons = page.locator("button").filter(has_text="Add to Cart")
+    clicked = False
+    for index in range(add_buttons.count()):
+        button = add_buttons.nth(index)
+        if button.is_visible():
+            button.click()
+            clicked = True
+            break
+    if not clicked:
+        raise RuntimeError("商品页的 Add to Cart 按钮当前不可见")
+
+    _goto(page, "https://www.takealot.com/cart")
+    quantity, exact, note = _find_exact_quantity(page, plid)
+    return StockProbeResult(
+        quantity=quantity,
+        exact=exact,
+        method="anonymous-cart-limit",
+        note=note,
+    )
 
 
 def _find_browser_executable() -> Path:
@@ -176,12 +271,12 @@ def _choose_quantity(page: Page, combo: Locator, quantity: int) -> bool:
     raise RuntimeError(f"等待数量 {quantity} 的库存校验结果超时")
 
 
-def _find_product_quantity_combo(page: Page, product: CompetitorProduct) -> Locator:
+def _find_product_quantity_combo(page: Page, plid: str) -> Locator:
     deadline = time.monotonic() + 15
     last_count = 0
     while time.monotonic() < deadline:
         product_link = page.locator(
-            f'a[href*="PLID{product.plid}"][title*="details"]:visible'
+            f'a[href*="PLID{plid}"][title*="details"]:visible'
         )
         if product_link.count() >= 1:
             product_row = product_link.first.locator(
@@ -297,9 +392,9 @@ def _submit_custom_quantity(
 
 
 def _find_exact_quantity(
-    page: Page, product: CompetitorProduct
+    page: Page, plid: str
 ) -> tuple[int, bool, str]:
-    combo = _find_product_quantity_combo(page, product)
+    combo = _find_product_quantity_combo(page, plid)
     combo.click()
     numeric_options: list[int] = []
     options = page.locator('[role="option"]:visible')

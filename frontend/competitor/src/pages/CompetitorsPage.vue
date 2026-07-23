@@ -25,7 +25,7 @@ const withStockProbe = ref(true);
 const visibleBrowser = ref(false);
 const competitors = ref<CompetitorItem[]>([]);
 const selectedPlid = ref("");
-const detail = ref<CompetitorDetail>({ history: [], reviews: [] });
+const detail = ref<CompetitorDetail>({ history: [], reviews: [], variants: [] });
 const loading = ref(true);
 const collecting = ref(false);
 const completed = ref(0);
@@ -71,7 +71,7 @@ onMounted(loadOverview);
 
 watch(selectedPlid, async (plid) => {
   if (!plid) {
-    detail.value = { history: [], reviews: [] };
+    detail.value = { history: [], reviews: [], variants: [] };
     return;
   }
   detail.value = await fetchCompetitorDetail(plid);
@@ -189,7 +189,7 @@ function reviewTone(stars: number) {
           <span class="switch"></span>
           <span>
             <strong>匿名购物车库存探测</strong>
-            <small>测试当前卖家与 SKU 的可售上限，不进入结算</small>
+            <small>逐个测试所有变体的当前卖家与 SKU，不进入结算</small>
           </span>
         </label>
         <label class="switch-row compact">
@@ -341,6 +341,63 @@ function reviewTone(stars: number) {
         </article>
       </section>
 
+      <section class="panel variant-panel">
+        <div class="section-heading">
+          <div>
+            <p class="section-kicker">VARIANT INVENTORY</p>
+            <h2>各变体库存</h2>
+          </div>
+          <span>{{ detail.variants.length }} 个变体 · 评论共用商品数据</span>
+        </div>
+        <div v-if="!detail.variants.length" class="empty-state slim">
+          这条历史快照尚无变体明细，重新采集后会逐个显示。
+        </div>
+        <div v-else class="table-wrap">
+          <table class="variant-table">
+            <thead>
+              <tr>
+                <th>变体</th>
+                <th>平台 SKU</th>
+                <th>卖家</th>
+                <th>价格</th>
+                <th>平台仓库存</th>
+                <th>说明</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="variant in detail.variants" :key="variant.变体键">
+                <td>
+                  <a :href="variant.链接" target="_blank" rel="noreferrer">
+                    {{ variant.变体 }}
+                  </a>
+                </td>
+                <td>{{ variant.SKU || "—" }}</td>
+                <td>{{ variant.卖家 || "未知卖家" }}</td>
+                <td>{{ formatCurrency(variant.价格) }}</td>
+                <td>
+                  <span
+                    class="stock-pill"
+                    :class="{
+                      exact: variant.库存精确,
+                      unavailable: variant.库存 === '没货',
+                    }"
+                  >
+                    {{ variant.库存 }}
+                  </span>
+                </td>
+                <td>
+                  <small>{{ variant.库存说明 || "—" }}</small>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p class="method-note">
+          库存按变体分别探测；供应商调货、长时效到货和当前不可购买的变体按平台仓没货处理。
+          评论按 PLID 商品维度共用，不因变体重复采集或重复计数。
+        </p>
+      </section>
+
       <section class="panel history-panel">
         <div class="section-heading">
           <div>
@@ -396,7 +453,7 @@ function reviewTone(stars: number) {
     </template>
 
     <footer class="module-footer">
-      库存是隔离匿名会话的购物车可售上限；评论可能跨卖家与变体。所有估算均需结合连续快照判断。
+      库存是各变体在隔离匿名会话中的购物车可售上限；评论按商品共用。所有估算均需结合连续快照判断。
     </footer>
   </div>
 </template>

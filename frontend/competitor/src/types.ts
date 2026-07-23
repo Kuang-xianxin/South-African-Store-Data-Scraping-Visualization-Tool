@@ -32,9 +32,28 @@ export interface ReviewItem {
   评论人: string | null;
 }
 
+export interface CompetitorVariantItem {
+  plid: string;
+  快照ID: number;
+  采集时间: string;
+  变体键: string;
+  变体: string;
+  SKU: string | null;
+  卖家: string | null;
+  价格: number | null;
+  库存: string;
+  库存数量: number | null;
+  库存精确: boolean;
+  库存方式: string;
+  库存说明: string | null;
+  非平台仓: boolean;
+  链接: string;
+}
+
 export interface CompetitorDetail {
   history: CompetitorItem[];
   reviews: ReviewItem[];
+  variants: CompetitorVariantItem[];
 }
 
 export interface CollectResult {

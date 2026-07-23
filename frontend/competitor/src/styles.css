@@ -318,6 +318,7 @@ textarea:focus {
 }
 
 .overview,
+.variant-panel,
 .history-panel,
 .reviews-panel {
   padding: 26px;
@@ -548,8 +549,28 @@ td small {
 }
 
 .history-panel,
+.variant-panel,
 .reviews-panel {
   margin-top: 18px;
+}
+
+.variant-table tbody tr {
+  cursor: default;
+}
+
+.variant-table td:first-child {
+  min-width: 190px;
+}
+
+.variant-table a {
+  color: var(--green);
+  font-weight: 700;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 3px;
+}
+
+.variant-table td:last-child {
+  min-width: 260px;
 }
 
 .timeline {
@@ -704,6 +725,7 @@ footer {
 
   .collector,
   .overview,
+  .variant-panel,
   .history-panel,
   .reviews-panel,
   .decision-card,
@@ -1849,6 +1871,7 @@ button {
 }
 
 .competitor-module .overview,
+.competitor-module .variant-panel,
 .competitor-module .history-panel,
 .competitor-module .reviews-panel {
   margin-top: 0;

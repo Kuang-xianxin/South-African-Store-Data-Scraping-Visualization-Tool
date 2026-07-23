@@ -24,6 +24,23 @@ class CompetitorOffer:
 
 
 @dataclass(frozen=True)
+class CompetitorVariant:
+    """One purchasable selector combination under a product PLID."""
+
+    key: str
+    label: str
+    url: str
+    title: str
+    sku: str
+    seller_id: str
+    seller_name: str
+    price: float
+    stock_status: str
+    is_leadtime: bool
+    is_add_to_cart_available: bool
+
+
+@dataclass(frozen=True)
 class CompetitorProduct:
     """Public product fields required by the MVP."""
 
@@ -40,6 +57,7 @@ class CompetitorProduct:
     review_count: int
     rating: float
     offers: tuple[CompetitorOffer, ...]
+    variants: tuple[CompetitorVariant, ...]
 
 
 @dataclass(frozen=True)
@@ -72,6 +90,14 @@ class StockProbeResult:
     exact: bool
     method: str
     note: str
+
+
+@dataclass(frozen=True)
+class VariantStockObservation:
+    """One variant and the platform-warehouse stock result collected for it."""
+
+    variant: CompetitorVariant
+    stock: StockProbeResult
 
 
 @dataclass(frozen=True)
