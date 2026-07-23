@@ -6,7 +6,17 @@ from datetime import date, datetime
 from decimal import Decimal
 from typing import Any
 
-from sqlalchemy import JSON, Date, DateTime, Integer, Numeric, String, Text, UniqueConstraint
+from sqlalchemy import (
+    JSON,
+    Boolean,
+    Date,
+    DateTime,
+    Integer,
+    Numeric,
+    String,
+    Text,
+    UniqueConstraint,
+)
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -193,3 +203,73 @@ class DataQualityEvent(Base):
     offer_id: Mapped[str | None] = mapped_column(String(100))
     details: Mapped[dict[str, Any] | None] = mapped_column(JSON)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class CompetitorTarget(Base):
+    """A Takealot product explicitly added to the competitor watch list."""
+
+    __tablename__ = "competitor_targets"
+
+    plid: Mapped[str] = mapped_column(String(30), primary_key=True)
+    url: Mapped[str] = mapped_column(Text, nullable=False)
+    title: Mapped[str | None] = mapped_column(Text)
+    active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class CompetitorSnapshot(Base):
+    """One timestamped competitor observation and bounded sales estimate."""
+
+    __tablename__ = "competitor_snapshots"
+    __table_args__ = (UniqueConstraint("plid", "collected_at"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    plid: Mapped[str] = mapped_column(String(30), nullable=False, index=True)
+    collected_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    url: Mapped[str] = mapped_column(Text, nullable=False)
+    title: Mapped[str] = mapped_column(Text, nullable=False)
+    image_url: Mapped[str | None] = mapped_column(Text)
+    sku: Mapped[str | None] = mapped_column(String(100))
+    seller_id: Mapped[str | None] = mapped_column(String(100))
+    seller_name: Mapped[str | None] = mapped_column(String(255))
+    price: Mapped[Decimal | None] = mapped_column(Numeric(14, 2))
+    stock_status: Mapped[str | None] = mapped_column(String(100))
+    stock_quantity: Mapped[int | None] = mapped_column(Integer)
+    stock_exact: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    stock_method: Mapped[str] = mapped_column(String(100), nullable=False)
+    stock_note: Mapped[str | None] = mapped_column(Text)
+    review_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    fetched_review_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    rating: Mapped[Decimal | None] = mapped_column(Numeric(5, 2))
+    positive_reviews: Mapped[int] = mapped_column(Integer, nullable=False)
+    neutral_reviews: Mapped[int] = mapped_column(Integer, nullable=False)
+    negative_reviews: Mapped[int] = mapped_column(Integer, nullable=False)
+    lifetime_sales_min: Mapped[int] = mapped_column(Integer, nullable=False)
+    lifetime_sales_max: Mapped[int] = mapped_column(Integer, nullable=False)
+    previous_snapshot_id: Mapped[int | None] = mapped_column(Integer)
+    observed_stock_outflow: Mapped[int | None] = mapped_column(Integer)
+    review_delta: Mapped[int | None] = mapped_column(Integer)
+    period_sales_min: Mapped[int | None] = mapped_column(Integer)
+    period_sales_max: Mapped[int | None] = mapped_column(Integer)
+    trend_label: Mapped[str] = mapped_column(String(100), nullable=False)
+    trend_note: Mapped[str] = mapped_column(Text, nullable=False)
+    offers: Mapped[list[dict[str, Any]] | None] = mapped_column(JSON)
+
+
+class CompetitorReview(Base):
+    """Latest known public review body for a watched competitor product."""
+
+    __tablename__ = "competitor_reviews"
+    __table_args__ = (UniqueConstraint("plid", "review_id"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    plid: Mapped[str] = mapped_column(String(30), nullable=False, index=True)
+    review_id: Mapped[str] = mapped_column(String(200), nullable=False)
+    rating: Mapped[int] = mapped_column(Integer, nullable=False)
+    title: Mapped[str | None] = mapped_column(Text)
+    body: Mapped[str | None] = mapped_column(Text)
+    customer_name: Mapped[str | None] = mapped_column(String(255))
+    review_date: Mapped[str | None] = mapped_column(String(100))
+    first_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)

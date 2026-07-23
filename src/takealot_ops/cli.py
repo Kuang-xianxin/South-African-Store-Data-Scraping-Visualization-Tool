@@ -14,7 +14,8 @@ from sqlalchemy.orm import Session
 
 from takealot_ops.api.client import TakealotClient
 from takealot_ops.collectors import collect_offers, collect_sales
-from takealot_ops.dashboard.launcher import launch_dashboard
+from takealot_ops.competitors.service import CompetitorCollector, parse_competitor_urls
+from takealot_ops.dashboard.launcher import launch_dashboard, launch_legacy_dashboard
 from takealot_ops.domain import sast_date
 from takealot_ops.metrics.service import MetricService
 from takealot_ops.quality import verify_quality
@@ -47,6 +48,26 @@ def build_parser() -> argparse.ArgumentParser:
 
     commands.add_parser("daily-run", help="执行每日采集、校验、导出和备份")
     commands.add_parser("dashboard", help="在 127.0.0.1 启动本地看板")
+    commands.add_parser(
+        "dashboard-legacy",
+        help="在 127.0.0.1 启动保留的 Streamlit 旧版看板",
+    )
+
+    competitors = commands.add_parser(
+        "collect-competitors",
+        help="采集一个或多个 Takealot 竞品链接",
+    )
+    competitors.add_argument("urls", nargs="+", help="Takealot 商品链接")
+    competitors.add_argument(
+        "--skip-stock",
+        action="store_true",
+        help="只采集公开商品与评论，不执行匿名购物车库存探测",
+    )
+    competitors.add_argument(
+        "--show-browser",
+        action="store_true",
+        help="在库存探测时显示隔离浏览器窗口",
+    )
 
     verify = commands.add_parser("verify", help="检查数据库完整性和数据质量")
     verify.add_argument("--date", type=_parse_date, help="检查日期 YYYY-MM-DD")
@@ -67,6 +88,17 @@ def main(argv: Sequence[str] | None = None) -> int:
             exit_code = _daily_command(project_root)
         elif args.command == "dashboard":
             exit_code = launch_dashboard(DashboardSettings.from_env(project_root))
+        elif args.command == "dashboard-legacy":
+            exit_code = launch_legacy_dashboard(
+                DashboardSettings.from_env(project_root)
+            )
+        elif args.command == "collect-competitors":
+            exit_code = _collect_competitors_command(
+                project_root,
+                args.urls,
+                skip_stock=args.skip_stock,
+                show_browser=args.show_browser,
+            )
         elif args.command == "verify":
             exit_code = _verify_command(project_root, args.date)
         else:
@@ -168,6 +200,37 @@ def _verify_command(project_root: Path, check_date: date | None) -> int:
         file=sys.stderr,
     )
     return EXIT_QUALITY
+
+
+def _collect_competitors_command(
+    project_root: Path,
+    raw_urls: Sequence[str],
+    *,
+    skip_stock: bool,
+    show_browser: bool,
+) -> int:
+    urls = parse_competitor_urls("\n".join(raw_urls))
+    settings = DashboardSettings.from_env(project_root)
+    engine = create_engine_for_settings(settings)
+    failures = 0
+    try:
+        create_schema(engine)
+        with CompetitorCollector(engine=engine, project_root=project_root) as collector:
+            for index, url in enumerate(urls, start=1):
+                result = collector.collect(
+                    url,
+                    with_stock_probe=not skip_stock,
+                    visible_browser=show_browser,
+                )
+                prefix = f"[{index}/{len(urls)}] PLID{result.plid}"
+                if result.succeeded:
+                    print(f"{prefix}：{result.message}")
+                else:
+                    failures += 1
+                    print(f"{prefix}：{result.message}", file=sys.stderr)
+    finally:
+        engine.dispose()
+    return EXIT_COLLECTION if failures else 0
 
 
 def _metric_service(repository: Repository, project_root: Path) -> MetricService:

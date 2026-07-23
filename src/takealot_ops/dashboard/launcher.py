@@ -1,4 +1,4 @@
-"""Official loopback-only process launcher for the Streamlit dashboard."""
+"""Official loopback-only process launcher for the local ERP."""
 
 from __future__ import annotations
 
@@ -113,11 +113,29 @@ def _run_dashboard_process(command: list[str], **kwargs: Any) -> subprocess.Comp
 def build_dashboard_command(
     settings: DashboardSettings, *, python_executable: str = sys.executable
 ) -> list[str]:
-    """Build the Streamlit command with CLI options that override local config."""
+    """Build the unified loopback-only Vue ERP command."""
+    _validate_launch_settings(settings)
+    return [
+        python_executable,
+        "-m",
+        "uvicorn",
+        "takealot_ops.erp.web:app",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        str(settings.dashboard_port),
+        "--no-access-log",
+    ]
+
+
+def build_legacy_dashboard_command(
+    settings: DashboardSettings, *, python_executable: str = sys.executable
+) -> list[str]:
+    """Build the retained Streamlit fallback command."""
     _validate_launch_settings(settings)
     app_path = settings.project_root / "src" / "takealot_ops" / "dashboard" / "app.py"
     if not app_path.is_file():
-        raise SettingsError(f"未找到本地看板程序：{app_path}")
+        raise SettingsError(f"未找到旧版看板程序：{app_path}")
     return [
         python_executable,
         "-m",
@@ -137,10 +155,25 @@ def launch_dashboard(
     *,
     runner: Runner = _run_dashboard_process,
 ) -> int:
-    """Run the dashboard as a hidden, blocking local Streamlit subprocess."""
+    """Run the unified Vue ERP on the configured loopback port."""
     command = build_dashboard_command(settings)
     completed = runner(
         command,
+        cwd=settings.project_root,
+        check=False,
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+    )
+    return int(completed.returncode)
+
+
+def launch_legacy_dashboard(
+    settings: DashboardSettings,
+    *,
+    runner: Runner = _run_dashboard_process,
+) -> int:
+    """Run the previous Streamlit dashboard as a compatibility fallback."""
+    completed = runner(
+        build_legacy_dashboard_command(settings),
         cwd=settings.project_root,
         check=False,
         creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),

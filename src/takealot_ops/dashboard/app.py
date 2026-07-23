@@ -85,7 +85,6 @@ header[data-testid="stHeader"],
 </style>
 """
 
-
 @dataclass(frozen=True)
 class DashboardFreshness:
     """Latest durable collection and metric timestamps shown to operators."""
@@ -206,7 +205,7 @@ def create_read_only_engine(database_url: str) -> Engine:
 
 
 def main() -> None:
-    """Render the local dashboard; only the NFT102 action invokes collection."""
+    """Render the local dashboard; collection runs only after explicit actions."""
     st.set_page_config(page_title="南非店铺运营看板", page_icon="📊", layout="wide")
     st.markdown(CHINESE_UI_STYLES, unsafe_allow_html=True)
     project_root = Path(os.environ.get("TAKEALOT_PROJECT_ROOT", Path.cwd())).resolve()
@@ -272,6 +271,7 @@ def main() -> None:
         "经营四象限": _render_quadrants,
         "异常商品": _render_anomalies,
         "数据质量": _render_quality,
+        "竞品观察": _render_competitors,
         "NFT102 日报更新": _render_nft102_update,
         "导出中心": _render_exports,
     }
@@ -532,6 +532,28 @@ def _render_quality(
     events = events.copy()
     events["details"] = events.apply(_quality_detail, axis=1)
     _dataframe(events, ["event_date", "event_type", "severity", "offer_id", "details"])
+
+
+def _render_competitors(
+    dataset: DashboardDataset | None,
+    load_error: str | None,
+    settings: DashboardSettings,
+    as_of: date,
+) -> None:
+    del dataset, load_error, as_of
+    st.title("竞品观察")
+    st.caption(
+        "竞品模块使用 Vue + TypeScript 构建，并通过本机接口与当前 SQLite 共用数据。"
+    )
+    st.caption(
+        "页面只连接 127.0.0.1；采集必须在 Vue 页面中明确点击后才会执行。"
+    )
+    competitor_port = (
+        settings.dashboard_port + 1 if settings.dashboard_port < 65535 else 8502
+    )
+    competitor_url = f"http://127.0.0.1:{competitor_port}"
+    st.link_button("在新窗口打开竞品中心", competitor_url, type="primary")
+    st.components.v1.iframe(competitor_url, height=920, scrolling=True)
 
 
 def _render_exports(

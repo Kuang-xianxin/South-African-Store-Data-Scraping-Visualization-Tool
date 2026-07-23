@@ -15,14 +15,18 @@ from typing import Any
 
 import pytest
 
-from takealot_ops.dashboard.launcher import build_dashboard_command, launch_dashboard
+from takealot_ops.dashboard.launcher import (
+    build_dashboard_command,
+    build_legacy_dashboard_command,
+    launch_dashboard,
+)
 from takealot_ops.settings import DashboardSettings, SettingsError
 
 
 PROJECT_ROOT = Path(__file__).parents[2]
 
 
-def test_launcher_builds_exact_loopback_streamlit_command_without_api_key(
+def test_launcher_builds_exact_loopback_erp_command_without_api_key(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.delenv("TAKEALOT_API_KEY", raising=False)
@@ -35,14 +39,21 @@ def test_launcher_builds_exact_loopback_streamlit_command_without_api_key(
     assert command == [
         sys.executable,
         "-m",
+        "uvicorn",
+        "takealot_ops.erp.web:app",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "8765",
+        "--no-access-log",
+    ]
+    assert build_legacy_dashboard_command(
+        settings,
+        python_executable=sys.executable,
+    )[2:5] == [
         "streamlit",
         "run",
         str(PROJECT_ROOT / "src" / "takealot_ops" / "dashboard" / "app.py"),
-        "--server.address=127.0.0.1",
-        "--server.port=8765",
-        "--server.headless=true",
-        "--browser.gatherUsageStats=false",
-        "--server.maxUploadSize=100",
     ]
 
 
@@ -95,8 +106,10 @@ def test_launcher_invokes_hidden_subprocess_from_project_root() -> None:
     assert seen["cwd"] == settings.project_root
     assert seen["check"] is False
     assert seen["creationflags"] == getattr(subprocess, "CREATE_NO_WINDOW", 0)
-    assert "--server.address=127.0.0.1" in seen["command"]
-    assert "--server.port=8642" in seen["command"]
+    assert "--host" in seen["command"]
+    assert "127.0.0.1" in seen["command"]
+    assert "--port" in seen["command"]
+    assert "8642" in seen["command"]
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="Windows uv-wrapper regression")

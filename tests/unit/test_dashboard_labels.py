@@ -165,6 +165,7 @@ def test_navigation_and_quadrant_labels_are_closed_approved_mappings() -> None:
         "经营四象限",
         "异常商品",
         "数据质量",
+        "竞品观察",
         "NFT102 日报更新",
         "导出中心",
     )

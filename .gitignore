@@ -2,6 +2,7 @@
 .superpowers/
 /archive/
 .venv/
+node_modules/
 __pycache__/
 .pytest_cache/
 .mypy_cache/
@@ -21,6 +22,8 @@ logs/
 *.sqlite
 *.sqlite3
 dist/
+!frontend/competitor/dist/
+!frontend/competitor/dist/**
 build/
 *.egg-info/
 playwright-report/
