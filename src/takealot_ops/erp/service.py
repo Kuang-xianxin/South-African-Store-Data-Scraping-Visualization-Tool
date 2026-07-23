@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 import pandas as pd
-from sqlalchemy import Engine, create_engine, event
+from sqlalchemy import Engine
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
@@ -28,6 +28,7 @@ from takealot_ops.metrics.service import (
     latest_metric_anomalies,
 )
 from takealot_ops.settings import DashboardSettings
+from takealot_ops.storage.migrations import create_read_only_engine
 from takealot_ops.storage.repository import Repository
 
 
@@ -41,16 +42,8 @@ EMPTY_DATASET = DashboardDataset(
 
 
 def create_read_only_erp_engine(database_url: str) -> Engine:
-    """Create a SQLite engine whose connections cannot write."""
-    engine = create_engine(database_url)
-
-    @event.listens_for(engine, "connect")
-    def _set_query_only(dbapi_connection: Any, _: Any) -> None:
-        cursor = dbapi_connection.cursor()
-        cursor.execute("PRAGMA query_only=ON")
-        cursor.close()
-
-    return engine
+    """Create a read-only engine for the ERP's configured database."""
+    return create_read_only_engine(database_url)
 
 
 def load_erp_dataset(

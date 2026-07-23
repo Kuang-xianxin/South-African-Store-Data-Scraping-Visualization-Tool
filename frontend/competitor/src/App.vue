@@ -121,7 +121,7 @@ function localDate() {
 
       <div class="sidebar-status">
         <p>数据状态</p>
-        <span><i></i> 本机 SQLite 已连接</span>
+        <span><i></i> 本机 MySQL 已连接</span>
         <small>
           最近采集 {{ formatChinaDateTime(freshness.last_collection_at, "暂无") }}
           · 北京时间

@@ -25,7 +25,7 @@ def test_settings_loads_api_key_from_project_dotenv(
     assert settings.api_key == "local-file-key"
 
 
-def test_settings_uses_defaults_and_resolves_relative_sqlite_path(
+def test_settings_uses_mysql_defaults(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     for name in (
@@ -43,10 +43,39 @@ def test_settings_uses_defaults_and_resolves_relative_sqlite_path(
     assert settings.project_root == tmp_path
     assert settings.api_key == "test-api-key"
     assert settings.base_url == "https://marketplace-api.takealot.com/v1"
-    assert settings.database_url == f"sqlite:///{(tmp_path / 'data' / 'takealot.db').as_posix()}"
+    assert settings.database_url == (
+        "mysql+pymysql://takealot_app@127.0.0.1:3306/"
+        "takealot_ops?charset=utf8mb4"
+    )
     assert settings.request_timeout_seconds == 30.0
     assert settings.dashboard_host == "127.0.0.1"
     assert settings.dashboard_port == 8501
+
+
+def test_settings_retains_relative_sqlite_resolution_for_migration_tests(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("TAKEALOT_API_KEY", "test-api-key")
+    monkeypatch.setenv("TAKEALOT_DATABASE_URL", "sqlite:///data/source.db")
+
+    settings = Settings.from_env(tmp_path)
+
+    assert settings.database_url == (
+        f"sqlite:///{(tmp_path / 'data' / 'source.db').as_posix()}"
+    )
+
+
+def test_settings_rejects_remote_mysql(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("TAKEALOT_API_KEY", "test-api-key")
+    monkeypatch.setenv(
+        "TAKEALOT_DATABASE_URL",
+        "mysql+pymysql://user:secret@db.example.com/takealot_ops",
+    )
+
+    with pytest.raises(SettingsError, match="本机"):
+        Settings.from_env(tmp_path)
 
 
 def test_settings_rejects_blank_api_key(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

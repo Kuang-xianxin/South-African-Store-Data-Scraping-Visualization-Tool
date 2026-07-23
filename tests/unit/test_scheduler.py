@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
+
+import pytest
 
 from takealot_ops.scheduler import backup_database
 from takealot_ops.settings import Settings
@@ -36,6 +39,44 @@ def test_database_backup_keeps_only_eight_newest_files(tmp_path: Path) -> None:
     assert newest in backups
     assert len(backups) == 8
     assert not (backup_dir / "takealot-20260701-000000-000000.db").exists()
+
+
+def test_mysql_backup_uses_password_environment_not_command_line(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = Settings(
+        project_root=tmp_path,
+        api_key="fixture-key",
+        base_url="https://example.invalid/v1",
+        database_url=(
+            "mysql+pymysql://takealot_app:fixture-secret@127.0.0.1:3306/"
+            "takealot_ops?charset=utf8mb4"
+        ),
+        request_timeout_seconds=1.0,
+        dashboard_host="127.0.0.1",
+        dashboard_port=8501,
+    )
+    monkeypatch.setattr(
+        "takealot_ops.scheduler._find_mysql_program",
+        lambda _: Path("C:/mysql/bin/mysqldump.exe"),
+    )
+    captured: dict[str, object] = {}
+
+    def fake_run(command, **kwargs):
+        captured["command"] = command
+        captured["password"] = kwargs["env"].get("MYSQL_PWD")
+        kwargs["stdout"].write(b"mysql dump")
+        return subprocess.CompletedProcess(command, 0)
+
+    monkeypatch.setattr("takealot_ops.scheduler.subprocess.run", fake_run)
+
+    backup = backup_database(settings)
+
+    assert backup.suffix == ".sql"
+    assert backup.read_bytes() == b"mysql dump"
+    assert captured["password"] == "fixture-secret"
+    assert "fixture-secret" not in " ".join(captured["command"])
 
 
 def test_scheduler_script_binds_dashboard_to_127_0_0_1() -> None:

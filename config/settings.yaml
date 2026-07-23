@@ -1,5 +1,5 @@
 base_url: https://marketplace-api.takealot.com/v1
-database_url: sqlite:///data/takealot.db
+database_url: mysql+pymysql://takealot_app:CHANGE_ME@127.0.0.1:3306/takealot_ops?charset=utf8mb4
 request_timeout_seconds: 30.0
 dashboard_host: 127.0.0.1
 dashboard_port: 8501

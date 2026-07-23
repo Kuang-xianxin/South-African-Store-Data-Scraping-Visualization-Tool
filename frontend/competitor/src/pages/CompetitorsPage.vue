@@ -165,7 +165,7 @@ function reviewTone(stars: number) {
       </div>
       <div class="status-chip">
         <span class="status-dot"></span>
-        本机数据 · SQLite
+        本机数据 · MySQL
       </div>
     </header>
 

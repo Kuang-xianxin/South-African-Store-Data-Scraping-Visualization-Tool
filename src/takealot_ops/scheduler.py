@@ -1,13 +1,16 @@
-"""Daily collection, reporting, integrity checking, and SQLite backups."""
+"""Daily collection, reporting, integrity checking, and database backups."""
 
 from __future__ import annotations
 
 import sqlite3
+import os
+import subprocess
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Protocol
 
+from sqlalchemy import inspect, text
 from sqlalchemy.engine import make_url
 from sqlalchemy.orm import Session
 
@@ -181,9 +184,14 @@ def run_daily(settings: Settings, clock: Clock) -> DailyRunResult:
 
 
 def backup_database(settings: LocalDatabaseSettings, keep: int = 8) -> Path:
-    """Create a consistent SQLite backup and retain only the newest files."""
+    """Create a consistent backup and retain only the newest files."""
     if keep < 1:
         raise ValueError("keep must be at least 1")
+    backend = make_url(settings.database_url).get_backend_name()
+    if backend == "mysql":
+        return _backup_mysql_database(settings, keep)
+    if backend != "sqlite":
+        raise ValueError(f"unsupported backup backend: {backend}")
     source_path = _sqlite_database_path(settings)
     if not source_path.is_file():
         raise FileNotFoundError(f"database does not exist: {source_path}")
@@ -202,7 +210,13 @@ def backup_database(settings: LocalDatabaseSettings, keep: int = 8) -> Path:
 
 
 def verify_database_integrity(settings: LocalDatabaseSettings) -> None:
-    """Fail unless SQLite reports a clean quick integrity check."""
+    """Fail unless the configured database and all application tables are healthy."""
+    backend = make_url(settings.database_url).get_backend_name()
+    if backend == "mysql":
+        _verify_mysql_integrity(settings)
+        return
+    if backend != "sqlite":
+        raise ValueError(f"unsupported integrity backend: {backend}")
     database_path = _sqlite_database_path(settings)
     if not database_path.is_file():
         raise FileNotFoundError(f"database does not exist: {database_path}")
@@ -210,6 +224,86 @@ def verify_database_integrity(settings: LocalDatabaseSettings) -> None:
         row = connection.execute("PRAGMA quick_check").fetchone()
     if row != ("ok",):
         raise RuntimeError("SQLite integrity check failed")
+
+
+def _backup_mysql_database(
+    settings: LocalDatabaseSettings,
+    keep: int,
+) -> Path:
+    url = make_url(settings.database_url)
+    if not url.database or not url.username:
+        raise ValueError("MySQL backup requires a database and username")
+    executable = _find_mysql_program("mysqldump.exe")
+    backup_dir = settings.project_root / "backups"
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S-%f")
+    destination = backup_dir / f"takealot-{timestamp}.sql"
+    command = [
+        str(executable),
+        "--protocol=TCP",
+        f"--host={url.host or '127.0.0.1'}",
+        f"--port={url.port or 3306}",
+        f"--user={url.username}",
+        "--single-transaction",
+        "--quick",
+        "--set-gtid-purged=OFF",
+        "--no-tablespaces",
+        "--default-character-set=utf8mb4",
+        url.database,
+    ]
+    environment = os.environ.copy()
+    if url.password is not None:
+        environment["MYSQL_PWD"] = url.password
+    try:
+        with destination.open("wb") as output:
+            completed = subprocess.run(
+                command,
+                stdout=output,
+                stderr=subprocess.PIPE,
+                env=environment,
+                check=False,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+        if completed.returncode != 0:
+            destination.unlink(missing_ok=True)
+            raise RuntimeError("MySQL backup failed")
+    finally:
+        environment.pop("MYSQL_PWD", None)
+
+    backups = sorted(backup_dir.glob("takealot-*.sql"), reverse=True)
+    for obsolete in backups[keep:]:
+        obsolete.unlink()
+    return destination
+
+
+def _verify_mysql_integrity(settings: LocalDatabaseSettings) -> None:
+    engine = create_engine_for_settings(settings)
+    try:
+        with engine.connect() as connection:
+            tables = inspect(connection).get_table_names()
+            if not tables:
+                raise RuntimeError("MySQL database has no application tables")
+            for table_name in tables:
+                escaped = table_name.replace("`", "``")
+                rows = connection.execute(
+                    text(f"CHECK TABLE `{escaped}` QUICK")
+                ).mappings()
+                for row in rows:
+                    if str(row.get("Msg_type", "")).casefold() == "error":
+                        raise RuntimeError(f"MySQL table check failed: {table_name}")
+    finally:
+        engine.dispose()
+
+
+def _find_mysql_program(name: str) -> Path:
+    candidates = (
+        Path("C:/Program Files/MySQL/MySQL Server 8.0/bin") / name,
+        Path("C:/Program Files/MySQL/MySQL Server 8.4/bin") / name,
+    )
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate
+    raise RuntimeError(f"未找到 MySQL 工具：{name}")
 
 
 def _sqlite_database_path(settings: LocalDatabaseSettings) -> Path:

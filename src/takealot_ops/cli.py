@@ -23,6 +23,7 @@ from takealot_ops.reporting import generate_daily_reports
 from takealot_ops.scheduler import SystemClock, run_daily, verify_database_integrity
 from takealot_ops.settings import DashboardSettings, Settings, SettingsError
 from takealot_ops.storage.migrations import create_engine_for_settings, create_schema
+from takealot_ops.storage.mysql_migration import migrate_sqlite_to_mysql
 from takealot_ops.storage.repository import Repository
 
 
@@ -71,6 +72,16 @@ def build_parser() -> argparse.ArgumentParser:
 
     verify = commands.add_parser("verify", help="检查数据库完整性和数据质量")
     verify.add_argument("--date", type=_parse_date, help="检查日期 YYYY-MM-DD")
+    migrate = commands.add_parser(
+        "migrate-to-mysql",
+        help="把旧 SQLite 全量迁移到当前配置的空 MySQL 数据库",
+    )
+    migrate.add_argument(
+        "--sqlite-source",
+        type=Path,
+        default=Path("data/takealot.db"),
+        help="旧 SQLite 文件路径",
+    )
     return parser
 
 
@@ -101,6 +112,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
         elif args.command == "verify":
             exit_code = _verify_command(project_root, args.date)
+        elif args.command == "migrate-to-mysql":
+            exit_code = _migrate_to_mysql_command(
+                project_root,
+                args.sqlite_source,
+            )
         else:
             parser.error("unknown command")
         logger.info("%s finished with exit code %s", args.command, exit_code)
@@ -231,6 +247,26 @@ def _collect_competitors_command(
     finally:
         engine.dispose()
     return EXIT_COLLECTION if failures else 0
+
+
+def _migrate_to_mysql_command(
+    project_root: Path,
+    sqlite_source: Path,
+) -> int:
+    settings = DashboardSettings.from_env(project_root)
+    source = (
+        sqlite_source
+        if sqlite_source.is_absolute()
+        else project_root / sqlite_source
+    )
+    report = migrate_sqlite_to_mysql(source, settings.database_url)
+    print(
+        f"MySQL 迁移完成：{len(report.table_counts)} 张表，"
+        f"{report.total_rows} 行。"
+    )
+    for table_name, count in sorted(report.table_counts.items()):
+        print(f"{table_name}：{count}")
+    return 0
 
 
 def _metric_service(repository: Repository, project_root: Path) -> MetricService:

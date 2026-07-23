@@ -13,8 +13,6 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
-from sqlalchemy import create_engine, event
-
 from takealot_ops.competitors.api import extract_plid
 from takealot_ops.competitors.service import (
     CompetitorCollector,
@@ -22,7 +20,11 @@ from takealot_ops.competitors.service import (
     load_competitor_dataset,
 )
 from takealot_ops.settings import DashboardSettings
-from takealot_ops.storage.migrations import create_engine_for_settings, create_schema
+from takealot_ops.storage.migrations import (
+    create_engine_for_settings,
+    create_read_only_engine,
+    create_schema,
+)
 
 
 class CollectRequest(BaseModel):
@@ -121,13 +123,7 @@ def _load_dataset(project_root: Path) -> CompetitorDataset:
         return CompetitorDataset(
             pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
         )
-    engine = create_engine(settings.database_url)
-    if engine.dialect.name == "sqlite":
-        @event.listens_for(engine, "connect")
-        def _set_query_only(dbapi_connection: Any, _: Any) -> None:
-            cursor = dbapi_connection.cursor()
-            cursor.execute("PRAGMA query_only=ON")
-            cursor.close()
+    engine = create_read_only_engine(settings.database_url)
     try:
         return load_competitor_dataset(engine)
     finally:

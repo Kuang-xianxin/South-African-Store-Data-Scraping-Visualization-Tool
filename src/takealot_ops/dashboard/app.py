@@ -13,7 +13,7 @@ from zoneinfo import ZoneInfo
 import pandas as pd
 import streamlit as st
 import yaml
-from sqlalchemy import create_engine, event, func, select
+from sqlalchemy import func, select
 from sqlalchemy.engine import Engine, make_url
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
@@ -53,6 +53,7 @@ from takealot_ops.reporting import generate_daily_reports
 from takealot_ops.scheduler import verify_database_integrity
 from takealot_ops.settings import DashboardSettings, SettingsError
 from takealot_ops.storage.models import CollectionRun, DailyProductMetric
+from takealot_ops.storage.migrations import create_read_only_engine as _create_read_only_engine
 from takealot_ops.storage.repository import Repository
 
 
@@ -190,18 +191,10 @@ def load_dashboard_freshness(settings: DashboardSettings) -> DashboardFreshness:
 
 def create_read_only_engine(database_url: str) -> Engine:
     """Create an engine whose dashboard connections reject write statements."""
-    url = make_url(database_url)
-    if url.drivername not in {"sqlite", "sqlite+pysqlite"}:
-        raise SettingsError("当前看板仅支持本机文件数据库地址")
-    engine = create_engine(url)
-
-    @event.listens_for(engine, "connect")
-    def _set_sqlite_query_only(dbapi_connection: Any, _: Any) -> None:
-        cursor = dbapi_connection.cursor()
-        cursor.execute("PRAGMA query_only=ON")
-        cursor.close()
-
-    return engine
+    try:
+        return _create_read_only_engine(database_url)
+    except ValueError as exc:
+        raise SettingsError("看板数据库必须使用受支持的同步驱动") from exc
 
 
 def main() -> None:
@@ -543,7 +536,7 @@ def _render_competitors(
     del dataset, load_error, as_of
     st.title("竞品观察")
     st.caption(
-        "竞品模块使用 Vue + TypeScript 构建，并通过本机接口与当前 SQLite 共用数据。"
+        "竞品模块使用 Vue + TypeScript 构建，并通过本机接口与当前 MySQL 共用数据。"
     )
     st.caption(
         "页面只连接 127.0.0.1；采集必须在 Vue 页面中明确点击后才会执行。"

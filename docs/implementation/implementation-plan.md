@@ -4,14 +4,14 @@
 
 **Goal:** Build a Windows-local, read-only Takealot operations system that collects Offer and Sales data, stores auditable history, presents an interactive dashboard, and exports shareable offline HTML, Excel, and PNG reports.
 
-**Architecture:** A synchronous HTTP API client feeds idempotent collectors backed by a SQLAlchemy repository. A separate metrics service produces typed dashboard datasets consumed by Streamlit and all export formats, ensuring one calculation path. SQLite is the default database, while SQLAlchemy boundaries preserve a later MySQL migration path.
+**Architecture:** A synchronous HTTP API client feeds idempotent collectors backed by a SQLAlchemy repository. A separate metrics service produces typed dashboard datasets consumed by the Vue ERP and all export formats, ensuring one calculation path. The production runtime uses local MySQL 8.0; SQLite remains only as the retired migration source and isolated test fixture.
 
 **Tech Stack:** Python 3.11+, HTTPX, SQLAlchemy 2, Alembic, Pandas, Streamlit, Plotly, OpenPyXL, Playwright, PyYAML, tzdata, Pytest, Ruff, Mypy, Build.
 
 ## Global Constraints
 
 - Run locally on Windows and store all project artifacts under `D:\南非店铺数据抓取`.
-- Default database is SQLite at `data/takealot.db`; business logic must not use SQLite-specific SQL.
+- Default production database is local MySQL 8.0 at `takealot_ops`; business logic must not scatter dialect-specific SQL.
 - Read `TAKEALOT_API_KEY` only from the environment; never log, export, or commit it.
 - Call only Takealot read endpoints in version 1: `/offers`, `/sales`, and optional `/returns`.
 - Use South African Standard Time (`Africa/Johannesburg`, UTC+02:00) for sales-day grouping.
@@ -37,7 +37,7 @@ src/takealot_ops/api/client.py         authenticated HTTP and pagination
 src/takealot_ops/api/errors.py         API error types
 src/takealot_ops/storage/models.py     SQLAlchemy tables
 src/takealot_ops/storage/repository.py persistence interface and implementation
-src/takealot_ops/storage/migrations.py schema creation and SQLite setup
+src/takealot_ops/storage/migrations.py schema creation and MySQL/retained-test setup
 src/takealot_ops/collectors/offers.py  Offer snapshot collection
 src/takealot_ops/collectors/sales.py   Sales backfill and refresh collection
 src/takealot_ops/metrics/service.py    daily metrics and anomalies
@@ -115,7 +115,7 @@ class Settings:
     dashboard_port: int
 ```
 
-Defaults are `https://marketplace-api.takealot.com/v1`, `sqlite:///data/takealot.db`, `30.0`, `127.0.0.1`, and `8501`. `Settings.from_env` resolves relative SQLite paths against `project_root` and raises `SettingsError` when the API key is absent or blank.
+Defaults are `https://marketplace-api.takealot.com/v1`, local `mysql+pymysql`, `30.0`, `127.0.0.1`, and `8501`. `Settings.from_env` validates a local synchronous MySQL URL and raises `SettingsError` when the API key is absent or blank.
 
 `OfferRecord` and `SaleRecord` are frozen dataclasses. `SaleRecord.order_date` is timezone-aware and `SaleRecord.sales_day` calls `sast_date`.
 
@@ -261,7 +261,7 @@ Create tables named exactly:
 
 Use SQLAlchemy `UniqueConstraint` for `(snapshot_date, offer_id)`, `(metric_date, offer_id)`, and `(event_date, offer_id, anomaly_type)`. Use `order_item_id` as the sales primary key. Store raw records as JSON, not stringified Python dictionaries.
 
-SQLite setup applies `PRAGMA journal_mode=WAL`, `PRAGMA foreign_keys=ON`, and a 5000 ms busy timeout through SQLAlchemy connection events. Repository methods use SQLAlchemy expressions compatible with MySQL; dialect-specific upsert code stays inside private adapter methods.
+MySQL setup uses `utf8mb4`, connection pre-ping and recycling; ERP read engines apply `SET SESSION TRANSACTION READ ONLY`. Retained SQLite setup exists only for migration and isolated tests. Repository methods use SQLAlchemy expressions compatible with the production MySQL dialect.
 
 - [ ] **Step 4: Verify persistence**
 

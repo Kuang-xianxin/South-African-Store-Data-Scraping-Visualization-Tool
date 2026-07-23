@@ -106,7 +106,7 @@ function megabytes(value: number) {
           {{ exporting ? "正在生成…" : "生成全部报表" }}
         </button>
       </div>
-      <p class="method-note">只读取当前 SQLite，不调用平台接口；同时尝试 HTML、Excel 和 PNG。</p>
+      <p class="method-note">只读取当前 MySQL，不调用平台接口；同时尝试 HTML、Excel 和 PNG。</p>
       <div class="export-cards">
         <article v-for="file in exports?.files ?? []" :key="file.kind">
           <span>{{ file.label }}</span>

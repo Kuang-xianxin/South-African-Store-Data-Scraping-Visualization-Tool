@@ -13,6 +13,7 @@ def test_help_lists_all_commands(capsys) -> None:
         "export",
         "daily-run",
         "dashboard",
+        "migrate-to-mysql",
         "verify",
     ):
         assert command in help_text

@@ -282,12 +282,15 @@ def test_dashboard_sqlite_engine_rejects_writes(tmp_path: Path) -> None:
 
 @pytest.mark.parametrize(
     "database_url",
-    ["mysql+pymysql://localhost/takealot", "sqlite+aiosqlite:///takealot.db"],
+    [
+        "postgresql+psycopg://localhost/takealot",
+        "sqlite+aiosqlite:///takealot.db",
+    ],
 )
 def test_dashboard_engine_rejects_unsupported_dialect_before_driver_import(
     database_url: str,
 ) -> None:
-    with pytest.raises(SettingsError, match="本机文件数据库"):
+    with pytest.raises(SettingsError, match="同步驱动"):
         create_read_only_engine(database_url)
 
 

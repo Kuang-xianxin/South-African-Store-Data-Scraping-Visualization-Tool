@@ -12,7 +12,9 @@ from sqlalchemy.exc import SQLAlchemyError
 
 
 DEFAULT_BASE_URL = "https://marketplace-api.takealot.com/v1"
-DEFAULT_DATABASE_URL = "sqlite:///data/takealot.db"
+DEFAULT_DATABASE_URL = (
+    "mysql+pymysql://takealot_app@127.0.0.1:3306/takealot_ops?charset=utf8mb4"
+)
 DEFAULT_REQUEST_TIMEOUT_SECONDS = 30.0
 DEFAULT_DASHBOARD_HOST = "127.0.0.1"
 DEFAULT_DASHBOARD_PORT = 8501
@@ -41,9 +43,10 @@ class Settings:
         if not api_key:
             raise SettingsError("接口密钥不能为空")
 
-        database_url = _resolve_sqlite_url(
+        database_url = _resolve_database_url(
             os.environ.get("TAKEALOT_DATABASE_URL", DEFAULT_DATABASE_URL), resolved_root
         )
+        _validate_database_url(database_url)
         return cls(
             project_root=resolved_root,
             api_key=api_key,
@@ -71,10 +74,10 @@ class DashboardSettings:
         """Build the read-only dashboard runtime boundary from environment values."""
         resolved_root = project_root.resolve()
         load_dotenv(resolved_root / ".env", override=False)
-        database_url = _resolve_sqlite_url(
+        database_url = _resolve_database_url(
             os.environ.get("TAKEALOT_DATABASE_URL", DEFAULT_DATABASE_URL), resolved_root
         )
-        _validate_dashboard_database_url(database_url)
+        _validate_database_url(database_url)
         return cls(
             project_root=resolved_root,
             database_url=database_url,
@@ -101,17 +104,25 @@ def _dashboard_port_from_env() -> int:
     return port
 
 
-def _validate_dashboard_database_url(database_url: str) -> None:
+def _validate_database_url(database_url: str) -> None:
     try:
-        driver_name = make_url(database_url).drivername
+        url = make_url(database_url)
     except SQLAlchemyError as exc:
-        raise SettingsError("数据库地址必须是有效的本机文件数据库地址") from exc
-    if driver_name not in {"sqlite", "sqlite+pysqlite"}:
-        raise SettingsError("当前看板仅支持本机文件数据库地址")
+        raise SettingsError("数据库地址格式无效") from exc
+    if url.drivername in {"sqlite", "sqlite+pysqlite"}:
+        return
+    if url.drivername != "mysql+pymysql":
+        raise SettingsError("数据库必须使用 mysql+pymysql 同步驱动")
+    if url.host not in {"127.0.0.1", "localhost"}:
+        raise SettingsError("MySQL 必须连接本机 127.0.0.1 或 localhost")
+    if not url.database:
+        raise SettingsError("MySQL 数据库名称不能为空")
+    if not url.username:
+        raise SettingsError("MySQL 用户名不能为空")
 
 
-def _resolve_sqlite_url(database_url: str, project_root: Path) -> str:
-    """Resolve a relative SQLite URL against the project root."""
+def _resolve_database_url(database_url: str, project_root: Path) -> str:
+    """Resolve the retained SQLite test/migration URL; MySQL URLs pass through."""
     prefix = "sqlite:///"
     if not database_url.startswith(prefix):
         return database_url

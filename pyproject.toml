@@ -16,6 +16,7 @@ dependencies = [
     "pandas>=2.2",
     "playwright>=1.45",
     "plotly>=5.23",
+    "PyMySQL>=1.1",
     "python-dotenv>=1.0",
     "python-multipart>=0.0.20",
     "PyYAML>=6.0",

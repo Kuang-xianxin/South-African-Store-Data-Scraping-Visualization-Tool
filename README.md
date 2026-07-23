@@ -1,6 +1,6 @@
 # Takealot 店铺运营数据工具
 
-这是一个在 Windows 本机运行的小型运营 ERP：通过只读 Seller API 采集自有店铺 Offer 与 Sales 数据，并通过公开商品接口和隔离匿名购物车观察竞品。统一的 Vue 3 + TypeScript 前端包含经营总览、商品中心、经营四象限、风险与质量、竞品雷达、报表与 NFT102 工作台；自有店铺和竞品历史统一保存在 SQLite。
+这是一个在 Windows 本机运行的小型运营 ERP：通过只读 Seller API 采集自有店铺 Offer 与 Sales 数据，并通过公开商品接口和隔离匿名购物车观察竞品。统一的 Vue 3 + TypeScript 前端包含经营总览、商品中心、经营四象限、风险与质量、竞品雷达、报表与 NFT102 工作台；自有店铺和竞品历史统一保存在本机 MySQL 8.0。
 
 ## 1. 安装
 
@@ -19,7 +19,7 @@ uv pip install --python .\.venv\Scripts\python.exe -e ".[dev]"
 .\.venv\Scripts\python.exe -m takealot_ops.cli --help
 ```
 
-## 2. 配置 API Key
+## 2. 配置 API Key 与 MySQL
 
 复制模板，生成项目根目录下的 `.env` 文件：
 
@@ -28,13 +28,22 @@ Copy-Item .env.example .env
 notepad .env
 ```
 
-只修改这一行：
+填写 API Key，并把 MySQL 密码替换为本机应用账号密码：
 
 ```env
 TAKEALOT_API_KEY=在这里粘贴真实Key
+TAKEALOT_DATABASE_URL=mysql+pymysql://takealot_app:密码@127.0.0.1:3306/takealot_ops?charset=utf8mb4
 ```
 
-程序会自动读取 `D:\南非店铺数据抓取\.env`。已经存在的系统环境变量优先于 `.env`。不要把真实 Key 写进 `.env.example`，也不要把 `.env` 发给他人或提交到 GitHub。
+密码中的 `+`、`@`、`:` 等特殊字符必须使用 URL 百分号编码。程序会自动读取 `D:\南非店铺数据抓取\.env`，已经存在的系统环境变量优先于 `.env`。不要把真实 Key 或数据库密码写进 `.env.example`，也不要把 `.env` 发给他人或提交到 GitHub。
+
+旧 SQLite 数据只作为迁移源和回退留档，不再被 ERP、采集或日报读取。首次切换时，MySQL 目标库必须为空，然后执行：
+
+```powershell
+.\.venv\Scripts\python.exe -m takealot_ops.cli migrate-to-mysql
+```
+
+迁移器会复制全部业务表并逐表核对行数；目标库已有数据时会拒绝执行，避免覆盖或重复导入。
 
 ## 3. 首次采集与检查
 
@@ -64,7 +73,7 @@ TAKEALOT_API_KEY=在这里粘贴真实Key
 .\.venv\Scripts\python.exe -m takealot_ops.cli dashboard
 ```
 
-浏览器打开 `http://127.0.0.1:8501`。这是正式的统一 Vue ERP 地址，不再需要相邻端口。ERP 默认只监听本机回环地址，不允许绑定局域网地址。浏览、筛选和切换页面时只读取 SQLite，不调用 API，因此查看已有历史数据不需要 API Key。
+浏览器打开 `http://127.0.0.1:8501`。这是正式的统一 Vue ERP 地址，不再需要相邻端口。ERP 默认只监听本机回环地址，不允许绑定局域网地址。浏览、筛选和切换页面时使用 MySQL 只读事务，不调用平台 API，因此查看已有历史数据不需要 API Key。
 
 侧边栏会显示“最近采集”和“最新指标”，用于判断当前看到的数据是否已经更新。“最近采集”以及竞品历史快照的时间固定按北京时间（Asia/Shanghai）显示，不跟随浏览器或南非平台时区；“最新指标”仍是既定的 SAST 业务日期。需要立即更新时，可点击“刷新全部数据”；该按钮会调用项目根目录 `.env` 中的 API Key，依次完成只读采集、指标重建、日报导出、完整性检查和备份，通常需要 1 至 3 分钟。刷新期间不要重复点击或关闭页面；失败时可查看 `logs\takealot-ops.log`，页面不会显示或记录 API Key。
 
@@ -76,7 +85,7 @@ TAKEALOT_API_KEY=在这里粘贴真实Key
 
 ### 4.1 竞品观察
 
-“竞品雷达”是统一 Vue ERP 的一个正式模块，与经营总览等页面共用 `8501` 地址和同一份 SQLite，不再通过 Streamlit 嵌入或单独启动第二个端口。
+“竞品雷达”是统一 Vue ERP 的一个正式模块，与经营总览等页面共用 `8501` 地址和同一份 MySQL，不再通过 Streamlit 嵌入或单独启动第二个端口。
 
 竞品中心支持一次粘贴多条 Takealot 商品链接，每行一条，按 PLID 自动去重。当前最小闭环会：
 
@@ -144,7 +153,7 @@ npm.cmd run build
 .\.venv\Scripts\python.exe -m takealot_ops.cli daily-run
 ```
 
-执行顺序为：完整分页采集 → 七个 SAST 自然日指标重建 → 数据质量检查 → 报表导出 → SQLite 完整性检查 → 数据库备份。任何分页失败都不会发布不完整快照或报表。日志写入 `logs\takealot-ops.log`，不会记录 API Key。
+执行顺序为：完整分页采集 → 七个 SAST 自然日指标重建 → 数据质量检查 → 报表导出 → MySQL 表完整性检查 → `mysqldump` 一致性备份。任何分页失败都不会发布不完整快照或报表。日志写入 `logs\takealot-ops.log`，不会记录 API Key 或数据库密码。
 
 ## 7. 安装 Windows 每日计划任务
 
@@ -160,15 +169,15 @@ powershell -ExecutionPolicy Bypass -File .\scripts\install_scheduled_task.ps1 `
 
 ## 8. 备份与恢复
 
-每次 `daily-run` 会在 `backups\` 中生成一致性 SQLite 备份，只保留最新 8 份。
+每次 `daily-run` 会通过 `mysqldump --single-transaction` 在 `backups\` 中生成一致性 `.sql` 备份，只保留最新 8 份。
 
 恢复步骤：
 
 1. 停止正在运行的看板和每日任务。
-2. 将当前 `data\takealot.db` 复制到安全位置留档。
-3. 把选定的 `backups\takealot-*.db` 复制为 `data\takealot.db`。
+2. 在 MySQL Workbench 中备份或清空目标 `takealot_ops` 数据库。
+3. 使用 Workbench 的 Data Import 导入选定的 `backups\takealot-*.sql`。
 4. 运行 `.\.venv\Scripts\python.exe -m takealot_ops.cli verify`。
-5. 验证通过后再启动看板。
+5. 验证通过后再启动看板和每日任务。
 
 ## 9. 流量指标口径
 
@@ -176,17 +185,13 @@ powershell -ExecutionPolicy Bypass -File .\scripts\install_scheduled_task.ps1 `
 
 “近30天日均浏览量”只是滚动窗口值除以 30；“30天浏览量窗口净变化”只是相邻快照的窗口差值。缺失值保持为空，不补零。
 
-## 10. 什么时候考虑 MySQL
+## 10. MySQL 运行边界
 
-当前单机、单店、单运营人员场景中，自有店铺数据和竞品历史统一使用 `data\takealot.db`，不需要安装 MySQL。出现以下任一情况再启动迁移评估：
-
-- 多人或多个任务需要同时写入数据库；
-- 看板需要部署到另一台服务器；
-- 管理多个店铺并需要统一权限控制；
-- SQLite 文件和备份窗口已经明显影响每日运行；
-- 需要数据库级高可用、集中备份或审计。
-
-业务代码通过 SQLAlchemy 隔离数据库访问，但当前看板和自动备份明确只支持同步 SQLite；切换 MySQL 前必须补充迁移脚本、方言测试、只读看板事务和新的备份方案。
+- 正式运行只使用本机 MySQL 8.0、`mysql+pymysql` 同步驱动和 `utf8mb4` 字符集。
+- ERP 查询连接执行数据库级只读事务；采集、指标重建和竞品刷新使用单独的可写连接。
+- 应用账号只授予 `takealot_ops` 数据库所需权限，不使用 root 启动 ERP。
+- 每日运行执行 MySQL `CHECK TABLE` 并生成 `mysqldump` 备份。
+- `data\takealot.db` 仅保留为迁移完成前的数据留档，不再是运行数据源，也不会自动回退。
 
 ## 11. 一键更新 NFT102 访客表
 

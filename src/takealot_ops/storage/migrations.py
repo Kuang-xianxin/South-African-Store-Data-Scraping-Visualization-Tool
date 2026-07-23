@@ -17,21 +17,54 @@ class DatabaseSettings(Protocol):
 
 
 def create_engine_for_settings(settings: DatabaseSettings) -> Engine:
-    """Create an engine, applying SQLite's local-operation safety settings."""
-    url = make_url(settings.database_url)
+    """Create a writable engine for the configured synchronous database."""
+    return create_engine_for_database_url(settings.database_url)
+
+
+def create_engine_for_database_url(database_url: str) -> Engine:
+    """Create a writable engine with backend-specific reliability settings."""
+    url = make_url(database_url)
+    supported = {"sqlite", "sqlite+pysqlite", "mysql+pymysql"}
+    if url.drivername not in supported:
+        raise ValueError(
+            "database must use sqlite+pysqlite or mysql+pymysql synchronous driver"
+        )
     if url.drivername in {"sqlite", "sqlite+pysqlite"} and url.database not in {
         None,
         ":memory:",
     }:
         Path(url.database).parent.mkdir(parents=True, exist_ok=True)
-    engine = create_engine(settings.database_url)
-    if settings.database_url.startswith("sqlite"):
+    options: dict[str, Any] = {}
+    if url.get_backend_name() == "mysql":
+        options.update(pool_pre_ping=True, pool_recycle=1800)
+    engine = create_engine(database_url, **options)
+    if url.get_backend_name() == "sqlite":
         _configure_sqlite(engine)
     return engine
 
 
+def create_read_only_engine(database_url: str) -> Engine:
+    """Create a dashboard engine that rejects writes at the database session level."""
+    engine = create_engine_for_database_url(database_url)
+    backend = make_url(database_url).get_backend_name()
+
+    @event.listens_for(engine, "connect")
+    def _set_read_only(dbapi_connection: Any, _: Any) -> None:
+        cursor = dbapi_connection.cursor()
+        if backend == "sqlite":
+            cursor.execute("PRAGMA query_only=ON")
+        elif backend == "mysql":
+            cursor.execute("SET SESSION TRANSACTION READ ONLY")
+        else:
+            cursor.close()
+            raise ValueError(f"unsupported database backend: {backend}")
+        cursor.close()
+
+    return engine
+
+
 def create_schema(engine: Engine) -> None:
-    """Create the current schema and apply additive SQLite upgrades."""
+    """Create the current schema and apply retained SQLite upgrades."""
     Base.metadata.create_all(engine)
     if engine.dialect.name == "sqlite":
         _add_sqlite_offer_stock_columns(engine)
