@@ -157,11 +157,13 @@ function localDate() {
       <p v-if="refreshMessage" class="global-notice">{{ refreshMessage }}</p>
 
       <section class="erp-content">
-        <component
-          :is="pageComponent"
-          :key="`${currentPage}-${refreshKey}`"
-          :as-of="asOf"
-        />
+        <KeepAlive include="CompetitorsPage">
+          <component
+            :is="pageComponent"
+            :key="`${currentPage}-${refreshKey}`"
+            :as-of="asOf"
+          />
+        </KeepAlive>
       </section>
     </div>
     <button

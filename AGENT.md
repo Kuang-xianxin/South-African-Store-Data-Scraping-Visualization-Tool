@@ -49,6 +49,7 @@
 - ERP 中“最近采集”和竞品历史快照属于记录时刻，必须固定按北京时间（Asia/Shanghai）显示；指标日期仍按 SAST 业务日，两种口径不得混淆。
 - `page_views_30_days` 只能称为“近30天浏览量”，不是独立访客数，也不是精确当天流量。
 - 经营四象限以最新近30天浏览量和截至最新可用指标日的近7个自然日下单件数分类；相对排名只用于图上拉开差异，悬停和明细必须展示真实值。销量为0必须留在低销量侧，缺失指标必须保持未分类。
+- 经营四象限的十字分界线和中心交点必须使用当前25/50/75分位分类接口返回的真实排名分界同步移动，不得固定在50%位置造成图形与分类口径不一致。
 - 经营四象限散点必须显式使用固定高对比填充色，不得继承按钮默认颜色导致近黑色，其中“待优化”固定为亮金色；散点必须使用无原生等待的自定义悬浮信息卡识别商品，并支持点击复制平台 SKU；复制成功、SKU 缺失或复制失败都必须给出中文反馈。
 - 下单件数图的每日实际值和坐标刻度必须使用整数；不得为了平滑趋势绘制或伪装成实际件数的小数值。
 - 相邻30天窗口差值只能称为“30天浏览量窗口净变化”；对于已有历史的商品，不能据此还原精确当天浏览量。
@@ -72,6 +73,7 @@
 - 竞品累计销量仅可按明确展示的2%–5%假设评论率给出低可信度区间；观察期销量只使用可比库存净流出和新增评论，价格、排名或卖家变化不得直接换算为订单。
 - 评论属于商品维度，可能跨卖家或变体；评论分类固定为4–5星好评、3星中评、1–2星差评。
 - 竞品页面和接口只绑定本机回环地址；浏览历史使用 MySQL 只读事务，只有运营人员明确点击采集按钮或运行 `collect-competitors` 时才允许访问公开接口和写入竞品表。
+- 竞品采集任务开始后，ERP 页面导航不得销毁任务页面状态；切换到其他模块再返回时，必须保留链接输入、采集选项、完成数量、进度及逐条成功/失败结果。
 - 正式运行数据库固定为本机 MySQL 8.0、`mysql+pymysql` 同步驱动和 `utf8mb4`；应用不得用 root 账号运行，不得自动回退读取 SQLite。旧 `data/takealot.db` 只允许作为一次性迁移源、历史留档和隔离测试夹具。
 - MySQL 密码只能存在于被 Git 忽略的 `.env` 或进程环境中，不得进入源码、命令输出、日志、测试、报表、文档或版本库；备份调用必须通过进程环境传递密码，不得把密码拼进命令参数。
 
@@ -110,6 +112,7 @@ Set-Location .\frontend\competitor; npm.cmd run build
 - 当前官方 Offer 数据提供近30天滚动浏览量，没有可确认的精确每日产品访客数接口。
 - 正式运行已切换到本机 MySQL 8.0；旧 SQLite 的12张表共4204行已全量迁移并逐表核对一致，ERP、采集、指标、竞品、报表、完整性检查和每日备份均读取或写入 MySQL。
 - 竞品观察最小闭环已完成：支持多链接逐条采集、单条失败隔离、全部变体枚举及独立库存、PLID 共享完整评论、历史快照、累计销量区间和观察期信号；该页面现为统一 Vue ERP 内的正式模块，与店铺经营页面共用 `8501` 和 MySQL。
+- 经营四象限分位切换会同步移动十字分界中心；竞品采集页在模块导航切换期间保持任务状态，返回后继续显示原进度和结果。
 - 当前11个竞品链接保留在本机 MySQL；重新采集后已有13条商品快照、14条变体结果和425条共享去重评论，`PLID70540744` 与 `PLID99275672` 最新精确平台仓购物车上限分别为4和10。
 - 当前是用户要求的最小模块；原独立工具中的关键词/类目排名、卖家上新、Buy Box 历史占有率和六工作表 Excel 尚未迁入，后续只能在保持现有销量口径与批量架构的前提下逐项增加。
 
@@ -117,6 +120,7 @@ Set-Location .\frontend\competitor; npm.cmd run build
 
 | 日期 | 修改摘要 | 主要文件 | 验证与结论 |
 |---|---|---|---|
+| 2026-07-23 | 修复统一 ERP 两项页面状态：经营四象限不再把十字线固定在50%，改用接口返回的浏览量与下单排名分界同步移动两条线、轴标签及中心交点；竞品雷达通过 Vue `KeepAlive` 在模块导航时保留正在运行的采集实例、输入、进度和结果，并在采集中明确提示可安全切页 | `frontend/competitor/src/App.vue`、`frontend/competitor/src/pages/QuadrantsPage.vue`、`frontend/competitor/src/pages/CompetitorsPage.vue`、`frontend/competitor/src/styles.css`、`README.md`、`docs/PROJECT_STATUS.md`、`AGENT.md` | Vue TypeScript 检查及生产构建通过；完整回归 `187 passed`（1条第三方 TestClient 弃用提示），Ruff、Mypy、`takealot_ops.cli verify` 通过。浏览器真实数据实测标准分位交点约为50%/31%，宽松分位横向移动至约25%，严格分位移动至约75%/75%；竞品页本地校验状态在切到经营总览再返回后输入与结果均保留，控制台错误为0 |
 | 2026-07-23 | 修复两个有货竞品被标记“未探测”：等待主商品异步加购完成，数量菜单关闭动画增加等待和重开；按 `aria-hidden` 排除未启用的数量输入节点，绕过目标商品卡链接对已核验输入框的指针拦截；定向清理 Braze 营销遮罩，购物车临时更新失败时重新加载并有限重试，自定义数量被平台接受且编辑器收起时通过 `Qty: N` 确认结果 | `src/takealot_ops/competitors/stock.py`、`tests/unit/test_competitor_stock.py`、`README.md`、`docs/PROJECT_STATUS.md`、`AGENT.md` | 完整回归 `187 passed`（1条第三方 TestClient 弃用提示）；Ruff、Mypy、`takealot_ops.cli verify` 通过。真实隔离匿名购物车取得 `PLID70540744=4`、`PLID99275672=10`，均为精确值并已重新采集写入 MySQL；当前数据库为11个目标、13条商品快照、14条变体结果、425条共享去重评论，测试购物车已清理 |
 | 2026-07-23 | 修复竞品库存探测误点推荐商品：不再遍历页面全部 `Add to Cart`，只在当前目标 PLID 商品页的 `main aside` 主购买区接受唯一按钮；商品页 URL 必须匹配目标 PLID，进入购物车后也必须再次找到同一 PLID 的商品行，移除“购物车只有一个数量控件就视为目标”的危险回退；补充防回归测试；保留11个链接并清空修复前受影响的重新采集结果 | `src/takealot_ops/competitors/stock.py`、`tests/unit/test_competitor_stock.py`、`README.md`、`docs/PROJECT_STATUS.md` | 完整回归 `181 passed`（1条第三方 TestClient 弃用提示）；Ruff、Mypy、`takealot_ops.cli verify` 通过。4个真实商品页逐一核对：3个可购买页的主购买区各仅1个按钮，推荐区分别有22、27、7个按钮；不可购买护膝页主购买区为0且不会回退推荐位。真实隔离购物车以 `PLID95526981` 跑通同 PLID 二次核对并取得精确库存90，测试购物车已清理；ERP 8501 已重启，健康检查通过且竞品快照为0 |
 | 2026-07-23 | 正式数据库由 SQLite 全面切换为本机 MySQL 8.0：新增 PyMySQL、MySQL 默认配置和本机/同步驱动校验，建立受限应用账号和 `utf8mb4` 数据库；增加空目标保护的一次性全表迁移命令、MySQL 数据库级只读 ERP 会话、`CHECK TABLE` 完整性检查及 `mysqldump --single-transaction` 每日备份；前端数据库状态与运行文档同步改为 MySQL，SQLite 只保留为退役迁移源和测试夹具 | `src/takealot_ops/settings.py`、`src/takealot_ops/storage/`、`src/takealot_ops/scheduler.py`、`src/takealot_ops/erp/`、`frontend/competitor/`、配置、测试与文档 | 旧 SQLite 的12张表4204行迁入 MySQL 并逐表数量完全一致；MySQL `CHECK TABLE`、只读事务拒绝 UPDATE、ERP 五个核心接口、HTML/Excel/PNG 读取和1,041,068字节 SQL 备份通过；完整回归 `177 passed`（1条第三方 TestClient 弃用提示），Ruff、Mypy、`takealot_ops.cli verify` 和 Vue 生产构建通过 |

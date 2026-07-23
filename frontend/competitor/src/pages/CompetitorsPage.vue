@@ -13,6 +13,8 @@ import type {
 } from "../types";
 import { formatChinaDateTime } from "../time";
 
+defineOptions({ name: "CompetitorsPage" });
+
 const sampleUrls = [
   "https://www.takealot.com/laser-lipo-slimming-machine/PLID72189176",
   "https://www.takealot.com/multifunctional-led-modern-kitchen-sink-waterfall-push-button-te/PLID95526981",
@@ -208,6 +210,9 @@ function reviewTone(stars: number) {
       <div v-if="collecting || completed" class="progress-track" aria-live="polite">
         <span :style="{ width: `${progress}%` }"></span>
       </div>
+      <p v-if="collecting" class="method-note collection-persistence-note">
+        采集正在后台继续；切换到其他页面后再返回，进度和结果仍会保留。
+      </p>
       <div v-if="collectionResults.length || collectionErrors.length" class="result-strip">
         <span v-if="collectionResults.length" class="result-good">
           成功 {{ collectionResults.length }} 个

@@ -1453,10 +1453,7 @@ button {
   overflow: hidden;
   border: 1px solid #d7ded8;
   border-radius: 13px;
-  background:
-    linear-gradient(90deg, transparent 49.8%, rgba(24, 37, 31, 0.12) 50%, transparent 50.2%),
-    linear-gradient(0deg, transparent 49.8%, rgba(24, 37, 31, 0.12) 50%, transparent 50.2%),
-    #f5f8f3;
+  background: #f5f8f3;
 }
 
 .matrix-zone {
@@ -1471,6 +1468,39 @@ button {
 .matrix-zone.top-right { top: 0; right: 0; }
 .matrix-zone.bottom-left { bottom: 0; left: 0; }
 .matrix-zone.bottom-right { right: 0; bottom: 0; }
+
+.matrix-divider,
+.matrix-center {
+  position: absolute;
+  z-index: 1;
+  pointer-events: none;
+}
+
+.matrix-divider {
+  background: rgba(24, 37, 31, 0.14);
+}
+
+.matrix-divider.vertical {
+  top: 0;
+  bottom: 0;
+  width: 1px;
+}
+
+.matrix-divider.horizontal {
+  right: 0;
+  left: 0;
+  height: 1px;
+}
+
+.matrix-center {
+  width: 9px;
+  height: 9px;
+  margin: 0 0 -4px -4px;
+  border: 2px solid rgba(255, 255, 255, 0.95);
+  border-radius: 50%;
+  background: var(--erp-sidebar-soft);
+  box-shadow: 0 0 0 2px rgba(24, 37, 31, 0.16);
+}
 
 .matrix-dot {
   --matrix-dot-fill: #718079;
@@ -1680,12 +1710,16 @@ button {
 
 .axis-x {
   right: 10px;
-  bottom: 49%;
+  transform: translateY(50%);
 }
 
 .axis-y {
   top: 10px;
-  left: 50%;
+  transform: translateX(-50%);
+}
+
+.collection-persistence-note {
+  margin-top: 10px;
 }
 
 .page-tabs,

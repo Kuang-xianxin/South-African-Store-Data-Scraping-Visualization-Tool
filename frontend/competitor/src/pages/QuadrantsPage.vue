@@ -64,6 +64,10 @@ function position(value: number | null) {
   return `${rankValue(value)}%`;
 }
 
+function boundaryPosition(value: number | null) {
+  return `${rankValue(value)}%`;
+}
+
 function rankValue(value: number | null) {
   return Math.min(98, Math.max(2, value ?? 50));
 }
@@ -175,8 +179,34 @@ onBeforeUnmount(() => {
           <div class="matrix-zone top-right">明星商品</div>
           <div class="matrix-zone bottom-left">待优化</div>
           <div class="matrix-zone bottom-right">转化问题</div>
-          <span class="axis-y">近7日下单件数 →</span>
-          <span class="axis-x">近30天浏览量 →</span>
+          <span
+            class="axis-y"
+            :style="{ left: boundaryPosition(data.boundaries.page_views_rank) }"
+          >
+            近7日下单件数 →
+          </span>
+          <span
+            class="axis-x"
+            :style="{ bottom: boundaryPosition(data.boundaries.ordered_units_rank) }"
+          >
+            近30天浏览量 →
+          </span>
+          <span
+            class="matrix-divider vertical"
+            :style="{ left: boundaryPosition(data.boundaries.page_views_rank) }"
+          ></span>
+          <span
+            class="matrix-divider horizontal"
+            :style="{ bottom: boundaryPosition(data.boundaries.ordered_units_rank) }"
+          ></span>
+          <span
+            class="matrix-center"
+            :style="{
+              left: boundaryPosition(data.boundaries.page_views_rank),
+              bottom: boundaryPosition(data.boundaries.ordered_units_rank),
+            }"
+            aria-hidden="true"
+          ></span>
           <button
             v-for="item in data.items.filter((row) => row.quadrant !== 'unclassified')"
             :key="item.offer_id"
@@ -232,7 +262,8 @@ onBeforeUnmount(() => {
           </aside>
         </div>
         <p class="method-note">
-          图中位置使用店铺内相对排名拉开差异；悬停查看商品，点击小点直接复制平台 SKU。
+          图中位置使用店铺内相对排名拉开差异；十字中心跟随分组严格程度移动。
+          悬停查看商品，点击小点直接复制平台 SKU。
         </p>
         <p
           v-if="copyFeedback"
