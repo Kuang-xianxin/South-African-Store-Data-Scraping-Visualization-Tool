@@ -116,6 +116,8 @@ def test_populated_dashboard_renders_every_data_page_without_api_key(
             assert app.metric[0].value == "1"
         elif page_name == "数据质量":
             assert app.metric[0].value == "1"
+        elif page_name == "导出中心":
+            assert any(button.label == "一键导出全部报表" for button in app.button)
 
 
 def _seed_dashboard(database: Path, metric_date: date) -> None:

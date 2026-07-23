@@ -48,6 +48,8 @@ from takealot_ops.nft102_portal import (
     inspect_nft102_upload,
     persist_nft102_baseline,
 )
+from takealot_ops.reporting import generate_daily_reports
+from takealot_ops.scheduler import verify_database_integrity
 from takealot_ops.settings import DashboardSettings, SettingsError
 from takealot_ops.storage.models import CollectionRun, DailyProductMetric
 from takealot_ops.storage.repository import Repository
@@ -512,15 +514,53 @@ def _render_exports(
     settings: DashboardSettings,
     as_of: date,
 ) -> None:
-    del dataset, load_error
     st.title("导出中心")
-    st.caption("这里只检查现有日报，不生成、不刷新，也不调用平台接口。")
+    st.caption(
+        "按当前截止日期一键生成离线网页、电子表格和图片；只读取本地数据库，"
+        "不会重新采集，也不会调用平台接口。"
+    )
+    if not _require_dataset(dataset, load_error):
+        return
+    assert dataset is not None
     export_root = settings.project_root / "exports"
     partition = export_root / as_of.isoformat()
     basename = f"Takealot运营日报_{as_of.isoformat()}"
+    export_clicked = st.button(
+        "一键导出全部报表",
+        type="primary",
+        width="stretch",
+        key=f"export_all_{as_of.isoformat()}",
+    )
+    if export_clicked:
+        try:
+            verify_database_integrity(settings)
+        except (OSError, RuntimeError, ValueError):
+            st.error("导出前的本地数据库完整性检查未通过，请先检查数据库。")
+        else:
+            try:
+                with st.spinner("正在生成离线网页、电子表格和图片……"):
+                    generated = generate_daily_reports(dataset, export_root, as_of)
+            except (OSError, RuntimeError, ValueError):
+                st.error("报表生成失败，请检查本地文件权限和运行环境后重试。")
+            else:
+                st.success(f"{as_of.isoformat()} 的日报已生成，可在下方直接下载。")
+                if generated.png_error is not None:
+                    st.warning("离线网页和电子表格已生成，但图片生成失败，请检查浏览器运行环境。")
+
+    file_specs = (
+        ("离线网页", ".html", "text/html"),
+        (
+            "电子表格",
+            ".xlsx",
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        ),
+        ("图片", ".png", "image/png"),
+    )
     rows = []
-    for label, suffix in (("离线网页", ".html"), ("电子表格", ".xlsx"), ("图片", ".png")):
+    paths: list[tuple[str, Path, str]] = []
+    for label, suffix, mime in file_specs:
         path = partition / f"{basename}{suffix}"
+        paths.append((label, path, mime))
         rows.append(
             {
                 "格式": label,
@@ -529,10 +569,24 @@ def _render_exports(
             }
         )
     st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
-    if any(row["状态"] == "已生成" for row in rows):
-        st.success("已找到部分或全部日报文件，可在项目日报导出目录中打开。")
-    else:
-        st.info("所选日期暂无日报。请在命令行运行既有导出工作流；看板不会写入数据或生成文件。")
+    available_paths = [(label, path, mime) for label, path, mime in paths if path.is_file()]
+    if not available_paths:
+        st.info("所选日期暂无日报，点击上方按钮即可从现有本地数据生成。")
+        return
+    st.success("已找到日报文件，可直接下载或在项目日报导出目录中打开。")
+    download_columns = st.columns(len(available_paths))
+    for column, (label, path, mime) in zip(
+        download_columns, available_paths, strict=True
+    ):
+        with column:
+            st.download_button(
+                f"下载{label}",
+                data=path.read_bytes(),
+                file_name=path.name,
+                mime=mime,
+                width="stretch",
+                key=f"download_{path.suffix}_{as_of.isoformat()}_{label}",
+            )
 
 
 def _render_nft102_update(
