@@ -78,6 +78,19 @@ function number(value: number | null | undefined) {
     : new Intl.NumberFormat("zh-CN").format(value);
 }
 
+function firstListingLabel(item: QuadrantItem) {
+  return item.first_listed_at || "暂无记录";
+}
+
+function restockLabel(item: QuadrantItem) {
+  if (!item.latest_restock_date) return "暂未观察到库存上升";
+  const increase =
+    item.latest_restock_increase === null
+      ? ""
+      : ` · 较前次 +${number(item.latest_restock_increase)}`;
+  return `${item.latest_restock_date}${increase}`;
+}
+
 async function copyPlatformSku(item: QuadrantItem) {
   const sku = String(item.sku ?? "").trim();
   if (!sku) {
@@ -174,7 +187,11 @@ onBeforeUnmount(() => {
             近7日下单分界 {{ number(data.boundaries.ordered_units) }}
           </span>
         </div>
-        <div class="matrix">
+        <div class="matrix-shell">
+          <span class="matrix-axis-title y">
+            纵轴 · 近7日下单件数相对排名（低 → 高）
+          </span>
+          <div class="matrix">
           <div class="matrix-zone top-left">潜力商品</div>
           <div class="matrix-zone top-right">明星商品</div>
           <div class="matrix-zone bottom-left">待优化</div>
@@ -183,13 +200,13 @@ onBeforeUnmount(() => {
             class="axis-y"
             :style="{ left: boundaryPosition(data.boundaries.page_views_rank) }"
           >
-            近7日下单件数 →
+            下单分界
           </span>
           <span
             class="axis-x"
             :style="{ bottom: boundaryPosition(data.boundaries.ordered_units_rank) }"
           >
-            近30天浏览量 →
+            流量分界
           </span>
           <span
             class="matrix-divider vertical"
@@ -251,19 +268,50 @@ onBeforeUnmount(() => {
             </div>
             <div class="tooltip-stats">
               <span>
-                <small>近30天浏览量</small>
-                <b>{{ number(hoveredItem.page_views_30_days) }}</b>
+                <small>近7日流量参考 · 估算</small>
+                <b>{{ number(hoveredItem.page_views_7_day_estimate) }}</b>
               </span>
               <span>
                 <small>近7日下单</small>
                 <b>{{ number(hoveredItem.ordered_units) }}</b>
               </span>
+              <span>
+                <small>平台可售库存</small>
+                <b>{{ number(hoveredItem.total_stock) }}</b>
+              </span>
+              <span>
+                <small>近30天浏览量</small>
+                <b>{{ number(hoveredItem.page_views_30_days) }}</b>
+              </span>
+            </div>
+            <div class="tooltip-timeline">
+              <span>
+                <small>
+                  {{
+                    hoveredItem.first_listed_source === "platform"
+                      ? "首次上架"
+                      : "首次上架 · 本库最早记录"
+                  }}
+                </small>
+                <b>{{ firstListingLabel(hoveredItem) }}</b>
+              </span>
+              <span>
+                <small>最近补货 · 按库存上升估算</small>
+                <b>{{ restockLabel(hoveredItem) }}</b>
+              </span>
+              <em>
+                库存和流量截至 {{ hoveredItem.metric_date }}；7日流量参考按近30日均值 × 7 估算。
+              </em>
             </div>
           </aside>
+          </div>
+          <span class="matrix-axis-title x">
+            横轴 · 近30天浏览量相对排名（低 → 高）
+          </span>
         </div>
         <p class="method-note">
           图中位置使用店铺内相对排名拉开差异；十字中心跟随分组严格程度移动。
-          悬停查看商品，点击小点直接复制平台 SKU。
+          悬停可查看首次上架、补货估算、库存及流量时效信息，点击小点直接复制平台 SKU。
         </p>
         <p
           v-if="copyFeedback"

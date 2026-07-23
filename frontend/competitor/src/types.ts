@@ -135,6 +135,11 @@ export interface QuadrantItem extends ProductItem {
   ordered_units: number | null;
   page_views_rank: number | null;
   ordered_units_rank: number | null;
+  page_views_7_day_estimate: number | null;
+  first_listed_at: string | null;
+  first_listed_source: "platform" | "first_observed";
+  latest_restock_date: string | null;
+  latest_restock_increase: number | null;
   quadrant: QuadrantKey;
 }
 

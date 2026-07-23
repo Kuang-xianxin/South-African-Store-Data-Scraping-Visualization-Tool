@@ -47,6 +47,7 @@ class OfferRecord:
     seller_available_stock: int | None = None
     takealot_stock_in_receiving: int | None = None
     takealot_stock_on_way: int | None = None
+    created_at: datetime | None = None
 
     @classmethod
     def from_api(cls, payload: Mapping[str, Any], captured_at: datetime) -> OfferRecord:
@@ -95,6 +96,7 @@ class OfferRecord:
             takealot_stock_on_way=_sum_stock_field(
                 payload.get("takealot_warehouse_stock"), "stock_on_way"
             ),
+            created_at=_optional_datetime(payload.get("created_at"), "created_at"),
         )
 
 
@@ -183,10 +185,10 @@ def _sum_stock_field(value: Any, field_name: str) -> int | None:
     return total
 
 
-def _optional_datetime(value: Any) -> datetime | None:
+def _optional_datetime(value: Any, field_name: str = "updated_at") -> datetime | None:
     if value is None or value == "":
         return None
-    return _parse_datetime(value, "updated_at")
+    return _parse_datetime(value, field_name)
 
 
 def _parse_datetime(value: Any, field_name: str) -> datetime:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import date
 
 from takealot_ops.erp.service import (
@@ -57,6 +58,34 @@ def test_erp_quadrants_keep_real_boundaries_after_identity_enrichment(
         "offer-a",
         "offer-b",
     }
+    offer_a = next(item for item in payload["items"] if item["offer_id"] == "offer-a")
+    offer_b = next(item for item in payload["items"] if item["offer_id"] == "offer-b")
+    assert offer_a["page_views_7_day_estimate"] == 224
+    assert offer_a["first_listed_at"] == "2026-01-15 12:34"
+    assert offer_a["first_listed_source"] == "platform"
+    assert offer_a["latest_restock_date"] is None
+    assert offer_b["first_listed_at"] == "2026-07-20"
+    assert offer_b["first_listed_source"] == "first_observed"
+
+
+def test_erp_quadrants_estimate_latest_restock_from_stock_increase(
+    dashboard_dataset: DashboardDataset,
+) -> None:
+    product_daily = dashboard_dataset.product_daily.copy(deep=True)
+    product_daily.loc[
+        (product_daily["offer_id"] == "offer-a")
+        & (product_daily["metric_date"] == date(2026, 7, 19)),
+        "total_stock",
+    ] = 4
+    payload = build_quadrant_payload(
+        replace(dashboard_dataset, product_daily=product_daily),
+        AS_OF,
+        50,
+    )
+
+    offer_a = next(item for item in payload["items"] if item["offer_id"] == "offer-a")
+    assert offer_a["latest_restock_date"] == "2026-07-20"
+    assert offer_a["latest_restock_increase"] == 3
 
 
 def test_erp_risks_are_localized_and_count_unique_latest_products(

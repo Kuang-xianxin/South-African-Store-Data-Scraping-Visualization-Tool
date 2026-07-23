@@ -1447,6 +1447,32 @@ button {
   color: var(--muted);
 }
 
+.matrix-shell {
+  position: relative;
+  padding: 0 0 32px 34px;
+}
+
+.matrix-axis-title {
+  position: absolute;
+  color: #51615a;
+  font-size: 0.63rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+}
+
+.matrix-axis-title.x {
+  bottom: 4px;
+  left: calc(50% + 17px);
+  transform: translateX(-50%);
+}
+
+.matrix-axis-title.y {
+  top: 50%;
+  left: 4px;
+  transform: translate(-50%, -50%) rotate(-90deg);
+}
+
 .matrix {
   position: relative;
   height: 450px;
@@ -1571,7 +1597,7 @@ button {
   --tooltip-y: calc(-100% - 16px);
   position: absolute;
   z-index: 12;
-  width: min(292px, calc(100% - 28px));
+  width: min(344px, calc(100% - 28px));
   padding: 15px;
   border: 1px solid rgba(215, 238, 112, 0.22);
   border-radius: 13px;
@@ -1668,6 +1694,40 @@ button {
   padding: 8px 10px;
   border: 1px solid rgba(255, 255, 255, 0.08);
   border-radius: 8px;
+}
+
+.tooltip-timeline {
+  display: grid;
+  gap: 8px;
+  margin-top: 9px;
+  padding-top: 9px;
+  border-top: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.tooltip-timeline > span {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.tooltip-timeline small {
+  color: rgba(255, 255, 255, 0.55);
+  font-size: 0.58rem;
+}
+
+.tooltip-timeline b {
+  color: white;
+  font-family: "Cascadia Mono", Consolas, monospace;
+  font-size: 0.66rem;
+  text-align: right;
+}
+
+.tooltip-timeline em {
+  color: rgba(255, 255, 255, 0.48);
+  font-size: 0.53rem;
+  font-style: normal;
+  line-height: 1.5;
 }
 
 @keyframes matrix-tooltip-in {

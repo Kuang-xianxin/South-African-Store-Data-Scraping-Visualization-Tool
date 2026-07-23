@@ -56,6 +56,7 @@ def offer() -> OfferRecord:
         wishlist_30_days=2,
         listing_quality="good",
         discount_percentage=Decimal("20"),
+        created_at=datetime(2026, 1, 15, 10, 34, 56, tzinfo=UTC),
         updated_at=datetime(2026, 7, 20, 7, 30, tzinfo=UTC),
         captured_at=datetime(2026, 7, 20, 8, 0, tzinfo=UTC),
     )
@@ -99,6 +100,7 @@ def test_offer_snapshot_is_unique_by_day_and_offer_id(engine: Engine, offer: Off
     assert len(snapshots) == 1
     assert snapshots[0].title == "Updated title"
     assert snapshots[0].selling_price == Decimal("189.99")
+    assert snapshots[0].created_at == datetime(2026, 1, 15, 10, 34, 56)
 
 
 def test_repeated_sale_updates_status_without_duplicate_order_item(

@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Protocol
 
-from sqlalchemy import Engine, create_engine, event
+from sqlalchemy import Engine, create_engine, event, inspect
 from sqlalchemy.engine import make_url
 
 from takealot_ops.storage.models import Base
@@ -66,8 +66,26 @@ def create_read_only_engine(database_url: str) -> Engine:
 def create_schema(engine: Engine) -> None:
     """Create the current schema and apply retained SQLite upgrades."""
     Base.metadata.create_all(engine)
+    _add_offer_created_at_columns(engine)
     if engine.dialect.name == "sqlite":
         _add_sqlite_offer_stock_columns(engine)
+
+
+def _add_offer_created_at_columns(engine: Engine) -> None:
+    """Add the documented platform listing timestamp to existing offer tables."""
+    with engine.begin() as connection:
+        preparer = connection.dialect.identifier_preparer
+        for table_name in ("offer_current", "offer_snapshots"):
+            existing = {
+                str(column["name"])
+                for column in inspect(connection).get_columns(table_name)
+            }
+            if "created_at" not in existing:
+                table = preparer.quote(table_name)
+                column = preparer.quote("created_at")
+                connection.exec_driver_sql(
+                    f"ALTER TABLE {table} ADD COLUMN {column} DATETIME NULL"
+                )
 
 
 def _add_sqlite_offer_stock_columns(engine: Engine) -> None:

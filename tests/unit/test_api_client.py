@@ -479,6 +479,8 @@ def test_429_uses_retry_after_then_retries() -> None:
         client.close()
 
     assert isinstance(offers[0], OfferRecord)
+    assert offers[0].created_at is not None
+    assert offers[0].created_at.isoformat() == "2026-02-15T12:34:56+02:00"
     assert calls == 2
     assert sleeps == [7.0]
 

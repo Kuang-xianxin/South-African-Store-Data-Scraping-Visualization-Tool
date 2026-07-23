@@ -252,6 +252,9 @@ def _offer_values(record: OfferRecord) -> dict[str, Any]:
         "wishlist_30_days": record.wishlist_30_days,
         "listing_quality": record.listing_quality,
         "discount_percentage": record.discount_percentage,
+        "created_at": (
+            record.created_at.astimezone(UTC) if record.created_at is not None else None
+        ),
         "updated_at": record.updated_at,
         "captured_at": record.captured_at.astimezone(UTC),
         "total_stock": record.total_stock,

@@ -112,6 +112,7 @@ def test_collect_offers_persists_complete_snapshot_and_successful_run() -> None:
     assert snapshots[0].seller_available_stock == 4
     assert snapshots[0].takealot_stock_in_receiving == 3
     assert snapshots[0].takealot_stock_on_way == 3
+    assert snapshots[0].created_at == datetime(2026, 1, 15, 10, 34, 56)
     assert snapshots[1].total_stock is None
     assert run is not None
     assert run.status == "success"

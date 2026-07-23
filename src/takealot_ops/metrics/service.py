@@ -89,6 +89,7 @@ _OFFER_CURRENT_COLUMNS = (
     "wishlist_30_days",
     "listing_quality",
     "discount_percentage",
+    "created_at",
     "updated_at",
     "captured_at",
     "total_stock",
