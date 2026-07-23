@@ -1,8 +1,8 @@
 # Takealot 运营数据工具：单 Agent 交接状态
 
 更新时间：2026-07-23
-开发分支：`agent/takealot-operations-dashboard`  
-功能代码基线：当前 `agent/takealot-operations-dashboard` 工作区
+主分支：`main`
+功能代码基线：当前 `main` 工作区
 工作区模式：项目根目录单 Agent
 
 ## 当前结论

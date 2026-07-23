@@ -98,6 +98,7 @@
 
 | 日期 | 修改摘要 | 主要文件 | 验证与结论 |
 |---|---|---|---|
+| 2026-07-23 | 将完整开发历史快进合并到 `main`，并把 `main` 设为项目后续开发与交付基线；原开发分支暂时保留，未删除 | `AGENT.md`、`docs/PROJECT_STATUS.md` | `main` 从初始提交快进包含开发分支全部44个提交；本次仅调整分支与交接文档，未修改运行代码 |
 | 2026-07-23 | 统一异常口径：看板总览、Excel 和 HTML/PNG 总览均统计最新指标日去重异常商品；看板异常页默认仅显示最新日并提供“全部历史”切换；Excel、HTML/PNG 异常明细仅保留最新指标日，同时说明同一商品可有多条异常类型记录 | `src/takealot_ops/metrics/service.py`、`src/takealot_ops/dashboard/app.py`、`src/takealot_ops/exports/excel.py`、`src/takealot_ops/exports/html.py`、相关测试与文档 | 重点测试 `49 passed`；完整测试 `158 passed`；Ruff、Mypy、`takealot_ops.cli verify` 通过；真实数据核对为最新日289个商品/299条记录，历史累计340个商品/986条记录；已重新生成并核对2026-07-23的HTML、Excel、PNG |
 | 2026-07-23 | 导出中心新增“一键导出全部报表”：按页面截止日期先检查 SQLite 完整性，再从当前本地数据生成 HTML、Excel、PNG；不调用平台接口，并对所有已生成文件提供页面直接下载 | `src/takealot_ops/dashboard/app.py`、`tests/e2e/test_dashboard_smoke.py`、`README.md`、`docs/PROJECT_STATUS.md` | 导出与页面重点测试 `28 passed`；完整测试 `155 passed`；Ruff、Mypy、`takealot_ops.cli verify` 通过；浏览器确认按钮、只读说明及三个下载入口均正常显示，未手动触发真实导出 |
 | 2026-07-23 | 重做经营四象限对比：销售维度由单日改为近7日下单件数，销量分界只从正销量商品计算且保持整数，坐标改为相对排名以避免极端值压缩，并增加四色区域背景和真实阈值说明；单品分析及店铺总览的下单件数图移除小数移动平均线并固定整数刻度 | `src/takealot_ops/metrics/service.py`、`src/takealot_ops/dashboard/charts.py`、`src/takealot_ops/dashboard/app.py`、`src/takealot_ops/dashboard/labels.py`、相关测试与文档 | 重点测试 `45 passed`；完整测试 `155 passed`；Ruff、Mypy、`takealot_ops.cli verify` 通过；真实数据验证得到明星27、转化问题34、潜力19、待优化40、未分类277，浏览器确认页面阈值与分类数量正确 |
