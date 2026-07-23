@@ -41,6 +41,7 @@ from takealot_ops.metrics.service import (
     MetricService,
     build_quadrant_window,
     classify_quadrants,
+    latest_metric_anomalies,
 )
 from takealot_ops.nft102_portal import (
     Nft102GenerationResult,
@@ -306,7 +307,10 @@ def _render_overview(
         "最新可用日下单金额", _currency_or_missing(_sum_numeric(latest, "ordered_revenue"))
     )
     metrics[2].metric("近7日下单件数", _sum_value(recent, "ordered_units", integer=True))
-    metrics[3].metric("异常商品数", _unique_count(dataset.anomalies, "offer_id"))
+    _, latest_anomalies = latest_metric_anomalies(dataset)
+    metrics[3].metric(
+        "最新指标日异常商品数", _unique_count(latest_anomalies, "offer_id")
+    )
     second = st.columns(4)
     second[0].metric("近30天浏览量合计", _sum_value(latest, "page_views_30_days", integer=True))
     second[1].metric(
@@ -450,13 +454,32 @@ def _render_anomalies(
 ) -> None:
     del settings
     st.title("异常商品")
-    st.caption(f"仅显示截至 {as_of.isoformat()} 的已计算异常，不在页面修改规则。")
     if not _require_dataset(dataset, load_error):
         return
     assert dataset is not None
-    anomalies = filter_as_of(dataset.anomalies, as_of, "event_date")
+    history = filter_as_of(dataset.anomalies, as_of, "event_date")
+    latest_date, latest = latest_metric_anomalies(dataset)
+    scope = st.radio(
+        "查看范围",
+        ("最新指标日", "全部历史"),
+        horizontal=True,
+        key="anomaly_scope",
+    )
+    if scope == "最新指标日":
+        anomalies = latest
+        date_label = latest_date.isoformat() if latest_date is not None else "暂无"
+        st.caption(
+            f"默认仅显示最新指标日 {date_label} 的异常；同一商品触发多种异常时会保留多条记录。"
+        )
+        metric_label = "最新指标日异常商品数"
+    else:
+        anomalies = history
+        st.caption(
+            f"显示截至 {as_of.isoformat()} 的全部历史异常；同一商品跨日期或触发多种异常时会有多条记录。"
+        )
+        metric_label = "历史异常商品数"
     if anomalies.empty:
-        _empty_state("当前没有异常记录", "可能尚未计算异常，或所选截止日期前没有触发规则。")
+        _empty_state("当前范围没有异常记录", "可切换查看范围，或确认所选截止日期已有指标。")
         return
     anomaly_types = sorted(anomalies["anomaly_type"].dropna().astype(str).unique())
     selected = st.multiselect(
@@ -469,7 +492,10 @@ def _render_anomalies(
     filtered["explanation"] = (
         filtered["anomaly_type"].map(ANOMALY_EXPLANATIONS).fillna("暂无中文说明")
     )
-    st.metric("异常商品数", _unique_count(filtered, "offer_id"))
+    st.metric(metric_label, _unique_count(filtered, "offer_id"))
+    st.caption(
+        f"当前共 {len(filtered)} 条异常记录，涉及 {_unique_count(filtered, 'offer_id')} 个去重商品。"
+    )
     _dataframe(
         filtered,
         ["event_date", "offer_id", "anomaly_type", "severity", "explanation"],

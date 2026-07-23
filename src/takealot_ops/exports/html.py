@@ -14,7 +14,7 @@ import pandas as pd
 import plotly.graph_objects as go  # type: ignore[import-untyped]
 import plotly.io as pio  # type: ignore[import-untyped]
 
-from takealot_ops.metrics.service import DashboardDataset
+from takealot_ops.metrics.service import DashboardDataset, latest_metric_anomalies
 
 
 _TRAFFIC_LABELS = {
@@ -52,8 +52,16 @@ def export_html(dataset: DashboardDataset, destination: Path) -> Path:
         config={"displaylogo": False, "responsive": True},
         post_script=_PLOT_COMPLETION_POST_SCRIPT,
     )
-    serialized = _serialize_dataset(dataset)
-    document = _document(dataset, serialized, store_plot, product_plot)
+    _, latest_anomalies = latest_metric_anomalies(dataset)
+    report_dataset = DashboardDataset(
+        store_daily=dataset.store_daily,
+        product_daily=dataset.product_daily,
+        offer_current=dataset.offer_current,
+        anomalies=latest_anomalies,
+        quality_events=dataset.quality_events,
+    )
+    serialized = _serialize_dataset(report_dataset)
+    document = _document(report_dataset, serialized, store_plot, product_plot)
     _reject_external_resource_attributes(document)
     document = _escape_inline_resource_literals(document)
     _reject_external_resources(document)
@@ -122,11 +130,20 @@ def _document(
     store_plot: str,
     product_plot: str,
 ) -> str:
+    latest_anomaly_date, latest_anomalies = latest_metric_anomalies(dataset)
+    anomaly_products = (
+        int(latest_anomalies["offer_id"].dropna().astype(str).nunique())
+        if "offer_id" in latest_anomalies.columns
+        else 0
+    )
+    anomaly_date_label = (
+        latest_anomaly_date.isoformat() if latest_anomaly_date is not None else "暂无"
+    )
     totals = {
         "units": _sum_or_none(dataset.store_daily, "ordered_units"),
         "effective": _sum_or_none(dataset.store_daily, "effective_units"),
         "revenue": _sum_or_none(dataset.store_daily, "ordered_revenue"),
-        "anomalies": len(dataset.anomalies),
+        "anomalies": anomaly_products,
     }
     product_columns = [
         ("metric_date", "日期"),
@@ -193,14 +210,14 @@ def _document(
     {_card("订购件数", totals["units"], "#,##0")}
     {_card("有效件数", totals["effective"], "#,##0")}
     {_card("订购销售额", totals["revenue"], "ZAR")}
-    {_card("异常数", totals["anomalies"], "#,##0")}
+    {_card("最新指标日异常商品数", totals["anomalies"], "#,##0")}
   </section>
   <section class="charts"><div class="panel">{store_plot}</div><div class="panel">{product_plot}</div></section>
   <section class="panel"><h2>商品每日销售明细/汇总</h2>
     <div class="controls"><input id="search" type="search" placeholder="搜索 SKU、Offer ID 或状态"><select id="offer-filter"><option value="">全部商品</option>{options}</select></div>
     {_table(dataset.product_daily, product_columns, "product-table")}
   </section>
-  <section class="panel"><h2>异常商品</h2>{_table(dataset.anomalies, anomaly_columns, "anomaly-table")}</section>
+  <section class="panel"><h2>异常商品（最新指标日 {anomaly_date_label}）</h2><p class="note">同一商品触发多种异常时会保留多条记录。</p>{_table(dataset.anomalies, anomaly_columns, "anomaly-table")}</section>
   <section class="panel"><h2>数据质量</h2>{_table(dataset.quality_events, quality_columns, "quality-table")}</section>
   <section class="panel"><h2>流量口径说明</h2><p class="note">近30天浏览量是 API 返回的滚动窗口值；近30天日均浏览量为该窗口值除以 30；30天浏览量窗口净变化用于比较相邻快照的窗口变化。缺失值保持空白，且不推断为零。</p></section>
 </main>

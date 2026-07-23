@@ -102,9 +102,13 @@ def test_populated_dashboard_renders_every_data_page_without_api_key(
 
     assert not app.exception
     assert app.metric[0].label == "最新可用日下单件数"
+    assert app.metric[3].label == "最新指标日异常商品数"
     assert metric_date.isoformat() in app.caption[0].value
     for page_name in PAGE_NAMES:
-        app.radio[0].set_value(page_name).run()
+        navigation = next(
+            radio for radio in app.radio if tuple(radio.options) == PAGE_NAMES
+        )
+        navigation.set_value(page_name).run()
         assert not app.exception
         assert app.title[0].value == page_name
         if page_name == "单品分析":
@@ -113,6 +117,14 @@ def test_populated_dashboard_renders_every_data_page_without_api_key(
         elif page_name == "经营四象限":
             assert len(app.get("plotly_chart")) == 1
         elif page_name == "异常商品":
+            scope_radios = [
+                radio
+                for radio in app.radio
+                if tuple(radio.options) == ("最新指标日", "全部历史")
+            ]
+            assert len(scope_radios) == 1
+            assert scope_radios[0].value == "最新指标日"
+            assert app.metric[0].label == "最新指标日异常商品数"
             assert app.metric[0].value == "1"
         elif page_name == "数据质量":
             assert app.metric[0].value == "1"

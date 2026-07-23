@@ -55,6 +55,7 @@
 - 看板默认只绑定 `127.0.0.1`，不得在没有明确需求和安全设计的情况下扩大监听范围。
 - 看板浏览、筛选和页面切换只读 SQLite；只有运营人员点击“立即刷新看板数据”或 Windows 每日任务运行时，才允许调用既有只读 API 采集和完整 `daily-run` 流程。
 - 导出中心允许基于当前只读数据集写入 `exports/YYYY-MM-DD/`，但不得触发平台接口或数据库写入；一键导出必须同时尝试 HTML、Excel、PNG，并对已存在文件提供页面下载入口。
+- 异常商品 KPI 必须统计最新可用指标日的去重商品数；异常明细允许同一商品因多种异常保留多行。看板默认显示最新指标日并可手动切换全部历史，Excel、HTML、PNG 默认不得混入历史异常日期。
 - 每日自动更新默认使用中国时间 10:10，避开平台 10:00 左右的切日窗口；自动任务必须忽略并发重复实例，并在错过计划时间后尽快补跑。
 - 看板的导航、按钮、上传提示、字段名、状态和说明必须使用中文；框架自带的英文工具栏应隐藏。平台原始商品名称、店铺代码、商品编码和南非货币符号属于真实业务数据，保持原值，不得擅自翻译或伪造。
 - HTML、Excel、PNG 与看板指标必须来自同一指标数据集，避免跨输出口径漂移。
@@ -97,6 +98,7 @@
 
 | 日期 | 修改摘要 | 主要文件 | 验证与结论 |
 |---|---|---|---|
+| 2026-07-23 | 统一异常口径：看板总览、Excel 和 HTML/PNG 总览均统计最新指标日去重异常商品；看板异常页默认仅显示最新日并提供“全部历史”切换；Excel、HTML/PNG 异常明细仅保留最新指标日，同时说明同一商品可有多条异常类型记录 | `src/takealot_ops/metrics/service.py`、`src/takealot_ops/dashboard/app.py`、`src/takealot_ops/exports/excel.py`、`src/takealot_ops/exports/html.py`、相关测试与文档 | 重点测试 `49 passed`；完整测试 `158 passed`；Ruff、Mypy、`takealot_ops.cli verify` 通过；真实数据核对为最新日289个商品/299条记录，历史累计340个商品/986条记录；已重新生成并核对2026-07-23的HTML、Excel、PNG |
 | 2026-07-23 | 导出中心新增“一键导出全部报表”：按页面截止日期先检查 SQLite 完整性，再从当前本地数据生成 HTML、Excel、PNG；不调用平台接口，并对所有已生成文件提供页面直接下载 | `src/takealot_ops/dashboard/app.py`、`tests/e2e/test_dashboard_smoke.py`、`README.md`、`docs/PROJECT_STATUS.md` | 导出与页面重点测试 `28 passed`；完整测试 `155 passed`；Ruff、Mypy、`takealot_ops.cli verify` 通过；浏览器确认按钮、只读说明及三个下载入口均正常显示，未手动触发真实导出 |
 | 2026-07-23 | 重做经营四象限对比：销售维度由单日改为近7日下单件数，销量分界只从正销量商品计算且保持整数，坐标改为相对排名以避免极端值压缩，并增加四色区域背景和真实阈值说明；单品分析及店铺总览的下单件数图移除小数移动平均线并固定整数刻度 | `src/takealot_ops/metrics/service.py`、`src/takealot_ops/dashboard/charts.py`、`src/takealot_ops/dashboard/app.py`、`src/takealot_ops/dashboard/labels.py`、相关测试与文档 | 重点测试 `45 passed`；完整测试 `155 passed`；Ruff、Mypy、`takealot_ops.cli verify` 通过；真实数据验证得到明星27、转化问题34、潜力19、待优化40、未分类277，浏览器确认页面阈值与分类数量正确 |
 | 2026-07-22 | 新增看板数据新鲜度展示和“立即刷新看板数据”按钮；手动刷新复用完整 `daily-run` 且不向页面泄露子进程输出；每日 Windows 自动任务默认改为中国时间 10:10；计划任务脚本改用兼容 Windows PowerShell 5.1 的 ASCII 源码并在运行时生成中文任务名 | `src/takealot_ops/dashboard/app.py`、`src/takealot_ops/dashboard/refresh.py`、`scripts/install_scheduled_task.ps1`、相关测试与文档 | 重点测试 `32 passed`；完整测试 `154 passed`；Ruff、Mypy、`takealot_ops.cli verify` 通过；系统任务“Takealot 店铺数据每日更新”安装成功，下一次运行 2026-07-23 10:10；看板重启后健康检查 200 |

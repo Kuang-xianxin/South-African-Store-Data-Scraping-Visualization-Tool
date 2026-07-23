@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from datetime import date
 from pathlib import Path
 
 import pandas as pd
@@ -68,8 +69,8 @@ def test_excel_key_totals_match_dataset(
         assert overview["C4"].value == latest_views
         assert overview["E3"].value == "近7天订购销售额"
         assert overview["E4"].value == dashboard_dataset.store_daily["ordered_revenue"].sum()
-        assert overview["G3"].value == "异常记录数"
-        assert overview["G4"].value == len(dashboard_dataset.anomalies)
+        assert overview["G3"].value == "最新指标日异常商品数"
+        assert overview["G4"].value == 1
         assert overview["A5"].value.startswith("口径提示：")
         assert "有效件数按本地销售状态规则计算" in overview["A5"].value
         assert "需完成销售状态规则确认" not in overview["A5"].value
@@ -195,6 +196,40 @@ def test_excel_uses_readable_details_and_real_product_fields(
                 for row in sheet.iter_rows(min_row=4)
                 for cell in row
             )
+    finally:
+        workbook.close()
+
+
+def test_excel_anomalies_default_to_latest_metric_date_and_count_unique_products(
+    tmp_path: Path, dashboard_dataset: DashboardDataset
+) -> None:
+    current = dashboard_dataset.anomalies.iloc[0].to_dict()
+    anomalies = pd.DataFrame(
+        [
+            {
+                **current,
+                "event_date": date(2026, 7, 19),
+                "offer_id": "offer-a",
+                "anomaly_type": "sales_drop",
+            },
+            current,
+            {**current, "anomaly_type": "suspected_stockout"},
+        ]
+    )
+    dataset = replace(dashboard_dataset, anomalies=anomalies)
+
+    destination = export_excel(dataset, tmp_path / "latest-anomalies.xlsx")
+
+    workbook = load_workbook(destination, data_only=False)
+    try:
+        overview = workbook["运营总览"]
+        anomaly = workbook["异常商品"]
+        assert overview["G4"].value == 1
+        assert "仅显示最新指标日 2026-07-20" in anomaly["A2"].value
+        assert anomaly.max_row == 5
+        assert {anomaly.cell(row, 1).value.date() for row in range(4, 6)} == {
+            date(2026, 7, 20)
+        }
     finally:
         workbook.close()
 

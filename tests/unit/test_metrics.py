@@ -14,9 +14,11 @@ from takealot_ops.domain import OfferRecord, SaleRecord
 from takealot_ops.metrics.service import (
     METRIC_METADATA,
     PRODUCT_DAILY_COLUMNS,
+    DashboardDataset,
     MetricService,
     build_quadrant_window,
     classify_quadrants,
+    latest_metric_anomalies,
 )
 from takealot_ops.storage.migrations import create_schema
 from takealot_ops.storage.models import AnomalyEvent, DataQualityEvent
@@ -450,6 +452,39 @@ def test_quadrant_window_uses_latest_traffic_and_seven_calendar_day_units() -> N
     assert pd.isna(result.loc["b", "ordered_units"])
     assert result.attrs["window_start"] == date(2026, 7, 16)
     assert result.attrs["window_end"] == date(2026, 7, 22)
+
+
+def test_latest_metric_anomalies_excludes_history_without_collapsing_types() -> None:
+    product_daily = pd.DataFrame(
+        {
+            "metric_date": [date(2026, 7, 22), date(2026, 7, 23)],
+            "offer_id": ["a", "b"],
+        }
+    )
+    anomalies = pd.DataFrame(
+        {
+            "event_date": [
+                date(2026, 7, 22),
+                date(2026, 7, 23),
+                date(2026, 7, 23),
+            ],
+            "offer_id": ["a", "b", "b"],
+            "anomaly_type": ["sales_drop", "non_buyable", "suspected_stockout"],
+        }
+    )
+    dataset = DashboardDataset(
+        store_daily=pd.DataFrame(),
+        product_daily=product_daily,
+        offer_current=pd.DataFrame(),
+        anomalies=anomalies,
+        quality_events=pd.DataFrame(),
+    )
+
+    latest_date, latest = latest_metric_anomalies(dataset)
+
+    assert latest_date == date(2026, 7, 23)
+    assert latest["offer_id"].tolist() == ["b", "b"]
+    assert latest["anomaly_type"].tolist() == ["non_buyable", "suspected_stockout"]
 
 
 def test_anomaly_rules_cover_spike_traffic_stock_status_and_staleness(tmp_path: Path) -> None:

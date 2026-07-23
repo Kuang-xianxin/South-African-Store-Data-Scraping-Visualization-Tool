@@ -18,7 +18,7 @@ from openpyxl.styles import Alignment, Border, Font, PatternFill, Side  # type: 
 from openpyxl.utils import get_column_letter  # type: ignore[import-untyped]
 from openpyxl.worksheet.worksheet import Worksheet  # type: ignore[import-untyped]
 
-from takealot_ops.metrics.service import DashboardDataset
+from takealot_ops.metrics.service import DashboardDataset, latest_metric_anomalies
 
 
 SHEET_NAMES = (
@@ -207,6 +207,7 @@ def export_excel(dataset: DashboardDataset, destination: Path) -> Path:
     recent_store_daily = _recent_store_daily(store_daily)
     product_daily = _product_daily_for_excel(dataset)
     offer_current = _offer_current_for_excel(dataset.offer_current)
+    latest_anomaly_date, _ = latest_metric_anomalies(dataset)
     anomalies = _anomalies_for_excel(dataset)
     quality_events = _quality_events_for_excel(dataset)
 
@@ -222,7 +223,9 @@ def export_excel(dataset: DashboardDataset, destination: Path) -> Path:
     _build_frame_sheet(
         workbook["异常商品"],
         "异常商品",
-        "异常详情已拆成可筛选字段；空白表示该类异常没有对应指标。",
+        "仅显示最新指标日"
+        f" {latest_anomaly_date.isoformat() if latest_anomaly_date is not None else '暂无'}；"
+        "同一商品触发多种异常时会保留多条记录，空白表示该类异常没有对应指标。",
         anomalies,
         _ANOMALY_COLUMNS,
     )
@@ -288,6 +291,12 @@ def _build_overview(
     sheet.merge_cells("A2:N2")
     sheet["A2"] = "只读日报 · KPI 来源于同一 DashboardDataset · 空白表示未知"
     _style_subtitle(sheet["A2"])
+    _, latest_anomalies = latest_metric_anomalies(dataset)
+    latest_anomaly_products = (
+        int(latest_anomalies["offer_id"].dropna().astype(str).nunique())
+        if "offer_id" in latest_anomalies.columns
+        else 0
+    )
     cards = [
         (
             "A3",
@@ -313,7 +322,14 @@ def _build_overview(
             '"R" #,##0.00',
             _PALE_BLUE,
         ),
-        ("G3", "G4", "异常记录数", len(dataset.anomalies), "#,##0", "FFF7ED"),
+        (
+            "G3",
+            "G4",
+            "最新指标日异常商品数",
+            latest_anomaly_products,
+            "#,##0",
+            "FFF7ED",
+        ),
     ]
     card_border = Border(
         left=Side(style="thin", color="CBD5E1"),
@@ -800,7 +816,8 @@ def _offer_current_for_excel(frame: pd.DataFrame) -> pd.DataFrame:
 
 
 def _anomalies_for_excel(dataset: DashboardDataset) -> pd.DataFrame:
-    frame = _with_offer_titles(dataset.anomalies, dataset.offer_current)
+    _, latest_anomalies = latest_metric_anomalies(dataset)
+    frame = _with_offer_titles(latest_anomalies, dataset.offer_current)
     if frame.empty:
         for key, _ in _ANOMALY_COLUMNS:
             if key not in frame:

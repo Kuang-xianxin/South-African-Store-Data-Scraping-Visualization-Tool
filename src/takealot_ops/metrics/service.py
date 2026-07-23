@@ -124,6 +124,25 @@ class DashboardDataset:
     quality_events: pd.DataFrame
 
 
+def latest_metric_anomalies(
+    dataset: DashboardDataset,
+) -> tuple[date | None, pd.DataFrame]:
+    """Return anomaly records for the latest available product metric date only."""
+    product_daily = dataset.product_daily
+    anomalies = dataset.anomalies
+    if product_daily.empty or "metric_date" not in product_daily.columns:
+        return None, anomalies.iloc[0:0].copy()
+    metric_dates = pd.to_datetime(product_daily["metric_date"], errors="coerce").dt.date
+    valid_metric_dates = metric_dates.dropna()
+    if valid_metric_dates.empty:
+        return None, anomalies.iloc[0:0].copy()
+    latest_date = valid_metric_dates.max()
+    if anomalies.empty or "event_date" not in anomalies.columns:
+        return latest_date, anomalies.iloc[0:0].copy()
+    event_dates = pd.to_datetime(anomalies["event_date"], errors="coerce").dt.date
+    return latest_date, anomalies.loc[event_dates == latest_date].copy()
+
+
 @dataclass(frozen=True)
 class _AnomalyRules:
     drop_baseline_days: int

@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import json
 import re
+from dataclasses import replace
+from datetime import date
 from html.parser import HTMLParser
 from pathlib import Path
 
+import pandas as pd
 import pytest
 from playwright.sync_api import Error as PlaywrightError
 from playwright.sync_api import sync_playwright
@@ -60,6 +64,42 @@ def test_html_uses_approved_traffic_labels(
     visible_document = re.sub(r"<script\b.*?</script>", "", document, flags=re.DOTALL)
     for banned in ("精确每日流量", "昨日流量", "日访问量", "访客数", "UV"):
         assert banned not in visible_document
+
+
+def test_html_anomalies_default_to_latest_metric_date_and_unique_product_count(
+    tmp_path: Path, dashboard_dataset: DashboardDataset
+) -> None:
+    current = dashboard_dataset.anomalies.iloc[0].to_dict()
+    anomalies = pd.DataFrame(
+        [
+            {
+                **current,
+                "event_date": date(2026, 7, 19),
+                "offer_id": "offer-a",
+                "anomaly_type": "sales_drop",
+            },
+            current,
+            {**current, "anomaly_type": "suspected_stockout"},
+        ]
+    )
+    dataset = replace(dashboard_dataset, anomalies=anomalies)
+
+    document = export_html(dataset, tmp_path / "latest-anomalies.html").read_text(
+        encoding="utf-8"
+    )
+
+    match = re.search(
+        r'<script id="dashboard-data" type="application/json">(.*?)</script>',
+        document,
+        flags=re.DOTALL,
+    )
+    assert match is not None
+    payload = json.loads(match.group(1))
+    assert len(payload["anomalies"]) == 2
+    assert {row["event_date"] for row in payload["anomalies"]} == {"2026-07-20"}
+    assert {row["offer_id"] for row in payload["anomalies"]} == {"offer-b"}
+    assert "最新指标日异常商品数" in document
+    assert "异常商品（最新指标日 2026-07-20）" in document
 
 
 def test_html_handles_empty_frames_without_inventing_zeroes(
