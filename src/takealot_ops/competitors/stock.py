@@ -173,17 +173,8 @@ def _probe_page_stock(
 ) -> StockProbeResult:
     _clear_isolated_cart(page)
     _goto(page, url)
-    _wait_for_product(page, title)
-    add_buttons = page.locator("button").filter(has_text="Add to Cart")
-    clicked = False
-    for index in range(add_buttons.count()):
-        button = add_buttons.nth(index)
-        if button.is_visible():
-            button.click()
-            clicked = True
-            break
-    if not clicked:
-        raise RuntimeError("商品页的 Add to Cart 按钮当前不可见")
+    _wait_for_product(page, plid, title)
+    _find_main_add_to_cart_button(page).click()
 
     _goto(page, "https://www.takealot.com/cart")
     quantity, exact, note = _find_exact_quantity(page, plid)
@@ -208,16 +199,41 @@ def _dismiss_cookie(page: Page) -> None:
         button.click()
 
 
-def _wait_for_product(page: Page, title: str) -> None:
+def _wait_for_product(page: Page, plid: str, title: str) -> None:
     for attempt in range(3):
         page.wait_for_timeout(3500 if attempt == 0 else 6500)
         _dismiss_cookie(page)
         body = page.locator("body").inner_text()
-        if title in body and "Add to Cart" in body:
-            return
+        if _url_matches_plid(page.url, plid) and title in body:
+            try:
+                _find_main_add_to_cart_button(page)
+            except RuntimeError:
+                pass
+            else:
+                return
         if attempt < 2:
             page.reload(wait_until="domcontentloaded", timeout=45_000)
-    raise RuntimeError("商品页未完整加载，可能触发了 Takealot 限流；请稍后重试")
+    raise RuntimeError(
+        f"目标竞品 PLID{plid} 的主商品购买按钮未完整加载；"
+        "已拒绝点击推荐商品，请稍后重试"
+    )
+
+
+def _url_matches_plid(url: str, plid: str) -> bool:
+    return re.search(
+        rf"/PLID{re.escape(plid)}(?:[/?#]|$)",
+        url,
+        re.IGNORECASE,
+    ) is not None
+
+
+def _find_main_add_to_cart_button(page: Page) -> Locator:
+    """Return only the target PDP buy-box button, never carousel recommendations."""
+    buy_box = page.locator("main aside")
+    button = buy_box.get_by_role("button", name="Add to Cart", exact=True)
+    if button.count() != 1 or not button.is_visible():
+        raise RuntimeError("无法唯一定位目标竞品主购买区的 Add to Cart 按钮")
+    return button
 
 
 def _goto(page: Page, url: str) -> None:
@@ -273,10 +289,9 @@ def _choose_quantity(page: Page, combo: Locator, quantity: int) -> bool:
 
 def _find_product_quantity_combo(page: Page, plid: str) -> Locator:
     deadline = time.monotonic() + 15
-    last_count = 0
     while time.monotonic() < deadline:
         product_link = page.locator(
-            f'a[href*="PLID{plid}"][title*="details"]:visible'
+            f'a[href*="/PLID{plid}"]:visible'
         )
         if product_link.count() >= 1:
             product_row = product_link.first.locator(
@@ -285,12 +300,11 @@ def _find_product_quantity_combo(page: Page, plid: str) -> Locator:
             scoped_combo = product_row.locator('button[role="combobox"]:visible')
             if scoped_combo.count() == 1:
                 return scoped_combo
-        visible_combos = page.locator('button[role="combobox"]:visible')
-        last_count = visible_combos.count()
-        if last_count == 1:
-            return visible_combos
         page.wait_for_timeout(500)
-    raise RuntimeError(f"无法唯一定位目标商品的购物车数量控件（发现 {last_count} 个）")
+    raise RuntimeError(
+        f"购物车中未找到目标竞品 PLID{plid}；"
+        "已拒绝把其他商品当作目标库存"
+    )
 
 
 def _parse_warehouse_stock_message(text: str) -> int | None:
