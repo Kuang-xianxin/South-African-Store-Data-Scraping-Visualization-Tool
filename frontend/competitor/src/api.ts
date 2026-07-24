@@ -23,7 +23,7 @@ export function setAuthSession(session: AuthSession | null) {
   csrfToken = session?.csrf_token ?? "";
 }
 
-async function request<T>(url: string, init?: RequestInit): Promise<T> {
+async function request<T>(url: string, init?: RequestInit & { signal?: AbortSignal }): Promise<T> {
   const headers = new Headers(init?.headers);
   const method = (init?.method ?? "GET").toUpperCase();
   if (!["GET", "HEAD", "OPTIONS"].includes(method) && csrfToken) {
@@ -143,6 +143,7 @@ export async function collectCompetitor(
   url: string,
   withStockProbe: boolean,
   visibleBrowser: boolean,
+  signal?: AbortSignal,
 ): Promise<CollectResult> {
   return request<CollectResult>("/api/competitors/collect", {
     method: "POST",
@@ -152,6 +153,7 @@ export async function collectCompetitor(
       with_stock_probe: withStockProbe,
       visible_browser: visibleBrowser,
     }),
+    signal,
   });
 }
 

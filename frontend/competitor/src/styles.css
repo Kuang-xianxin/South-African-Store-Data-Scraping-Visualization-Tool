@@ -345,6 +345,15 @@ textarea.link-input-error-pulse {
   opacity: 0.6;
 }
 
+.primary-button.stop-button {
+  background: #b23b3b;
+  color: #fff;
+}
+
+.primary-button.stop-button:hover {
+  background: #8b2e2e;
+}
+
 .progress-track {
   height: 5px;
   margin-top: 18px;

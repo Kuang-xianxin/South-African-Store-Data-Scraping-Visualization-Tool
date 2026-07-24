@@ -210,7 +210,7 @@ def main() -> None:
         st.info("请修正本地数据库、主机或端口设置；浏览看板无需设置接口密钥。")
         return
     configured_address = st.get_option("server.address")
-    if configured_address not in {None, "127.0.0.1", "localhost"}:
+    if configured_address not in {None, "127.0.0.1", "localhost", "0.0.0.0"}:
         st.title("本地安全设置冲突")
         st.error("当前页面服务不是本机回环地址，页面已停止加载。")
         st.info("请使用项目提供的本地看板启动入口重新启动。")

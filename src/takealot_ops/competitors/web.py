@@ -78,7 +78,7 @@ def create_app(project_root: Path | None = None) -> FastAPI:
         }
 
     @app.post("/api/competitors/collect")
-    def collect(request: CollectRequest) -> dict[str, object]:
+    async def collect(request: CollectRequest) -> dict[str, object]:
         try:
             extract_plid(request.url)
         except ValueError as exc:
@@ -87,8 +87,8 @@ def create_app(project_root: Path | None = None) -> FastAPI:
         engine = create_engine_for_settings(settings)
         try:
             create_schema(engine)
-            with CompetitorCollector(engine=engine, project_root=root) as collector:
-                result = collector.collect(
+            async with CompetitorCollector(engine=engine, project_root=root) as collector:
+                result = await collector.collect(
                     request.url,
                     with_stock_probe=request.with_stock_probe,
                     visible_browser=request.visible_browser,

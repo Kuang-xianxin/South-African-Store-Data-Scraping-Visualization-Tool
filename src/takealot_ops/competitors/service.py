@@ -67,17 +67,18 @@ class CompetitorCollector:
         self._client = client or CompetitorPublicClient()
         self._owns_client = client is None
 
-    def close(self) -> None:
+    async def close(self) -> None:
         if self._owns_client:
-            self._client.close()
+            await self._client.close()
 
-    def __enter__(self) -> CompetitorCollector:
+    async def __aenter__(self) -> CompetitorCollector:
+        await self._client.start()
         return self
 
-    def __exit__(self, *_: object) -> None:
-        self.close()
+    async def __aexit__(self, *_: object) -> None:
+        await self.close()
 
-    def collect(
+    async def collect(
         self,
         url: str,
         *,
@@ -86,9 +87,9 @@ class CompetitorCollector:
     ) -> CompetitorCollectionResult:
         plid = extract_plid(url)
         try:
-            product = self._client.fetch_product(url)
-            reviews = self._client.fetch_all_reviews(product.plid)
-            variant_stocks = self._collect_variant_stocks(
+            product = await self._client.fetch_product(url)
+            reviews = await self._client.fetch_all_reviews(product.plid)
+            variant_stocks = await self._collect_variant_stocks(
                 product,
                 enabled=with_stock_probe,
                 visible_browser=visible_browser,
@@ -131,7 +132,7 @@ class CompetitorCollector:
                 message=str(exc),
             )
 
-    def _collect_variant_stocks(
+    async def _collect_variant_stocks(
         self,
         product: CompetitorProduct,
         *,
@@ -144,7 +145,7 @@ class CompetitorCollector:
                 for variant in product.variants
             ]
         try:
-            return probe_variant_stocks(
+            return await probe_variant_stocks(
                 product,
                 profile_dir=self._project_root / "data" / "competitor-browser-profile",
                 visible=visible_browser,

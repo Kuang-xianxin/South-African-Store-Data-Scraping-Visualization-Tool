@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import logging
 import os
 import sys
@@ -225,15 +226,35 @@ def _collect_competitors_command(
     skip_stock: bool,
     show_browser: bool,
 ) -> int:
+    return asyncio.run(
+        _collect_competitors_async(
+            project_root,
+            raw_urls,
+            skip_stock=skip_stock,
+            show_browser=show_browser,
+        )
+    )
+
+
+async def _collect_competitors_async(
+    project_root: Path,
+    raw_urls: Sequence[str],
+    *,
+    skip_stock: bool,
+    show_browser: bool,
+) -> int:
     urls = parse_competitor_urls("\n".join(raw_urls))
     settings = DashboardSettings.from_env(project_root)
     engine = create_engine_for_settings(settings)
     failures = 0
     try:
         create_schema(engine)
-        with CompetitorCollector(engine=engine, project_root=project_root) as collector:
+        async with CompetitorCollector(
+            engine=engine,
+            project_root=project_root,
+        ) as collector:
             for index, url in enumerate(urls, start=1):
-                result = collector.collect(
+                result = await collector.collect(
                     url,
                     with_stock_probe=not skip_stock,
                     visible_browser=show_browser,

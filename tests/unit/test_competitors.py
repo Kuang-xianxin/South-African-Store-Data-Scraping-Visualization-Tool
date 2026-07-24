@@ -1,8 +1,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
-
-import httpx
+from unittest.mock import MagicMock, patch
 
 from takealot_ops.competitors.api import CompetitorPublicClient, extract_plid
 from takealot_ops.competitors.domain import (
@@ -14,6 +13,10 @@ from takealot_ops.competitors.domain import (
 )
 from takealot_ops.competitors.service import parse_competitor_urls
 from takealot_ops.competitors.stock import _parse_warehouse_stock_message
+
+
+async def _fake_delay(self: object, a: float, b: float) -> None:
+    pass
 
 
 def test_parse_competitor_urls_deduplicates_by_plid() -> None:
@@ -91,73 +94,88 @@ def test_sales_signal_requires_comparable_snapshots_and_labels_single_signal() -
     assert combined.period_sales_max == 50
 
 
-def test_public_client_parses_product_offers_and_all_review_pages() -> None:
-    def handler(request: httpx.Request) -> httpx.Response:
-        if "product-details" in str(request.url):
-            return httpx.Response(
-                200,
-                json={
-                    "desktop_href": "https://www.takealot.com/example/PLID123",
-                    "core": {"title": "Example", "reviews": 2, "star_rating": 4.5},
-                    "buybox": {
-                        "tsin": "TSIN-1",
-                        "items": [
-                            {
-                                "is_selected": True,
-                                "sku": "SKU-1",
-                                "price": 199.0,
-                                "stock_availability": {
-                                    "status": "Ships in 10 - 14 work days",
-                                    "is_leadtime": True,
-                                },
-                            }
-                        ],
-                    },
-                    "seller_detail": {
-                        "seller_id": "seller-1",
-                        "display_name": "Seller One",
-                    },
-                    "reviews": {"count": 2, "star_rating": 4.5},
-                    "gallery": {"images": ["https://img/{size}.jpg"]},
-                    "other_offers": {
-                        "conditions": [
-                            {
-                                "items": [
-                                    {
-                                        "sku": "SKU-2",
-                                        "price": 205,
-                                        "seller": {
-                                            "seller_id": "seller-2",
-                                            "display_name": "Seller Two",
-                                        },
-                                        "stock_availability": {"status": "In stock"},
-                                    }
-                                ]
-                            }
-                        ]
-                    },
-                },
-            )
-        page = request.url.params.get("page")
-        return httpx.Response(
-            200,
-            json={
-                "page_info": {"total_pages": 2},
-                "reviews": [
+async def test_public_client_parses_product_offers_and_all_review_pages() -> None:
+    canned: dict[str, dict[str, object]] = {
+        "https://api.takealot.com/rest/v-1-10-0/product-details/PLID123": {
+            "desktop_href": "https://www.takealot.com/example/PLID123",
+            "core": {"title": "Example", "reviews": 2, "star_rating": 4.5},
+            "buybox": {
+                "tsin": "TSIN-1",
+                "items": [
                     {
-                        "uuid": f"review-{page}",
-                        "rating": 5 if page == "0" else 2,
-                        "customer_name": "Customer",
-                        "date": f"2026-07-2{page}",
-                        "text": {"title": "Title", "body": "Body"},
+                        "is_selected": True,
+                        "sku": "SKU-1",
+                        "price": 199.0,
+                        "stock_availability": {
+                            "status": "Ships in 10 - 14 work days",
+                            "is_leadtime": True,
+                        },
                     }
                 ],
             },
-        )
+            "seller_detail": {
+                "seller_id": "seller-1",
+                "display_name": "Seller One",
+            },
+            "reviews": {"count": 2, "star_rating": 4.5},
+            "gallery": {"images": ["https://img/{size}.jpg"]},
+            "other_offers": {
+                "conditions": [
+                    {
+                        "items": [
+                            {
+                                "sku": "SKU-2",
+                                "price": 205,
+                                "seller": {
+                                    "seller_id": "seller-2",
+                                    "display_name": "Seller Two",
+                                },
+                                "stock_availability": {"status": "In stock"},
+                            }
+                        ]
+                    }
+                ]
+            },
+        },
+        "https://api.takealot.com/rest/v-1-10-0/product-reviews/plid/123?page=0": {
+            "page_info": {"total_pages": 2},
+            "reviews": [
+                {
+                    "uuid": "review-0",
+                    "rating": 5,
+                    "customer_name": "Customer",
+                    "date": "2026-07-20",
+                    "text": {"title": "Title", "body": "Body"},
+                }
+            ],
+        },
+        "https://api.takealot.com/rest/v-1-10-0/product-reviews/plid/123?page=1": {
+            "page_info": {"total_pages": 2},
+            "reviews": [
+                {
+                    "uuid": "review-1",
+                    "rating": 2,
+                    "customer_name": "Customer",
+                    "date": "2026-07-21",
+                    "text": {"title": "Title", "body": "Body"},
+                }
+            ],
+        },
+    }
 
-    with CompetitorPublicClient(transport=httpx.MockTransport(handler)) as client:
-        product = client.fetch_product("https://www.takealot.com/example/PLID123")
-        reviews = client.fetch_all_reviews("123", page_delay_seconds=0)
+    async def fake_get_json(self, url: str, **kw: object) -> dict[str, object]:
+        return canned[url]  # type: ignore[return-value]
+
+    with (
+        patch.object(CompetitorPublicClient, "__init__", lambda self, **kw: None),
+        patch.object(CompetitorPublicClient, "_get_json", fake_get_json),
+        patch.object(CompetitorPublicClient, "close", lambda self: None),
+        patch.object(CompetitorPublicClient, "_human_delay", _fake_delay),
+    ):
+        client = CompetitorPublicClient()
+        client._page = MagicMock()
+        product = await client.fetch_product("https://www.takealot.com/example/PLID123")
+        reviews = await client.fetch_all_reviews("123", page_delay_seconds=0)
 
     assert product.plid == "123"
     assert product.seller_name == "Seller One"
@@ -170,7 +188,7 @@ def test_public_client_parses_product_offers_and_all_review_pages() -> None:
     assert [review.rating for review in reviews] == [2, 5]
 
 
-def test_public_client_enumerates_variants_under_one_plid() -> None:
+async def test_public_client_enumerates_variants_under_one_plid() -> None:
     def variant_detail(size: str, *, available: bool) -> dict[str, object]:
         return {
             "title": f"Brace - {size}",
@@ -207,43 +225,47 @@ def test_public_client_enumerates_variants_under_one_plid() -> None:
             },
         }
 
-    def handler(request: httpx.Request) -> httpx.Response:
-        size = request.url.params.get("size")
-        if size:
-            return httpx.Response(
-                200,
-                json=variant_detail(size, available=size == "Right"),
-            )
-        return httpx.Response(
-            200,
-            json={
-                "title": "Brace",
-                "desktop_href": "https://www.takealot.com/brace/PLID96909926",
-                "core": {"title": "Brace"},
-                "reviews": {"count": 8, "star_rating": 4.2},
-                "variants": {
-                    "selectors": [
-                        {
-                            "title": "Size",
-                            "options": [
-                                {
-                                    "value": value,
-                                    "is_selected": False,
-                                    "href": (
-                                        "https://api.takealot.com/rest/v-1-13-0/"
-                                        f"product-details/PLID96909926?size={value}"
-                                    ),
-                                }
-                                for value in ("Right", "Left")
-                            ],
-                        }
-                    ]
-                },
+    canned: dict[str, dict[str, object]] = {
+        "https://api.takealot.com/rest/v-1-10-0/product-details/PLID96909926": {
+            "title": "Brace",
+            "desktop_href": "https://www.takealot.com/brace/PLID96909926",
+            "core": {"title": "Brace"},
+            "reviews": {"count": 8, "star_rating": 4.2},
+            "variants": {
+                "selectors": [
+                    {
+                        "title": "Size",
+                        "options": [
+                            {
+                                "value": value,
+                                "is_selected": False,
+                                "href": (
+                                    "https://api.takealot.com/rest/v-1-13-0/"
+                                    f"product-details/PLID96909926?size={value}"
+                                ),
+                            }
+                            for value in ("Right", "Left")
+                        ],
+                    }
+                ]
             },
-        )
+        },
+        "https://api.takealot.com/rest/v-1-13-0/product-details/PLID96909926?size=Right": variant_detail("Right", available=True),
+        "https://api.takealot.com/rest/v-1-13-0/product-details/PLID96909926?size=Left": variant_detail("Left", available=True),
+    }
 
-    with CompetitorPublicClient(transport=httpx.MockTransport(handler)) as client:
-        product = client.fetch_product(
+    async def fake_get_json(self, url: str, **kw: object) -> dict[str, object]:
+        return canned[url]  # type: ignore[return-value]
+
+    with (
+        patch.object(CompetitorPublicClient, "__init__", lambda self, **kw: None),
+        patch.object(CompetitorPublicClient, "_get_json", fake_get_json),
+        patch.object(CompetitorPublicClient, "close", lambda self: None),
+        patch.object(CompetitorPublicClient, "_human_delay", _fake_delay),
+    ):
+        client = CompetitorPublicClient()
+        client._page = MagicMock()
+        product = await client.fetch_product(
             "https://www.takealot.com/brace/PLID96909926?size=Left"
         )
 

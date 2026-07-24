@@ -1,15 +1,23 @@
-"""Read-only client for Takealot's public product and review endpoints."""
+"""Read-only client for Takealot's public product and review endpoints — Playwright-backed."""
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
+import random
 import re
-import time
 from collections.abc import Mapping
+from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlsplit
 
-import httpx
+from playwright.async_api import (
+    Browser,
+    BrowserContext,
+    Page,
+    Playwright,
+    async_playwright,
+)
 
 from takealot_ops.competitors.domain import (
     CompetitorOffer,
@@ -21,16 +29,13 @@ from takealot_ops.competitors.domain import (
 
 PUBLIC_API_BASE = "https://api.takealot.com/rest/v-1-10-0"
 PLID_PATTERN = re.compile(r"PLID(\d+)", re.IGNORECASE)
-PUBLIC_HEADERS = {
-    "accept": "application/json, text/plain, */*",
-    "accept-language": "en-ZA,en;q=0.9",
-    "origin": "https://www.takealot.com",
-    "referer": "https://www.takealot.com/",
-    "user-agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
-    ),
-}
+
+BROWSER_PATHS = (
+    Path("C:/Program Files/Google/Chrome/Application/chrome.exe"),
+    Path("C:/Program Files (x86)/Google/Chrome/Application/chrome.exe"),
+    Path("C:/Program Files/Microsoft/Edge/Application/msedge.exe"),
+    Path("C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe"),
+)
 
 
 def extract_plid(value: str) -> str:
@@ -41,35 +46,106 @@ def extract_plid(value: str) -> str:
     return match.group(1)
 
 
+def _find_browser_executable() -> Path:
+    for candidate in BROWSER_PATHS:
+        if candidate.exists():
+            return candidate
+    raise RuntimeError("未找到 Chrome 或 Edge，需要本机浏览器")
+
+
 class CompetitorPublicClient:
-    """Retrying public-data client; it never calls seller-only write endpoints."""
+    """Browser-backed public-data client.
+
+    Uses Playwright with a real Chrome/Edge browser so Cloudflare JS challenges
+    pass through naturally.  Human-like random delays are inserted between
+    requests to avoid secondary rate-limiting.
+
+    Must be used as an async context manager::
+
+        async with CompetitorPublicClient() as client:
+            product = await client.fetch_product(url)
+    """
 
     def __init__(
         self,
         *,
         timeout_seconds: float = 30.0,
-        transport: httpx.BaseTransport | None = None,
+        headless: bool = True,
     ) -> None:
-        self._client = httpx.Client(
-            headers=PUBLIC_HEADERS,
-            timeout=timeout_seconds,
-            transport=transport,
-            trust_env=False,
+        self._timeout_ms = int(timeout_seconds * 1000)
+        self._headless = headless
+        self._started = False
+        self._playwright: Playwright | None = None
+        self._browser: Browser | None = None
+        self._context: BrowserContext | None = None
+        self._page: Page | None = None
+
+    async def start(self) -> None:
+        """Launch browser and warm up Cloudflare.  Called automatically by __aenter__."""
+        if self._started:
+            return
+        executable = _find_browser_executable()
+        playwright = await async_playwright().start()
+        browser = await playwright.chromium.launch(
+            executable_path=str(executable),
+            headless=self._headless,
+            args=[
+                "--disable-background-timer-throttling",
+                "--disable-blink-features=AutomationControlled",
+                "--disable-features=IsolateOrigins,site-per-process",
+            ],
         )
+        context = await browser.new_context(
+            locale="en-ZA",
+            viewport={"width": 1365, "height": 900},
+            user_agent=(
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/131.0.0.0 Safari/537.36"
+            ),
+        )
+        page = await context.new_page()
+        # Strip navigator.webdriver so headless mode isn't fingerprintable
+        await page.add_init_script(
+            "Object.defineProperty(navigator, 'webdriver', {get: () => undefined});"
+        )
+        # One-time warm-up: pass Cloudflare's JS challenge
+        await page.goto(
+            "https://www.takealot.com/",
+            wait_until="domcontentloaded",
+            timeout=45_000,
+        )
+        await self._human_delay(5.0, 12.0)
+        self._playwright = playwright
+        self._browser = browser
+        self._context = context
+        self._page = page
+        self._started = True
 
-    def close(self) -> None:
-        self._client.close()
+    # ── lifecycle ──────────────────────────────────────────────────────────
 
-    def __enter__(self) -> CompetitorPublicClient:
+    async def __aenter__(self) -> CompetitorPublicClient:
+        await self.start()
         return self
 
-    def __exit__(self, *_: object) -> None:
-        self.close()
+    async def __aexit__(self, *_: object) -> None:
+        await self.close()
 
-    def fetch_product(self, url: str) -> CompetitorProduct:
+    async def close(self) -> None:
+        if self._context is not None:
+            try:
+                await self._context.close()
+            finally:
+                if self._playwright is not None:
+                    await self._playwright.stop()
+        self._started = False
+
+    # ── public API (same signatures as before) ────────────────────────────
+
+    async def fetch_product(self, url: str) -> CompetitorProduct:
         plid = extract_plid(url)
-        detail = self._get_json(f"{PUBLIC_API_BASE}/product-details/PLID{plid}")
-        variant_details = self._fetch_variant_details(detail)
+        detail = await self._get_json(f"{PUBLIC_API_BASE}/product-details/PLID{plid}")
+        variant_details = await self._fetch_variant_details(detail)
         variants = tuple(_variant_record(item, plid) for item in variant_details)
         requested_key = _variant_key(url)
         selected_index = next(
@@ -129,11 +205,10 @@ class CompetitorPublicClient:
             variants=variants,
         )
 
-    def _fetch_variant_details(
+    async def _fetch_variant_details(
         self,
         root: Mapping[str, Any],
     ) -> list[Mapping[str, Any]]:
-        """Resolve every selector combination while keeping one product-level PLID."""
         queue: list[Mapping[str, Any]] = [root]
         terminal: dict[str, Mapping[str, Any]] = {}
         visited: set[str] = set()
@@ -161,18 +236,21 @@ class CompetitorPublicClient:
                 if not href or href in visited:
                     continue
                 visited.add(href)
-                queue.append(self._get_json(href))
+                await self._human_delay(5.0, 10.0)
+                queue.append(await self._get_json(href))
         return list(terminal.values()) or [root]
 
-    def fetch_all_reviews(self, plid: str, *, page_delay_seconds: float = 0.1) -> list[CompetitorReviewRecord]:
-        first = self._get_json(f"{PUBLIC_API_BASE}/product-reviews/plid/{plid}?page=0")
+    async def fetch_all_reviews(
+        self, plid: str, *, page_delay_seconds: float = 0.1
+    ) -> list[CompetitorReviewRecord]:
+        first = await self._get_json(f"{PUBLIC_API_BASE}/product-reviews/plid/{plid}?page=0")
         page_info = _mapping(first.get("page_info"))
         total_pages = max(1, int(_number(page_info.get("total_pages"))))
         raw_reviews = list(_mapping_list(first.get("reviews")))
         for page in range(1, total_pages):
-            if page_delay_seconds:
-                time.sleep(page_delay_seconds)
-            result = self._get_json(
+            delay = max(page_delay_seconds, random.uniform(3.0, 8.0))
+            await asyncio.sleep(delay)
+            result = await self._get_json(
                 f"{PUBLIC_API_BASE}/product-reviews/plid/{plid}?page={page}"
             )
             raw_reviews.extend(_mapping_list(result.get("reviews")))
@@ -199,27 +277,63 @@ class CompetitorPublicClient:
             )
         return sorted(unique.values(), key=lambda item: item.review_date, reverse=True)
 
-    def _get_json(self, url: str, *, retries: int = 3) -> dict[str, Any]:
+    # ── internal ──────────────────────────────────────────────────────────
+
+    async def _human_delay(self, min_s: float, max_s: float) -> None:
+        """Sleep for a random duration to avoid triggering bot detection."""
+        await asyncio.sleep(random.uniform(min_s, max_s))
+
+    async def _get_json(self, url: str, *, retries: int = 3) -> dict[str, Any]:
+        """Fetch JSON by navigating the browser to the API URL.
+
+        Uses ``page.goto()`` — a real browser navigation — so Cloudflare sees
+        ``Sec-Fetch-Dest: document`` instead of an XHR ``fetch`` and passes
+        the request through like a typed address-bar URL.
+        """
+        page = self._page
+        if page is None:
+            raise RuntimeError("竞品浏览器尚未启动")
         last_error: Exception | None = None
         for attempt in range(retries + 1):
             try:
-                response = self._client.get(url)
-                response.raise_for_status()
-                payload = response.json()
+                response = await page.goto(
+                    url,
+                    wait_until="domcontentloaded",
+                    timeout=self._timeout_ms,
+                )
+                if response is None:
+                    raise RuntimeError("浏览器导航未返回响应")
+                status = response.status
+                if status != 200:
+                    retryable = status == 429 or status >= 500
+                    if not retryable or attempt == retries:
+                        raise RuntimeError(f"Takealot API returned {status}")
+                    await self._human_delay(2.0 * (2**attempt), 4.0 * (2**attempt))
+                    continue
+                try:
+                    payload = await response.json()
+                except Exception:
+                    body = await page.content()
+                    if any(kw in body.lower() for kw in ("cloudflare", "cf-challenge", "checking your browser")):
+                        if attempt == retries:
+                            raise RuntimeError("Cloudflare 验证失败，请稍后重试")
+                        await self._human_delay(3.0, 6.0)
+                        continue
+                    raise ValueError("Takealot 公开接口返回了非 JSON 数据")
                 if not isinstance(payload, dict):
                     raise ValueError("Takealot 公开接口返回了非对象数据")
                 return payload
-            except (httpx.HTTPError, ValueError) as exc:
+            except RuntimeError:
+                raise
+            except Exception as exc:
                 last_error = exc
-                retryable = (
-                    not isinstance(exc, httpx.HTTPStatusError)
-                    or exc.response.status_code == 429
-                    or exc.response.status_code >= 500
-                )
-                if not retryable or attempt == retries:
+                if attempt == retries:
                     break
-                time.sleep(0.8 * (2**attempt))
+                await self._human_delay(2.0 * (2**attempt), 4.0 * (2**attempt))
         raise RuntimeError("Takealot 公开接口暂时不可用，请稍后重试") from last_error
+
+
+# ── helpers (unchanged logic) ──────────────────────────────────────────────
 
 
 def _offer_record(

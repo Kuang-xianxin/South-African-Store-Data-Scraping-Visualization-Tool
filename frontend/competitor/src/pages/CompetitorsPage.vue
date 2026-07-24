@@ -42,6 +42,7 @@ const selectedPlid = ref("");
 const detail = ref<CompetitorDetail>({ history: [], reviews: [], variants: [] });
 const loading = ref(true);
 const collecting = ref(false);
+const abortController = ref<AbortController | null>(null);
 const completed = ref(0);
 const total = ref(0);
 const collectionResults = ref<CollectResult[]>([]);
@@ -299,6 +300,10 @@ async function focusInvalidLink(issue: LinkValidationIssue) {
   );
 }
 
+function delay(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 async function startCollection() {
   if (!props.canOperate) return;
   collectionResults.value = [];
@@ -317,18 +322,23 @@ async function startCollection() {
     if (!urls.length) throw new Error("请至少填写一个 Takealot 竞品链接");
     total.value = urls.length;
     collecting.value = true;
+    const controller = new AbortController();
+    abortController.value = controller;
     for (const url of urls) {
+      if (controller.signal.aborted) break;
       try {
         collectionResults.value.push(
-          await collectCompetitor(url, withStockProbe.value, visibleBrowser.value),
+          await collectCompetitor(url, withStockProbe.value, visibleBrowser.value, controller.signal),
         );
       } catch (error) {
+        if (controller.signal.aborted) break;
         const plid = url.match(/PLID(\d+)/i)?.[1] ?? "未知商品";
         const message = error instanceof Error ? error.message : "采集失败";
         collectionErrors.value.push(`PLID${plid}：${message}`);
       } finally {
         completed.value += 1;
       }
+      if (completed.value < total.value) await delay(5_000);
     }
     await loadOverview();
   } catch (error) {
@@ -337,7 +347,12 @@ async function startCollection() {
     ];
   } finally {
     collecting.value = false;
+    abortController.value = null;
   }
+}
+
+function stopCollection() {
+  abortController.value?.abort();
 }
 
 function formatCurrency(value: number | null) {
@@ -434,10 +449,18 @@ function reviewTone(stars: number) {
         </label>
         <button
           class="primary-button"
-          :disabled="collecting || !props.canOperate"
+          :disabled="!props.canOperate"
           @click="startCollection"
+          v-if="!collecting"
         >
-          {{ collecting ? `正在采集 ${completed}/${total}` : "开始采集" }}
+          开始采集
+        </button>
+        <button
+          class="primary-button stop-button"
+          @click="stopCollection"
+          v-if="collecting"
+        >
+          停止采集
         </button>
       </div>
       <div v-if="collecting || completed" class="progress-track" aria-live="polite">
