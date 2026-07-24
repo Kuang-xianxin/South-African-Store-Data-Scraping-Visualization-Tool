@@ -64,7 +64,7 @@ async function toggleActive(user: ManagedUser) {
 }
 
 async function resetPassword(user: ManagedUser) {
-  const next = window.prompt(`为 ${user.display_name} 设置新密码（至少 12 个字符）`);
+  const next = window.prompt(`为 ${user.display_name} 设置新密码（至少 8 个字符）`);
   if (next === null) return;
   await saveUser(user, { password: next });
 }
@@ -122,7 +122,7 @@ async function saveUser(
         </label>
         <label>
           <span>初始密码</span>
-          <input v-model="password" type="password" minlength="12" maxlength="128" required />
+          <input v-model="password" type="password" minlength="8" maxlength="128" required />
         </label>
         <label>
           <span>角色</span>

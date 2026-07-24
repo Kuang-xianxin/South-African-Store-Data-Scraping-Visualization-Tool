@@ -16,7 +16,7 @@ def _bootstrap(client: TestClient) -> dict[str, object]:
         json={
             "username": "localadmin",
             "display_name": "Local Admin",
-            "password": "correct-horse-battery",
+            "password": "pass-123",
         },
     )
     assert response.status_code == 200
@@ -52,6 +52,16 @@ def test_erp_requires_login_and_bootstraps_only_from_loopback(
         assert remote.get("/api/erp/summary?as_of=2026-07-20").status_code == 401
 
     with TestClient(app, client=("127.0.0.1", 50001)) as local:
+        too_short = local.post(
+            "/api/auth/bootstrap",
+            json={
+                "username": "localadmin",
+                "display_name": "Local Admin",
+                "password": "pass123",
+            },
+        )
+        assert too_short.status_code == 422
+        assert too_short.json()["detail"] == "密码至少需要 8 个字符"
         session = _bootstrap(local)
         assert session["user"]["role"] == "admin"
         summary = local.get("/api/erp/summary?as_of=2026-07-20")

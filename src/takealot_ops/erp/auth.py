@@ -353,8 +353,8 @@ def _validate_display_name(display_name: str, fallback: str) -> str:
 
 
 def _validate_password(password: str) -> None:
-    if len(password) < 12:
-        raise AuthInputError("密码至少需要 12 个字符")
+    if len(password) < 8:
+        raise AuthInputError("密码至少需要 8 个字符")
     if len(password) > 128:
         raise AuthInputError("密码不能超过 128 个字符")
 
