@@ -157,6 +157,103 @@ textarea:focus {
   box-shadow: 0 0 0 4px rgba(30, 93, 67, 0.1);
 }
 
+textarea.link-input-error,
+textarea.link-input-error:focus {
+  border-color: #c64835;
+  background: #fff8f6;
+  box-shadow: 0 0 0 4px rgba(198, 72, 53, 0.14);
+}
+
+textarea.link-input-error::selection {
+  background: #d95743;
+  color: #fff;
+}
+
+textarea.link-input-error-pulse {
+  animation: link-input-error-pulse 520ms ease-in-out 3;
+}
+
+.link-diagnostic {
+  display: grid;
+  grid-template-columns: auto auto minmax(0, 1fr);
+  align-items: start;
+  gap: 9px;
+  margin-top: 9px;
+  padding: 11px 13px;
+  border: 1px solid #e7aaa0;
+  border-left: 4px solid #c64835;
+  border-radius: 9px;
+  background: #fff1ee;
+  color: #8f3023;
+  font-family: "Cascadia Mono", Consolas, monospace;
+  font-size: 0.72rem;
+  line-height: 1.5;
+  animation: link-diagnostic-in 180ms ease-out both;
+}
+
+.link-diagnostic-location {
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: #c64835;
+  color: #fff;
+  font-weight: 800;
+  white-space: nowrap;
+}
+
+.link-diagnostic-marker {
+  font-size: 1rem;
+  font-weight: 900;
+  line-height: 1;
+}
+
+.link-diagnostic-content {
+  min-width: 0;
+}
+
+.link-diagnostic-content strong,
+.link-diagnostic-content code {
+  display: block;
+}
+
+.link-diagnostic-content code {
+  margin-top: 3px;
+  overflow-wrap: anywhere;
+  color: #a13c2e;
+  font-family: inherit;
+}
+
+@keyframes link-input-error-pulse {
+  0%,
+  100% {
+    box-shadow: 0 0 0 4px rgba(198, 72, 53, 0.14);
+  }
+
+  50% {
+    box-shadow:
+      0 0 0 6px rgba(198, 72, 53, 0.28),
+      0 0 20px rgba(198, 72, 53, 0.2);
+  }
+}
+
+@keyframes link-diagnostic-in {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  textarea.link-input-error-pulse,
+  .link-diagnostic {
+    animation: none;
+  }
+}
+
 .collector-actions {
   display: grid;
   grid-template-columns: minmax(270px, 1fr) minmax(190px, auto) auto;

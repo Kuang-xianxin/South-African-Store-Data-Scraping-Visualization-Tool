@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from "vue";
+import { computed, nextTick, onMounted, ref, watch } from "vue";
 
 import {
   collectCompetitor,
@@ -22,7 +22,18 @@ const sampleUrls = [
   "https://www.takealot.com/cosmos-healing-enema-kit-medical-grade-silicone-2-litre/PLID94890093",
 ];
 
+interface LinkValidationIssue {
+  lineNumber: number;
+  start: number;
+  end: number;
+  url: string;
+  message: string;
+}
+
 const rawUrls = ref(sampleUrls.join("\n"));
+const urlInput = ref<HTMLTextAreaElement | null>(null);
+const linkValidationIssue = ref<LinkValidationIssue | null>(null);
+const linkErrorPulse = ref(false);
 const withStockProbe = ref(true);
 const visibleBrowser = ref(false);
 const competitors = ref<CompetitorItem[]>([]);
@@ -201,16 +212,90 @@ async function loadOverview() {
   }
 }
 
-function parseUrls(): string[] {
+function parseUrls(): {
+  urls: string[];
+  issue: LinkValidationIssue | null;
+} {
   const unique = new Map<string, string>();
-  for (const line of rawUrls.value.split(/\r?\n/)) {
+  const raw = rawUrls.value;
+  const lines = raw.split(/\r\n|\n|\r/);
+  let lineStart = 0;
+  for (const [lineIndex, line] of lines.entries()) {
+    const currentLineStart = lineStart;
+    lineStart += line.length + lineBreakLength(raw, lineStart + line.length);
+    const leadingWhitespace = line.match(/^\s*/)?.[0].length ?? 0;
     const url = line.trim();
     if (!url) continue;
+    const validationMessage = validateCompetitorUrl(url);
     const match = url.match(/PLID(\d+)/i);
-    if (!match) throw new Error(`链接中未找到 PLID：${url}`);
+    if (validationMessage || !match) {
+      return {
+        urls: [...unique.values()],
+        issue: {
+          lineNumber: lineIndex + 1,
+          start: currentLineStart + leadingWhitespace,
+          end: currentLineStart + leadingWhitespace + url.length,
+          url,
+          message: validationMessage ?? "链接中未找到 Takealot PLID",
+        },
+      };
+    }
     if (!unique.has(match[1])) unique.set(match[1], url);
   }
-  return [...unique.values()];
+  return { urls: [...unique.values()], issue: null };
+}
+
+function validateCompetitorUrl(value: string): string | null {
+  let parsed: URL;
+  try {
+    parsed = new URL(value);
+  } catch {
+    return "链接格式无效";
+  }
+  const hostname = parsed.hostname.toLowerCase();
+  if (
+    !["http:", "https:"].includes(parsed.protocol) ||
+    (hostname !== "takealot.com" && !hostname.endsWith(".takealot.com"))
+  ) {
+    return "不是 Takealot 商品链接";
+  }
+  if (!/PLID\d+/i.test(value)) return "链接中未找到 Takealot PLID";
+  return null;
+}
+
+function lineBreakLength(value: string, position: number) {
+  if (value.slice(position, position + 2) === "\r\n") return 2;
+  return value[position] === "\n" || value[position] === "\r" ? 1 : 0;
+}
+
+function clearLinkValidation() {
+  const hadValidationIssue = linkValidationIssue.value !== null;
+  linkValidationIssue.value = null;
+  linkErrorPulse.value = false;
+  if (hadValidationIssue) {
+    collectionErrors.value = [];
+    completed.value = 0;
+    total.value = 0;
+  }
+}
+
+async function focusInvalidLink(issue: LinkValidationIssue) {
+  linkValidationIssue.value = issue;
+  linkErrorPulse.value = false;
+  await nextTick();
+  linkErrorPulse.value = true;
+
+  const input = urlInput.value;
+  if (!input) return;
+  input.scrollIntoView({ behavior: "smooth", block: "center" });
+  input.focus({ preventScroll: true });
+  input.setSelectionRange(issue.start, issue.end);
+  const lineHeight =
+    Number.parseFloat(window.getComputedStyle(input).lineHeight) || 22;
+  input.scrollTop = Math.max(
+    0,
+    (issue.lineNumber - 1) * lineHeight - input.clientHeight / 2,
+  );
 }
 
 async function startCollection() {
@@ -218,7 +303,15 @@ async function startCollection() {
   collectionErrors.value = [];
   completed.value = 0;
   try {
-    const urls = parseUrls();
+    clearLinkValidation();
+    const { urls, issue } = parseUrls();
+    if (issue) {
+      collectionErrors.value = [
+        `第 ${issue.lineNumber} 行：${issue.message}：${issue.url}`,
+      ];
+      await focusInvalidLink(issue);
+      return;
+    }
     if (!urls.length) throw new Error("请至少填写一个 Takealot 竞品链接");
     total.value = urls.length;
     collecting.value = true;
@@ -287,11 +380,34 @@ function reviewTone(stars: number) {
         <p class="section-note">每行一个链接，重复 PLID 会自动去重</p>
       </div>
       <textarea
+        ref="urlInput"
         v-model="rawUrls"
         aria-label="竞品链接"
+        :aria-describedby="linkValidationIssue ? 'link-validation-error' : undefined"
+        :aria-invalid="Boolean(linkValidationIssue)"
+        :class="{
+          'link-input-error': linkValidationIssue,
+          'link-input-error-pulse': linkErrorPulse,
+        }"
         :disabled="collecting"
         spellcheck="false"
+        @input="clearLinkValidation"
       ></textarea>
+      <div
+        v-if="linkValidationIssue"
+        id="link-validation-error"
+        class="link-diagnostic"
+        role="alert"
+      >
+        <span class="link-diagnostic-location">
+          第 {{ linkValidationIssue.lineNumber }} 行
+        </span>
+        <span class="link-diagnostic-marker" aria-hidden="true">×</span>
+        <span class="link-diagnostic-content">
+          <strong>{{ linkValidationIssue.message }}</strong>
+          <code>{{ linkValidationIssue.url }}</code>
+        </span>
+      </div>
       <div class="collector-actions">
         <label class="switch-row">
           <input v-model="withStockProbe" type="checkbox" :disabled="collecting" />
