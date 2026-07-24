@@ -36,6 +36,11 @@ const collectionResults = ref<CollectResult[]>([]);
 const collectionErrors = ref<string[]>([]);
 const pageError = ref("");
 const reviewFilter = ref<"全部" | "好评" | "中评" | "差评">("全部");
+const reviewStartDate = ref("");
+const reviewEndDate = ref("");
+const reviewSort = ref<
+  "date_desc" | "date_asc" | "rating_desc" | "rating_asc"
+>("date_desc");
 
 const selected = computed(
   () => competitors.value.find((item) => item.plid === selectedPlid.value) ?? null,
@@ -54,13 +59,32 @@ const latestCollection = computed(() => {
   if (!competitors.value.length) return "尚未采集";
   return formatChinaDateTime(competitors.value[0].采集时间);
 });
+const reviewDates = computed(() =>
+  detail.value.reviews
+    .map((review) => reviewDateKey(review.评论日期))
+    .filter((value): value is string => value !== null)
+    .sort(),
+);
+const reviewMinDate = computed(() => reviewDates.value[0] ?? "");
+const reviewMaxDate = computed(
+  () => reviewDates.value[reviewDates.value.length - 1] ?? "",
+);
 const filteredReviews = computed(() => {
-  if (reviewFilter.value === "全部") return detail.value.reviews;
-  return detail.value.reviews.filter((review) => {
-    if (reviewFilter.value === "好评") return review.星级 >= 4;
-    if (reviewFilter.value === "中评") return review.星级 === 3;
-    return review.星级 <= 2;
+  const result = detail.value.reviews.filter((review) => {
+    if (reviewFilter.value === "好评" && review.星级 < 4) return false;
+    if (reviewFilter.value === "中评" && review.星级 !== 3) return false;
+    if (reviewFilter.value === "差评" && review.星级 > 2) return false;
+
+    const date = reviewDateKey(review.评论日期);
+    if (reviewStartDate.value && (!date || date < reviewStartDate.value)) {
+      return false;
+    }
+    if (reviewEndDate.value && (!date || date > reviewEndDate.value)) {
+      return false;
+    }
+    return true;
   });
+  return [...result].sort(compareReviews);
 });
 const progress = computed(() =>
   total.value ? Math.round((completed.value / total.value) * 100) : 0,
@@ -78,6 +102,89 @@ watch(selectedPlid, async (plid) => {
   }
   detail.value = await fetchCompetitorDetail(plid);
 });
+
+watch(reviewStartDate, (start) => {
+  if (start && reviewEndDate.value && start > reviewEndDate.value) {
+    reviewEndDate.value = start;
+  }
+});
+
+watch(reviewEndDate, (end) => {
+  if (end && reviewStartDate.value && end < reviewStartDate.value) {
+    reviewStartDate.value = end;
+  }
+});
+
+function reviewDateKey(value: string | null): string | null {
+  const trimmed = value?.trim();
+  if (!trimmed) return null;
+  const isoMatch = trimmed.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (isoMatch) return `${isoMatch[1]}-${isoMatch[2]}-${isoMatch[3]}`;
+
+  const namedMatch = trimmed.match(
+    /^(\d{1,2})\s+([A-Za-z]{3,9})\s+(\d{4})$/,
+  );
+  if (!namedMatch) return null;
+  const month = {
+    jan: 1,
+    feb: 2,
+    mar: 3,
+    apr: 4,
+    may: 5,
+    jun: 6,
+    jul: 7,
+    aug: 8,
+    sep: 9,
+    oct: 10,
+    nov: 11,
+    dec: 12,
+  }[namedMatch[2].slice(0, 3).toLowerCase()];
+  const day = Number(namedMatch[1]);
+  if (!month || day < 1 || day > 31) return null;
+  return `${namedMatch[3]}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+}
+
+function compareReviewDates(
+  first: string | null,
+  second: string | null,
+  ascending: boolean,
+) {
+  if (first === null && second === null) return 0;
+  if (first === null) return 1;
+  if (second === null) return -1;
+  return ascending
+    ? first.localeCompare(second)
+    : second.localeCompare(first);
+}
+
+function compareReviews(
+  first: CompetitorDetail["reviews"][number],
+  second: CompetitorDetail["reviews"][number],
+) {
+  const firstDate = reviewDateKey(first.评论日期);
+  const secondDate = reviewDateKey(second.评论日期);
+  if (reviewSort.value === "date_asc") {
+    return compareReviewDates(firstDate, secondDate, true);
+  }
+  if (reviewSort.value === "rating_desc") {
+    return (
+      second.星级 - first.星级 ||
+      compareReviewDates(firstDate, secondDate, false)
+    );
+  }
+  if (reviewSort.value === "rating_asc") {
+    return (
+      first.星级 - second.星级 ||
+      compareReviewDates(firstDate, secondDate, false)
+    );
+  }
+  return compareReviewDates(firstDate, secondDate, false);
+}
+
+function clearReviewDates() {
+  reviewStartDate.value = "";
+  reviewEndDate.value = "";
+}
 
 async function loadOverview() {
   loading.value = true;
@@ -430,6 +537,11 @@ function reviewTone(stars: number) {
             <p class="section-kicker">VOICE OF CUSTOMER</p>
             <h2>公开评论</h2>
           </div>
+          <span class="review-result-count">
+            显示 {{ filteredReviews.length }} / {{ detail.reviews.length }} 条
+          </span>
+        </div>
+        <div class="review-filter-bar">
           <div class="filter-tabs">
             <button
               v-for="filter in ['全部', '好评', '中评', '差评'] as const"
@@ -440,10 +552,49 @@ function reviewTone(stars: number) {
               {{ filter }}
             </button>
           </div>
+          <div class="review-controls">
+            <label>
+              <span>开始日期</span>
+              <input
+                v-model="reviewStartDate"
+                type="date"
+                :min="reviewMinDate || undefined"
+                :max="reviewEndDate || reviewMaxDate || undefined"
+              />
+            </label>
+            <label>
+              <span>结束日期</span>
+              <input
+                v-model="reviewEndDate"
+                type="date"
+                :min="reviewStartDate || reviewMinDate || undefined"
+                :max="reviewMaxDate || undefined"
+              />
+            </label>
+            <label>
+              <span>展示排序</span>
+              <select v-model="reviewSort">
+                <option value="date_desc">最新评论优先</option>
+                <option value="date_asc">最早评论优先</option>
+                <option value="rating_desc">评分从高到低</option>
+                <option value="rating_asc">评分从低到高</option>
+              </select>
+            </label>
+            <button
+              v-if="reviewStartDate || reviewEndDate"
+              class="clear-review-dates"
+              @click="clearReviewDates"
+            >
+              清除时间
+            </button>
+          </div>
         </div>
         <div v-if="!filteredReviews.length" class="empty-state slim">暂无对应评论。</div>
         <div v-else class="review-list">
-          <article v-for="review in filteredReviews" :key="`${review.评论日期}-${review.标题}`">
+          <article
+            v-for="(review, reviewIndex) in filteredReviews"
+            :key="`${review.评论日期}-${review.标题}-${review.评论人}-${reviewIndex}`"
+          >
             <span class="review-score" :class="reviewTone(review.星级)">
               {{ review.星级 }} 星
             </span>
