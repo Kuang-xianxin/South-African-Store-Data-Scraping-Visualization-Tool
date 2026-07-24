@@ -203,9 +203,6 @@ def build_quadrant_payload(
             on="offer_id",
             how="left",
         )
-    classified["page_views_7_day_estimate"] = classified[
-        "page_views_30_days"
-    ].map(_seven_day_traffic_estimate)
     counts = (
         classified["quadrant"].value_counts().to_dict()
         if "quadrant" in classified.columns
@@ -561,13 +558,6 @@ def _format_observation_time(value: object) -> str | None:
     if not isinstance(parsed, pd.Timestamp) or pd.isna(parsed):
         return None
     return parsed.to_pydatetime().astimezone(CHINA).strftime("%Y-%m-%d %H:%M")
-
-
-def _seven_day_traffic_estimate(value: object) -> int | None:
-    numeric = pd.to_numeric(pd.Series([value]), errors="coerce").iloc[0]
-    if pd.isna(numeric):
-        return None
-    return int(math.floor(float(numeric) * 7 / 30 + 0.5))
 
 
 def _details_text(value: object) -> str:

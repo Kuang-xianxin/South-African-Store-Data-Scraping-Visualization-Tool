@@ -270,10 +270,6 @@ onBeforeUnmount(() => {
             </div>
             <div class="tooltip-stats">
               <span>
-                <small>近7日流量参考 · 估算</small>
-                <b>{{ number(hoveredItem.page_views_7_day_estimate) }}</b>
-              </span>
-              <span>
                 <small>近7日下单</small>
                 <b>{{ number(hoveredItem.ordered_units) }}</b>
               </span>
@@ -302,7 +298,7 @@ onBeforeUnmount(() => {
                 <b>{{ restockLabel(hoveredItem) }}</b>
               </span>
               <em>
-                库存和流量截至 {{ hoveredItem.metric_date }}；7日流量参考按近30日均值 × 7 估算。
+                库存和指标截至 {{ hoveredItem.metric_date }}；浏览量为平台明确返回的近30天窗口值。
               </em>
             </div>
           </aside>
@@ -313,7 +309,7 @@ onBeforeUnmount(() => {
         </div>
         <p class="method-note">
           图中位置使用店铺内相对排名拉开差异；十字中心跟随分组严格程度移动。
-          悬停可查看首次上架、补货时间、库存及流量时效信息，点击小点直接复制平台 SKU。
+          悬停可查看首次上架、补货时间、库存及近30天浏览量时效信息，点击小点直接复制平台 SKU。
         </p>
         <p
           v-if="copyFeedback"
