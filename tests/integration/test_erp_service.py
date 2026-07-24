@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import replace
 from datetime import date
 
+import pandas as pd
+
 from takealot_ops.erp.service import (
     build_product_detail_payload,
     build_products_payload,
@@ -68,23 +70,34 @@ def test_erp_quadrants_keep_real_boundaries_after_identity_enrichment(
     assert offer_b["first_listed_source"] == "first_observed"
 
 
-def test_erp_quadrants_estimate_latest_restock_from_stock_increase(
+def test_erp_quadrants_record_latest_restock_from_stock_increase(
     dashboard_dataset: DashboardDataset,
 ) -> None:
-    product_daily = dashboard_dataset.product_daily.copy(deep=True)
-    product_daily.loc[
-        (product_daily["offer_id"] == "offer-a")
-        & (product_daily["metric_date"] == date(2026, 7, 19)),
-        "total_stock",
-    ] = 4
+    offer_history = dashboard_dataset.offer_history.copy(deep=True)
+    offer_history = pd.concat(
+        [
+            pd.DataFrame(
+                [
+                    {
+                        "snapshot_date": date(2026, 7, 19),
+                        "offer_id": "offer-a",
+                        "captured_at": "2026-07-19T09:00:00Z",
+                        "total_stock": 4,
+                    }
+                ]
+            ),
+            offer_history,
+        ],
+        ignore_index=True,
+    )
     payload = build_quadrant_payload(
-        replace(dashboard_dataset, product_daily=product_daily),
+        replace(dashboard_dataset, offer_history=offer_history),
         AS_OF,
         50,
     )
 
     offer_a = next(item for item in payload["items"] if item["offer_id"] == "offer-a")
-    assert offer_a["latest_restock_date"] == "2026-07-20"
+    assert offer_a["latest_restock_date"] == "2026-07-20 17:00"
     assert offer_a["latest_restock_increase"] == 3
 
 

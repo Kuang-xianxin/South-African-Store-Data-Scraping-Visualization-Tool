@@ -45,7 +45,7 @@ const tooltipClasses = computed(() => {
   return {
     "align-left": x < 24,
     "align-right": x > 76,
-    below: y > 72,
+    below: y >= 50,
   };
 });
 
@@ -83,7 +83,7 @@ function firstListingLabel(item: QuadrantItem) {
 }
 
 function restockLabel(item: QuadrantItem) {
-  if (!item.latest_restock_date) return "暂未观察到库存上升";
+  if (!item.latest_restock_date) return "暂无平台库存增加记录";
   const increase =
     item.latest_restock_increase === null
       ? ""
@@ -247,6 +247,8 @@ onBeforeUnmount(() => {
             @blur="hoveredItem = null"
             @click="copyPlatformSku(item)"
           ></button>
+          </div>
+          <div class="matrix-tooltip-layer">
           <aside
             v-if="hoveredItem"
             id="quadrant-tooltip"
@@ -296,7 +298,7 @@ onBeforeUnmount(() => {
                 <b>{{ firstListingLabel(hoveredItem) }}</b>
               </span>
               <span>
-                <small>最近补货 · 按库存上升估算</small>
+                <small>最近补货时间 · 平台库存增加记录</small>
                 <b>{{ restockLabel(hoveredItem) }}</b>
               </span>
               <em>
@@ -311,7 +313,7 @@ onBeforeUnmount(() => {
         </div>
         <p class="method-note">
           图中位置使用店铺内相对排名拉开差异；十字中心跟随分组严格程度移动。
-          悬停可查看首次上架、补货估算、库存及流量时效信息，点击小点直接复制平台 SKU。
+          悬停可查看首次上架、补货时间、库存及流量时效信息，点击小点直接复制平台 SKU。
         </p>
         <p
           v-if="copyFeedback"

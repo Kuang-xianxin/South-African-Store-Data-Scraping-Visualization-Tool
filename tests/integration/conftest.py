@@ -135,6 +135,22 @@ def dashboard_dataset() -> DashboardDataset:
                 },
             ]
         ),
+        offer_history=pd.DataFrame(
+            [
+                {
+                    "snapshot_date": date(2026, 7, 20),
+                    "offer_id": "offer-a",
+                    "captured_at": datetime(2026, 7, 20, 9, tzinfo=timezone.utc),
+                    "total_stock": 7,
+                },
+                {
+                    "snapshot_date": date(2026, 7, 20),
+                    "offer_id": "offer-b",
+                    "captured_at": datetime(2026, 7, 20, 9, tzinfo=timezone.utc),
+                    "total_stock": None,
+                },
+            ]
+        ),
         anomalies=pd.DataFrame(
             [
                 {

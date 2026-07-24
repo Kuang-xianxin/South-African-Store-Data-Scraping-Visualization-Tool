@@ -1449,6 +1449,7 @@ button {
 
 .matrix-shell {
   position: relative;
+  z-index: 2;
   padding: 0 0 32px 34px;
 }
 
@@ -1480,6 +1481,17 @@ button {
   border: 1px solid #d7ded8;
   border-radius: 13px;
   background: #f5f8f3;
+}
+
+.matrix-tooltip-layer {
+  position: absolute;
+  z-index: 10;
+  top: 0;
+  right: 0;
+  bottom: 32px;
+  left: 34px;
+  overflow: visible;
+  pointer-events: none;
 }
 
 .matrix-zone {
@@ -1637,8 +1649,9 @@ button {
 }
 
 .tooltip-heading small {
-  color: rgba(255, 255, 255, 0.55);
-  font-size: 0.59rem;
+  color: rgba(255, 255, 255, 0.8);
+  font-size: 0.62rem;
+  font-weight: 600;
   white-space: nowrap;
 }
 
@@ -1664,8 +1677,9 @@ button {
 
 .tooltip-sku span,
 .tooltip-stats small {
-  color: rgba(255, 255, 255, 0.55);
-  font-size: 0.59rem;
+  color: rgba(255, 255, 255, 0.84);
+  font-size: 0.63rem;
+  font-weight: 600;
 }
 
 .tooltip-sku b,
@@ -1712,8 +1726,9 @@ button {
 }
 
 .tooltip-timeline small {
-  color: rgba(255, 255, 255, 0.55);
-  font-size: 0.58rem;
+  color: rgba(255, 255, 255, 0.82);
+  font-size: 0.62rem;
+  font-weight: 600;
 }
 
 .tooltip-timeline b {
@@ -1724,8 +1739,8 @@ button {
 }
 
 .tooltip-timeline em {
-  color: rgba(255, 255, 255, 0.48);
-  font-size: 0.53rem;
+  color: rgba(255, 255, 255, 0.7);
+  font-size: 0.58rem;
   font-style: normal;
   line-height: 1.5;
 }

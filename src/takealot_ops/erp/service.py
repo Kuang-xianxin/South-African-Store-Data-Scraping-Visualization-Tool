@@ -41,6 +41,7 @@ EMPTY_DATASET = DashboardDataset(
     quality_events=pd.DataFrame(),
 )
 SAST = ZoneInfo("Africa/Johannesburg")
+CHINA = ZoneInfo("Asia/Shanghai")
 
 
 def create_read_only_erp_engine(database_url: str) -> Engine:
@@ -194,6 +195,7 @@ def build_quadrant_payload(
         dataset.product_daily,
         dataset.offer_current,
         as_of,
+        dataset.offer_history,
     )
     if not operational_context.empty:
         classified = classified.merge(
@@ -422,8 +424,9 @@ def _quadrant_operational_context(
     product_daily: pd.DataFrame,
     offers: pd.DataFrame,
     as_of: date,
+    offer_history: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
-    """Derive listing and replenishment context from durable product history."""
+    """Derive listing and observed replenishment context from durable history."""
     columns = [
         "offer_id",
         "first_listed_at",
@@ -452,33 +455,7 @@ def _quadrant_operational_context(
         .reset_index()
     )
 
-    stock_history = history.loc[
-        history["total_stock"].notna(),
-        ["offer_id", "_metric_date", "total_stock"],
-    ].copy()
-    stock_history["total_stock"] = pd.to_numeric(
-        stock_history["total_stock"], errors="coerce"
-    )
-    stock_history = stock_history.dropna(subset=["total_stock"]).sort_values(
-        ["offer_id", "_metric_date"]
-    )
-    stock_history["_previous_stock"] = stock_history.groupby("offer_id")[
-        "total_stock"
-    ].shift()
-    stock_history["_stock_increase"] = (
-        stock_history["total_stock"] - stock_history["_previous_stock"]
-    )
-    restocks = (
-        stock_history.loc[stock_history["_stock_increase"] > 0]
-        .drop_duplicates("offer_id", keep="last")
-        .loc[:, ["offer_id", "_metric_date", "_stock_increase"]]
-        .rename(
-            columns={
-                "_metric_date": "latest_restock_date",
-                "_stock_increase": "latest_restock_increase",
-            }
-        )
-    )
+    restocks = _platform_restock_context(offer_history, as_of)
 
     context = first_seen.merge(restocks, on="offer_id", how="left")
     platform_listings = _platform_listing_context(offers)
@@ -501,6 +478,53 @@ def _quadrant_operational_context(
         context["latest_restock_increase"], errors="coerce"
     ).map(lambda value: int(value) if pd.notna(value) else None)
     return pd.DataFrame(context.loc[:, columns])
+
+
+def _platform_restock_context(
+    offer_history: pd.DataFrame | None,
+    as_of: date,
+) -> pd.DataFrame:
+    columns = ["offer_id", "latest_restock_date", "latest_restock_increase"]
+    required = {"snapshot_date", "offer_id", "captured_at", "total_stock"}
+    if (
+        offer_history is None
+        or offer_history.empty
+        or not required.issubset(offer_history.columns)
+    ):
+        return pd.DataFrame(columns=columns)
+
+    stock_history = filter_as_of(offer_history, as_of, "snapshot_date").loc[
+        :, ["snapshot_date", "offer_id", "captured_at", "total_stock"]
+    ].copy()
+    stock_history["_snapshot_date"] = pd.to_datetime(
+        stock_history["snapshot_date"], errors="coerce"
+    ).dt.date
+    stock_history["_captured_at"] = pd.to_datetime(
+        stock_history["captured_at"], errors="coerce", utc=True
+    )
+    stock_history["total_stock"] = pd.to_numeric(
+        stock_history["total_stock"], errors="coerce"
+    )
+    stock_history = stock_history.dropna(
+        subset=["offer_id", "_snapshot_date", "total_stock"]
+    ).sort_values(["offer_id", "_snapshot_date", "_captured_at"])
+    stock_history["_previous_stock"] = stock_history.groupby("offer_id")[
+        "total_stock"
+    ].shift()
+    stock_history["_stock_increase"] = (
+        stock_history["total_stock"] - stock_history["_previous_stock"]
+    )
+    restocks = stock_history.loc[stock_history["_stock_increase"] > 0].copy()
+    if restocks.empty:
+        return pd.DataFrame(columns=columns)
+    restocks = restocks.drop_duplicates("offer_id", keep="last")
+    restocks["latest_restock_date"] = restocks.apply(
+        lambda row: _format_observation_time(row["_captured_at"])
+        or row["_snapshot_date"].isoformat(),
+        axis=1,
+    )
+    restocks["latest_restock_increase"] = restocks["_stock_increase"].map(int)
+    return restocks.loc[:, columns]
 
 
 def _platform_listing_context(offers: pd.DataFrame) -> pd.DataFrame:
@@ -528,6 +552,15 @@ def _format_platform_listing_time(value: object) -> str | None:
     if parsed.tzinfo is None or parsed.utcoffset() is None:
         parsed = parsed.replace(tzinfo=UTC)
     return parsed.astimezone(SAST).strftime("%Y-%m-%d %H:%M")
+
+
+def _format_observation_time(value: object) -> str | None:
+    if value is None or value is pd.NA or value is pd.NaT:
+        return None
+    parsed = pd.to_datetime(str(value), errors="coerce", utc=True)
+    if not isinstance(parsed, pd.Timestamp) or pd.isna(parsed):
+        return None
+    return parsed.to_pydatetime().astimezone(CHINA).strftime("%Y-%m-%d %H:%M")
 
 
 def _seven_day_traffic_estimate(value: object) -> int | None:

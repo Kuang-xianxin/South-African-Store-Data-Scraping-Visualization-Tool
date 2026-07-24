@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -94,6 +94,7 @@ _OFFER_CURRENT_COLUMNS = (
     "captured_at",
     "total_stock",
 )
+_OFFER_HISTORY_COLUMNS = ("snapshot_date",) + _OFFER_CURRENT_COLUMNS
 _ANOMALY_COLUMNS = (
     "event_date",
     "offer_id",
@@ -123,6 +124,7 @@ class DashboardDataset:
     offer_current: pd.DataFrame
     anomalies: pd.DataFrame
     quality_events: pd.DataFrame
+    offer_history: pd.DataFrame = field(default_factory=pd.DataFrame)
 
 
 def latest_metric_anomalies(
@@ -216,6 +218,7 @@ class MetricService:
             offer_current = _offer_frame(
                 _batch_snapshots(snapshots, _latest_scope(scope_dates, as_of))
             )
+            offer_history = _offer_history_frame(snapshots)
             anomaly_frame = _anomaly_frame(anomalies)
             quality_frame = _quality_frame(quality_events)
         return DashboardDataset(
@@ -224,6 +227,7 @@ class MetricService:
             offer_current=offer_current,
             anomalies=anomaly_frame,
             quality_events=quality_frame,
+            offer_history=offer_history,
         )
 
     def _calculate(
@@ -791,6 +795,14 @@ def _offer_frame(rows: Sequence[OfferSnapshot]) -> pd.DataFrame:
         {column: _plain_attribute(row, column) for column in _OFFER_CURRENT_COLUMNS} for row in rows
     ]
     return pd.DataFrame(values, columns=_OFFER_CURRENT_COLUMNS)
+
+
+def _offer_history_frame(rows: Sequence[OfferSnapshot]) -> pd.DataFrame:
+    values = [
+        {column: _plain_attribute(row, column) for column in _OFFER_HISTORY_COLUMNS}
+        for row in rows
+    ]
+    return pd.DataFrame(values, columns=_OFFER_HISTORY_COLUMNS)
 
 
 def _latest_scope(scope_dates: Sequence[date], as_of: date) -> date | None:

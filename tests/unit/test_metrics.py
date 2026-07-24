@@ -788,6 +788,7 @@ def test_collection_gap_carries_offer_state_without_fabricating_traffic(
 
     row = dataset.product_daily.loc[dataset.product_daily["metric_date"] == day_two].iloc[0]
     current = dataset.offer_current.iloc[0]
+    history = dataset.offer_history.iloc[0]
     assert row["offer_status"] == current["status"] == "buyable"
     assert row["total_stock"] == current["total_stock"] == 5
     assert row["sku"] == current["sku"] == "SKU-gap-offer"
@@ -797,6 +798,9 @@ def test_collection_gap_carries_offer_state_without_fabricating_traffic(
     assert row["conversion_percentage_30_days"] is None
     assert row["conversion_percentage_previous_30_days"] is None
     assert row["conversion_change_points"] is None
+    assert history["snapshot_date"] == day_one
+    assert history["offer_id"] == "gap-offer"
+    assert history["total_stock"] == 5
     anomaly_types = dataset.anomalies["anomaly_type"].tolist()
     assert "non_buyable" not in anomaly_types
     assert "stale_offer_snapshot" in anomaly_types
