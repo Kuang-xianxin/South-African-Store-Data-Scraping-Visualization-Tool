@@ -5,11 +5,13 @@ import {
   fetchAuthSession,
   fetchAuthStatus,
   fetchFreshness,
+  fetchDailyReportReminders,
   logout,
   refreshStoreData,
   setAuthSession,
 } from "./api";
 import CompetitorsPage from "./pages/CompetitorsPage.vue";
+import DailyReportPage from "./pages/DailyReportPage.vue";
 import LoginPage from "./pages/LoginPage.vue";
 import OverviewPage from "./pages/OverviewPage.vue";
 import ProductsPage from "./pages/ProductsPage.vue";
@@ -18,7 +20,12 @@ import ReportsPage from "./pages/ReportsPage.vue";
 import RisksPage from "./pages/RisksPage.vue";
 import UsersPage from "./pages/UsersPage.vue";
 import { formatChinaDateTime } from "./time";
-import type { AuthSession, AuthStatus, FreshnessPayload } from "./types";
+import type {
+  AuthSession,
+  AuthStatus,
+  DailyReportReminders,
+  FreshnessPayload,
+} from "./types";
 
 type PageKey =
   | "overview"
@@ -26,6 +33,7 @@ type PageKey =
   | "quadrants"
   | "risks"
   | "competitors"
+  | "daily-report"
   | "reports"
   | "users";
 
@@ -35,13 +43,14 @@ const basePages = [
   { key: "quadrants", label: "经营四象限", hint: "商品组合定位", mark: "03" },
   { key: "risks", label: "风险与质量", hint: "异常和数据质量", mark: "04" },
   { key: "competitors", label: "竞品雷达", hint: "库存评论与销量", mark: "05" },
-  { key: "reports", label: "报表工作台", hint: "导出与 NFT102", mark: "06" },
+  { key: "daily-report", label: "运营日报", hint: "早晚核对与合并", mark: "06" },
+  { key: "reports", label: "报表工作台", hint: "导出与 NFT102", mark: "07" },
 ] as const;
 const adminPage = {
   key: "users",
   label: "用户权限",
   hint: "账号与角色管理",
-  mark: "07",
+  mark: "08",
 } as const;
 
 const authReady = ref(false);
@@ -53,6 +62,7 @@ const freshness = ref<FreshnessPayload>({
   last_collection_at: null,
   latest_metric_date: null,
 });
+const dailyReportReminders = ref<DailyReportReminders>({ count: 0, dates: [] });
 const refreshKey = ref(0);
 const refreshing = ref(false);
 const refreshMessage = ref("");
@@ -73,6 +83,7 @@ const pageComponent = computed(() => {
     quadrants: QuadrantsPage,
     risks: RisksPage,
     competitors: CompetitorsPage,
+    "daily-report": DailyReportPage,
     reports: ReportsPage,
     users: UsersPage,
   };
@@ -84,7 +95,7 @@ const roleLabel = computed(() => {
 });
 const activePageProps = computed(() => ({
   asOf: asOf.value,
-  ...(["competitors", "reports"].includes(currentPage.value)
+  ...(["competitors", "daily-report", "reports"].includes(currentPage.value)
     ? { canOperate: canOperate.value }
     : {}),
 }));
@@ -115,6 +126,7 @@ function acceptSession(next: AuthSession) {
   setAuthSession(next);
   authReady.value = true;
   void loadFreshness();
+  void loadDailyReportReminders();
 }
 
 function handleExpired() {
@@ -141,6 +153,13 @@ async function loadFreshness() {
   }));
 }
 
+async function loadDailyReportReminders() {
+  dailyReportReminders.value = await fetchDailyReportReminders().catch(() => ({
+    count: 0,
+    dates: [],
+  }));
+}
+
 async function runRefresh() {
   if (!canOperate.value) return;
   refreshing.value = true;
@@ -151,6 +170,7 @@ async function runRefresh() {
     if (result.succeeded) {
       refreshKey.value += 1;
       await loadFreshness();
+      await loadDailyReportReminders();
     }
   } catch (error) {
     refreshMessage.value =
@@ -250,6 +270,18 @@ function localDate() {
       </header>
 
       <p v-if="refreshMessage" class="global-notice">{{ refreshMessage }}</p>
+      <button
+        v-if="dailyReportReminders.count && currentPage !== 'daily-report'"
+        class="pending-daily-banner"
+        @click="switchPage('daily-report')"
+      >
+        <strong>有 {{ dailyReportReminders.count }} 个日报数据尚未人工合并</strong>
+        <span>
+          涉及
+          {{ dailyReportReminders.dates.map((row) => row.business_date).join("、") }}
+          · 请先处理后再开始今日工作
+        </span>
+      </button>
 
       <section class="erp-content">
         <KeepAlive include="CompetitorsPage">
@@ -304,6 +336,25 @@ function localDate() {
   color: #36584b;
   background: #e9f0ec;
   cursor: pointer;
+}
+.pending-daily-banner {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  width: calc(100% - 48px);
+  margin: 12px 24px 0;
+  padding: 12px 15px;
+  border: 1px solid #e1aa82;
+  border-left: 5px solid #c95830;
+  border-radius: 10px;
+  background: #fff5ec;
+  color: #873c1d;
+  text-align: left;
+  cursor: pointer;
+}
+.pending-daily-banner span {
+  color: #9c6447;
+  font-size: 12px;
 }
 @media (max-width: 760px) {
   .account-menu {

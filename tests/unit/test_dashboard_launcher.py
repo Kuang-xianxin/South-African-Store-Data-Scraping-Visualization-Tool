@@ -62,8 +62,10 @@ def test_daily_schedule_defaults_to_china_time_after_platform_rollover() -> None
         encoding="utf-8"
     )
 
-    assert "[string]$DailyAt = '10:10'" in script
-    assert '$TaskName = "Takealot $ChineseTaskSuffix"' in script
+    assert "[string]$MorningAt = '10:05'" in script
+    assert "[string]$EveningAt = '18:00'" in script
+    assert "[string]$DeadlineAt = '18:30'" in script
+    assert '$ChineseDailyUpdate = -join [char[]](' in script
     assert "0x5E97, 0x94FA, 0x6570, 0x636E" in script
 
 

@@ -1,10 +1,15 @@
 from __future__ import annotations
 
 from pathlib import Path
+from datetime import UTC, date, datetime
 
 from fastapi.testclient import TestClient
+from sqlalchemy import create_engine
+from sqlalchemy.orm import Session
 
+from takealot_ops.erp.daily_report import capture_daily_report
 from takealot_ops.erp.web import create_app
+from takealot_ops.storage.models import OfferCurrent
 
 
 PROJECT_ROOT = Path(__file__).parents[2]
@@ -162,3 +167,53 @@ def test_erp_rejects_unsupported_quadrant_percentile_after_login(
 
     assert response.status_code == 422
     assert "25" in response.json()["detail"]
+
+
+def test_daily_report_api_reads_versions_and_bulk_confirms_ready_rows(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    database_path = tmp_path / "erp.db"
+    database_url = f"sqlite:///{database_path.as_posix()}"
+    monkeypatch.setenv("TAKEALOT_DATABASE_URL", database_url)
+    app = create_app(tmp_path)
+    with TestClient(app, client=("127.0.0.1", 50000)) as client:
+        issued = _bootstrap(client)
+        engine = create_engine(database_url)
+        try:
+            with Session(engine) as session, session.begin():
+                session.add(
+                    OfferCurrent(
+                        offer_id="offer-a",
+                        sku="9900000000001",
+                        title="Product A",
+                        captured_at=datetime(2026, 7, 24, 2, tzinfo=UTC),
+                        page_views_30_days=10,
+                        takealot_available_stock=5,
+                    )
+                )
+            for slot, hour in (("morning", 2), ("evening", 10)):
+                capture_daily_report(
+                    engine,
+                    business_date=date(2026, 7, 24),
+                    slot=slot,
+                    captured_at=datetime(2026, 7, 24, hour, tzinfo=UTC),
+                )
+        finally:
+            engine.dispose()
+
+        report = client.get(
+            "/api/erp/daily-report?business_date=2026-07-24"
+        )
+        assert report.status_code == 200
+        assert report.json()["counts"]["ready"] == 1
+        confirmed = client.post(
+            "/api/erp/daily-report/2026-07-24/confirm-ready",
+            headers={"X-CSRF-Token": str(issued["csrf_token"])},
+            json={"note": "早晚值一致，批量确认"},
+        )
+        assert confirmed.status_code == 200
+        assert confirmed.json()["confirmed"] == 1
+        assert confirmed.json()["exported"] is True
+        exported = tmp_path / "exports" / "operations-daily" / "2026-07-24"
+        assert any(exported.glob("*.xlsx"))

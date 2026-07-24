@@ -18,6 +18,14 @@ from takealot_ops.collectors import collect_offers, collect_sales
 from takealot_ops.competitors.service import CompetitorCollector, parse_competitor_urls
 from takealot_ops.dashboard.launcher import launch_dashboard, launch_legacy_dashboard
 from takealot_ops.domain import sast_date
+from takealot_ops.erp.daily_report import (
+    ReportCaptureResult,
+    capture_daily_report,
+    create_deadline_snapshot,
+    daily_report_payload,
+    export_operations_workbook,
+    unresolved_locations,
+)
 from takealot_ops.metrics.service import MetricService
 from takealot_ops.quality import verify_quality
 from takealot_ops.reporting import generate_daily_reports
@@ -49,6 +57,23 @@ def build_parser() -> argparse.ArgumentParser:
     export.add_argument("--date", type=_parse_date, help="报告截止日期 YYYY-MM-DD")
 
     commands.add_parser("daily-run", help="执行每日采集、校验、导出和备份")
+    daily_report_run = commands.add_parser(
+        "daily-report-run",
+        help="执行完整采集并冻结运营日报早间或晚间版本",
+    )
+    daily_report_run.add_argument("--slot", choices=("morning", "evening"), required=True)
+    daily_report_capture = commands.add_parser(
+        "daily-report-capture",
+        help="不访问平台，直接把当前数据库冻结为运营日报版本",
+    )
+    daily_report_capture.add_argument(
+        "--slot", choices=("morning", "evening"), required=True
+    )
+    daily_report_capture.add_argument("--date", type=_parse_date)
+    commands.add_parser(
+        "daily-report-deadline",
+        help="记录18:30仍未合并的数据并在可导出时保存本地表格",
+    )
     commands.add_parser("dashboard", help="在 127.0.0.1 启动本地看板")
     commands.add_parser(
         "dashboard-legacy",
@@ -98,6 +123,16 @@ def main(argv: Sequence[str] | None = None) -> int:
             exit_code = _export_command(project_root, args.date)
         elif args.command == "daily-run":
             exit_code = _daily_command(project_root)
+        elif args.command == "daily-report-run":
+            exit_code = _daily_report_run_command(project_root, args.slot)
+        elif args.command == "daily-report-capture":
+            exit_code = _daily_report_capture_command(
+                project_root,
+                args.slot,
+                args.date,
+            )
+        elif args.command == "daily-report-deadline":
+            exit_code = _daily_report_deadline_command(project_root)
         elif args.command == "dashboard":
             exit_code = launch_dashboard(DashboardSettings.from_env(project_root))
         elif args.command == "dashboard-legacy":
@@ -196,6 +231,111 @@ def _daily_command(project_root: Path) -> int:
     if result.error:
         print(result.error, file=sys.stderr)
     return result.exit_code
+
+
+def _daily_report_run_command(project_root: Path, slot: str) -> int:
+    settings = Settings.from_env(project_root)
+    clock = SystemClock()
+    result = run_daily(settings, clock)
+    if result.status not in {"success", "quality_failed"}:
+        if result.error:
+            print(result.error, file=sys.stderr)
+        return result.exit_code
+    captured_at = clock.now()
+    capture = _capture_report_values(
+        settings,
+        business_date=result.end_date,
+        slot=slot,
+        captured_at=captured_at,
+    )
+    print(
+        f"运营日报 {slot} 版本已冻结：{capture.product_count} 个商品，"
+        f"重新待确认 {capture.reopened_count} 个。"
+    )
+    return result.exit_code
+
+
+def _daily_report_capture_command(
+    project_root: Path,
+    slot: str,
+    report_date: date | None,
+) -> int:
+    settings = Settings.from_env(project_root)
+    captured_at = SystemClock().now()
+    business_date = report_date or sast_date(captured_at)
+    result = _capture_report_values(
+        settings,
+        business_date=business_date,
+        slot=slot,
+        captured_at=captured_at,
+    )
+    print(
+        f"运营日报 {slot} 版本已冻结：{result.product_count} 个商品，"
+        f"业务日 {business_date}。"
+    )
+    return 0
+
+
+def _daily_report_deadline_command(project_root: Path) -> int:
+    settings = Settings.from_env(project_root)
+    captured_at = SystemClock().now()
+    business_date = sast_date(captured_at)
+    engine = create_engine_for_settings(settings)
+    try:
+        create_schema(engine)
+        unresolved = create_deadline_snapshot(
+            engine,
+            business_date=business_date,
+            snapped_at=captured_at,
+        )
+        if not daily_report_payload(engine, business_date)["items"]:
+            print(f"{business_date} 尚无运营日报采集版本，本次不生成空表。")
+            return 0
+        if unresolved:
+            print(
+                f"{business_date} 仍有 {unresolved} 个商品未确认，"
+                "已保存18:30待办快照。"
+            )
+            return 0
+        if unresolved_locations(engine, business_date):
+            print("历史日期仍有未合并数据，本次不导出。", file=sys.stderr)
+            return 0
+        destination = (
+            project_root
+            / "exports"
+            / "operations-daily"
+            / business_date.isoformat()
+            / f"运营日报_{business_date.isoformat()}.xlsx"
+        )
+        export_operations_workbook(
+            engine,
+            business_date=business_date,
+            destination=destination,
+        )
+    finally:
+        engine.dispose()
+    print(f"运营日报已自动导出：{destination}")
+    return 0
+
+
+def _capture_report_values(
+    settings: Settings,
+    *,
+    business_date: date,
+    slot: str,
+    captured_at: datetime,
+) -> ReportCaptureResult:
+    engine = create_engine_for_settings(settings)
+    try:
+        create_schema(engine)
+        return capture_daily_report(
+            engine,
+            business_date=business_date,
+            slot=slot,
+            captured_at=captured_at,
+        )
+    finally:
+        engine.dispose()
 
 
 def _verify_command(project_root: Path, check_date: date | None) -> int:

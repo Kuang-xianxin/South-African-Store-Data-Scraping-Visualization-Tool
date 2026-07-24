@@ -177,17 +177,44 @@ npm.cmd run build
 
 执行顺序为：完整分页采集 → 七个 SAST 自然日指标重建 → 数据质量检查 → 报表导出 → MySQL 表完整性检查 → `mysqldump` 一致性备份。任何分页失败都不会发布不完整快照或报表。日志写入 `logs\takealot-ops.log`，不会记录 API Key 或数据库密码。
 
+### 运营日报的早晚版本
+
+运营日报不会让后一次采集覆盖前一次值。早间、晚间和截止快照分别运行：
+
+```powershell
+.\.venv\Scripts\python.exe -m takealot_ops.cli daily-report-run --slot morning
+.\.venv\Scripts\python.exe -m takealot_ops.cli daily-report-run --slot evening
+.\.venv\Scripts\python.exe -m takealot_ops.cli daily-report-deadline
+```
+
+- 早间版固定保存 10:05 完整采集后的订单、平台仓可售库存和平台近30天浏览量。
+- 晚间版固定保存 18:00 完整采集后的同一组字段；系统会把早晚差异和人工候选值分开显示。
+- 无差异商品允许一次批量合并；有差异商品由运营选择早间、晚间或人工值，确认及人工修改都必须填写备注。
+- 前一日最终/最新平台库存减去当天订单与当天库存不一致时，库存格显示红色；运营可以填写原因后取消红标，普通异常备注与红标状态相互独立。
+- 18:30 仍未合并的数据会形成持久待办快照。次日仍正常采集，并使用前一日最新系统值参与库存核对，但历史待办会在 ERP 全局持续提醒。
+- 只要截止日期及之前存在任何未合并商品，运营日报 Excel 就拒绝导出并返回具体日期和 SKU；最后一项确认完成时会自动导出到 `exports\operations-daily\YYYY-MM-DD\`。
+
+如果只需用当前数据库做演练、不访问平台，可运行：
+
+```powershell
+.\.venv\Scripts\python.exe -m takealot_ops.cli daily-report-capture --slot morning --date 2026-07-24
+```
+
 ## 7. 安装 Windows 每日计划任务
 
-安装脚本本身不会自动运行；只有运营人员明确执行后才会创建计划任务。默认每天中国时间 `10:10`，避开平台 10 点切日窗口。自动任务与页面手动刷新执行的是同一套完整流程：
+安装脚本本身不会自动运行；只有运营人员明确执行后才会创建计划任务。默认按中国时间建立三个互不覆盖的任务：`10:05` 早间采集、`18:00` 晚间采集、`18:30` 未合并快照/自动导出。错过触发时间后会尽快补跑，并忽略并发重复实例：
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\install_scheduled_task.ps1 `
   -ProjectPath 'D:\南非店铺数据抓取' `
-  -DailyAt '10:10'
+  -MorningAt '10:05' `
+  -EveningAt '18:00' `
+  -DeadlineAt '18:30'
 ```
 
-计划任务使用项目自己的 `.venv`，工作目录固定为项目根目录，并强制设置 `TAKEALOT_DASHBOARD_HOST=127.0.0.1`。
+计划任务使用项目自己的 `.venv`，工作目录固定为项目根目录；不会改变 ERP 的局域网监听地址。
+
+当前不增加 09:50 正式采集：Takealot Sales 接口支持按 SAST 日期范围重复查询，项目每次会重拉最近7个业务日并按订单行更新，因此10点后仍能补回前一日数据；09:50 反而更容易取得尚未完全入账的早期版本。若后续连续日志证明平台会删除历史订单，再增加“仅存原始响应、不参与最终值”的09:50保险快照，而不是把它混入早晚确认口径。
 
 ## 8. 备份与恢复
 

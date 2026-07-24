@@ -79,11 +79,12 @@ def test_mysql_backup_uses_password_environment_not_command_line(
     assert "fixture-secret" not in " ".join(captured["command"])
 
 
-def test_scheduler_script_binds_dashboard_to_127_0_0_1() -> None:
+def test_scheduler_script_installs_two_captures_and_one_deadline() -> None:
     script = (PROJECT_ROOT / "scripts" / "install_scheduled_task.ps1").read_text(
         encoding="utf-8"
     )
-    assert "127.0.0.1" in script
-    assert "TAKEALOT_DASHBOARD_HOST" in script
-    assert "python -m takealot_ops.cli daily-run" in script
+    assert "daily-report-run --slot morning" in script
+    assert "daily-report-run --slot evening" in script
+    assert "daily-report-deadline" in script
+    assert "-MultipleInstances IgnoreNew" in script
 

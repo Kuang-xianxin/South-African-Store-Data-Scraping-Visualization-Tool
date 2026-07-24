@@ -15,6 +15,9 @@ import type {
   QuadrantPayload,
   RiskPayload,
   SummaryPayload,
+  DailyReportExport,
+  DailyReportPayload,
+  DailyReportReminders,
 } from "./types";
 
 let csrfToken = "";
@@ -233,5 +236,112 @@ export async function generateNft102(
   return request<NftGeneration>("/api/erp/nft102/generate", {
     method: "POST",
     body,
+  });
+}
+
+export function fetchDailyReport(businessDate: string): Promise<DailyReportPayload> {
+  return request<DailyReportPayload>(
+    `/api/erp/daily-report?business_date=${encodeURIComponent(businessDate)}`,
+  );
+}
+
+export function fetchDailyReportReminders(): Promise<DailyReportReminders> {
+  return request<DailyReportReminders>("/api/erp/daily-report/reminders");
+}
+
+export function saveDailyReportManual(
+  businessDate: string,
+  offerId: string,
+  input: {
+    page_views_30_days?: number | null;
+    ordered_units?: number | null;
+    platform_stock?: number | null;
+    reason: string;
+    note: string;
+  },
+): Promise<{ ok: boolean }> {
+  return request(
+    `/api/erp/daily-report/${encodeURIComponent(businessDate)}/${encodeURIComponent(offerId)}/manual`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(input),
+    },
+  );
+}
+
+export function confirmDailyReportEntry(
+  businessDate: string,
+  offerId: string,
+  source: "morning" | "evening" | "manual",
+  note: string,
+): Promise<{ ok: boolean; exported: boolean }> {
+  return request(
+    `/api/erp/daily-report/${encodeURIComponent(businessDate)}/${encodeURIComponent(offerId)}/confirm`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ source, note }),
+    },
+  );
+}
+
+export function confirmReadyDailyReportEntries(
+  businessDate: string,
+  note: string,
+): Promise<{ ok: boolean; confirmed: number; exported: boolean }> {
+  return request(
+    `/api/erp/daily-report/${encodeURIComponent(businessDate)}/confirm-ready`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ note }),
+    },
+  );
+}
+
+export function dismissDailyReportStockAlert(
+  businessDate: string,
+  offerId: string,
+  note: string,
+): Promise<{ ok: boolean }> {
+  return request(
+    `/api/erp/daily-report/${encodeURIComponent(businessDate)}/${encodeURIComponent(offerId)}/stock-alert`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ note }),
+    },
+  );
+}
+
+export function saveDailyReportNote(
+  businessDate: string,
+  offerId: string,
+  note: string,
+): Promise<{ ok: boolean }> {
+  return request(
+    `/api/erp/daily-report/${encodeURIComponent(businessDate)}/${encodeURIComponent(offerId)}/note`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ note }),
+    },
+  );
+}
+
+export function fetchDailyReportExport(through: string): Promise<DailyReportExport> {
+  return request<DailyReportExport>(
+    `/api/erp/daily-report/export?through=${encodeURIComponent(through)}`,
+  );
+}
+
+export function generateDailyReportExport(
+  through: string,
+): Promise<DailyReportExport> {
+  return request<DailyReportExport>("/api/erp/daily-report/export", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ as_of: through }),
   });
 }

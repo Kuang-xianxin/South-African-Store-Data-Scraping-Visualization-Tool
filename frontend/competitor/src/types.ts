@@ -252,3 +252,93 @@ export interface NftGeneration {
   workbook_url: string;
   audit_url: string;
 }
+
+export type DailyReportStatus =
+  | "awaiting_evening"
+  | "ready"
+  | "needs_review"
+  | "confirmed";
+
+export interface DailyReportValues {
+  page_views_30_days: number | null;
+  ordered_units: number | null;
+  platform_stock: number | null;
+}
+
+export interface DailyReportItem {
+  offer_id: string;
+  sku: string | null;
+  title: string;
+  status: DailyReportStatus;
+  morning: DailyReportValues | null;
+  evening: DailyReportValues | null;
+  manual: DailyReportValues | null;
+  manual_reason: string | null;
+  manual_note: string | null;
+  final: DailyReportValues | null;
+  selected_source: "morning" | "evening" | "manual" | null;
+  confirm_note: string | null;
+  operator_note: string | null;
+  differences: Array<keyof DailyReportValues>;
+  current: DailyReportValues;
+  stock_check: {
+    previous_stock: number | null;
+    expected_stock: number | null;
+    actual_stock: number | null;
+    mismatch: boolean;
+    dismissed: boolean;
+    note: string | null;
+  };
+}
+
+export interface DailyReportPayload {
+  business_date: string;
+  runs: Array<{
+    run_id: string;
+    slot: "morning" | "evening";
+    captured_at: string;
+    status: string;
+    counts: Record<string, number>;
+  }>;
+  counts: {
+    products: number;
+    with_sales: number;
+    awaiting_evening: number;
+    ready: number;
+    needs_review: number;
+    confirmed: number;
+    stock_alerts: number;
+  };
+  items: DailyReportItem[];
+  prior_reminders: DailyReportReminderDate[];
+  deadline_snapshot: {
+    snapped_at: string;
+    unresolved_count: number;
+    resolved_at: string | null;
+  } | null;
+}
+
+export interface DailyReportReminderDate {
+  business_date: string;
+  unresolved_count: number;
+}
+
+export interface DailyReportReminders {
+  count: number;
+  dates: DailyReportReminderDate[];
+}
+
+export interface DailyReportExport {
+  through: string;
+  blocked: boolean;
+  unresolved: Array<{
+    business_date: string;
+    offer_id: string;
+    sku: string | null;
+    title: string | null;
+    status: DailyReportStatus;
+  }>;
+  exists: boolean;
+  download_url: string | null;
+  name?: string;
+}

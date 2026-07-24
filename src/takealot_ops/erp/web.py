@@ -21,6 +21,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
+from sqlalchemy.engine import Engine
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
@@ -38,6 +39,19 @@ from takealot_ops.erp.auth import (
     AuthInputError,
     AuthManager,
     IssuedSession,
+)
+from takealot_ops.erp.daily_report import (
+    DailyReportConflictError,
+    DailyReportInputError,
+    confirm_entry,
+    confirm_ready_entries,
+    daily_report_payload,
+    dismiss_stock_alert,
+    export_operations_workbook,
+    reminder_payload,
+    save_manual_candidate,
+    save_operator_note,
+    unresolved_locations,
 )
 from takealot_ops.erp.service import (
     build_product_detail_payload,
@@ -74,6 +88,23 @@ class ExportRequest(BaseModel):
     """One explicit report export request."""
 
     as_of: date
+
+
+class DailyReportManualRequest(BaseModel):
+    page_views_30_days: int | None = Field(default=None, ge=0)
+    ordered_units: int | None = Field(default=None, ge=0)
+    platform_stock: int | None = Field(default=None, ge=0)
+    reason: str
+    note: str = Field(min_length=1, max_length=2000)
+
+
+class DailyReportConfirmRequest(BaseModel):
+    source: str
+    note: str = Field(min_length=1, max_length=2000)
+
+
+class DailyReportNoteRequest(BaseModel):
+    note: str = Field(min_length=1, max_length=2000)
 
 
 class LoginRequest(BaseModel):
@@ -366,6 +397,192 @@ def create_app(project_root: Path | None = None) -> FastAPI:
         result = run_dashboard_refresh(root)
         return {"succeeded": result.succeeded, "message": result.message}
 
+    @app.get("/api/erp/daily-report")
+    def operations_daily_report(
+        business_date: date = Query(default_factory=date.today),
+    ) -> dict[str, Any]:
+        settings = DashboardSettings.from_env(root)
+        engine = create_read_only_erp_engine(settings.database_url)
+        try:
+            return daily_report_payload(engine, business_date)
+        finally:
+            engine.dispose()
+
+    @app.get("/api/erp/daily-report/reminders")
+    def operations_daily_report_reminders() -> dict[str, Any]:
+        settings = DashboardSettings.from_env(root)
+        engine = create_read_only_erp_engine(settings.database_url)
+        try:
+            return reminder_payload(engine)
+        finally:
+            engine.dispose()
+
+    @app.post("/api/erp/daily-report/{business_date}/{offer_id}/manual")
+    def operations_daily_report_manual(
+        business_date: date,
+        offer_id: str,
+        payload: DailyReportManualRequest,
+        request: Request,
+    ) -> dict[str, object]:
+        values = payload.model_dump(
+            include={"page_views_30_days", "ordered_units", "platform_stock"},
+            exclude_unset=True,
+        )
+        _write_daily_report(
+            root,
+            lambda engine: save_manual_candidate(
+                engine,
+                business_date=business_date,
+                offer_id=offer_id,
+                values=values,
+                reason=payload.reason,
+                note=payload.note,
+                user_id=request.state.erp_user.id,
+            ),
+        )
+        return {"ok": True}
+
+    @app.post("/api/erp/daily-report/{business_date}/{offer_id}/confirm")
+    def operations_daily_report_confirm(
+        business_date: date,
+        offer_id: str,
+        payload: DailyReportConfirmRequest,
+        request: Request,
+    ) -> dict[str, object]:
+        _write_daily_report(
+            root,
+            lambda engine: confirm_entry(
+                engine,
+                business_date=business_date,
+                offer_id=offer_id,
+                source=payload.source,
+                note=payload.note,
+                user_id=request.state.erp_user.id,
+            ),
+        )
+        return {
+            "ok": True,
+            "exported": _auto_export_operations_if_ready(root, business_date),
+        }
+
+    @app.post("/api/erp/daily-report/{business_date}/confirm-ready")
+    def operations_daily_report_confirm_ready(
+        business_date: date,
+        payload: DailyReportNoteRequest,
+        request: Request,
+    ) -> dict[str, object]:
+        confirmed = int(
+            _write_daily_report(
+                root,
+                lambda engine: confirm_ready_entries(
+                    engine,
+                    business_date=business_date,
+                    note=payload.note,
+                    user_id=request.state.erp_user.id,
+                ),
+            )
+            or 0
+        )
+        return {
+            "ok": True,
+            "confirmed": confirmed,
+            "exported": _auto_export_operations_if_ready(root, business_date),
+        }
+
+    @app.post("/api/erp/daily-report/{business_date}/{offer_id}/stock-alert")
+    def operations_daily_report_stock_alert(
+        business_date: date,
+        offer_id: str,
+        payload: DailyReportNoteRequest,
+        request: Request,
+    ) -> dict[str, object]:
+        _write_daily_report(
+            root,
+            lambda engine: dismiss_stock_alert(
+                engine,
+                business_date=business_date,
+                offer_id=offer_id,
+                note=payload.note,
+                user_id=request.state.erp_user.id,
+            ),
+        )
+        return {"ok": True}
+
+    @app.post("/api/erp/daily-report/{business_date}/{offer_id}/note")
+    def operations_daily_report_note(
+        business_date: date,
+        offer_id: str,
+        payload: DailyReportNoteRequest,
+        request: Request,
+    ) -> dict[str, object]:
+        _write_daily_report(
+            root,
+            lambda engine: save_operator_note(
+                engine,
+                business_date=business_date,
+                offer_id=offer_id,
+                note=payload.note,
+                user_id=request.state.erp_user.id,
+            ),
+        )
+        return {"ok": True}
+
+    @app.get("/api/erp/daily-report/export")
+    def operations_daily_report_export_status(
+        through: date = Query(default_factory=date.today),
+    ) -> dict[str, Any]:
+        settings = DashboardSettings.from_env(root)
+        engine = create_read_only_erp_engine(settings.database_url)
+        try:
+            unresolved = unresolved_locations(engine, through)
+        finally:
+            engine.dispose()
+        path = _operations_export_path(root, through)
+        return {
+            "through": through.isoformat(),
+            "blocked": bool(unresolved),
+            "unresolved": unresolved,
+            "exists": path.is_file(),
+            "download_url": (
+                f"/api/erp/daily-report/export/download?through={through.isoformat()}"
+                if path.is_file()
+                else None
+            ),
+        }
+
+    @app.post("/api/erp/daily-report/export")
+    def operations_daily_report_export(payload: ExportRequest) -> dict[str, Any]:
+        settings = DashboardSettings.from_env(root)
+        engine = create_engine_for_settings(settings)
+        try:
+            create_schema(engine)
+            path = export_operations_workbook(
+                engine,
+                business_date=payload.as_of,
+                destination=_operations_export_path(root, payload.as_of),
+            )
+        except (DailyReportConflictError, DailyReportInputError) as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        finally:
+            engine.dispose()
+        return {
+            "through": payload.as_of.isoformat(),
+            "blocked": False,
+            "unresolved": [],
+            "exists": True,
+            "download_url": (
+                f"/api/erp/daily-report/export/download?through={payload.as_of.isoformat()}"
+            ),
+            "name": path.name,
+        }
+
+    @app.get("/api/erp/daily-report/export/download")
+    def operations_daily_report_export_download(through: date) -> FileResponse:
+        path = _operations_export_path(root, through)
+        if not path.is_file():
+            raise HTTPException(status_code=404, detail="运营日报表格不存在")
+        return FileResponse(path, filename=path.name)
+
     @app.get("/api/erp/exports")
     def exports(as_of: date = Query(default_factory=date.today)) -> dict[str, Any]:
         return _export_payload(root, as_of)
@@ -525,6 +742,50 @@ def _load_competitor_dataset(project_root: Path) -> CompetitorDataset:
     engine = create_read_only_erp_engine(settings.database_url)
     try:
         return load_competitor_dataset(engine)
+    finally:
+        engine.dispose()
+
+
+def _write_daily_report(
+    project_root: Path,
+    operation: Callable[[Engine], Any],
+) -> Any:
+    settings = DashboardSettings.from_env(project_root)
+    engine = create_engine_for_settings(settings)
+    try:
+        create_schema(engine)
+        return operation(engine)
+    except DailyReportInputError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except DailyReportConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    finally:
+        engine.dispose()
+
+
+def _operations_export_path(project_root: Path, through: date) -> Path:
+    return (
+        project_root
+        / "exports"
+        / "operations-daily"
+        / through.isoformat()
+        / f"运营日报_{through.isoformat()}.xlsx"
+    )
+
+
+def _auto_export_operations_if_ready(project_root: Path, through: date) -> bool:
+    settings = DashboardSettings.from_env(project_root)
+    engine = create_engine_for_settings(settings)
+    try:
+        create_schema(engine)
+        if unresolved_locations(engine, through):
+            return False
+        export_operations_workbook(
+            engine,
+            business_date=through,
+            destination=_operations_export_path(project_root, through),
+        )
+        return True
     finally:
         engine.dispose()
 

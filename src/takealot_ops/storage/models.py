@@ -334,3 +334,102 @@ class ErpSession(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
     expires_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, index=True)
     last_seen_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+
+
+class DailyReportRun(Base):
+    """One immutable morning/evening capture used by the operations daily report."""
+
+    __tablename__ = "daily_report_runs"
+
+    run_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    business_date: Mapped[date] = mapped_column(Date, nullable=False, index=True)
+    slot: Mapped[str] = mapped_column(String(20), nullable=False, index=True)
+    captured_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    status: Mapped[str] = mapped_column(String(30), nullable=False)
+    counts: Mapped[dict[str, int] | None] = mapped_column(JSON)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+
+
+class DailyReportObservation(Base):
+    """One product value set frozen at a daily-report capture time."""
+
+    __tablename__ = "daily_report_observations"
+    __table_args__ = (UniqueConstraint("run_id", "offer_id"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    run_id: Mapped[str] = mapped_column(
+        ForeignKey("daily_report_runs.run_id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    offer_id: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
+    sku: Mapped[str | None] = mapped_column(String(255))
+    title: Mapped[str | None] = mapped_column(Text)
+    page_views_30_days: Mapped[int | None] = mapped_column(Integer)
+    ordered_units: Mapped[int] = mapped_column(Integer, nullable=False)
+    platform_stock: Mapped[int | None] = mapped_column(Integer)
+    stock_source: Mapped[str | None] = mapped_column(String(50))
+
+
+class DailyReportResolution(Base):
+    """Human candidate and confirmed final values for one product and business day."""
+
+    __tablename__ = "daily_report_resolutions"
+    __table_args__ = (UniqueConstraint("business_date", "offer_id"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    business_date: Mapped[date] = mapped_column(Date, nullable=False, index=True)
+    offer_id: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
+    status: Mapped[str] = mapped_column(String(30), nullable=False)
+    manual_page_views_30_days: Mapped[int | None] = mapped_column(Integer)
+    manual_ordered_units: Mapped[int | None] = mapped_column(Integer)
+    manual_platform_stock: Mapped[int | None] = mapped_column(Integer)
+    manual_reason: Mapped[str | None] = mapped_column(String(50))
+    manual_note: Mapped[str | None] = mapped_column(Text)
+    manual_by: Mapped[int | None] = mapped_column(ForeignKey("erp_users.id"))
+    manual_at: Mapped[datetime | None] = mapped_column(DateTime)
+    selected_source: Mapped[str | None] = mapped_column(String(20))
+    final_page_views_30_days: Mapped[int | None] = mapped_column(Integer)
+    final_ordered_units: Mapped[int | None] = mapped_column(Integer)
+    final_platform_stock: Mapped[int | None] = mapped_column(Integer)
+    confirm_note: Mapped[str | None] = mapped_column(Text)
+    confirmed_by: Mapped[int | None] = mapped_column(ForeignKey("erp_users.id"))
+    confirmed_at: Mapped[datetime | None] = mapped_column(DateTime)
+    stock_alert_dismissed: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False
+    )
+    stock_alert_note: Mapped[str | None] = mapped_column(Text)
+    stock_alert_dismissed_by: Mapped[int | None] = mapped_column(
+        ForeignKey("erp_users.id")
+    )
+    stock_alert_dismissed_at: Mapped[datetime | None] = mapped_column(DateTime)
+    operator_note: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+
+
+class DailyReportAudit(Base):
+    """Append-only audit trail for report edits, confirmations, and alert handling."""
+
+    __tablename__ = "daily_report_audits"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    business_date: Mapped[date] = mapped_column(Date, nullable=False, index=True)
+    offer_id: Mapped[str | None] = mapped_column(String(100), index=True)
+    action: Mapped[str] = mapped_column(String(50), nullable=False)
+    payload: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+    note: Mapped[str | None] = mapped_column(Text)
+    user_id: Mapped[int | None] = mapped_column(ForeignKey("erp_users.id"))
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+
+
+class DailyReportDeadlineSnapshot(Base):
+    """Persistent unresolved-work snapshot made at the daily confirmation deadline."""
+
+    __tablename__ = "daily_report_deadline_snapshots"
+
+    business_date: Mapped[date] = mapped_column(Date, primary_key=True)
+    snapped_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    unresolved_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    details: Mapped[list[dict[str, Any]] | None] = mapped_column(JSON)
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime)
