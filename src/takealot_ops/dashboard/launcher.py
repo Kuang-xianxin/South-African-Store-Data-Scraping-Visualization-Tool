@@ -1,4 +1,4 @@
-"""Official loopback-only process launcher for the local ERP."""
+"""Official process launcher for the authenticated local ERP."""
 
 from __future__ import annotations
 
@@ -113,7 +113,7 @@ def _run_dashboard_process(command: list[str], **kwargs: Any) -> subprocess.Comp
 def build_dashboard_command(
     settings: DashboardSettings, *, python_executable: str = sys.executable
 ) -> list[str]:
-    """Build the unified loopback-only Vue ERP command."""
+    """Build the unified authenticated Vue ERP command."""
     _validate_launch_settings(settings)
     return [
         python_executable,
@@ -121,7 +121,7 @@ def build_dashboard_command(
         "uvicorn",
         "takealot_ops.erp.web:app",
         "--host",
-        "127.0.0.1",
+        settings.dashboard_host,
         "--port",
         str(settings.dashboard_port),
         "--no-access-log",
@@ -155,7 +155,7 @@ def launch_dashboard(
     *,
     runner: Runner = _run_dashboard_process,
 ) -> int:
-    """Run the unified Vue ERP on the configured loopback port."""
+    """Run the unified Vue ERP on the configured host and port."""
     command = build_dashboard_command(settings)
     completed = runner(
         command,
@@ -193,8 +193,8 @@ def main() -> int:
 
 
 def _validate_launch_settings(settings: DashboardSettings) -> None:
-    if settings.dashboard_host not in {"127.0.0.1", "localhost"}:
-        raise SettingsError("看板启动地址必须是本机回环地址")
+    if settings.dashboard_host not in {"127.0.0.1", "localhost", "0.0.0.0"}:
+        raise SettingsError("看板启动地址只能是 0.0.0.0、127.0.0.1 或 localhost")
     if not 1 <= settings.dashboard_port <= 65535:
         raise SettingsError("看板端口必须是1到65535之间的整数")
 

@@ -1,17 +1,23 @@
-"""Loopback-only FastAPI application for the unified local ERP."""
+"""Authenticated FastAPI application for the unified local ERP."""
 
 from __future__ import annotations
 
 import os
+import time
+from collections import defaultdict
+from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import asynccontextmanager
 from datetime import date, datetime
 from pathlib import Path
+from threading import Lock
 from typing import Annotated, Any
 from urllib.parse import quote
 from zoneinfo import ZoneInfo
 
 import pandas as pd
-from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile
+from fastapi.concurrency import run_in_threadpool
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
@@ -25,6 +31,14 @@ from takealot_ops.competitors.service import (
     load_competitor_dataset,
 )
 from takealot_ops.dashboard.refresh import run_dashboard_refresh
+from takealot_ops.erp.auth import (
+    OPERATOR_ROLES,
+    SESSION_COOKIE,
+    AuthConflictError,
+    AuthInputError,
+    AuthManager,
+    IssuedSession,
+)
 from takealot_ops.erp.service import (
     build_product_detail_payload,
     build_products_payload,
@@ -62,22 +76,218 @@ class ExportRequest(BaseModel):
     as_of: date
 
 
+class LoginRequest(BaseModel):
+    username: str = Field(min_length=1, max_length=64)
+    password: str = Field(min_length=1, max_length=128)
+
+
+class BootstrapRequest(LoginRequest):
+    display_name: str = Field(default="", max_length=100)
+
+
+class UserCreateRequest(BootstrapRequest):
+    role: str
+
+
+class UserUpdateRequest(BaseModel):
+    display_name: str | None = Field(default=None, max_length=100)
+    password: str | None = Field(default=None, max_length=128)
+    role: str | None = None
+    active: bool | None = None
+
+
+class _LoginLimiter:
+    def __init__(self) -> None:
+        self._failures: dict[str, list[float]] = defaultdict(list)
+        self._lock = Lock()
+
+    def allowed(self, source: str) -> bool:
+        now = time.monotonic()
+        with self._lock:
+            recent = [stamp for stamp in self._failures[source] if now - stamp < 300]
+            self._failures[source] = recent
+            return len(recent) < 5
+
+    def failure(self, source: str) -> None:
+        with self._lock:
+            self._failures[source].append(time.monotonic())
+
+    def success(self, source: str) -> None:
+        with self._lock:
+            self._failures.pop(source, None)
+
+
 def create_app(project_root: Path | None = None) -> FastAPI:
     """Create the unified ERP API and attach its built Vue application."""
     root = (
         project_root
         or Path(os.environ.get("TAKEALOT_PROJECT_ROOT", Path.cwd()))
     ).resolve()
+    auth = AuthManager(root)
+    limiter = _LoginLimiter()
+
+    @asynccontextmanager
+    async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+        yield
+        auth.close()
+
     app = FastAPI(
         title="Takealot 本地运营 ERP",
         docs_url=None,
         redoc_url=None,
         openapi_url=None,
+        lifespan=lifespan,
     )
+    app.state.auth_manager = auth
+
+    @app.middleware("http")
+    async def enforce_permissions(
+        request: Request,
+        call_next: Callable[[Request], Awaitable[Response]],
+    ) -> Response:
+        path = request.url.path
+        public_paths = {
+            "/api/health",
+            "/api/auth/status",
+            "/api/auth/session",
+            "/api/auth/login",
+            "/api/auth/bootstrap",
+        }
+        if not path.startswith("/api/") or path in public_paths:
+            return await call_next(request)
+
+        session = await run_in_threadpool(
+            auth.resolve_session,
+            request.cookies.get(SESSION_COOKIE),
+        )
+        if session is None:
+            return JSONResponse(status_code=401, content={"detail": "请先登录"})
+        request.state.erp_user = session.user
+        request.state.erp_session = session
+
+        if request.method not in {"GET", "HEAD", "OPTIONS"}:
+            csrf_token = request.headers.get("X-CSRF-Token", "")
+            if not csrf_token or csrf_token != session.csrf_token:
+                return JSONResponse(
+                    status_code=403,
+                    content={"detail": "请求校验失败，请刷新页面后重试"},
+                )
+            if path.startswith("/api/auth/users"):
+                if session.user.role != "admin":
+                    return JSONResponse(
+                        status_code=403,
+                        content={"detail": "只有管理员可以管理用户"},
+                    )
+            elif path != "/api/auth/logout" and session.user.role not in OPERATOR_ROLES:
+                return JSONResponse(
+                    status_code=403,
+                    content={"detail": "当前账号只有查看权限"},
+                )
+        elif path.startswith("/api/auth/users") and session.user.role != "admin":
+            return JSONResponse(
+                status_code=403,
+                content={"detail": "只有管理员可以管理用户"},
+            )
+        return await call_next(request)
 
     @app.get("/api/health")
     def health() -> dict[str, str]:
         return {"status": "ok", "application": "takealot-erp"}
+
+    @app.get("/api/auth/status")
+    def auth_status(request: Request) -> dict[str, bool]:
+        setup_required = auth.user_count() == 0
+        return {
+            "setup_required": setup_required,
+            "bootstrap_allowed": setup_required and _is_loopback_request(request),
+        }
+
+    @app.get("/api/auth/session")
+    def auth_session(request: Request) -> dict[str, Any]:
+        resolved = auth.resolve_session(request.cookies.get(SESSION_COOKIE))
+        if resolved is None:
+            raise HTTPException(status_code=401, detail="请先登录")
+        return {
+            "user": resolved.user.as_dict(),
+            "csrf_token": resolved.csrf_token,
+            "expires_at": resolved.expires_at.isoformat(),
+        }
+
+    @app.post("/api/auth/bootstrap")
+    def auth_bootstrap(request: Request, payload: BootstrapRequest) -> Response:
+        if not _is_loopback_request(request):
+            raise HTTPException(
+                status_code=403,
+                detail="首个管理员只能在服务器本机通过 127.0.0.1 初始化",
+            )
+        try:
+            issued = auth.bootstrap(
+                username=payload.username,
+                display_name=payload.display_name,
+                password=payload.password,
+            )
+        except AuthInputError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except AuthConflictError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return _session_response(request, issued)
+
+    @app.post("/api/auth/login")
+    def auth_login(request: Request, payload: LoginRequest) -> Response:
+        source = request.client.host if request.client else "unknown"
+        if not limiter.allowed(source):
+            raise HTTPException(status_code=429, detail="登录失败次数过多，请 5 分钟后重试")
+        try:
+            issued = auth.login(payload.username, payload.password)
+        except AuthInputError:
+            issued = None
+        if issued is None:
+            limiter.failure(source)
+            raise HTTPException(status_code=401, detail="用户名或密码错误")
+        limiter.success(source)
+        return _session_response(request, issued)
+
+    @app.post("/api/auth/logout")
+    def auth_logout(request: Request) -> Response:
+        auth.logout(request.cookies.get(SESSION_COOKIE))
+        response = JSONResponse({"ok": True})
+        response.delete_cookie(SESSION_COOKIE, path="/")
+        return response
+
+    @app.get("/api/auth/users")
+    def auth_users() -> dict[str, Any]:
+        return {"items": auth.list_users()}
+
+    @app.post("/api/auth/users")
+    def auth_create_user(payload: UserCreateRequest) -> dict[str, Any]:
+        try:
+            user = auth.create_user(
+                username=payload.username,
+                display_name=payload.display_name,
+                password=payload.password,
+                role=payload.role,
+            )
+        except AuthInputError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except AuthConflictError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return {"user": user}
+
+    @app.patch("/api/auth/users/{user_id}")
+    def auth_update_user(user_id: int, payload: UserUpdateRequest) -> dict[str, Any]:
+        try:
+            user = auth.update_user(
+                user_id,
+                display_name=payload.display_name,
+                password=payload.password,
+                role=payload.role,
+                active=payload.active,
+            )
+        except AuthInputError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except AuthConflictError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return {"user": user}
 
     @app.get("/api/erp/freshness")
     def freshness() -> dict[str, str | None]:
@@ -351,6 +561,33 @@ def _nft_download_url(report_date: date, name: str) -> str:
         "/api/erp/nft102/download?"
         f"report_date={report_date.isoformat()}&name={quote(name)}"
     )
+
+
+def _is_loopback_request(request: Request) -> bool:
+    return bool(
+        request.client
+        and request.client.host in {"127.0.0.1", "::1", "localhost"}
+    )
+
+
+def _session_response(request: Request, issued: IssuedSession) -> Response:
+    response = JSONResponse(
+        {
+            "user": issued.user.as_dict(),
+            "csrf_token": issued.csrf_token,
+            "expires_at": issued.expires_at.isoformat(),
+        }
+    )
+    response.set_cookie(
+        SESSION_COOKIE,
+        issued.token,
+        max_age=12 * 60 * 60,
+        httponly=True,
+        secure=request.url.scheme == "https",
+        samesite="strict",
+        path="/",
+    )
+    return response
 
 
 app = create_app()

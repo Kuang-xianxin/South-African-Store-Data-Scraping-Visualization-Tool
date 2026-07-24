@@ -27,7 +27,7 @@ APP_PATH = (
 PROJECT_ROOT = Path(__file__).parents[2]
 
 
-def test_dashboard_defaults_to_localhost_without_api_key(
+def test_dashboard_defaults_to_lan_without_api_key(
     tmp_path: Path, monkeypatch
 ) -> None:
     monkeypatch.delenv("TAKEALOT_API_KEY", raising=False)
@@ -37,7 +37,7 @@ def test_dashboard_defaults_to_localhost_without_api_key(
 
     settings = DashboardSettings.from_env(tmp_path)
 
-    assert settings.dashboard_host == "127.0.0.1"
+    assert settings.dashboard_host == "0.0.0.0"
     assert settings.dashboard_port == 8501
 
 

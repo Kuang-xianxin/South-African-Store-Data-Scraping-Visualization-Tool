@@ -11,6 +11,7 @@ from sqlalchemy import (
     Boolean,
     Date,
     DateTime,
+    ForeignKey,
     Integer,
     Numeric,
     String,
@@ -300,3 +301,36 @@ class CompetitorVariantSnapshot(Base):
     stock_exact: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     stock_method: Mapped[str] = mapped_column(String(100), nullable=False)
     stock_note: Mapped[str | None] = mapped_column(Text)
+
+
+class ErpUser(Base):
+    """A local ERP user with a server-enforced role."""
+
+    __tablename__ = "erp_users"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    username: Mapped[str] = mapped_column(String(64), nullable=False, unique=True, index=True)
+    display_name: Mapped[str] = mapped_column(String(100), nullable=False)
+    password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
+    role: Mapped[str] = mapped_column(String(20), nullable=False)
+    active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    last_login_at: Mapped[datetime | None] = mapped_column(DateTime)
+
+
+class ErpSession(Base):
+    """A revocable server-side ERP browser session."""
+
+    __tablename__ = "erp_sessions"
+
+    token_hash: Mapped[str] = mapped_column(String(64), primary_key=True)
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("erp_users.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    csrf_token: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, index=True)
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)

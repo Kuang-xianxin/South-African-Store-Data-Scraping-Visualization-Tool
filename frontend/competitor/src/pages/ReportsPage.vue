@@ -13,7 +13,7 @@ import type {
   NftInspection,
 } from "../types";
 
-const props = defineProps<{ asOf: string }>();
+const props = defineProps<{ asOf: string; canOperate?: boolean }>();
 const tab = ref<"exports" | "nft102">("exports");
 const exports = ref<ExportPayload | null>(null);
 const exporting = ref(false);
@@ -32,6 +32,7 @@ async function loadExports() {
 }
 
 async function runExport() {
+  if (!props.canOperate) return;
   exporting.value = true;
   message.value = "";
   try {
@@ -47,6 +48,7 @@ async function runExport() {
 }
 
 async function chooseFile(event: Event) {
+  if (!props.canOperate) return;
   const input = event.target as HTMLInputElement;
   nftFile.value = input.files?.[0] ?? null;
   inspection.value = null;
@@ -64,6 +66,7 @@ async function chooseFile(event: Event) {
 }
 
 async function runNftGeneration() {
+  if (!props.canOperate) return;
   if (!nftFile.value || !reportDate.value) return;
   generating.value = true;
   message.value = "";
@@ -102,7 +105,11 @@ function megabytes(value: number) {
           <p class="section-kicker">DAILY REPORTS</p>
           <h3>{{ asOf }} 运营日报</h3>
         </div>
-        <button class="action-button" :disabled="exporting" @click="runExport">
+        <button
+          class="action-button"
+          :disabled="exporting || !props.canOperate"
+          @click="runExport"
+        >
           {{ exporting ? "正在生成…" : "生成全部报表" }}
         </button>
       </div>
@@ -124,7 +131,12 @@ function megabytes(value: number) {
         <h3>上传运营最终版</h3>
         <p>系统以本次上传文件为唯一基准；原文件不会被覆盖。</p>
         <label class="file-drop">
-          <input type="file" accept=".xlsx" @change="chooseFile" />
+          <input
+            type="file"
+            accept=".xlsx"
+            :disabled="!props.canOperate"
+            @change="chooseFile"
+          />
           <strong>{{ nftFile?.name || "选择电子表格" }}</strong>
           <span>{{ inspecting ? "正在校验…" : "仅支持 .xlsx，最大100 MB" }}</span>
         </label>
@@ -142,7 +154,7 @@ function megabytes(value: number) {
         <div v-else class="state-card slim">先上传并通过校验，才能生成下一日表格。</div>
         <button
           class="action-button full"
-          :disabled="!inspection || generating"
+          :disabled="!inspection || generating || !props.canOperate"
           @click="runNftGeneration"
         >
           {{ generating ? "正在生成，请勿关闭…" : "保存基准并生成下一日表格" }}

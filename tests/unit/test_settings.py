@@ -48,7 +48,7 @@ def test_settings_uses_mysql_defaults(
         "takealot_ops?charset=utf8mb4"
     )
     assert settings.request_timeout_seconds == 30.0
-    assert settings.dashboard_host == "127.0.0.1"
+    assert settings.dashboard_host == "0.0.0.0"
     assert settings.dashboard_port == 8501
 
 

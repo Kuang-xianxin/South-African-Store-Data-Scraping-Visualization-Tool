@@ -14,6 +14,7 @@ import type {
 import { formatChinaDateTime } from "../time";
 
 defineOptions({ name: "CompetitorsPage" });
+const props = defineProps<{ canOperate?: boolean }>();
 
 const sampleUrls = [
   "https://www.takealot.com/laser-lipo-slimming-machine/PLID72189176",
@@ -299,6 +300,7 @@ async function focusInvalidLink(issue: LinkValidationIssue) {
 }
 
 async function startCollection() {
+  if (!props.canOperate) return;
   collectionResults.value = [];
   collectionErrors.value = [];
   completed.value = 0;
@@ -389,7 +391,7 @@ function reviewTone(stars: number) {
           'link-input-error': linkValidationIssue,
           'link-input-error-pulse': linkErrorPulse,
         }"
-        :disabled="collecting"
+        :disabled="collecting || !props.canOperate"
         spellcheck="false"
         @input="clearLinkValidation"
       ></textarea>
@@ -410,7 +412,11 @@ function reviewTone(stars: number) {
       </div>
       <div class="collector-actions">
         <label class="switch-row">
-          <input v-model="withStockProbe" type="checkbox" :disabled="collecting" />
+          <input
+            v-model="withStockProbe"
+            type="checkbox"
+            :disabled="collecting || !props.canOperate"
+          />
           <span class="switch"></span>
           <span>
             <strong>匿名购物车库存探测</strong>
@@ -421,12 +427,16 @@ function reviewTone(stars: number) {
           <input
             v-model="visibleBrowser"
             type="checkbox"
-            :disabled="collecting || !withStockProbe"
+            :disabled="collecting || !withStockProbe || !props.canOperate"
           />
           <span class="switch"></span>
           <span><strong>显示检测浏览器</strong></span>
         </label>
-        <button class="primary-button" :disabled="collecting" @click="startCollection">
+        <button
+          class="primary-button"
+          :disabled="collecting || !props.canOperate"
+          @click="startCollection"
+        >
           {{ collecting ? `正在采集 ${completed}/${total}` : "开始采集" }}
         </button>
       </div>

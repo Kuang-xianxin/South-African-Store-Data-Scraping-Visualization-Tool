@@ -1,15 +1,24 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 
-import { fetchFreshness, refreshStoreData } from "./api";
+import {
+  fetchAuthSession,
+  fetchAuthStatus,
+  fetchFreshness,
+  logout,
+  refreshStoreData,
+  setAuthSession,
+} from "./api";
 import CompetitorsPage from "./pages/CompetitorsPage.vue";
+import LoginPage from "./pages/LoginPage.vue";
 import OverviewPage from "./pages/OverviewPage.vue";
 import ProductsPage from "./pages/ProductsPage.vue";
 import QuadrantsPage from "./pages/QuadrantsPage.vue";
 import ReportsPage from "./pages/ReportsPage.vue";
 import RisksPage from "./pages/RisksPage.vue";
+import UsersPage from "./pages/UsersPage.vue";
 import { formatChinaDateTime } from "./time";
-import type { FreshnessPayload } from "./types";
+import type { AuthSession, AuthStatus, FreshnessPayload } from "./types";
 
 type PageKey =
   | "overview"
@@ -17,9 +26,10 @@ type PageKey =
   | "quadrants"
   | "risks"
   | "competitors"
-  | "reports";
+  | "reports"
+  | "users";
 
-const pages = [
+const basePages = [
   { key: "overview", label: "经营总览", hint: "今日经营脉搏", mark: "01" },
   { key: "products", label: "商品中心", hint: "单品销售与流量", mark: "02" },
   { key: "quadrants", label: "经营四象限", hint: "商品组合定位", mark: "03" },
@@ -27,7 +37,16 @@ const pages = [
   { key: "competitors", label: "竞品雷达", hint: "库存评论与销量", mark: "05" },
   { key: "reports", label: "报表工作台", hint: "导出与 NFT102", mark: "06" },
 ] as const;
+const adminPage = {
+  key: "users",
+  label: "用户权限",
+  hint: "账号与角色管理",
+  mark: "07",
+} as const;
 
+const authReady = ref(false);
+const authStatus = ref<AuthStatus>({ setup_required: false, bootstrap_allowed: false });
+const session = ref<AuthSession | null>(null);
 const currentPage = ref<PageKey>("overview");
 const asOf = ref(localDate());
 const freshness = ref<FreshnessPayload>({
@@ -39,8 +58,13 @@ const refreshing = ref(false);
 const refreshMessage = ref("");
 const mobileNavOpen = ref(false);
 
+const isAdmin = computed(() => session.value?.user.role === "admin");
+const canOperate = computed(() =>
+  ["operator", "admin"].includes(session.value?.user.role ?? ""),
+);
+const pages = computed(() => (isAdmin.value ? [...basePages, adminPage] : basePages));
 const activePage = computed(
-  () => pages.find((page) => page.key === currentPage.value) ?? pages[0],
+  () => pages.value.find((page) => page.key === currentPage.value) ?? pages.value[0],
 );
 const pageComponent = computed(() => {
   const components = {
@@ -50,11 +74,65 @@ const pageComponent = computed(() => {
     risks: RisksPage,
     competitors: CompetitorsPage,
     reports: ReportsPage,
+    users: UsersPage,
   };
   return components[currentPage.value];
 });
+const roleLabel = computed(() => {
+  const labels = { viewer: "查看员", operator: "运营员", admin: "管理员" };
+  return labels[session.value?.user.role ?? "viewer"];
+});
+const activePageProps = computed(() => ({
+  asOf: asOf.value,
+  ...(["competitors", "reports"].includes(currentPage.value)
+    ? { canOperate: canOperate.value }
+    : {}),
+}));
 
-onMounted(loadFreshness);
+onMounted(async () => {
+  window.addEventListener("erp-auth-expired", handleExpired);
+  await restoreSession();
+});
+onBeforeUnmount(() => window.removeEventListener("erp-auth-expired", handleExpired));
+
+async function restoreSession() {
+  try {
+    acceptSession(await fetchAuthSession());
+  } catch {
+    setAuthSession(null);
+    session.value = null;
+    authStatus.value = await fetchAuthStatus().catch(() => ({
+      setup_required: false,
+      bootstrap_allowed: false,
+    }));
+  } finally {
+    authReady.value = true;
+  }
+}
+
+function acceptSession(next: AuthSession) {
+  session.value = next;
+  setAuthSession(next);
+  authReady.value = true;
+  void loadFreshness();
+}
+
+function handleExpired() {
+  session.value = null;
+  setAuthSession(null);
+  currentPage.value = "overview";
+  void fetchAuthStatus().then((status) => {
+    authStatus.value = status;
+  });
+}
+
+async function signOut() {
+  try {
+    await logout();
+  } finally {
+    handleExpired();
+  }
+}
 
 async function loadFreshness() {
   freshness.value = await fetchFreshness().catch(() => ({
@@ -64,6 +142,7 @@ async function loadFreshness() {
 }
 
 async function runRefresh() {
+  if (!canOperate.value) return;
   refreshing.value = true;
   refreshMessage.value = "";
   try {
@@ -94,7 +173,13 @@ function localDate() {
 </script>
 
 <template>
-  <div class="erp-shell">
+  <div v-if="!authReady" class="auth-loading">正在连接经营系统…</div>
+  <LoginPage
+    v-else-if="!session"
+    :status="authStatus"
+    @authenticated="acceptSession"
+  />
+  <div v-else class="erp-shell">
     <aside class="erp-sidebar" :class="{ open: mobileNavOpen }">
       <div class="brand">
         <span class="brand-mark">T</span>
@@ -148,9 +233,19 @@ function localDate() {
             <span>数据截止日期</span>
             <input v-model="asOf" type="date" />
           </label>
-          <button class="refresh-button" :disabled="refreshing" @click="runRefresh">
+          <button
+            v-if="canOperate"
+            class="refresh-button"
+            :disabled="refreshing"
+            @click="runRefresh"
+          >
             {{ refreshing ? "正在刷新…" : "刷新全部数据" }}
           </button>
+          <div class="account-menu">
+            <span>{{ session.user.display_name }}</span>
+            <small>{{ roleLabel }}</small>
+            <button type="button" @click="signOut">退出</button>
+          </div>
         </div>
       </header>
 
@@ -161,7 +256,7 @@ function localDate() {
           <component
             :is="pageComponent"
             :key="`${currentPage}-${refreshKey}`"
-            :as-of="asOf"
+            v-bind="activePageProps"
           />
         </KeepAlive>
       </section>
@@ -174,3 +269,50 @@ function localDate() {
     ></button>
   </div>
 </template>
+
+<style scoped>
+.auth-loading {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  color: #315245;
+  background: #edf2ec;
+}
+.account-menu {
+  display: grid;
+  grid-template-columns: auto auto;
+  column-gap: 9px;
+  align-items: center;
+  padding-left: 16px;
+  border-left: 1px solid #d8e0dc;
+}
+.account-menu span {
+  color: #173f31;
+  font-size: 13px;
+  font-weight: 700;
+}
+.account-menu small {
+  color: #7b8982;
+  font-size: 11px;
+}
+.account-menu button {
+  grid-column: 2;
+  grid-row: 1 / span 2;
+  padding: 7px 10px;
+  border: 0;
+  border-radius: 7px;
+  color: #36584b;
+  background: #e9f0ec;
+  cursor: pointer;
+}
+@media (max-width: 760px) {
+  .account-menu {
+    padding-left: 0;
+    border-left: 0;
+  }
+  .account-menu span,
+  .account-menu small {
+    display: none;
+  }
+}
+</style>

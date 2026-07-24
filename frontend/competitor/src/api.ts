@@ -6,6 +6,10 @@ import type {
   FreshnessPayload,
   NftGeneration,
   NftInspection,
+  AuthSession,
+  AuthStatus,
+  ManagedUser,
+  UserRole,
   ProductDetailPayload,
   ProductsPayload,
   QuadrantPayload,
@@ -13,15 +17,115 @@ import type {
   SummaryPayload,
 } from "./types";
 
+let csrfToken = "";
+
+export function setAuthSession(session: AuthSession | null) {
+  csrfToken = session?.csrf_token ?? "";
+}
+
 async function request<T>(url: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(url, init);
+  const headers = new Headers(init?.headers);
+  const method = (init?.method ?? "GET").toUpperCase();
+  if (!["GET", "HEAD", "OPTIONS"].includes(method) && csrfToken) {
+    headers.set("X-CSRF-Token", csrfToken);
+  }
+  const response = await fetch(url, {
+    ...init,
+    headers,
+    credentials: "same-origin",
+  });
   const payload = await response.json().catch(() => ({}));
   if (!response.ok) {
+    if (
+      response.status === 401
+      && !["/api/auth/login", "/api/auth/session"].includes(url)
+    ) {
+      window.dispatchEvent(new CustomEvent("erp-auth-expired"));
+    }
     const message =
       typeof payload.detail === "string" ? payload.detail : "本机接口请求失败";
     throw new Error(message);
   }
   return payload as T;
+}
+
+export function fetchAuthStatus(): Promise<AuthStatus> {
+  return request<AuthStatus>("/api/auth/status");
+}
+
+export async function fetchAuthSession(): Promise<AuthSession> {
+  const session = await request<AuthSession>("/api/auth/session");
+  setAuthSession(session);
+  return session;
+}
+
+export async function login(username: string, password: string): Promise<AuthSession> {
+  const session = await request<AuthSession>("/api/auth/login", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ username, password }),
+  });
+  setAuthSession(session);
+  return session;
+}
+
+export async function bootstrapAdmin(
+  username: string,
+  displayName: string,
+  password: string,
+): Promise<AuthSession> {
+  const session = await request<AuthSession>("/api/auth/bootstrap", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      username,
+      display_name: displayName,
+      password,
+    }),
+  });
+  setAuthSession(session);
+  return session;
+}
+
+export async function logout(): Promise<void> {
+  await request<{ ok: boolean }>("/api/auth/logout", { method: "POST" });
+  setAuthSession(null);
+}
+
+export async function fetchUsers(): Promise<ManagedUser[]> {
+  const result = await request<{ items: ManagedUser[] }>("/api/auth/users");
+  return result.items;
+}
+
+export async function createUser(input: {
+  username: string;
+  display_name: string;
+  password: string;
+  role: UserRole;
+}): Promise<ManagedUser> {
+  const result = await request<{ user: ManagedUser }>("/api/auth/users", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(input),
+  });
+  return result.user;
+}
+
+export async function updateUser(
+  id: number,
+  input: {
+    display_name?: string;
+    password?: string;
+    role?: UserRole;
+    active?: boolean;
+  },
+): Promise<ManagedUser> {
+  const result = await request<{ user: ManagedUser }>(`/api/auth/users/${id}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(input),
+  });
+  return result.user;
 }
 
 export async function fetchCompetitors(): Promise<CompetitorItem[]> {

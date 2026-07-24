@@ -26,11 +26,11 @@ from takealot_ops.settings import DashboardSettings, SettingsError
 PROJECT_ROOT = Path(__file__).parents[2]
 
 
-def test_launcher_builds_exact_loopback_erp_command_without_api_key(
+def test_launcher_builds_exact_lan_erp_command_without_api_key(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.delenv("TAKEALOT_API_KEY", raising=False)
-    monkeypatch.setenv("TAKEALOT_DASHBOARD_HOST", "localhost")
+    monkeypatch.setenv("TAKEALOT_DASHBOARD_HOST", "0.0.0.0")
     monkeypatch.setenv("TAKEALOT_DASHBOARD_PORT", "8765")
     settings = DashboardSettings.from_env(PROJECT_ROOT)
 
@@ -42,7 +42,7 @@ def test_launcher_builds_exact_loopback_erp_command_without_api_key(
         "uvicorn",
         "takealot_ops.erp.web:app",
         "--host",
-        "127.0.0.1",
+        "0.0.0.0",
         "--port",
         "8765",
         "--no-access-log",
@@ -67,11 +67,11 @@ def test_daily_schedule_defaults_to_china_time_after_platform_rollover() -> None
     assert "0x5E97, 0x94FA, 0x6570, 0x636E" in script
 
 
-def test_launcher_rejects_non_loopback_settings_before_subprocess() -> None:
+def test_launcher_rejects_arbitrary_bind_address_before_subprocess() -> None:
     settings = DashboardSettings(
         project_root=PROJECT_ROOT,
         database_url=f"sqlite:///{(PROJECT_ROOT / 'data' / 'takealot.db').as_posix()}",
-        dashboard_host="0.0.0.0",
+        dashboard_host="192.168.1.20",
         dashboard_port=8501,
     )
     calls: list[list[str]] = []
@@ -80,7 +80,7 @@ def test_launcher_rejects_non_loopback_settings_before_subprocess() -> None:
         calls.append(command)
         return subprocess.CompletedProcess(command, 0)
 
-    with pytest.raises(SettingsError, match="本机回环地址"):
+    with pytest.raises(SettingsError, match="0.0.0.0"):
         launch_dashboard(settings, runner=runner)
 
     assert calls == []

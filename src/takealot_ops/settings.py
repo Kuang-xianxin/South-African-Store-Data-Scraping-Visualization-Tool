@@ -16,7 +16,7 @@ DEFAULT_DATABASE_URL = (
     "mysql+pymysql://takealot_app@127.0.0.1:3306/takealot_ops?charset=utf8mb4"
 )
 DEFAULT_REQUEST_TIMEOUT_SECONDS = 30.0
-DEFAULT_DASHBOARD_HOST = "127.0.0.1"
+DEFAULT_DASHBOARD_HOST = "0.0.0.0"
 DEFAULT_DASHBOARD_PORT = 8501
 
 
@@ -88,8 +88,8 @@ class DashboardSettings:
 
 def _dashboard_host_from_env() -> str:
     host = os.environ.get("TAKEALOT_DASHBOARD_HOST", DEFAULT_DASHBOARD_HOST).strip()
-    if host not in {"127.0.0.1", "localhost"}:
-        raise SettingsError("看板地址必须是本机回环地址")
+    if host not in {"127.0.0.1", "localhost", "0.0.0.0"}:
+        raise SettingsError("看板地址只能是 0.0.0.0、127.0.0.1 或 localhost")
     return host
 
 

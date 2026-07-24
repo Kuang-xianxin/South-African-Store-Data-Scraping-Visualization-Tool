@@ -142,6 +142,33 @@ export interface QuadrantItem extends ProductItem {
   quadrant: QuadrantKey;
 }
 
+export type UserRole = "viewer" | "operator" | "admin";
+
+export interface AuthUser {
+  id: number;
+  username: string;
+  display_name: string;
+  role: UserRole;
+}
+
+export interface AuthSession {
+  user: AuthUser;
+  csrf_token: string;
+  expires_at: string;
+}
+
+export interface AuthStatus {
+  setup_required: boolean;
+  bootstrap_allowed: boolean;
+}
+
+export interface ManagedUser extends AuthUser {
+  active: boolean;
+  created_at: string;
+  updated_at: string;
+  last_login_at: string | null;
+}
+
 export interface QuadrantPayload {
   window_start: string | null;
   window_end: string | null;
