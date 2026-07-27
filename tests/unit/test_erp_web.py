@@ -626,3 +626,83 @@ def test_daily_report_api_reads_versions_and_bulk_confirms_ready_rows(
         assert repeated_revert.status_code == 409
         exported = tmp_path / "exports" / "operations-daily" / "2026-07-24"
         assert any(exported.glob("*.xlsx"))
+
+
+def test_daily_report_stock_difference_can_be_confirmed_logged_and_reopened(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    database_path = tmp_path / "erp-stock-audit.db"
+    database_url = f"sqlite:///{database_path.as_posix()}"
+    monkeypatch.setenv("TAKEALOT_DATABASE_URL", database_url)
+    app = create_app(tmp_path)
+    with TestClient(app, client=("127.0.0.1", 50000)) as client:
+        issued = _bootstrap(client)
+        engine = create_engine(database_url)
+        try:
+            with Session(engine) as session, session.begin():
+                session.add(
+                    OfferCurrent(
+                        offer_id="offer-stock",
+                        sku="9900000000099",
+                        title="Stock Audit Product",
+                        captured_at=datetime(2026, 7, 24, 2, tzinfo=UTC),
+                        page_views_30_days=10,
+                        takealot_available_stock=9,
+                    )
+                )
+            for slot, hour in (("morning", 2), ("evening", 10)):
+                capture_daily_report(
+                    engine,
+                    business_date=date(2026, 7, 24),
+                    slot=slot,
+                    captured_at=datetime(2026, 7, 24, hour, tzinfo=UTC),
+                )
+            with Session(engine) as session, session.begin():
+                session.get(
+                    OfferCurrent,
+                    "offer-stock",
+                ).takealot_available_stock = 8
+            for slot, hour in (("morning", 2), ("evening", 10)):
+                capture_daily_report(
+                    engine,
+                    business_date=date(2026, 7, 25),
+                    slot=slot,
+                    captured_at=datetime(2026, 7, 25, hour, tzinfo=UTC),
+                )
+        finally:
+            engine.dispose()
+
+        before = client.get(
+            "/api/erp/daily-report?business_date=2026-07-25"
+        ).json()
+        assert before["pending_actions"][0]["offer_id"] == "offer-stock"
+        handled = client.post(
+            "/api/erp/daily-report/2026-07-25/offer-stock/stock-alert",
+            headers={"X-CSRF-Token": str(issued["csrf_token"])},
+            json={"note": "确认属于平台库存调整"},
+        )
+        assert handled.status_code == 200
+        after = client.get(
+            "/api/erp/daily-report?business_date=2026-07-25"
+        ).json()
+        assert after["pending_actions"] == []
+        assert after["items"][0]["stock_check"]["mismatch"] is True
+        assert after["items"][0]["stock_check"]["dismissed"] is True
+        assert after["handled_actions"][0]["active"] is True
+        assert after["handled_actions"][0]["handled_by"] == "Local Admin"
+
+        reopened = client.post(
+            "/api/erp/daily-report/2026-07-25/offer-stock/stock-alert/reopen",
+            headers={"X-CSRF-Token": str(issued["csrf_token"])},
+            json={"note": "误操作，恢复待办"},
+        )
+        assert reopened.status_code == 200
+        final = client.get(
+            "/api/erp/daily-report?business_date=2026-07-25"
+        ).json()
+        assert final["pending_actions"][0]["offer_id"] == "offer-stock"
+        assert final["handled_actions"][0]["active"] is False
+        assert final["handled_actions"][0]["reversal"]["note"] == (
+            "误操作，恢复待办"
+        )

@@ -43,6 +43,10 @@ NOTE_ISSUE_TYPES = frozenset({"general", "capture_difference", "stock_continuity
 NOTE_AUDIT_ACTIONS = frozenset(
     {"operator_note", "operator_note_updated", "operator_note_deleted"}
 )
+HANDLED_ACTIONS = frozenset({"confirm", "bulk_confirm", "dismiss_stock_alert"})
+HANDLED_REVERSALS = frozenset(
+    {"confirmation_reverted", "stock_alert_reopened"}
+)
 OPEN_STATUSES = frozenset({"needs_review"})
 EXPORTABLE_STATUSES = frozenset({"ready", "confirmed", "missing_capture"})
 
@@ -371,6 +375,7 @@ def daily_report_payload(engine: Engine, business_date: date) -> dict[str, Any]:
             through=business_date,
             current_items=items,
         )
+        handled_actions = _handled_actions(session, through=business_date)
     counts = {
         "products": len(items),
         "with_sales": sum(
@@ -383,13 +388,7 @@ def daily_report_payload(engine: Engine, business_date: date) -> dict[str, Any]:
         "needs_review": sum(item["status"] == "needs_review" for item in items),
         "missing_capture": sum(item["status"] == "missing_capture" for item in items),
         "confirmed": sum(item["status"] == "confirmed" for item in items),
-        "stock_alerts": sum(
-            any(
-                issue["type"] == "stock_continuity"
-                for issue in item["review_issues"]
-            )
-            for item in items
-        ),
+        "stock_alerts": sum(item["stock_check"]["mismatch"] for item in items),
     }
     return {
         "business_date": business_date.isoformat(),
@@ -407,6 +406,7 @@ def daily_report_payload(engine: Engine, business_date: date) -> dict[str, Any]:
         "capture_issues": _capture_issues(items, capture_status, runs),
         "comparison_history": comparison_history,
         "pending_actions": pending_actions,
+        "handled_actions": handled_actions,
         "counts": counts,
         "items": items,
         "prior_reminders": reminders,
@@ -848,10 +848,27 @@ def dismiss_stock_alert(
     note: str,
     user_id: int,
 ) -> None:
-    clean_note = _required_note(note, "取消库存红色标记必须填写原因")
+    clean_note = _required_note(note, "确认库存差异必须填写原因")
     now = _utc_now()
     with Session(engine) as session, session.begin():
         resolution = _resolution_or_error(session, business_date, offer_id)
+        if resolution.stock_alert_dismissed:
+            raise DailyReportConflictError("该库存差异已经确认，无需重复处理")
+        capture_rows = _all_observations(session, business_date).get(
+            offer_id,
+            [],
+        )
+        values = (
+            _final_values(resolution)
+            if _has_confirmation_baseline(resolution)
+            else _coalesced_capture_values(
+                [_value_dict(observation) for _, observation in capture_rows]
+            )
+        )
+        previous_stock = _previous_values(session, business_date).get(offer_id)
+        if not _stock_continuity_mismatch(previous_stock, values):
+            raise DailyReportConflictError("当前库存连续性已经相符，无需确认差异")
+        previous_status = resolution.status
         resolution.stock_alert_dismissed = True
         resolution.stock_alert_note = clean_note
         resolution.stock_alert_dismissed_by = user_id
@@ -871,12 +888,82 @@ def dismiss_stock_alert(
             business_date,
             offer_id,
             "dismiss_stock_alert",
-            None,
+            {
+                "previous_status": previous_status,
+                "previous_stock": previous_stock,
+                "ordered_units": values.get("ordered_units"),
+                "expected_stock": (
+                    previous_stock - int(values.get("ordered_units") or 0)
+                    if previous_stock is not None
+                    else None
+                ),
+                "actual_stock": values.get("platform_stock"),
+                "values": values,
+            },
             clean_note,
             user_id,
             now,
         )
-        _resolve_deadline_if_complete(session, business_date, now)
+        _refresh_deadline_snapshot(session, business_date, now)
+
+
+def reopen_stock_alert(
+    engine: Engine,
+    *,
+    business_date: date,
+    offer_id: str,
+    note: str,
+    user_id: int,
+) -> None:
+    """Undo one stock-difference acknowledgement without deleting its audit."""
+    clean_note = _required_note(note, "撤销库存差异确认必须填写原因")
+    now = _utc_now()
+    with Session(engine) as session, session.begin():
+        resolution = _resolution_or_error(session, business_date, offer_id)
+        if not resolution.stock_alert_dismissed:
+            raise DailyReportConflictError("该商品没有可撤销的库存差异确认")
+        previous_handling = {
+            "note": resolution.stock_alert_note,
+            "handled_by": _user_display_name(
+                session,
+                resolution.stock_alert_dismissed_by,
+            ),
+            "handled_at": (
+                resolution.stock_alert_dismissed_at.isoformat()
+                if resolution.stock_alert_dismissed_at is not None
+                else None
+            ),
+        }
+        resolution.stock_alert_dismissed = False
+        resolution.stock_alert_note = None
+        resolution.stock_alert_dismissed_by = None
+        resolution.stock_alert_dismissed_at = None
+        capture_rows = _all_observations(session, business_date).get(
+            offer_id,
+            [],
+        )
+        latest = _latest_observation_any_slot(session, business_date, offer_id)
+        if latest is not None:
+            resolution.status = _status_after_capture(
+                session,
+                resolution=resolution,
+                slot="manual",
+                incoming=_value_dict(latest),
+                previous_stock=_previous_values(session, business_date).get(offer_id),
+                capture_rows=capture_rows,
+            )
+        resolution.updated_at = now
+        _audit(
+            session,
+            business_date,
+            offer_id,
+            "stock_alert_reopened",
+            {"previous_handling": previous_handling},
+            clean_note,
+            user_id,
+            now,
+        )
+        _refresh_deadline_snapshot(session, business_date, now)
 
 
 def backfill_stock_continuity_reviews(
@@ -1252,7 +1339,6 @@ def export_operations_workbook(
                 previous_stock is not None
                 and stock is not None
                 and previous_stock - int(orders or 0) != stock
-                and not resolution.stock_alert_dismissed
             ):
                 sheet.cell(row_number + 2, column).fill = alert_fill
         sheet.row_dimensions[row_number + 3].height = 36
@@ -2492,6 +2578,223 @@ def _pending_actions(
                 continue
             result.append({"business_date": report_date.isoformat(), **item})
     return result
+
+
+def _handled_actions(
+    session: Session,
+    *,
+    through: date,
+    limit: int = 100,
+) -> list[dict[str, Any]]:
+    """Return append-only todo completions with their current undo state."""
+    audits = list(
+        session.scalars(
+            select(DailyReportAudit)
+            .where(
+                DailyReportAudit.business_date <= through,
+                DailyReportAudit.offer_id.is_not(None),
+                DailyReportAudit.action.in_(
+                    HANDLED_ACTIONS | HANDLED_REVERSALS
+                ),
+            )
+            .order_by(DailyReportAudit.created_at, DailyReportAudit.id)
+        )
+    )
+    if not audits:
+        return []
+    offer_ids = sorted(
+        {str(row.offer_id) for row in audits if row.offer_id is not None}
+    )
+    user_ids = {row.user_id for row in audits if row.user_id is not None}
+    users = {
+        user.id: user.display_name
+        for user in session.scalars(
+            select(ErpUser).where(ErpUser.id.in_(user_ids))
+        )
+    }
+    identities = {
+        row.offer_id: row
+        for row in session.scalars(
+            select(OfferCurrent).where(OfferCurrent.offer_id.in_(offer_ids))
+        )
+    }
+    snapshot_identities: dict[
+        tuple[date, str],
+        DailyReportObservation,
+    ] = {}
+    identity_rows = session.execute(
+        select(DailyReportRun.business_date, DailyReportObservation)
+        .join(
+            DailyReportObservation,
+            DailyReportObservation.run_id == DailyReportRun.run_id,
+        )
+        .where(
+            DailyReportRun.business_date <= through,
+            DailyReportObservation.offer_id.in_(offer_ids),
+        )
+        .order_by(
+            DailyReportRun.captured_at,
+            DailyReportObservation.id,
+        )
+    )
+    for report_date, observation in identity_rows:
+        snapshot_identities[(report_date, observation.offer_id)] = observation
+    resolutions = {
+        (row.business_date, row.offer_id): row
+        for row in session.scalars(
+            select(DailyReportResolution).where(
+                DailyReportResolution.business_date <= through,
+                DailyReportResolution.offer_id.in_(offer_ids),
+            )
+        )
+    }
+    result: list[dict[str, Any]] = []
+    active: dict[tuple[date, str, str], dict[str, Any]] = {}
+    for audit in audits:
+        if audit.offer_id is None:
+            continue
+        offer_id = audit.offer_id
+        action_type = (
+            "stock_difference"
+            if audit.action == "dismiss_stock_alert"
+            else "confirmation"
+            if audit.action in {"confirm", "bulk_confirm"}
+            else None
+        )
+        if action_type is not None:
+            key = (audit.business_date, offer_id, action_type)
+            previous = active.get(key)
+            if previous is not None and previous["active"]:
+                previous["active"] = False
+                previous["reversal"] = {
+                    "kind": "superseded",
+                    "handled_by": (
+                        users.get(audit.user_id, "系统")
+                        if audit.user_id is not None
+                        else "系统"
+                    ),
+                    "handled_at": audit.created_at.isoformat(),
+                    "note": "已被后续处理记录替代",
+                }
+            payload = audit.payload if isinstance(audit.payload, dict) else {}
+            values = payload.get("values")
+            if not isinstance(values, dict):
+                resolution = resolutions.get((audit.business_date, offer_id))
+                values = (
+                    _export_values(session, resolution)
+                    if resolution is not None
+                    else {}
+                )
+            current = {
+                key_name: values.get(key_name)
+                for key_name in _VALUE_KEYS
+            }
+            snapshot_identity = snapshot_identities.get(
+                (audit.business_date, offer_id)
+            )
+            current_identity = identities.get(offer_id)
+            sku = (
+                snapshot_identity.sku
+                if snapshot_identity is not None and snapshot_identity.sku
+                else current_identity.sku
+                if current_identity is not None
+                else None
+            )
+            title = (
+                snapshot_identity.title
+                if snapshot_identity is not None and snapshot_identity.title
+                else current_identity.title
+                if current_identity is not None and current_identity.title
+                else offer_id
+            )
+            entry = {
+                "id": audit.id,
+                "action_type": action_type,
+                "business_date": audit.business_date.isoformat(),
+                "offer_id": offer_id,
+                "sku": sku,
+                "title": title,
+                "handled_by": (
+                    users.get(audit.user_id, "系统")
+                    if audit.user_id is not None
+                    else "系统"
+                ),
+                "handled_at": audit.created_at.isoformat(),
+                "note": audit.note,
+                "active": True,
+                "reversal": None,
+                "current": current,
+                "detail": {
+                    "source": payload.get("source"),
+                    "source_label": (
+                        _confirmation_source_label(str(payload.get("source")))
+                        if action_type == "confirmation"
+                        and payload.get("source") is not None
+                        else None
+                    ),
+                    "previous_stock": payload.get("previous_stock"),
+                    "ordered_units": payload.get(
+                        "ordered_units",
+                        current.get("ordered_units"),
+                    ),
+                    "expected_stock": payload.get("expected_stock"),
+                    "actual_stock": payload.get(
+                        "actual_stock",
+                        current.get("platform_stock"),
+                    ),
+                },
+            }
+            result.append(entry)
+            active[key] = entry
+            continue
+        reversal_type = (
+            "confirmation"
+            if audit.action == "confirmation_reverted"
+            else "stock_difference"
+        )
+        key = (audit.business_date, offer_id, reversal_type)
+        target = active.get(key)
+        if target is not None and target["active"]:
+            target["active"] = False
+            target["reversal"] = {
+                "kind": audit.action,
+                "handled_by": (
+                    users.get(audit.user_id, "系统")
+                    if audit.user_id is not None
+                    else "系统"
+                ),
+                "handled_at": audit.created_at.isoformat(),
+                "note": audit.note,
+            }
+    for key, entry in active.items():
+        report_date, offer_id, action_type = key
+        resolution = resolutions.get((report_date, offer_id))
+        currently_active = bool(
+            resolution is not None
+            and (
+                (
+                    action_type == "confirmation"
+                    and _has_confirmation_baseline(resolution)
+                )
+                or (
+                    action_type == "stock_difference"
+                    and resolution.stock_alert_dismissed
+                )
+            )
+        )
+        if entry["active"] and not currently_active:
+            entry["active"] = False
+            entry["reversal"] = {
+                "kind": "state_changed",
+                "handled_by": "系统",
+                "handled_at": (
+                    resolution.updated_at.isoformat()
+                    if resolution is not None
+                    else entry["handled_at"]
+                ),
+                "note": "后续数据或操作已经替代此处理状态",
+            }
+    return list(reversed(result))[:limit]
 
 
 def _comparison_items_for_date(

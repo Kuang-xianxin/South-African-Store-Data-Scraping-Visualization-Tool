@@ -465,6 +465,21 @@ export function dismissDailyReportStockAlert(
   );
 }
 
+export function reopenDailyReportStockAlert(
+  businessDate: string,
+  offerId: string,
+  note: string,
+): Promise<{ ok: boolean }> {
+  return request(
+    `/api/erp/daily-report/${encodeURIComponent(businessDate)}/${encodeURIComponent(offerId)}/stock-alert/reopen`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ note }),
+    },
+  );
+}
+
 export function saveDailyReportNote(
   businessDate: string,
   offerId: string,

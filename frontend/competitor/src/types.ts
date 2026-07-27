@@ -427,6 +427,34 @@ export interface DailyReportPendingAction extends DailyReportItem {
   business_date: string;
 }
 
+export interface DailyReportHandledAction {
+  id: number;
+  action_type: "confirmation" | "stock_difference";
+  business_date: string;
+  offer_id: string;
+  sku: string | null;
+  title: string;
+  handled_by: string;
+  handled_at: string;
+  note: string | null;
+  active: boolean;
+  reversal: {
+    kind: string;
+    handled_by: string;
+    handled_at: string;
+    note: string | null;
+  } | null;
+  current: DailyReportValues;
+  detail: {
+    source: "morning" | "evening" | "latest" | "manual" | null;
+    source_label: string | null;
+    previous_stock: number | null;
+    ordered_units: number | null;
+    expected_stock: number | null;
+    actual_stock: number | null;
+  };
+}
+
 export interface DailyReportPayload {
   business_date: string;
   runs: Array<{
@@ -489,6 +517,7 @@ export interface DailyReportPayload {
     >;
   }>;
   pending_actions: DailyReportPendingAction[];
+  handled_actions: DailyReportHandledAction[];
   counts: {
     products: number;
     with_sales: number;

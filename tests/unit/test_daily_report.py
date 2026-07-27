@@ -23,6 +23,7 @@ from takealot_ops.erp.daily_report import (
     record_daily_report_failure,
     reminder_payload,
     revert_confirmation,
+    reopen_stock_alert,
     save_manual_candidate,
     save_operator_note,
     update_operator_note,
@@ -1206,6 +1207,10 @@ def test_stock_continuity_mismatch_is_a_cross_date_pending_action(
         note="库存包含非订单调整，人工确认采用晚间值",
         user_id=1,
     )
+    with Session(engine) as session, session.begin():
+        current_offer = session.get(OfferCurrent, "offer-a")
+        assert current_offer is not None
+        session.delete(current_offer)
     resolved = daily_report_payload(engine, REPORT_DATE.replace(day=26))
     assert not any(
         item["business_date"] == next_date.isoformat()
@@ -1218,8 +1223,71 @@ def test_stock_continuity_mismatch_is_a_cross_date_pending_action(
         if row["offer_id"] == "offer-a"
     )
     assert item["status"] == "ready"
+    assert item["stock_check"]["mismatch"] is True
     assert item["stock_check"]["dismissed"] is True
     assert item["stock_check"]["note"] == "库存包含非订单调整，人工确认采用晚间值"
+    handled = resolved["handled_actions"][0]
+    assert handled["action_type"] == "stock_difference"
+    assert handled["business_date"] == next_date.isoformat()
+    assert handled["offer_id"] == "offer-a"
+    assert handled["sku"] == "9900000000001"
+    assert handled["title"] == "Product A"
+    assert handled["handled_by"] == "Operator"
+    assert handled["active"] is True
+    assert handled["detail"] == {
+        "source": None,
+        "source_label": None,
+        "previous_stock": 9,
+        "ordered_units": 0,
+        "expected_stock": 9,
+        "actual_stock": 8,
+    }
+    exported = export_operations_workbook(
+        engine,
+        business_date=next_date,
+        destination=tmp_path / "handled-stock-difference.xlsx",
+    )
+    workbook = load_workbook(exported)
+    sheet = workbook["运营日报"]
+    offer_column = next(
+        cell.column
+        for cell in sheet[1]
+        if cell.value and "9900000000001" in str(cell.value)
+    )
+    date_row = next(
+        cell.row
+        for cell in sheet["B"]
+        if cell.value == next_date.isoformat()
+    )
+    assert sheet.cell(date_row + 2, offer_column).fill.fgColor.rgb == "00FFC7CE"
+
+    reopen_stock_alert(
+        engine,
+        business_date=next_date,
+        offer_id="offer-a",
+        note="误点确认，恢复库存差异待办",
+        user_id=1,
+    )
+    reopened = daily_report_payload(engine, REPORT_DATE.replace(day=26))
+    assert any(
+        row["business_date"] == next_date.isoformat()
+        and row["offer_id"] == "offer-a"
+        for row in reopened["pending_actions"]
+    )
+    reopened_item = next(
+        row
+        for row in daily_report_payload(engine, next_date)["items"]
+        if row["offer_id"] == "offer-a"
+    )
+    assert reopened_item["status"] == "needs_review"
+    assert reopened_item["stock_check"]["mismatch"] is True
+    assert reopened_item["stock_check"]["dismissed"] is False
+    history = reopened["handled_actions"][0]
+    assert history["active"] is False
+    assert history["reversal"]["kind"] == "stock_alert_reopened"
+    assert history["reversal"]["handled_by"] == "Operator"
+    assert history["reversal"]["note"] == "误点确认，恢复库存差异待办"
+    assert reminder_payload(engine, REPORT_DATE.replace(day=26))["count"] == 1
 
 
 def test_continuity_waits_until_previous_day_version_difference_is_confirmed() -> None:

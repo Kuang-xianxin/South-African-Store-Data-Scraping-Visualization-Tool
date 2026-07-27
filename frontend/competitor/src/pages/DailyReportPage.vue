@@ -9,6 +9,7 @@ import {
   fetchDailyReportExport,
   generateDailyReportExport,
   revertDailyReportConfirmation,
+  reopenDailyReportStockAlert,
   saveDailyReportManual,
   saveDailyReportNote,
   updateDailyReportNote,
@@ -16,6 +17,7 @@ import {
 import { formatChinaDateTime } from "../time";
 import type {
   DailyReportExport,
+  DailyReportHandledAction,
   DailyReportItem,
   DailyReportPendingAction,
   DailyReportPayload,
@@ -26,6 +28,9 @@ type MatrixDailyReportItem =
 type EditableDailyReportItem =
   | DailyReportPendingAction
   | (MatrixDailyReportItem & { business_date: string });
+type OperatorActionItem =
+  | EditableDailyReportItem
+  | DailyReportHandledAction;
 type DailyReportNote = DailyReportItem["operator_notes"][number];
 
 const props = defineProps<{ asOf: string; canOperate?: boolean }>();
@@ -52,8 +57,9 @@ const editor = ref<{
     | "note"
     | "edit_note"
     | "dismiss"
+    | "reopen_stock"
     | null;
-  item: EditableDailyReportItem | null;
+  item: OperatorActionItem | null;
   note: DailyReportNote | null;
 }>({ mode: null, item: null, note: null });
 const noteManager = ref<EditableDailyReportItem | null>(null);
@@ -119,7 +125,7 @@ const filteredItems = computed(() => {
     }
     if (filter.value === "sales") return Number(item.current.ordered_units || 0) > 0;
     if (filter.value === "stock") {
-      return item.stock_check.mismatch && !item.stock_check.dismissed;
+      return item.stock_check.mismatch;
     }
     if (filter.value === "missing") return item.missing_capture;
     if (filter.value === "review") {
@@ -135,6 +141,7 @@ const visibleItems = computed(() =>
   filteredItems.value.slice((page.value - 1) * pageSize, page.value * pageSize),
 );
 const actionItems = computed(() => report.value?.pending_actions ?? []);
+const handledActions = computed(() => report.value?.handled_actions ?? []);
 const missingPageViewsCount = computed(
   () =>
     report.value?.items.filter((item) =>
@@ -195,8 +202,15 @@ async function load() {
 }
 
 function openEditor(
-  mode: "manual" | "confirm" | "revert" | "note" | "edit_note" | "dismiss",
-  item: EditableDailyReportItem | null = null,
+  mode:
+    | "manual"
+    | "confirm"
+    | "revert"
+    | "note"
+    | "edit_note"
+    | "dismiss"
+    | "reopen_stock",
+  item: OperatorActionItem | null = null,
   note: DailyReportNote | null = null,
 ) {
   editor.value = { mode, item, note };
@@ -256,7 +270,7 @@ async function submitEditor() {
   }
   const note = String(form.value.note ?? "").trim();
   if (!note) {
-    editorError.value = mode === "revert"
+    editorError.value = mode === "revert" || mode === "reopen_stock"
       ? "请先填写撤销原因，再点击“确认撤销”。"
       : mode === "confirm"
         ? "请先填写合并备注，再点击“确认合并”。"
@@ -270,6 +284,8 @@ async function submitEditor() {
   editorError.value = "";
   editorStatus.value = mode === "revert"
     ? "正在撤销上次确认并重新计算相关待办，请稍候…"
+    : mode === "reopen_stock"
+      ? "正在撤销库存差异确认；如公式仍不平，将重新生成待办…"
     : mode === "confirm"
       ? "正在确认合并并重新计算库存连续性，请稍候…"
       : "正在保存并重新计算相关数据，请稍候…";
@@ -301,6 +317,13 @@ async function submitEditor() {
         note,
       );
       successMessage = "已撤销确认并恢复待核对；原确认和撤销原因均已留痕。";
+    } else if (mode === "reopen_stock" && item) {
+      await reopenDailyReportStockAlert(
+        item.business_date,
+        item.offer_id,
+        note,
+      );
+      successMessage = "已撤销库存差异确认；若公式仍不平，待办已恢复，原处理记录继续保留。";
     } else if (mode === "note" && item) {
       await saveDailyReportNote(
         item.business_date,
@@ -494,6 +517,12 @@ function matrixNoteText(item: MatrixDailyReportItem | undefined) {
   const notes: string[] = [];
   const confirmationNote = item.confirmation_baseline?.confirm_note?.trim();
   if (confirmationNote) notes.push(`（确认：${confirmationNote}）`);
+  const stockHandlingNote = item.stock_check.dismissed
+    ? item.stock_check.note?.trim()
+    : "";
+  if (stockHandlingNote) {
+    notes.push(`（库存差异已确认：${stockHandlingNote}）`);
+  }
   if (item.operator_notes.length) {
     notes.push(
       ...item.operator_notes
@@ -515,7 +544,7 @@ function fieldLabel(key: string) {
 
 function stockContinuityText(item: DailyReportItem) {
   const check = item.stock_check;
-  if (!check.mismatch || check.dismissed) return "";
+  if (!check.mismatch) return "";
   return `库存连续性：${value(check.previous_stock)} − ${value(item.current.ordered_units)} = ${value(check.expected_stock)}，实际 ${value(check.actual_stock)}`;
 }
 
@@ -763,8 +792,7 @@ function parseInput(value: string | number): number | null {
                   :key="item.offer_id"
                   :class="{
                     'stock-value-mismatch':
-                      comparisonItem(day.business_date, item.offer_id)?.stock_check.mismatch &&
-                      !comparisonItem(day.business_date, item.offer_id)?.stock_check.dismissed,
+                      comparisonItem(day.business_date, item.offer_id)?.stock_check.mismatch,
                     'missing-value': comparisonItem(day.business_date, item.offer_id)?.current.platform_stock == null,
                   }"
                   :title="
@@ -1149,6 +1177,88 @@ function parseInput(value: string | number): number | null {
       </div>
     </section>
 
+    <section class="erp-panel handled-history-panel">
+      <div class="section-title">
+        <p>OPERATION AUDIT</p>
+        <h3>待办处理留痕</h3>
+        <span>保留最近100次确认；撤销只改变当前状态，不删除原处理记录</span>
+      </div>
+      <div v-if="handledActions.length" class="handled-action-list">
+        <article
+          v-for="item in handledActions"
+          :key="item.id"
+          :class="{ inactive: !item.active }"
+        >
+          <div class="handled-action-main">
+            <header>
+              <span
+                class="handled-action-type"
+                :class="item.action_type"
+              >
+                {{
+                  item.action_type === "stock_difference"
+                    ? "已确认库存差异"
+                    : "已确认合并"
+                }}
+              </span>
+              <span class="handled-action-state">
+                {{ item.active ? "当前有效" : "已撤销或已被后续操作替代" }}
+              </span>
+            </header>
+            <strong>{{ item.title }}</strong>
+            <div class="handled-action-identity">
+              <code>{{ item.sku || item.offer_id }}</code>
+              <span>{{ item.business_date }}</span>
+            </div>
+            <p v-if="item.action_type === 'stock_difference'">
+              库存公式：
+              {{ value(item.detail.previous_stock) }} −
+              {{ value(item.detail.ordered_units) }} =
+              {{ value(item.detail.expected_stock) }}，实际
+              {{ value(item.detail.actual_stock) }}
+              <em>表格红标继续保留</em>
+            </p>
+            <p v-else>
+              采用 {{ item.detail.source_label || "人工确认值" }}：
+              订单 {{ value(item.current.ordered_units) }} /
+              库存 {{ value(item.current.platform_stock) }}
+            </p>
+            <small>
+              {{ item.handled_by }} · 北京时间
+              {{ formatChinaDateTime(item.handled_at, "—") }} ·
+              {{ item.note || "无处理备注" }}
+            </small>
+            <small v-if="item.reversal" class="handled-reversal">
+              撤销/替代：{{ item.reversal.handled_by }} · 北京时间
+              {{ formatChinaDateTime(item.reversal.handled_at, "—") }} ·
+              {{ item.reversal.note || "未填写原因" }}
+            </small>
+          </div>
+          <div v-if="props.canOperate && item.active" class="handled-action-buttons">
+            <button
+              type="button"
+              class="danger-link"
+              @click="
+                openEditor(
+                  item.action_type === 'stock_difference'
+                    ? 'reopen_stock'
+                    : 'revert',
+                  item,
+                )
+              "
+            >
+              {{
+                item.action_type === "stock_difference"
+                  ? "撤销库存差异确认"
+                  : "撤销确认合并"
+              }}
+            </button>
+          </div>
+        </article>
+      </div>
+      <div v-else class="review-empty">目前还没有人工处理完成的待办记录。</div>
+    </section>
+
     <div
       v-if="noteManager"
       class="daily-modal-backdrop"
@@ -1254,6 +1364,8 @@ function parseInput(value: string | number): number | null {
                 ? "确认最终采用值"
                 : editor.mode === "revert"
                   ? "撤销确认合并"
+                : editor.mode === "reopen_stock"
+                  ? "撤销库存差异确认"
                 : editor.mode === "dismiss"
                   ? "确认库存连续性差异"
                   : editor.mode === "edit_note"
@@ -1267,6 +1379,9 @@ function parseInput(value: string | number): number | null {
         </p>
         <p v-if="editor.mode === 'revert'" class="revert-warning">
           撤销后会恢复为待核对；原确认记录不会删除，相邻日报日的库存连续性会在重新确认后重新计算。
+        </p>
+        <p v-if="editor.mode === 'reopen_stock'" class="revert-warning">
+          撤销后原处理记录不会删除；如果库存公式仍不平，该商品会重新进入人工核对待办，表格红标始终保留。
         </p>
         <div v-if="editor.mode === 'manual'" class="manual-grid">
           <p class="manual-baseline-tip">
@@ -1314,7 +1429,7 @@ function parseInput(value: string | number): number | null {
           {{
             editor.mode === "confirm"
               ? "合并备注（必填）"
-              : editor.mode === "revert"
+              : editor.mode === "revert" || editor.mode === "reopen_stock"
                 ? "撤销原因（必填）"
               : editor.mode === "note"
                 ? "新增备注内容（必填）"
@@ -1343,12 +1458,12 @@ function parseInput(value: string | number): number | null {
           >
             {{
               saving
-                ? editor.mode === "revert"
+                ? editor.mode === "revert" || editor.mode === "reopen_stock"
                   ? "正在撤销…"
                   : editor.mode === "confirm"
                     ? "正在合并…"
                     : "正在保存…"
-                : editor.mode === "revert"
+                : editor.mode === "revert" || editor.mode === "reopen_stock"
                   ? "确认撤销"
                   : editor.mode === "confirm"
                     ? "确认合并"
@@ -1506,6 +1621,25 @@ function parseInput(value: string | number): number | null {
 .note-actions button, .note-manager-actions button { padding: 3px 6px; border: 1px solid #cfd9d2; border-radius: 5px; background: #fff; color: #315245; cursor: pointer; font-size: 9px; }
 .note-actions button.danger-link, .note-manager-actions button.danger-link { border-color: #e3a294; color: #ad442f; }
 .review-empty { margin-top: 14px; padding: 20px; border: 1px dashed #ccd8d0; border-radius: 10px; color: #718077; text-align: center; }
+.handled-history-panel { padding: 18px 20px; }
+.handled-history-panel .section-title > span { color: #7c8981; font-size: 11px; }
+.handled-action-list { display: grid; gap: 9px; margin-top: 14px; }
+.handled-action-list article { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 16px; padding: 12px 14px; border: 1px solid #cddfd4; border-left: 4px solid #438761; border-radius: 10px; background: #f7fbf8; }
+.handled-action-list article.inactive { border-color: #d9dedb; border-left-color: #9ca7a0; background: #f7f8f7; opacity: .82; }
+.handled-action-main { min-width: 0; }
+.handled-action-main header { display: flex; flex-wrap: wrap; align-items: center; gap: 7px; margin-bottom: 7px; }
+.handled-action-type, .handled-action-state { width: fit-content; padding: 3px 7px; border-radius: 999px; font-size: 9px; font-weight: 700; }
+.handled-action-type.confirmation { background: #e3f0e8; color: #2f6b4b; }
+.handled-action-type.stock_difference { background: #ffe1dc; color: #a33e2f; }
+.handled-action-state { background: #edf0ee; color: #65736b; }
+.handled-action-main > strong { display: block; overflow-wrap: anywhere; }
+.handled-action-identity { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 3px; color: #6a786f; font-size: 10px; }
+.handled-action-identity code { color: #1e5d43; font-family: inherit; }
+.handled-action-main p { margin: 8px 0 5px; color: #4d6156; font-size: 11px; }
+.handled-action-main p em { margin-left: 6px; color: #aa3f31; font-size: 9px; font-style: normal; font-weight: 700; }
+.handled-action-main small { display: block; color: #748179; font-size: 9px; line-height: 1.5; }
+.handled-action-main small.handled-reversal { margin-top: 4px; color: #96622a; }
+.handled-action-buttons button { padding: 6px 9px; border: 1px solid #e0a59a; border-radius: 7px; background: #fff; color: #aa4432; cursor: pointer; white-space: nowrap; }
 .row-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; width: auto; min-width: 0; }
 .row-actions button { margin: 3px; padding: 5px 7px; }
 .row-actions button.danger-link { border-color: #e3a294; color: #ad442f; }
@@ -1560,6 +1694,8 @@ function parseInput(value: string | number): number | null {
   .daily-kpis { grid-template-columns: repeat(3, 1fr); }
   .daily-toolbar, .daily-run-times { align-items: flex-start; flex-direction: column; }
   .review-list article { grid-template-columns: 1fr; }
+  .handled-action-list article { grid-template-columns: 1fr; }
+  .handled-action-buttons { display: flex; justify-content: flex-start; }
 }
 @media (max-width: 640px) {
   .daily-kpis { grid-template-columns: repeat(2, 1fr); }

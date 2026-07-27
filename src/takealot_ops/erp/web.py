@@ -61,6 +61,7 @@ from takealot_ops.erp.daily_report import (
     operations_business_date,
     reminder_payload,
     revert_confirmation,
+    reopen_stock_alert,
     save_manual_candidate,
     save_operator_note,
     unresolved_locations,
@@ -627,6 +628,27 @@ def create_app(project_root: Path | None = None) -> FastAPI:
         _write_daily_report(
             root,
             lambda engine: dismiss_stock_alert(
+                engine,
+                business_date=business_date,
+                offer_id=offer_id,
+                note=payload.note,
+                user_id=request.state.erp_user.id,
+            ),
+        )
+        return {"ok": True}
+
+    @app.post(
+        "/api/erp/daily-report/{business_date}/{offer_id}/stock-alert/reopen"
+    )
+    def operations_daily_report_reopen_stock_alert(
+        business_date: date,
+        offer_id: str,
+        payload: DailyReportNoteRequest,
+        request: Request,
+    ) -> dict[str, object]:
+        _write_daily_report(
+            root,
+            lambda engine: reopen_stock_alert(
                 engine,
                 business_date=business_date,
                 offer_id=offer_id,
