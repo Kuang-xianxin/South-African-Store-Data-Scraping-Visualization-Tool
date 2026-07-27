@@ -171,7 +171,7 @@ function openEditor(
 ) {
   editor.value = { mode, item, note };
   const fullItem = item && "manual" in item ? item : null;
-  const current = mode === "manual" && fullItem?.manual
+  const current = mode === "manual" && fullItem?.manual_at && fullItem.manual
     ? fullItem.manual
     : item?.current;
   const pendingItem = item && "review_issues" in item ? item : null;
@@ -1125,9 +1125,21 @@ function parseInput(value: string): number | null {
           撤销后会恢复为待核对；原确认记录不会删除，相邻日报日的库存连续性会在重新确认后重新计算。
         </p>
         <div v-if="editor.mode === 'manual'" class="manual-grid">
-          <label>近30天浏览量<input v-model="form.page_views_30_days" type="number" min="0" /></label>
-          <label>当天订单数<input v-model="form.ordered_units" type="number" min="0" /></label>
-          <label>平台仓库存<input v-model="form.platform_stock" type="number" min="0" /></label>
+          <p class="manual-baseline-tip">
+            输入框已带入当前数据；如已有人工候选，则带入上次修改值。下方基准值始终保留用于对照。
+          </p>
+          <label>
+            <span>近30天浏览量<small>当前基准：{{ value(editor.item?.current.page_views_30_days) }}</small></span>
+            <input v-model="form.page_views_30_days" type="number" min="0" />
+          </label>
+          <label>
+            <span>当天订单数<small>当前基准：{{ value(editor.item?.current.ordered_units) }}</small></span>
+            <input v-model="form.ordered_units" type="number" min="0" />
+          </label>
+          <label>
+            <span>平台仓库存<small>当前基准：{{ value(editor.item?.current.platform_stock) }}</small></span>
+            <input v-model="form.platform_stock" type="number" min="0" />
+          </label>
           <label>
             修改原因
             <select v-model="form.reason">
@@ -1368,6 +1380,9 @@ function parseInput(value: string): number | null {
 .capture-attempt-log span.failed { color: #9b4039; }
 .daily-run-state em { display: block; color: #9a6420; font-size: 10px; font-style: normal; font-weight: 700; }
 .manual-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 0 12px; }
+.manual-baseline-tip { grid-column: 1 / -1; margin: 10px 0 0; padding: 8px 10px; border-radius: 7px; background: #edf5f0; color: #506a5c; font-size: 10px; line-height: 1.5; }
+.manual-grid label > span { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+.manual-grid label small { color: #77867e; font-size: 9px; font-weight: 400; }
 .modal-actions { display: flex; justify-content: flex-end; gap: 9px; margin-top: 18px; }
 .modal-actions button { padding: 9px 15px; border: 1px solid #d1dad4; border-radius: 8px; background: white; color: #315245; cursor: pointer; }
 .modal-actions button.action-button { border-color: var(--green); background: var(--green); color: white; }
