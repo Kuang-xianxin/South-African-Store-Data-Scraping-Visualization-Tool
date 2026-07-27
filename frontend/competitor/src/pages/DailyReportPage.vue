@@ -34,6 +34,7 @@ const exportState = ref<DailyReportExport | null>(null);
 const loading = ref(false);
 const saving = ref(false);
 const message = ref("");
+const editorError = ref("");
 const search = ref("");
 const filter = ref<"review" | "all" | "sales" | "stock" | "missing">("all");
 const page = ref(1);
@@ -170,6 +171,7 @@ function openEditor(
   note: DailyReportNote | null = null,
 ) {
   editor.value = { mode, item, note };
+  editorError.value = "";
   const fullItem = item && "manual" in item ? item : null;
   const current = mode === "manual" && fullItem?.manual_at && fullItem.manual
     ? fullItem.manual
@@ -205,6 +207,7 @@ function openEditor(
 
 function closeEditor() {
   editor.value = { mode: null, item: null, note: null };
+  editorError.value = "";
 }
 
 async function submitEditor() {
@@ -213,6 +216,7 @@ async function submitEditor() {
   const item = editor.value.item;
   saving.value = true;
   message.value = "";
+  editorError.value = "";
   try {
     if (mode === "manual" && item) {
       await saveDailyReportManual(item.business_date, item.offer_id, {
@@ -268,7 +272,9 @@ async function submitEditor() {
     closeEditor();
     await load();
   } catch (error) {
-    message.value = error instanceof Error ? error.message : "保存失败";
+    const detail = error instanceof Error ? error.message : "保存失败";
+    editorError.value = detail;
+    message.value = detail;
   } finally {
     saving.value = false;
   }
@@ -465,8 +471,9 @@ function toInput(value: number | null | undefined) {
   return value === null || value === undefined ? "" : String(value);
 }
 
-function parseInput(value: string): number | null {
-  return value.trim() === "" ? null : Number(value);
+function parseInput(value: string | number): number | null {
+  const normalized = String(value).trim();
+  return normalized === "" ? null : Number(normalized);
 }
 </script>
 
@@ -1180,9 +1187,14 @@ function parseInput(value: string): number | null {
           }}
           <textarea v-model="form.note" required maxlength="2000"></textarea>
         </label>
+        <p v-if="editorError" class="modal-error">{{ editorError }}</p>
         <div class="modal-actions">
           <button type="button" @click="closeEditor">取消</button>
-          <button class="action-button" :disabled="saving || !form.note.trim()">
+          <button
+            type="submit"
+            class="action-button"
+            :disabled="saving || !form.note.trim()"
+          >
             {{
               saving
                 ? "正在保存…"
@@ -1358,6 +1370,7 @@ function parseInput(value: string): number | null {
 .daily-modal label { display: grid; gap: 6px; margin-top: 13px; color: #4e5f56; font-size: 11px; }
 .daily-modal input, .daily-modal select, .daily-modal textarea { width: 100%; padding: 9px 10px; border: 1px solid #d1dad4; border-radius: 8px; background: white; }
 .daily-modal textarea { min-height: 100px; font-family: inherit; line-height: 1.5; }
+.modal-error { margin: 12px 0 0; padding: 8px 10px; border: 1px solid #e7aaa0; border-radius: 7px; background: #fff1ee; color: #a43c2d; font-size: 10px; line-height: 1.5; }
 .note-manager-modal { width: min(680px, 100%); }
 .note-manager-list { display: grid; gap: 8px; margin-top: 15px; }
 .note-manager-list article { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; padding: 10px 11px; border: 1px solid #dce3de; border-radius: 8px; background: white; }
