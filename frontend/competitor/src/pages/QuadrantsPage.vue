@@ -22,6 +22,7 @@ const labels: Record<QuadrantKey, string> = {
   optimize: "待优化",
   unclassified: "未分类",
 };
+const rankTicks = [0, 25, 50, 75, 100];
 const filtered = computed(() =>
   selectedQuadrant.value === "all"
     ? data.value?.items ?? []
@@ -188,8 +189,11 @@ onBeforeUnmount(() => {
           </span>
         </div>
         <div class="matrix-shell">
-          <span class="matrix-axis-title y">
-            纵轴 · 近7日下单件数相对排名（低 → 高）
+          <span
+            class="matrix-axis-title y"
+            aria-label="纵轴：近7日下单件数相对排名，数值由下向上增大"
+          >
+            近7日下单件数相对排名
           </span>
           <div class="matrix">
           <div class="matrix-zone top-left">潜力商品</div>
@@ -197,16 +201,36 @@ onBeforeUnmount(() => {
           <div class="matrix-zone bottom-left">待优化</div>
           <div class="matrix-zone bottom-right">转化问题</div>
           <span
-            class="axis-y"
+            class="matrix-boundary-label vertical"
             :style="{ left: boundaryPosition(data.boundaries.page_views_rank) }"
           >
-            下单分界
+            浏览量分界 {{ number(data.boundaries.page_views) }}
           </span>
           <span
-            class="axis-x"
+            class="matrix-boundary-label horizontal"
             :style="{ bottom: boundaryPosition(data.boundaries.ordered_units_rank) }"
           >
-            流量分界
+            下单分界 {{ number(data.boundaries.ordered_units) }}
+          </span>
+          <span
+            v-for="tick in rankTicks"
+            :key="`x-${tick}`"
+            class="matrix-rank-tick x"
+            :class="{ start: tick === 0, end: tick === 100 }"
+            :style="{ left: `${tick}%` }"
+            aria-hidden="true"
+          >
+            {{ tick }}
+          </span>
+          <span
+            v-for="tick in rankTicks"
+            :key="`y-${tick}`"
+            class="matrix-rank-tick y"
+            :class="{ start: tick === 0, end: tick === 100 }"
+            :style="{ bottom: `${tick}%` }"
+            aria-hidden="true"
+          >
+            {{ tick }}
           </span>
           <span
             class="matrix-divider vertical"
@@ -304,7 +328,7 @@ onBeforeUnmount(() => {
           </aside>
           </div>
           <span class="matrix-axis-title x">
-            横轴 · 近30天浏览量相对排名（低 → 高）
+            横轴 · 近30天浏览量相对排名
           </span>
         </div>
         <p class="method-note">

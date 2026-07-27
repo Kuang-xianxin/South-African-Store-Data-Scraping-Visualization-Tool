@@ -130,6 +130,31 @@ def test_daily_run_refreshes_seven_sast_days(tmp_path: Path, monkeypatch) -> Non
     assert result.report_paths is not None
 
 
+def test_daily_run_can_export_the_previous_completed_business_day(
+    tmp_path: Path, monkeypatch
+) -> None:
+    client = RecordingClient()
+    published: list[date] = []
+    monkeypatch.setattr("takealot_ops.scheduler.TakealotClient", lambda _: client)
+    monkeypatch.setattr(
+        "takealot_ops.scheduler.generate_daily_reports",
+        lambda _dataset, _root, report_date: (
+            published.append(report_date) or _fake_reports(tmp_path, report_date)
+        ),
+    )
+
+    result = run_daily(
+        _settings(tmp_path),
+        FixedClock(datetime(2026, 7, 25, 2, 5, tzinfo=UTC)),
+        report_date=date(2026, 7, 24),
+    )
+
+    assert result.end_date == date(2026, 7, 25)
+    assert published == [date(2026, 7, 24)]
+    assert result.report_paths is not None
+    assert result.report_paths.html.parent.name == "2026-07-24"
+
+
 def test_daily_run_does_not_publish_reports_after_incomplete_pagination(
     tmp_path: Path, monkeypatch
 ) -> None:

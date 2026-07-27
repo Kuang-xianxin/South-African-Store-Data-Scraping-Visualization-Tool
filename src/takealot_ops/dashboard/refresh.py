@@ -35,7 +35,9 @@ def run_dashboard_refresh(
         str(python),
         "-m",
         "takealot_ops.cli",
-        "daily-run",
+        "daily-report-run",
+        "--slot",
+        "manual",
     )
     try:
         completed = runner(
@@ -60,4 +62,7 @@ def run_dashboard_refresh(
         return DashboardRefreshResult(
             False, "刷新失败，请检查接口密钥、网络和本地日志后重试。"
         )
-    return DashboardRefreshResult(True, "数据刷新完成，页面已读取最新指标。")
+    return DashboardRefreshResult(
+        True,
+        "数据刷新完成，本次手动数据已纳入当前10:00核对周期。",
+    )

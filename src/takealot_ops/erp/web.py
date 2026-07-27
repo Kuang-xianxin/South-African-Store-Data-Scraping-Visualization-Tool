@@ -7,7 +7,7 @@ import time
 from collections import defaultdict
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
 from threading import Lock
 from typing import Annotated, Any
@@ -25,11 +25,19 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
-from takealot_ops.competitors.api import extract_plid
+from takealot_ops.competitors.api import CompetitorNetworkError, extract_plid
+from takealot_ops.competitors.batch import (
+    CollectionBatchBusyError,
+    CollectionBatchRegistry,
+    CollectionRequestCoordinator,
+    configure_collection_logger,
+)
 from takealot_ops.competitors.service import (
+    CompetitorCollectionResult,
     CompetitorCollector,
     CompetitorDataset,
     load_competitor_dataset,
+    load_competitor_link_health,
 )
 from takealot_ops.dashboard.refresh import run_dashboard_refresh
 from takealot_ops.erp.auth import (
@@ -40,18 +48,22 @@ from takealot_ops.erp.auth import (
     AuthManager,
     IssuedSession,
 )
+from takealot_ops.erp.coordination import RefreshBusyError, RefreshCoordinator
 from takealot_ops.erp.daily_report import (
     DailyReportConflictError,
     DailyReportInputError,
     confirm_entry,
     confirm_ready_entries,
     daily_report_payload,
+    delete_operator_note,
     dismiss_stock_alert,
     export_operations_workbook,
+    operations_business_date,
     reminder_payload,
     save_manual_candidate,
     save_operator_note,
     unresolved_locations,
+    update_operator_note,
 )
 from takealot_ops.erp.service import (
     build_product_detail_payload,
@@ -82,12 +94,64 @@ class CollectCompetitorRequest(BaseModel):
     url: str = Field(min_length=1)
     with_stock_probe: bool = True
     visible_browser: bool = False
+    batch_id: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=80,
+        pattern=r"^[A-Za-z0-9_-]+$",
+    )
+    request_id: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=80,
+        pattern=r"^[A-Za-z0-9_-]+$",
+    )
+    client_id: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=80,
+        pattern=r"^[A-Za-z0-9_-]+$",
+    )
+    item_index: int | None = Field(default=None, ge=0)
+    total_items: int | None = Field(default=None, ge=1)
+
+
+class CompetitorBatchEventRequest(BaseModel):
+    """One operator-page batch lifecycle event written to the server log."""
+
+    batch_id: str = Field(
+        min_length=1,
+        max_length=80,
+        pattern=r"^[A-Za-z0-9_-]+$",
+    )
+    client_id: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=80,
+        pattern=r"^[A-Za-z0-9_-]+$",
+    )
+    event: str = Field(
+        min_length=1,
+        max_length=40,
+        pattern=r"^[a-z_]+$",
+    )
+    completed: int = Field(ge=0)
+    total: int = Field(ge=0)
+    pending: int = Field(ge=0)
+    succeeded: int = Field(default=0, ge=0)
+    failed: int = Field(default=0, ge=0)
+    terminal: int = Field(default=0, ge=0)
+    reason: str = Field(default="", max_length=500)
 
 
 class ExportRequest(BaseModel):
     """One explicit report export request."""
 
     as_of: date
+
+
+def _default_operations_business_date() -> date:
+    return operations_business_date(datetime.now(UTC))
 
 
 class DailyReportManualRequest(BaseModel):
@@ -105,6 +169,7 @@ class DailyReportConfirmRequest(BaseModel):
 
 class DailyReportNoteRequest(BaseModel):
     note: str = Field(min_length=1, max_length=2000)
+    issue_type: str = "general"
 
 
 class LoginRequest(BaseModel):
@@ -156,10 +221,15 @@ def create_app(project_root: Path | None = None) -> FastAPI:
     ).resolve()
     auth = AuthManager(root)
     limiter = _LoginLimiter()
+    competitor_logger = configure_collection_logger(root)
+    collection_coordinator = CollectionRequestCoordinator[CompetitorCollectionResult]()
+    collection_registry = CollectionBatchRegistry()
+    refresh_coordinator = RefreshCoordinator(root)
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         yield
+        refresh_coordinator.close()
         auth.close()
 
     app = FastAPI(
@@ -392,14 +462,46 @@ def create_app(project_root: Path | None = None) -> FastAPI:
         settings = DashboardSettings.from_env(root)
         return build_risk_payload(load_erp_dataset(settings, as_of), as_of)
 
+    @app.get("/api/erp/refresh-status")
+    def refresh_status(request: Request) -> dict[str, object]:
+        return refresh_coordinator.status(role=request.state.erp_user.role)
+
     @app.post("/api/erp/refresh")
-    def refresh() -> dict[str, object]:
-        result = run_dashboard_refresh(root)
-        return {"succeeded": result.succeeded, "message": result.message}
+    def refresh(request: Request) -> dict[str, object]:
+        user = request.state.erp_user
+        try:
+            refresh_coordinator.begin(
+                username=user.username,
+                display_name=user.display_name,
+                role=user.role,
+            )
+        except RefreshBusyError as exc:
+            raise HTTPException(status_code=429, detail=str(exc)) from exc
+        try:
+            result = run_dashboard_refresh(root)
+        except BaseException:
+            refresh_coordinator.finish(
+                username=user.username,
+                display_name=user.display_name,
+                succeeded=False,
+                role=user.role,
+            )
+            raise
+        status = refresh_coordinator.finish(
+            username=user.username,
+            display_name=user.display_name,
+            succeeded=result.succeeded,
+            role=user.role,
+        )
+        return {
+            "succeeded": result.succeeded,
+            "message": result.message,
+            "refresh_status": status,
+        }
 
     @app.get("/api/erp/daily-report")
     def operations_daily_report(
-        business_date: date = Query(default_factory=date.today),
+        business_date: date = Query(default_factory=_default_operations_business_date),
     ) -> dict[str, Any]:
         settings = DashboardSettings.from_env(root)
         engine = create_read_only_erp_engine(settings.database_url)
@@ -523,13 +625,55 @@ def create_app(project_root: Path | None = None) -> FastAPI:
                 offer_id=offer_id,
                 note=payload.note,
                 user_id=request.state.erp_user.id,
+                issue_type=payload.issue_type,
+            ),
+        )
+        return {"ok": True}
+
+    @app.patch("/api/erp/daily-report/{business_date}/{offer_id}/note/{note_id}")
+    def operations_daily_report_note_update(
+        business_date: date,
+        offer_id: str,
+        note_id: int,
+        payload: DailyReportNoteRequest,
+        request: Request,
+    ) -> dict[str, object]:
+        _write_daily_report(
+            root,
+            lambda engine: update_operator_note(
+                engine,
+                business_date=business_date,
+                offer_id=offer_id,
+                note_id=note_id,
+                note=payload.note,
+                user_id=request.state.erp_user.id,
+                issue_type=payload.issue_type,
+            ),
+        )
+        return {"ok": True}
+
+    @app.delete("/api/erp/daily-report/{business_date}/{offer_id}/note/{note_id}")
+    def operations_daily_report_note_delete(
+        business_date: date,
+        offer_id: str,
+        note_id: int,
+        request: Request,
+    ) -> dict[str, object]:
+        _write_daily_report(
+            root,
+            lambda engine: delete_operator_note(
+                engine,
+                business_date=business_date,
+                offer_id=offer_id,
+                note_id=note_id,
+                user_id=request.state.erp_user.id,
             ),
         )
         return {"ok": True}
 
     @app.get("/api/erp/daily-report/export")
     def operations_daily_report_export_status(
-        through: date = Query(default_factory=date.today),
+        through: date = Query(default_factory=_default_operations_business_date),
     ) -> dict[str, Any]:
         settings = DashboardSettings.from_env(root)
         engine = create_read_only_erp_engine(settings.database_url)
@@ -673,6 +817,19 @@ def create_app(project_root: Path | None = None) -> FastAPI:
         dataset = _load_competitor_dataset(root)
         return {"items": frame_records(dataset.current)}
 
+    @app.get("/api/competitors/link-health")
+    def competitor_link_health() -> dict[str, list[dict[str, Any]]]:
+        settings = DashboardSettings.from_env(root)
+        engine = create_read_only_erp_engine(settings.database_url)
+        try:
+            return {"items": load_competitor_link_health(engine)}
+        finally:
+            engine.dispose()
+
+    @app.get("/api/competitors/batch-status")
+    def competitor_batch_status() -> dict[str, object]:
+        return collection_registry.status()
+
     @app.get("/api/competitors/{plid}")
     def competitor_detail(plid: str) -> dict[str, list[dict[str, Any]]]:
         dataset = _load_competitor_dataset(root)
@@ -694,30 +851,175 @@ def create_app(project_root: Path | None = None) -> FastAPI:
         }
 
     @app.post("/api/competitors/collect")
-    async def collect_competitor(request: CollectCompetitorRequest) -> dict[str, object]:
+    async def collect_competitor(
+        payload: CollectCompetitorRequest,
+        request: Request,
+    ) -> dict[str, object]:
         try:
-            extract_plid(request.url)
+            plid = extract_plid(payload.url)
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
-        settings = DashboardSettings.from_env(root)
-        engine = create_engine_for_settings(settings)
+        user = request.state.erp_user
         try:
-            create_schema(engine)
-            async with CompetitorCollector(engine=engine, project_root=root) as collector:
-                result = await collector.collect(
-                    request.url,
-                    with_stock_probe=request.with_stock_probe,
-                    visible_browser=request.visible_browser,
+            collection_registry.start_link(
+                batch_id=payload.batch_id,
+                client_id=payload.client_id,
+                request_id=payload.request_id,
+                username=user.username,
+                display_name=user.display_name,
+                item_index=payload.item_index,
+                total_items=payload.total_items,
+                plid=plid,
+            )
+        except CollectionBatchBusyError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+        async def execute_collection() -> CompetitorCollectionResult:
+            registry_reason = ""
+            competitor_logger.info(
+                "link_start batch=%s request=%s item=%s/%s plid=%s",
+                payload.batch_id or "-",
+                payload.request_id or "-",
+                _display_item_number(payload.item_index),
+                payload.total_items or "-",
+                plid,
+            )
+            settings = DashboardSettings.from_env(root)
+            engine = create_engine_for_settings(settings)
+            try:
+                create_schema(engine)
+                try:
+                    async with CompetitorCollector(
+                        engine=engine,
+                        project_root=root,
+                    ) as collector:
+                        result = await collector.collect(
+                            payload.url,
+                            with_stock_probe=payload.with_stock_probe,
+                            visible_browser=payload.visible_browser,
+                        )
+                except CompetitorNetworkError as exc:
+                    registry_reason = _single_line(str(exc))
+                    competitor_logger.warning(
+                        "link_failure batch=%s request=%s item=%s/%s "
+                        "plid=%s kind=network reason=%s",
+                        payload.batch_id or "-",
+                        payload.request_id or "-",
+                        _display_item_number(payload.item_index),
+                        payload.total_items or "-",
+                        plid,
+                        _single_line(str(exc)),
+                    )
+                    raise
+                registry_reason = _single_line(result.message)
+            except BaseException as exc:
+                registry_reason = registry_reason or _single_line(str(exc))
+                if not isinstance(exc, CompetitorNetworkError):
+                    competitor_logger.error(
+                        "link_exception batch=%s request=%s item=%s/%s "
+                        "plid=%s type=%s reason=%s",
+                        payload.batch_id or "-",
+                        payload.request_id or "-",
+                        _display_item_number(payload.item_index),
+                        payload.total_items or "-",
+                        plid,
+                        type(exc).__name__,
+                        _single_line(str(exc)),
+                    )
+                raise
+            finally:
+                engine.dispose()
+                collection_registry.finish_link(
+                    batch_id=payload.batch_id,
+                    request_id=payload.request_id,
+                    reason=registry_reason,
                 )
-        finally:
-            engine.dispose()
+            competitor_logger.info(
+                "link_result batch=%s request=%s item=%s/%s plid=%s "
+                "succeeded=%s kind=%s retryable=%s reason=%s",
+                payload.batch_id or "-",
+                payload.request_id or "-",
+                _display_item_number(payload.item_index),
+                payload.total_items or "-",
+                result.plid,
+                result.succeeded,
+                result.failure_kind or "-",
+                result.retryable,
+                _single_line(result.message),
+            )
+            return result
+
+        try:
+            result, reused = await collection_coordinator.run(
+                payload.request_id,
+                execute_collection,
+            )
+        except CompetitorNetworkError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        if reused:
+            competitor_logger.info(
+                "link_reused batch=%s request=%s item=%s/%s plid=%s",
+                payload.batch_id or "-",
+                payload.request_id or "-",
+                _display_item_number(payload.item_index),
+                payload.total_items or "-",
+                result.plid,
+            )
+            collection_registry.finish_link(
+                batch_id=payload.batch_id,
+                request_id=payload.request_id,
+                reason=_single_line(result.message),
+            )
         if not result.succeeded:
-            raise HTTPException(status_code=422, detail=result.message)
+            status_code = _collection_failure_status(
+                result.failure_kind,
+                retryable=result.retryable,
+            )
+            raise HTTPException(status_code=status_code, detail=result.message)
         return {
             "plid": result.plid,
             "title": result.title,
             "message": result.message,
         }
+
+    @app.post("/api/competitors/batch-events")
+    def competitor_batch_event(
+        payload: CompetitorBatchEventRequest,
+        request: Request,
+    ) -> dict[str, object]:
+        user = request.state.erp_user
+        try:
+            status = collection_registry.event(
+                batch_id=payload.batch_id,
+                client_id=payload.client_id,
+                event=payload.event,
+                username=user.username,
+                display_name=user.display_name,
+                completed=payload.completed,
+                total=payload.total,
+                pending=payload.pending,
+                succeeded=payload.succeeded,
+                failed=payload.failed,
+                terminal=payload.terminal,
+                reason=payload.reason,
+            )
+        except CollectionBatchBusyError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        competitor_logger.info(
+            "batch_event batch=%s event=%s completed=%s total=%s pending=%s "
+            "succeeded=%s failed=%s terminal=%s user=%s reason=%s",
+            payload.batch_id,
+            payload.event,
+            payload.completed,
+            payload.total,
+            payload.pending,
+            payload.succeeded,
+            payload.failed,
+            payload.terminal,
+            user.username,
+            _single_line(payload.reason),
+        )
+        return {"ok": True, "status": status}
 
     frontend_dist = root / "frontend" / "competitor" / "dist"
     if frontend_dist.is_dir():
@@ -730,6 +1032,30 @@ def create_app(project_root: Path | None = None) -> FastAPI:
                 "<p>请在 frontend/competitor 目录执行 npm run build。</p>"
             )
     return app
+
+
+def _collection_failure_status(
+    failure_kind: str | None,
+    *,
+    retryable: bool,
+) -> int:
+    if failure_kind == "network":
+        return 503
+    if failure_kind == "validation-uncertain":
+        return 409
+    if failure_kind == "suspected-invalid":
+        return 404
+    if failure_kind == "confirmed-invalid":
+        return 410
+    return 503 if retryable else 422
+
+
+def _display_item_number(item_index: int | None) -> int | str:
+    return item_index + 1 if item_index is not None else "-"
+
+
+def _single_line(value: str) -> str:
+    return " ".join(value.split())[:500]
 
 
 def _load_competitor_dataset(project_root: Path) -> CompetitorDataset:

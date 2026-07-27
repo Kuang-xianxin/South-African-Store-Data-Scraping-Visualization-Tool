@@ -1,0 +1,327 @@
+"""In-process idempotency and durable file logging for browser collection batches."""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+from collections import OrderedDict
+from collections.abc import Awaitable, Callable
+from dataclasses import asdict, dataclass
+from datetime import UTC, datetime, timedelta
+from logging.handlers import RotatingFileHandler
+from pathlib import Path
+from threading import RLock
+from typing import Generic, TypeVar
+
+
+T = TypeVar("T")
+COLLECTION_STALE_AFTER = timedelta(minutes=2)
+
+
+class CollectionBatchBusyError(RuntimeError):
+    """Raised when another browser already owns the global collection slot."""
+
+
+@dataclass
+class CollectionBatchStatus:
+    """Process-wide batch state projected to every logged-in ERP browser."""
+
+    active: bool = False
+    batch_id: str | None = None
+    owner_username: str | None = None
+    owner_display_name: str | None = None
+    event: str = "idle"
+    completed: int = 0
+    total: int = 0
+    pending: int = 0
+    succeeded: int = 0
+    failed: int = 0
+    terminal: int = 0
+    current_index: int | None = None
+    current_plid: str | None = None
+    current_request_id: str | None = None
+    reason: str = ""
+    started_at: str | None = None
+    updated_at: str | None = None
+
+
+class CollectionBatchRegistry:
+    """Synchronize one active competitor batch across all ERP users."""
+
+    def __init__(self) -> None:
+        self._lock = RLock()
+        self._state = CollectionBatchStatus()
+        self._release_after_request = False
+        self._owner_client_id: str | None = None
+
+    def status(self) -> dict[str, object]:
+        with self._lock:
+            self._expire_if_abandoned()
+            return asdict(self._state)
+
+    def event(
+        self,
+        *,
+        batch_id: str,
+        client_id: str | None,
+        event: str,
+        username: str,
+        display_name: str,
+        completed: int,
+        total: int,
+        pending: int,
+        succeeded: int,
+        failed: int,
+        terminal: int,
+        reason: str,
+    ) -> dict[str, object]:
+        with self._lock:
+            self._expire_if_abandoned()
+            active_event = event in {
+                "start",
+                "resume",
+                "auto_resume",
+                "progress",
+                "heartbeat",
+            }
+            if (
+                active_event
+                and self._state.active
+                and self._state.batch_id != batch_id
+            ):
+                raise CollectionBatchBusyError(self._busy_message())
+            if (
+                self._state.active
+                and self._state.batch_id == batch_id
+                and (
+                    self._state.owner_username != username
+                    or (
+                        self._owner_client_id is not None
+                        and client_id != self._owner_client_id
+                    )
+                )
+            ):
+                raise CollectionBatchBusyError(self._busy_message())
+            if (
+                active_event
+                and self._state.batch_id == batch_id
+                and self._release_after_request
+            ):
+                raise CollectionBatchBusyError(
+                    "当前商品正在完成停止清理，请等待浏览器探测退出"
+                )
+
+            now = _utc_iso()
+            if active_event:
+                if not self._state.active:
+                    self._release_after_request = False
+                    self._owner_client_id = client_id
+                    self._state = CollectionBatchStatus(
+                        active=True,
+                        batch_id=batch_id,
+                        owner_username=username,
+                        owner_display_name=display_name,
+                        event=event,
+                        started_at=now,
+                    )
+                self._state.active = True
+                self._state.event = event
+            elif self._state.batch_id == batch_id:
+                self._state.event = event
+                if self._state.current_request_id is not None:
+                    self._release_after_request = True
+                else:
+                    self._state.active = False
+                    self._state.current_index = None
+                    self._state.current_plid = None
+                    self._state.current_request_id = None
+
+            if self._state.batch_id == batch_id:
+                self._state.completed = completed
+                self._state.total = total
+                self._state.pending = pending
+                self._state.succeeded = succeeded
+                self._state.failed = failed
+                self._state.terminal = terminal
+                self._state.reason = reason
+                self._state.updated_at = now
+            return asdict(self._state)
+
+    def start_link(
+        self,
+        *,
+        batch_id: str | None,
+        client_id: str | None,
+        request_id: str | None,
+        username: str,
+        display_name: str,
+        item_index: int | None,
+        total_items: int | None,
+        plid: str,
+    ) -> None:
+        if not batch_id:
+            return
+        with self._lock:
+            self._expire_if_abandoned()
+            if self._state.active and self._state.batch_id != batch_id:
+                raise CollectionBatchBusyError(self._busy_message())
+            if (
+                self._state.active
+                and (
+                    self._state.owner_username != username
+                    or (
+                        self._owner_client_id is not None
+                        and client_id != self._owner_client_id
+                    )
+                )
+            ):
+                raise CollectionBatchBusyError(self._busy_message())
+            now = _utc_iso()
+            if not self._state.active:
+                self._release_after_request = False
+                self._owner_client_id = client_id
+                self._state = CollectionBatchStatus(
+                    active=True,
+                    batch_id=batch_id,
+                    owner_username=username,
+                    owner_display_name=display_name,
+                    event="collecting",
+                    started_at=now,
+                )
+            self._state.event = "collecting"
+            self._state.current_index = item_index
+            self._state.current_plid = plid
+            self._state.current_request_id = request_id
+            if total_items is not None:
+                self._state.total = total_items
+            self._state.updated_at = now
+
+    def finish_link(
+        self,
+        *,
+        batch_id: str | None,
+        request_id: str | None,
+        reason: str,
+    ) -> None:
+        if not batch_id:
+            return
+        with self._lock:
+            if (
+                self._state.batch_id == batch_id
+                and self._state.current_request_id == request_id
+            ):
+                self._state.current_index = None
+                self._state.current_plid = None
+                self._state.current_request_id = None
+                self._state.reason = reason
+                self._state.updated_at = _utc_iso()
+                if self._release_after_request:
+                    self._state.active = False
+                    self._release_after_request = False
+
+    def _expire_if_abandoned(self) -> None:
+        if (
+            not self._state.active
+            or self._state.current_request_id is not None
+            or self._state.updated_at is None
+        ):
+            return
+        updated = datetime.fromisoformat(self._state.updated_at)
+        if datetime.now(UTC) - updated > COLLECTION_STALE_AFTER:
+            self._state.active = False
+            self._state.event = "stale"
+            self._state.reason = "采集页面长时间未发送进度，已自动释放全局采集占用"
+            self._state.updated_at = _utc_iso()
+
+    def _busy_message(self) -> str:
+        owner = self._state.owner_display_name or self._state.owner_username or "其他用户"
+        progress = (
+            f"{self._state.completed}/{self._state.total}"
+            if self._state.total
+            else "准备中"
+        )
+        return f"{owner} 正在采集竞品（{progress}），请等待当前批次结束或暂停"
+
+
+def _utc_iso() -> str:
+    return datetime.now(UTC).isoformat()
+
+
+class CollectionRequestCoordinator(Generic[T]):
+    """Let a reloaded page rejoin the same in-flight link request safely."""
+
+    def __init__(self, *, max_completed: int = 2_000) -> None:
+        self._max_completed = max_completed
+        self._lock = asyncio.Lock()
+        self._inflight: dict[str, asyncio.Task[T]] = {}
+        self._completed: OrderedDict[str, T] = OrderedDict()
+
+    async def run(
+        self,
+        request_id: str | None,
+        operation: Callable[[], Awaitable[T]],
+    ) -> tuple[T, bool]:
+        """Run once per request id and report whether existing work was reused."""
+        if not request_id:
+            return await operation(), False
+
+        async with self._lock:
+            cached = self._completed.get(request_id)
+            if cached is not None:
+                self._completed.move_to_end(request_id)
+                return cached, True
+            task = self._inflight.get(request_id)
+            reused = task is not None
+            if task is None:
+                task = asyncio.create_task(self._execute(request_id, operation))
+                self._inflight[request_id] = task
+
+        return await asyncio.shield(task), reused
+
+    async def _execute(
+        self,
+        request_id: str,
+        operation: Callable[[], Awaitable[T]],
+    ) -> T:
+        try:
+            result = await operation()
+        except BaseException:
+            async with self._lock:
+                self._inflight.pop(request_id, None)
+            raise
+
+        async with self._lock:
+            self._inflight.pop(request_id, None)
+            self._completed[request_id] = result
+            self._completed.move_to_end(request_id)
+            while len(self._completed) > self._max_completed:
+                self._completed.popitem(last=False)
+        return result
+
+
+def configure_collection_logger(project_root: Path) -> logging.Logger:
+    """Create one rotating competitor collection log for the project."""
+    log_dir = project_root / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    target = (log_dir / "competitor-collection.log").resolve()
+    logger = logging.getLogger(
+        f"takealot_ops.competitors.collection.{abs(hash(str(target)))}"
+    )
+    logger.setLevel(logging.INFO)
+    logger.propagate = False
+    if not any(
+        isinstance(handler, logging.FileHandler)
+        and Path(handler.baseFilename).resolve() == target
+        for handler in logger.handlers
+    ):
+        handler = RotatingFileHandler(
+            target,
+            maxBytes=5 * 1024 * 1024,
+            backupCount=3,
+            encoding="utf-8",
+        )
+        handler.setFormatter(
+            logging.Formatter("%(asctime)s %(levelname)s %(message)s")
+        )
+        logger.addHandler(handler)
+    return logger

@@ -2,9 +2,16 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from datetime import date, datetime
 
+from takealot_ops.api.errors import (
+    ApiResponseError,
+    ApiTransportError,
+    AuthenticationError,
+    RateLimitError,
+)
 from takealot_ops.api.client import TakealotClient, _offer_record_from_api
 from takealot_ops.domain import sast_date
 from takealot_ops.storage.repository import Repository
@@ -69,7 +76,23 @@ def _persist_run_failure(
     repository: Repository, run_id: str, error: Exception
 ) -> CollectionResult:
     counts = {"records": 0}
-    safe_error = f"{type(error).__name__}: collection failed"
+    safe_error = _safe_collection_error(error)
     with repository.transaction():
         repository.finish_run(run_id, "failed", counts, safe_error)
     return CollectionResult(run_id=run_id, status="failed", counts=counts, error=safe_error)
+
+
+def _safe_collection_error(error: Exception) -> str:
+    """Return an actionable failure category without leaking arbitrary exception text."""
+    status_match = re.search(r"HTTP\s+(\d{3})", str(error))
+    status = f" HTTP {status_match.group(1)}" if status_match else ""
+    if isinstance(error, AuthenticationError):
+        return f"AuthenticationError: 接口鉴权被拒绝{status}"
+    if isinstance(error, RateLimitError):
+        return f"RateLimitError: 接口限流重试耗尽{status}"
+    if isinstance(error, ApiTransportError):
+        transport_type = str(error).split(":", 1)[0].strip() or "network failure"
+        return f"ApiTransportError: 网络/DNS/TLS/代理或超时（{transport_type}）"
+    if isinstance(error, ApiResponseError):
+        return f"ApiResponseError: 接口返回异常{status}"
+    return f"{type(error).__name__}: collection failed"

@@ -87,4 +87,7 @@ def test_scheduler_script_installs_two_captures_and_one_deadline() -> None:
     assert "daily-report-run --slot evening" in script
     assert "daily-report-deadline" in script
     assert "-MultipleInstances IgnoreNew" in script
+    assert "-RestartCount 3" in script
+    assert "-RestartInterval (New-TimeSpan -Minutes 5)" in script
+    assert "exit `$LASTEXITCODE" in script
 

@@ -66,16 +66,27 @@ class DailyRunResult:
         return 5
 
 
-def run_daily(settings: Settings, clock: Clock) -> DailyRunResult:
+def run_daily(
+    settings: Settings,
+    clock: Clock,
+    *,
+    report_date: date | None = None,
+    trust_env: bool = True,
+) -> DailyRunResult:
     """Run the complete daily workflow in the approved publication order."""
     captured_at = clock.now()
     end_date = sast_date(captured_at)
     start_date = end_date - timedelta(days=6)
+    export_date = report_date or end_date
     engine = create_engine_for_settings(settings)
     client: TakealotClient | None = None
     try:
         create_schema(engine)
-        client = TakealotClient(settings)
+        client = (
+            TakealotClient(settings)
+            if trust_env
+            else TakealotClient(settings, trust_env=False)
+        )
         with Session(engine) as session:
             repository = Repository(session)
             offer_result = collect_offers(client, repository, captured_at)
@@ -110,7 +121,7 @@ def run_daily(settings: Settings, clock: Clock) -> DailyRunResult:
             try:
                 metric_rows = service.rebuild(start_date, end_date)
                 quality = verify_quality(repository, end_date, start_date=start_date)
-                dataset = service.dashboard_dataset(end_date)
+                dataset = service.dashboard_dataset(export_date)
             except Exception as exc:
                 return DailyRunResult(
                     "processing_failed",
@@ -123,7 +134,7 @@ def run_daily(settings: Settings, clock: Clock) -> DailyRunResult:
 
             try:
                 reports = generate_daily_reports(
-                    dataset, settings.project_root / "exports", end_date
+                    dataset, settings.project_root / "exports", export_date
                 )
             except Exception as exc:
                 return DailyRunResult(

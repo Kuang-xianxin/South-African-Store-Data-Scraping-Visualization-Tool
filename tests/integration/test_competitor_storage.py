@@ -12,6 +12,7 @@ from takealot_ops.competitors.domain import (
     CompetitorProduct,
     CompetitorReviewRecord,
     CompetitorVariant,
+    StockProbeResult,
     VariantStockObservation,
     analyze_sales_signal,
     estimate_lifetime_sales,
@@ -79,10 +80,22 @@ def test_competitor_observation_persists_snapshot_and_deduplicated_reviews(
         )
     ]
 
-    for collected_at in (
-        datetime(2026, 7, 22, 8, tzinfo=UTC),
-        datetime(2026, 7, 23, 8, tzinfo=UTC),
-    ):
+    observations = (
+        (
+            datetime(2026, 7, 22, 8, tzinfo=UTC),
+            StockProbeResult(
+                quantity=9,
+                exact=True,
+                method="anonymous-cart-limit",
+                note="精确库存",
+            ),
+        ),
+        (
+            datetime(2026, 7, 23, 8, tzinfo=UTC),
+            skipped_stock_probe(),
+        ),
+    )
+    for collected_at, stock_probe in observations:
         with Session(engine) as session, session.begin():
             repository = CompetitorRepository(session)
             previous = repository.latest_compatible_snapshot(product)
@@ -90,11 +103,11 @@ def test_competitor_observation_persists_snapshot_and_deduplicated_reviews(
                 product=product,
                 reviews=reviews,
                 review_summary=summarize_reviews(reviews),
-                stock=skipped_stock_probe(),
+                stock=stock_probe,
                 variant_stocks=[
                     VariantStockObservation(
                         variant=product.variants[0],
-                        stock=skipped_stock_probe(),
+                        stock=stock_probe,
                     )
                 ],
                 lifetime_sales=estimate_lifetime_sales(product.review_count),
@@ -115,8 +128,14 @@ def test_competitor_observation_persists_snapshot_and_deduplicated_reviews(
     assert len(dataset.reviews) == 1
     assert len(dataset.variants) == 2
     assert dataset.variants.iloc[0]["变体"] == "默认款"
-    assert dataset.current.iloc[0]["累计销量估算"] == "20–50"
+    assert "累计销量估算" not in dataset.current.columns
     assert dataset.current.iloc[0]["趋势判断"] == "暂未观察到净流出"
+    assert dataset.current.iloc[0]["库存上限"] == "未探测"
+    assert bool(dataset.current.iloc[0]["库存参考过期"])
+    assert dataset.current.iloc[0]["上次成功库存"] == "9"
+    assert dataset.current.iloc[0]["上次成功库存时间"] == datetime(
+        2026, 7, 22, 8
+    )
 
 
 def test_competitor_api_reads_the_shared_sqlite(

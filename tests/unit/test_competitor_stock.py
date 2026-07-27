@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock, Mock, call
 
 import pytest
 
@@ -11,8 +11,10 @@ from takealot_ops.competitors.stock import (
     _dismiss_marketing_overlay,
     _find_main_add_to_cart_button,
     _find_product_quantity_combo,
+    _open_quantity_menu_with_retry,
     _probe_above_quick_menu,
     _probe_custom_quantity_with_retry,
+    _read_visible_numeric_quantity_options,
     _select_quantity_option,
     _submit_custom_quantity,
     _url_matches_plid,
@@ -28,6 +30,100 @@ def test_target_url_requires_the_requested_plid() -> None:
         "https://www.takealot.com/recommendation/PLID91577928",
         "72189176",
     )
+
+
+@pytest.mark.asyncio
+async def test_initial_quantity_menu_waits_for_animated_numeric_options(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    page = Mock()
+    page.wait_for_timeout = AsyncMock()
+    page.keyboard.press = AsyncMock()
+    combo = Mock()
+    combo.click = AsyncMock()
+    find_combo = AsyncMock(return_value=combo)
+    read_options = AsyncMock(side_effect=[[], [1, 2, 9]])
+    dismiss_overlay = AsyncMock()
+    monkeypatch.setattr(
+        "takealot_ops.competitors.stock._find_product_quantity_combo",
+        find_combo,
+    )
+    monkeypatch.setattr(
+        "takealot_ops.competitors.stock._read_visible_numeric_quantity_options",
+        read_options,
+    )
+    monkeypatch.setattr(
+        "takealot_ops.competitors.stock._dismiss_marketing_overlay",
+        dismiss_overlay,
+    )
+
+    selected_combo, options = await _open_quantity_menu_with_retry(page, "95565512")
+
+    assert selected_combo is combo
+    assert options == [1, 2, 9]
+    find_combo.assert_awaited_once_with(page, "95565512")
+    combo.click.assert_awaited_once_with()
+    assert read_options.await_count == 2
+    page.reload.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_initial_quantity_menu_reloads_and_reidentifies_same_plid(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    page = Mock()
+    page.wait_for_timeout = AsyncMock()
+    page.keyboard.press = AsyncMock()
+    page.reload = AsyncMock()
+    first_combo = Mock()
+    first_combo.click = AsyncMock()
+    refreshed_combo = Mock()
+    refreshed_combo.click = AsyncMock()
+    find_combo = AsyncMock(side_effect=[first_combo, refreshed_combo])
+    read_options = AsyncMock(side_effect=[*([[]] * 24), [1, 2, 9]])
+    dismiss_overlay = AsyncMock()
+    monkeypatch.setattr(
+        "takealot_ops.competitors.stock._find_product_quantity_combo",
+        find_combo,
+    )
+    monkeypatch.setattr(
+        "takealot_ops.competitors.stock._read_visible_numeric_quantity_options",
+        read_options,
+    )
+    monkeypatch.setattr(
+        "takealot_ops.competitors.stock._dismiss_marketing_overlay",
+        dismiss_overlay,
+    )
+
+    selected_combo, options = await _open_quantity_menu_with_retry(page, "95565512")
+
+    assert selected_combo is refreshed_combo
+    assert options == [1, 2, 9]
+    assert find_combo.await_args_list == [
+        call(page, "95565512"),
+        call(page, "95565512"),
+    ]
+    assert first_combo.click.await_count == 3
+    refreshed_combo.click.assert_awaited_once_with()
+    page.reload.assert_awaited_once_with(
+        wait_until="domcontentloaded",
+        timeout=45_000,
+    )
+
+
+@pytest.mark.asyncio
+async def test_visible_numeric_quantity_options_ignore_ten_plus() -> None:
+    page = Mock()
+    options = page.locator.return_value
+    options.count = AsyncMock(return_value=3)
+    options.nth.side_effect = [
+        Mock(inner_text=AsyncMock(return_value="1")),
+        Mock(inner_text=AsyncMock(return_value="9")),
+        Mock(inner_text=AsyncMock(return_value="10+")),
+    ]
+
+    assert await _read_visible_numeric_quantity_options(page) == [1, 9]
+    page.locator.assert_called_once_with('[role="option"]:visible')
 
 
 @pytest.mark.asyncio
@@ -81,7 +177,68 @@ async def test_explicit_warehouse_warning_skips_all_followup_probes(
     )
 
     assert await _probe_above_quick_menu(page, combo) == (4, True)
-    submit_probe.assert_awaited_once_with(page, combo, 100)
+    submit_probe.assert_awaited_once_with(page, combo, 10)
+
+
+@pytest.mark.asyncio
+async def test_rejected_quantity_ten_confirms_exact_stock_of_nine(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    page = Mock()
+    page.wait_for_timeout = AsyncMock()
+    combo = Mock()
+    submit_probe = AsyncMock(return_value=(False, None))
+    monkeypatch.setattr(
+        "takealot_ops.competitors.stock._probe_custom_quantity_with_retry",
+        submit_probe,
+    )
+
+    assert await _probe_above_quick_menu(page, combo) == (9, True)
+    submit_probe.assert_awaited_once_with(page, combo, 10)
+    page.wait_for_timeout.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_unavailable_ten_plus_editor_without_warning_remains_indeterminate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    page = Mock()
+    page.wait_for_timeout = AsyncMock()
+    combo = Mock()
+    submit_probe = AsyncMock(return_value=(None, None))
+    monkeypatch.setattr(
+        "takealot_ops.competitors.stock._probe_custom_quantity_with_retry",
+        submit_probe,
+    )
+
+    assert await _probe_above_quick_menu(page, combo) is None
+    submit_probe.assert_awaited_once_with(page, combo, 10)
+    page.wait_for_timeout.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_accepted_quantity_ten_continues_to_high_quantity_probe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    page = Mock()
+    page.wait_for_timeout = AsyncMock()
+    combo = Mock()
+    submit_probe = AsyncMock(
+        side_effect=[
+            (True, None),
+            (False, 42),
+        ]
+    )
+    monkeypatch.setattr(
+        "takealot_ops.competitors.stock._probe_custom_quantity_with_retry",
+        submit_probe,
+    )
+
+    assert await _probe_above_quick_menu(page, combo) == (42, True)
+    assert submit_probe.await_args_list == [
+        call(page, combo, 10),
+        call(page, combo, 100),
+    ]
 
 
 @pytest.mark.asyncio
@@ -106,6 +263,57 @@ async def test_explicit_custom_quantity_warning_returns_without_extra_wait(
     ensure_input.assert_awaited_once_with(page, combo)
     submit_quantity.assert_awaited_once_with(page, combo, 100)
     page.wait_for_timeout.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_unavailable_ten_plus_editor_reads_explicit_no_ten_warning(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    page = Mock()
+    body = Mock()
+    body.inner_text = AsyncMock(return_value="We currently do not have 10 in stock.")
+    page.locator.return_value = body
+    combo = Mock()
+    ensure_input = AsyncMock(return_value=False)
+    submit_quantity = AsyncMock()
+    monkeypatch.setattr(
+        "takealot_ops.competitors.stock._ensure_custom_quantity_input",
+        ensure_input,
+    )
+    monkeypatch.setattr(
+        "takealot_ops.competitors.stock._submit_custom_quantity",
+        submit_quantity,
+    )
+
+    assert await _probe_custom_quantity_with_retry(page, combo, 10) == (False, None)
+    ensure_input.assert_awaited_once_with(page, combo)
+    page.locator.assert_called_once_with("body")
+    submit_quantity.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_unavailable_ten_plus_editor_without_warning_is_indeterminate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    page = Mock()
+    body = Mock()
+    body.inner_text = AsyncMock(return_value="Shopping Cart")
+    page.locator.return_value = body
+    combo = Mock()
+    ensure_input = AsyncMock(return_value=False)
+    submit_quantity = AsyncMock()
+    monkeypatch.setattr(
+        "takealot_ops.competitors.stock._ensure_custom_quantity_input",
+        ensure_input,
+    )
+    monkeypatch.setattr(
+        "takealot_ops.competitors.stock._submit_custom_quantity",
+        submit_quantity,
+    )
+
+    assert await _probe_custom_quantity_with_retry(page, combo, 10) == (None, None)
+    ensure_input.assert_awaited_once_with(page, combo)
+    submit_quantity.assert_not_awaited()
 
 
 @pytest.mark.asyncio

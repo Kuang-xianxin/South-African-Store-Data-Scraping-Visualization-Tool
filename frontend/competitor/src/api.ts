@@ -2,6 +2,7 @@ import type {
   CollectResult,
   CompetitorDetail,
   CompetitorItem,
+  CompetitorLinkHealthItem,
   ExportPayload,
   FreshnessPayload,
   NftGeneration,
@@ -22,6 +23,16 @@ import type {
 
 let csrfToken = "";
 
+export class ApiRequestError extends Error {
+  constructor(
+    message: string,
+    readonly status: number,
+  ) {
+    super(message);
+    this.name = "ApiRequestError";
+  }
+}
+
 export function setAuthSession(session: AuthSession | null) {
   csrfToken = session?.csrf_token ?? "";
 }
@@ -32,11 +43,20 @@ async function request<T>(url: string, init?: RequestInit & { signal?: AbortSign
   if (!["GET", "HEAD", "OPTIONS"].includes(method) && csrfToken) {
     headers.set("X-CSRF-Token", csrfToken);
   }
-  const response = await fetch(url, {
-    ...init,
-    headers,
-    credentials: "same-origin",
-  });
+  let response: Response;
+  try {
+    response = await fetch(url, {
+      ...init,
+      headers,
+      credentials: "same-origin",
+    });
+  } catch (error) {
+    if (error instanceof DOMException && error.name === "AbortError") throw error;
+    throw new ApiRequestError(
+      "无法连接本机 ERP 服务，请确认服务正在运行",
+      0,
+    );
+  }
   const payload = await response.json().catch(() => ({}));
   if (!response.ok) {
     if (
@@ -46,8 +66,10 @@ async function request<T>(url: string, init?: RequestInit & { signal?: AbortSign
       window.dispatchEvent(new CustomEvent("erp-auth-expired"));
     }
     const message =
-      typeof payload.detail === "string" ? payload.detail : "本机接口请求失败";
-    throw new Error(message);
+      typeof payload.detail === "string"
+        ? payload.detail
+        : `本机接口返回异常（HTTP ${response.status}）`;
+    throw new ApiRequestError(message, response.status);
   }
   return payload as T;
 }
@@ -136,10 +158,68 @@ export async function fetchCompetitors(): Promise<CompetitorItem[]> {
   return result.items;
 }
 
+export async function fetchCompetitorLinkHealth(): Promise<
+  CompetitorLinkHealthItem[]
+> {
+  const result = await request<{ items: CompetitorLinkHealthItem[] }>(
+    "/api/competitors/link-health",
+  );
+  return result.items;
+}
+
 export async function fetchCompetitorDetail(
   plid: string,
 ): Promise<CompetitorDetail> {
   return request<CompetitorDetail>(`/api/competitors/${plid}`);
+}
+
+export interface CompetitorCollectionContext {
+  batchId: string;
+  clientId: string;
+  requestId: string;
+  itemIndex: number;
+  totalItems: number;
+}
+
+export interface CompetitorBatchEvent {
+  batchId: string;
+  clientId: string;
+  event:
+    | "start"
+    | "resume"
+    | "auto_resume"
+    | "progress"
+    | "heartbeat"
+    | "paused"
+    | "manual_stop"
+    | "completed";
+  completed: number;
+  total: number;
+  pending: number;
+  succeeded: number;
+  failed: number;
+  terminal: number;
+  reason?: string;
+}
+
+export interface CompetitorBatchStatus {
+  active: boolean;
+  batch_id: string | null;
+  owner_username: string | null;
+  owner_display_name: string | null;
+  event: string;
+  completed: number;
+  total: number;
+  pending: number;
+  succeeded: number;
+  failed: number;
+  terminal: number;
+  current_index: number | null;
+  current_plid: string | null;
+  current_request_id: string | null;
+  reason: string;
+  started_at: string | null;
+  updated_at: string | null;
 }
 
 export async function collectCompetitor(
@@ -147,6 +227,7 @@ export async function collectCompetitor(
   withStockProbe: boolean,
   visibleBrowser: boolean,
   signal?: AbortSignal,
+  context?: CompetitorCollectionContext,
 ): Promise<CollectResult> {
   return request<CollectResult>("/api/competitors/collect", {
     method: "POST",
@@ -155,9 +236,43 @@ export async function collectCompetitor(
       url,
       with_stock_probe: withStockProbe,
       visible_browser: visibleBrowser,
+      batch_id: context?.batchId,
+      client_id: context?.clientId,
+      request_id: context?.requestId,
+      item_index: context?.itemIndex,
+      total_items: context?.totalItems,
     }),
     signal,
   });
+}
+
+export async function logCompetitorBatchEvent(
+  event: CompetitorBatchEvent,
+): Promise<CompetitorBatchStatus> {
+  const result = await request<{
+    ok: boolean;
+    status: CompetitorBatchStatus;
+  }>("/api/competitors/batch-events", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      batch_id: event.batchId,
+      client_id: event.clientId,
+      event: event.event,
+      completed: event.completed,
+      total: event.total,
+      pending: event.pending,
+      succeeded: event.succeeded,
+      failed: event.failed,
+      terminal: event.terminal,
+      reason: event.reason ?? "",
+    }),
+  });
+  return result.status;
+}
+
+export function fetchCompetitorBatchStatus(): Promise<CompetitorBatchStatus> {
+  return request<CompetitorBatchStatus>("/api/competitors/batch-status");
 }
 
 function query(asOf: string) {
@@ -198,9 +313,29 @@ export async function fetchRisks(asOf: string): Promise<RiskPayload> {
   return request<RiskPayload>(`/api/erp/risks?${query(asOf)}`);
 }
 
+export interface RefreshStatus {
+  in_progress: boolean;
+  in_progress_by: string | null;
+  in_progress_display_name: string | null;
+  started_at: string | null;
+  last_success_at: string | null;
+  last_success_by: string | null;
+  last_success_display_name: string | null;
+  cooldown_until: string | null;
+  cooldown_remaining_seconds: number;
+  cooldown_seconds: number;
+  admin_exempt: boolean;
+  can_refresh: boolean;
+}
+
+export function fetchRefreshStatus(): Promise<RefreshStatus> {
+  return request<RefreshStatus>("/api/erp/refresh-status");
+}
+
 export async function refreshStoreData(): Promise<{
   succeeded: boolean;
   message: string;
+  refresh_status: RefreshStatus;
 }> {
   return request("/api/erp/refresh", { method: "POST" });
 }
@@ -273,7 +408,7 @@ export function saveDailyReportManual(
 export function confirmDailyReportEntry(
   businessDate: string,
   offerId: string,
-  source: "morning" | "evening" | "manual",
+  source: "morning" | "evening" | "latest" | "manual",
   note: string,
 ): Promise<{ ok: boolean; exported: boolean }> {
   return request(
@@ -319,14 +454,43 @@ export function saveDailyReportNote(
   businessDate: string,
   offerId: string,
   note: string,
+  issueType: "general" | "capture_difference" | "stock_continuity",
 ): Promise<{ ok: boolean }> {
   return request(
     `/api/erp/daily-report/${encodeURIComponent(businessDate)}/${encodeURIComponent(offerId)}/note`,
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ note }),
+      body: JSON.stringify({ note, issue_type: issueType }),
     },
+  );
+}
+
+export function updateDailyReportNote(
+  businessDate: string,
+  offerId: string,
+  noteId: number,
+  note: string,
+  issueType: "general" | "capture_difference" | "stock_continuity",
+): Promise<{ ok: boolean }> {
+  return request(
+    `/api/erp/daily-report/${encodeURIComponent(businessDate)}/${encodeURIComponent(offerId)}/note/${noteId}`,
+    {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ note, issue_type: issueType }),
+    },
+  );
+}
+
+export function deleteDailyReportNote(
+  businessDate: string,
+  offerId: string,
+  noteId: number,
+): Promise<{ ok: boolean }> {
+  return request(
+    `/api/erp/daily-report/${encodeURIComponent(businessDate)}/${encodeURIComponent(offerId)}/note/${noteId}`,
+    { method: "DELETE" },
   );
 }
 

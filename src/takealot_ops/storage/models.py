@@ -221,6 +221,36 @@ class CompetitorTarget(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
+class CompetitorLinkHealth(Base):
+    """Persistent validation state for a submitted competitor product link."""
+
+    __tablename__ = "competitor_link_health"
+
+    plid: Mapped[str] = mapped_column(String(30), primary_key=True)
+    url: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(
+        String(30), nullable=False, default="healthy", index=True
+    )
+    confirmed_not_found_count: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0
+    )
+    first_not_found_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
+    last_evidence_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
+    last_checked_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    last_success_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
+    control_plid: Mapped[str | None] = mapped_column(String(30))
+    control_check_ok: Mapped[bool | None] = mapped_column(Boolean)
+    last_error: Mapped[str | None] = mapped_column(Text)
+
+
 class CompetitorSnapshot(Base):
     """One timestamped competitor observation and bounded sales estimate."""
 
@@ -336,6 +366,18 @@ class ErpSession(Base):
     last_seen_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
 
 
+class ErpRefreshState(Base):
+    """Persistent global cooldown state for the ERP full-refresh action."""
+
+    __tablename__ = "erp_refresh_state"
+
+    action_key: Mapped[str] = mapped_column(String(50), primary_key=True)
+    last_success_at: Mapped[datetime | None] = mapped_column(DateTime)
+    last_success_by: Mapped[str | None] = mapped_column(String(64))
+    last_success_display_name: Mapped[str | None] = mapped_column(String(100))
+    updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+
+
 class DailyReportRun(Base):
     """One immutable morning/evening capture used by the operations daily report."""
 
@@ -346,7 +388,7 @@ class DailyReportRun(Base):
     slot: Mapped[str] = mapped_column(String(20), nullable=False, index=True)
     captured_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
     status: Mapped[str] = mapped_column(String(30), nullable=False)
-    counts: Mapped[dict[str, int] | None] = mapped_column(JSON)
+    counts: Mapped[dict[str, Any] | None] = mapped_column(JSON)
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
 
 

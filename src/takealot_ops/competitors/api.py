@@ -8,7 +8,7 @@ import random
 import re
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 from urllib.parse import parse_qsl, urlencode, urlsplit
 
 from playwright.async_api import (
@@ -36,6 +36,21 @@ BROWSER_PATHS = (
     Path("C:/Program Files/Microsoft/Edge/Application/msedge.exe"),
     Path("C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe"),
 )
+
+
+class CompetitorNetworkError(RuntimeError):
+    """Temporary Takealot connectivity failure that may succeed after recovery."""
+
+
+class CompetitorNotFoundError(RuntimeError):
+    """A product-details endpoint returned HTTP 404 and needs cross-checking."""
+
+
+class CompetitorPageValidationError(RuntimeError):
+    """A product-page cross-check was inconclusive but connectivity still worked."""
+
+
+ProductPageState = Literal["product", "not-found", "uncertain"]
 
 
 def extract_plid(value: str) -> str:
@@ -86,41 +101,59 @@ class CompetitorPublicClient:
             return
         executable = _find_browser_executable()
         playwright = await async_playwright().start()
-        browser = await playwright.chromium.launch(
-            executable_path=str(executable),
-            headless=self._headless,
-            args=[
-                "--disable-background-timer-throttling",
-                "--disable-blink-features=AutomationControlled",
-                "--disable-features=IsolateOrigins,site-per-process",
-            ],
-        )
-        context = await browser.new_context(
-            locale="en-ZA",
-            viewport={"width": 1365, "height": 900},
-            user_agent=(
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/131.0.0.0 Safari/537.36"
-            ),
-        )
-        page = await context.new_page()
-        # Strip navigator.webdriver so headless mode isn't fingerprintable
-        await page.add_init_script(
-            "Object.defineProperty(navigator, 'webdriver', {get: () => undefined});"
-        )
-        # One-time warm-up: pass Cloudflare's JS challenge
-        await page.goto(
-            "https://www.takealot.com/",
-            wait_until="domcontentloaded",
-            timeout=45_000,
-        )
-        await self._human_delay(5.0, 12.0)
         self._playwright = playwright
-        self._browser = browser
-        self._context = context
-        self._page = page
-        self._started = True
+        try:
+            browser = await playwright.chromium.launch(
+                executable_path=str(executable),
+                headless=self._headless,
+                args=[
+                    "--disable-background-timer-throttling",
+                    "--disable-blink-features=AutomationControlled",
+                    "--disable-features=IsolateOrigins,site-per-process",
+                ],
+            )
+            self._browser = browser
+            context = await browser.new_context(
+                locale="en-ZA",
+                viewport={"width": 1365, "height": 900},
+                user_agent=(
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/131.0.0.0 Safari/537.36"
+                ),
+            )
+            self._context = context
+            page = await context.new_page()
+            self._page = page
+            # Strip navigator.webdriver so headless mode isn't fingerprintable.
+            await page.add_init_script(
+                "Object.defineProperty(navigator, 'webdriver', {get: () => undefined});"
+            )
+            # One-time warm-up: tolerate short proxy/VPN interruptions.
+            for attempt in range(3):
+                try:
+                    await page.goto(
+                        "https://www.takealot.com/",
+                        wait_until="domcontentloaded",
+                        timeout=45_000,
+                    )
+                    break
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    if attempt == 2:
+                        raise
+                    await self._human_delay(2.0 * (2**attempt), 4.0 * (2**attempt))
+            await self._human_delay(5.0, 12.0)
+            self._started = True
+        except asyncio.CancelledError:
+            await self._close_after_failed_start()
+            raise
+        except Exception as exc:
+            await self._close_after_failed_start()
+            raise CompetitorNetworkError(
+                "Takealot 当前无法访问，请检查梯子或代理连接后重试"
+            ) from exc
 
     # ── lifecycle ──────────────────────────────────────────────────────────
 
@@ -132,15 +165,60 @@ class CompetitorPublicClient:
         await self.close()
 
     async def close(self) -> None:
-        if self._context is not None:
-            try:
-                await self._context.close()
-            finally:
-                if self._playwright is not None:
-                    await self._playwright.stop()
+        context = self._context
+        browser = self._browser
+        playwright = self._playwright
+        self._page = None
+        self._context = None
+        self._browser = None
+        self._playwright = None
         self._started = False
+        try:
+            if context is not None:
+                await context.close()
+        finally:
+            try:
+                if browser is not None:
+                    await browser.close()
+            finally:
+                if playwright is not None:
+                    await playwright.stop()
+
+    async def _close_after_failed_start(self) -> None:
+        try:
+            await self.close()
+        except BaseException:
+            # Preserve the original cancellation/network error after best-effort cleanup.
+            pass
 
     # ── public API (same signatures as before) ────────────────────────────
+
+    async def confirm_product_page_absent(
+        self,
+        target_url: str,
+        control_url: str,
+    ) -> None:
+        """Cross-check one 404 against a recently successful control product.
+
+        Returning normally means the target page explicitly renders Takealot's
+        not-found state while the control page renders product-specific content.
+        Ambiguous rendered content is kept separate from real connectivity
+        failures so it cannot trip the batch network circuit breaker.
+        """
+        target_state = await self._product_page_state(target_url)
+        control_state = await self._product_page_state(control_url)
+        if control_state != "product":
+            raise CompetitorPageValidationError(
+                "正常对照商品页未能稳定识别；网络可以访问，但本次复核结果不确定，已保留重试"
+            )
+        if target_state == "product":
+            raise CompetitorPageValidationError(
+                "目标商品页仍可打开，但公开数据接口暂时返回 404；已保留重试"
+            )
+        if target_state != "not-found":
+            raise CompetitorPageValidationError(
+                "目标商品页未能稳定识别；网络可以访问，但本次复核结果不确定，已保留重试"
+            )
 
     async def fetch_product(self, url: str) -> CompetitorProduct:
         plid = extract_plid(url)
@@ -283,6 +361,49 @@ class CompetitorPublicClient:
         """Sleep for a random duration to avoid triggering bot detection."""
         await asyncio.sleep(random.uniform(min_s, max_s))
 
+    async def _product_page_state(self, url: str) -> ProductPageState:
+        page = self._page
+        if page is None:
+            raise RuntimeError("竞品浏览器尚未启动")
+        try:
+            response = await page.goto(
+                url,
+                wait_until="domcontentloaded",
+                timeout=self._timeout_ms,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            raise CompetitorNetworkError(
+                "Takealot 商品页暂时无法访问；本次按网络问题保留重试"
+            ) from exc
+        if response is None or response.status == 429 or response.status >= 500:
+            raise CompetitorNetworkError(
+                "Takealot 商品页暂时无法访问；本次按网络问题保留重试"
+            )
+        if response.status == 404:
+            return "not-found"
+
+        heading = page.locator("main h1")
+        for attempt in range(3):
+            title = _normalized_page_text(await page.title())
+            headings = [
+                _normalized_page_text(value)
+                for value in await heading.all_text_contents()
+                if _normalized_page_text(value)
+            ]
+            if _is_takealot_not_found(title) or any(
+                _is_takealot_not_found(value) for value in headings
+            ):
+                return "not-found"
+            if any(not _is_takealot_not_found(value) for value in headings):
+                return "product"
+            if _is_takealot_product_title(title):
+                return "product"
+            if attempt < 2:
+                await page.wait_for_timeout(2_000)
+        return "uncertain"
+
     async def _get_json(self, url: str, *, retries: int = 3) -> dict[str, Any]:
         """Fetch JSON by navigating the browser to the API URL.
 
@@ -302,12 +423,17 @@ class CompetitorPublicClient:
                     timeout=self._timeout_ms,
                 )
                 if response is None:
-                    raise RuntimeError("浏览器导航未返回响应")
+                    raise CompetitorNetworkError("浏览器导航未返回响应")
                 status = response.status
                 if status != 200:
+                    if status == 404:
+                        raise CompetitorNotFoundError(
+                            "Takealot 商品数据返回 404"
+                        )
                     retryable = status == 429 or status >= 500
                     if not retryable or attempt == retries:
-                        raise RuntimeError(f"Takealot API returned {status}")
+                        error_type = CompetitorNetworkError if retryable else RuntimeError
+                        raise error_type(f"Takealot API returned {status}")
                     await self._human_delay(2.0 * (2**attempt), 4.0 * (2**attempt))
                     continue
                 try:
@@ -316,7 +442,9 @@ class CompetitorPublicClient:
                     body = await page.content()
                     if any(kw in body.lower() for kw in ("cloudflare", "cf-challenge", "checking your browser")):
                         if attempt == retries:
-                            raise RuntimeError("Cloudflare 验证失败，请稍后重试")
+                            raise CompetitorNetworkError(
+                                "Cloudflare 验证失败，请稍后重试"
+                            )
                         await self._human_delay(3.0, 6.0)
                         continue
                     raise ValueError("Takealot 公开接口返回了非 JSON 数据")
@@ -330,10 +458,24 @@ class CompetitorPublicClient:
                 if attempt == retries:
                     break
                 await self._human_delay(2.0 * (2**attempt), 4.0 * (2**attempt))
-        raise RuntimeError("Takealot 公开接口暂时不可用，请稍后重试") from last_error
+        raise CompetitorNetworkError(
+            "Takealot 公开接口暂时不可用，请检查梯子或代理连接后重试"
+        ) from last_error
 
 
 # ── helpers (unchanged logic) ──────────────────────────────────────────────
+
+
+def _normalized_page_text(value: str) -> str:
+    return " ".join(value.casefold().split())
+
+
+def _is_takealot_not_found(value: str) -> bool:
+    return "404" in value and ("page not found" in value or "not found" in value)
+
+
+def _is_takealot_product_title(value: str) -> bool:
+    return "| shop today." in value and "| takealot.com" in value
 
 
 def _offer_record(

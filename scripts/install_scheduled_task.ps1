@@ -24,13 +24,18 @@ if (-not (Test-Path -LiteralPath $PythonPath -PathType Leaf)) {
 
 $EscapedProjectPath = $ResolvedProjectPath.Replace("'", "''")
 $EscapedPythonPath = $PythonPath.Replace("'", "''")
-$TaskSettings = New-ScheduledTaskSettingsSet -StartWhenAvailable -MultipleInstances IgnoreNew
+$TaskSettings = New-ScheduledTaskSettingsSet `
+    -StartWhenAvailable `
+    -MultipleInstances IgnoreNew `
+    -RestartCount 3 `
+    -RestartInterval (New-TimeSpan -Minutes 5)
 
 function New-TakealotTaskAction {
     param([Parameter(Mandatory = $true)][string]$CliArguments)
     $Command = "`$env:TAKEALOT_PROJECT_ROOT='$EscapedProjectPath'; " +
         "Set-Location -LiteralPath '$EscapedProjectPath'; " +
-        "& '$EscapedPythonPath' -m takealot_ops.cli $CliArguments"
+        "& '$EscapedPythonPath' -m takealot_ops.cli $CliArguments; " +
+        "exit `$LASTEXITCODE"
     $ActionArguments = "-NoProfile -NonInteractive -WindowStyle Hidden -Command `"$Command`""
     return New-ScheduledTaskAction -Execute 'powershell.exe' -Argument $ActionArguments
 }

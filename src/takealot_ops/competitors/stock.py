@@ -363,6 +363,45 @@ async def _select_quantity_menu_option(
     return False
 
 
+async def _read_visible_numeric_quantity_options(page: Page) -> list[int]:
+    """Read the currently rendered numeric options from the animated menu."""
+    numeric_options: list[int] = []
+    options = page.locator('[role="option"]:visible')
+    for index in range(await options.count()):
+        text = (await options.nth(index).inner_text()).strip()
+        if text.isdigit():
+            numeric_options.append(int(text))
+    return numeric_options
+
+
+async def _open_quantity_menu_with_retry(
+    page: Page,
+    plid: str,
+) -> tuple[Locator, list[int]]:
+    """Wait for the initial menu, then reload once and re-identify the PLID."""
+    for page_attempt in range(2):
+        combo = await _find_product_quantity_combo(page, plid)
+        for _ in range(3):
+            await _dismiss_marketing_overlay(page)
+            await page.wait_for_timeout(random.randint(800, 1500))
+            await combo.click()
+            for _ in range(8):
+                numeric_options = await _read_visible_numeric_quantity_options(page)
+                if numeric_options:
+                    await page.keyboard.press("Escape")
+                    await page.wait_for_timeout(random.randint(800, 1500))
+                    return combo, numeric_options
+                await page.wait_for_timeout(500)
+            await page.keyboard.press("Escape")
+            await page.wait_for_timeout(random.randint(800, 1500))
+        if page_attempt == 0:
+            await page.reload(wait_until="domcontentloaded", timeout=45_000)
+            await page.wait_for_timeout(random.randint(1500, 3000))
+    raise RuntimeError(
+        "购物车数量菜单在3次重开和1次页面刷新后仍没有可识别的数字选项"
+    )
+
+
 async def _find_product_quantity_combo(page: Page, plid: str) -> Locator:
     deadline = time.monotonic() + 15
     while time.monotonic() < deadline:
@@ -397,6 +436,20 @@ async def _probe_above_quick_menu(
 ) -> tuple[int, bool] | None:
     """Switch to custom quantity input and parse the explicit warehouse limit."""
     low = 9
+    accepted, explicit_quantity = await _probe_custom_quantity_with_retry(
+        page,
+        combo,
+        10,
+    )
+    if explicit_quantity is not None:
+        return explicit_quantity, True
+    if accepted is None:
+        return None
+    if not accepted:
+        return 9, True
+
+    low = 10
+    await page.wait_for_timeout(random.randint(1500, 3000))
     probe = HIGH_QUANTITY_PROBE
     while True:
         accepted, explicit_quantity = await _probe_custom_quantity_with_retry(
@@ -444,6 +497,12 @@ async def _probe_custom_quantity_with_retry(
     """Retry transient cart-update errors without changing the target product."""
     for attempt in range(3):
         if not await _ensure_custom_quantity_input(page, combo):
+            cart_text = await page.locator("body").inner_text()
+            explicit_quantity = _parse_warehouse_stock_message(cart_text)
+            if explicit_quantity is not None:
+                return False, explicit_quantity
+            if f"We currently do not have {quantity} in stock." in cart_text:
+                return False, None
             return None, None
         result = await _submit_custom_quantity(page, combo, quantity)
         if result[1] is not None:
@@ -535,18 +594,7 @@ async def _submit_custom_quantity(
 async def _find_exact_quantity(
     page: Page, plid: str
 ) -> tuple[int, bool, str]:
-    combo = await _find_product_quantity_combo(page, plid)
-    await combo.click()
-    numeric_options: list[int] = []
-    options = page.locator('[role="option"]:visible')
-    for index in range(await options.count()):
-        text = (await options.nth(index).inner_text()).strip()
-        if text.isdigit():
-            numeric_options.append(int(text))
-    await page.keyboard.press("Escape")
-    await page.wait_for_timeout(random.randint(1500, 3000))
-    if not numeric_options:
-        raise RuntimeError("购物车数量菜单没有可识别的数字选项")
+    combo, numeric_options = await _open_quantity_menu_with_retry(page, plid)
     if 9 not in numeric_options:
         maximum = max(numeric_options)
         accepted, explicit_quantity = await _choose_quantity(page, combo, maximum)

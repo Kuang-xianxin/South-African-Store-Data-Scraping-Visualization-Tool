@@ -11,7 +11,12 @@ import httpx
 import pytest
 
 from takealot_ops.api.client import TakealotClient
-from takealot_ops.api.errors import ApiResponseError, AuthenticationError, RateLimitError
+from takealot_ops.api.errors import (
+    ApiResponseError,
+    ApiTransportError,
+    AuthenticationError,
+    RateLimitError,
+)
 from takealot_ops.domain import OfferRecord, SaleRecord
 from takealot_ops.settings import Settings
 
@@ -483,6 +488,42 @@ def test_429_uses_retry_after_then_retries() -> None:
     assert offers[0].created_at.isoformat() == "2026-02-15T12:34:56+02:00"
     assert calls == 2
     assert sleeps == [7.0]
+
+
+def test_transport_failure_retries_before_succeeding() -> None:
+    calls = 0
+    sleeps: list[float] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise httpx.ConnectError("temporary DNS failure", request=request)
+        return httpx.Response(200, json=_fixture("offers_page_2.json"))
+
+    client = _client(handler, sleep=sleeps.append)
+    try:
+        offers = list(client.list_offers())
+    finally:
+        client.close()
+
+    assert offers
+    assert calls == 2
+    assert sleeps == [2.0]
+
+
+def test_transport_failure_exhaustion_has_actionable_type() -> None:
+    client = _client(
+        lambda request: (_ for _ in ()).throw(
+            httpx.ConnectTimeout("connection timed out", request=request)
+        ),
+        sleep=lambda _: None,
+    )
+    try:
+        with pytest.raises(ApiTransportError, match="ConnectTimeout"):
+            list(client.list_offers())
+    finally:
+        client.close()
 
 
 def test_500_retries_three_times_then_raises() -> None:

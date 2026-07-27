@@ -7,12 +7,17 @@ export interface CompetitorItem {
   库存上限: string;
   库存数量: number | null;
   库存精确: boolean;
+  库存说明: string | null;
+  库存参考过期: boolean;
+  上次成功库存: string | null;
+  上次成功库存数量: number | null;
+  上次成功库存精确: boolean;
+  上次成功库存时间: string | null;
   评论数: number;
   评分: number | null;
   好评: number;
   中评: number;
   差评: number;
-  累计销量估算: string;
   观察期销量信号: string;
   观察期估算下限: number | null;
   观察期估算上限: number | null;
@@ -60,6 +65,18 @@ export interface CollectResult {
   plid: string;
   title: string;
   message: string;
+}
+
+export interface CompetitorLinkHealthItem {
+  plid: string;
+  url: string;
+  status: "suspected_invalid" | "confirmed_invalid";
+  confirmed_not_found_count: number;
+  first_not_found_at: string | null;
+  last_checked_at: string;
+  control_plid: string | null;
+  control_check_ok: boolean | null;
+  last_error: string | null;
 }
 
 export interface StoreKpis {
@@ -257,6 +274,7 @@ export type DailyReportStatus =
   | "awaiting_evening"
   | "ready"
   | "needs_review"
+  | "missing_capture"
   | "confirmed";
 
 export interface DailyReportValues {
@@ -272,15 +290,98 @@ export interface DailyReportItem {
   status: DailyReportStatus;
   morning: DailyReportValues | null;
   evening: DailyReportValues | null;
+  capture_versions: Array<{
+    run_id: string;
+    slot: "morning" | "evening" | "manual";
+    label: string;
+    captured_at: string;
+    values: DailyReportValues;
+  }>;
   manual: DailyReportValues | null;
   manual_reason: string | null;
   manual_note: string | null;
+  manual_at: string | null;
   final: DailyReportValues | null;
-  selected_source: "morning" | "evening" | "manual" | null;
+  confirmation_baseline: {
+    values: DailyReportValues;
+    source: "morning" | "evening" | "latest" | "manual";
+    source_label: string;
+    confirmed_by: string;
+    confirmed_at: string;
+    confirm_note: string | null;
+  } | null;
+  review_versions: Array<{
+    kind: "confirmed" | "capture" | "manual";
+    run_id: string | null;
+    slot: "morning" | "evening" | "manual" | null;
+    label: string;
+    captured_at: string | null;
+    values: DailyReportValues;
+    source_label: string | null;
+    user_name: string | null;
+    note: string | null;
+  }>;
+  selected_source: "morning" | "evening" | "latest" | "manual" | null;
   confirm_note: string | null;
   operator_note: string | null;
+  operator_notes: Array<{
+    id: number;
+    issue_type: "general" | "capture_difference" | "stock_continuity";
+    note: string;
+    user_id: number | null;
+    user_name: string;
+    created_at: string;
+    updated_by: string | null;
+    updated_at: string | null;
+  }>;
+  confirmation_trigger: {
+    kind: "previous_confirmation";
+    message: string;
+    trigger_business_date: string;
+    affected_business_date: string;
+    confirmation_source: "morning" | "evening" | "latest" | "manual";
+    confirmation_source_label: string;
+    confirmed_by: string | null;
+    confirmed_at: string;
+    confirmation_note: string;
+    previous_stock_before_confirmation: number | null;
+    confirmed_previous_stock: number;
+    current_ordered_units: number;
+    expected_stock_before_confirmation: number | null;
+    comparison_before_state?: "matched" | "mismatch" | "unavailable";
+    expected_stock_after_confirmation: number;
+    actual_stock: number;
+    affected_previous_status: DailyReportStatus;
+    affected_previous_final: DailyReportValues | null;
+    affected_previous_confirmed_by: string | null;
+    affected_previous_confirmed_at: string | null;
+    affected_previous_confirm_note: string | null;
+    affected_current_values: DailyReportValues;
+  } | null;
   differences: Array<keyof DailyReportValues>;
+  review_issues: Array<{
+    type: "capture_difference" | "stock_continuity";
+    fields: Array<keyof DailyReportValues>;
+  }>;
+  missing_capture: boolean;
+  missing_slots: Array<"morning" | "evening">;
+  missing_run_ids: string[];
+  missing_fields: Array<keyof DailyReportValues>;
+  missing_reason: string | null;
   current: DailyReportValues;
+  stock_context: {
+    business_date: string;
+    stock: number | null;
+    source: "confirmed" | "latest_capture" | "version_difference";
+    source_label: string;
+    selected_source: "morning" | "evening" | "latest" | "manual" | null;
+    confirmed_by: string | null;
+    confirmed_at: string | null;
+    confirm_note: string | null;
+    capture_label: string | null;
+    continuity_ready: boolean;
+    version_differences: Array<keyof DailyReportValues>;
+  } | null;
   stock_check: {
     previous_stock: number | null;
     expected_stock: number | null;
@@ -288,24 +389,81 @@ export interface DailyReportItem {
     mismatch: boolean;
     dismissed: boolean;
     note: string | null;
+    deferred_reason: string | null;
   };
+}
+
+export interface DailyReportPendingAction extends DailyReportItem {
+  business_date: string;
 }
 
 export interface DailyReportPayload {
   business_date: string;
   runs: Array<{
     run_id: string;
-    slot: "morning" | "evening";
+    slot: "morning" | "evening" | "manual";
     captured_at: string;
     status: string;
-    counts: Record<string, number>;
+    counts: Record<string, unknown>;
   }>;
+  capture_status: Record<
+    "morning" | "evening",
+    {
+      status: "success" | "failed" | "missing" | "pending";
+      captured_at: string | null;
+      product_count: number;
+      reason: string | null;
+      attempts: Array<{
+        attempt: number;
+        strategy: string;
+        trust_env: boolean;
+        started_at: string;
+        finished_at: string;
+        status: "success" | "failed";
+        workflow_status: string;
+        reason: string;
+        offer_run_id: string | null;
+        sales_run_id: string | null;
+      }>;
+      attempt_count: number;
+      recovered: boolean;
+      capture_method: string | null;
+    }
+  >;
+  capture_issues: Array<{
+    kind: "slot" | "product";
+    slot: "morning" | "evening" | "manual" | null;
+    offer_id: string | null;
+    sku: string | null;
+    title: string | null;
+    reason: string;
+  }>;
+  comparison_history: Array<{
+    business_date: string;
+    items: Array<
+      Pick<
+        DailyReportItem,
+        | "offer_id"
+        | "sku"
+        | "title"
+        | "status"
+        | "missing_capture"
+        | "missing_reason"
+        | "current"
+        | "stock_check"
+        | "operator_note"
+        | "operator_notes"
+      >
+    >;
+  }>;
+  pending_actions: DailyReportPendingAction[];
   counts: {
     products: number;
     with_sales: number;
     awaiting_evening: number;
     ready: number;
     needs_review: number;
+    missing_capture: number;
     confirmed: number;
     stock_alerts: number;
   };

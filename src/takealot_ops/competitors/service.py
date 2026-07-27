@@ -10,7 +10,13 @@ from sqlalchemy import Engine, select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
-from takealot_ops.competitors.api import CompetitorPublicClient, extract_plid
+from takealot_ops.competitors.api import (
+    CompetitorNetworkError,
+    CompetitorNotFoundError,
+    CompetitorPageValidationError,
+    CompetitorPublicClient,
+    extract_plid,
+)
 from takealot_ops.competitors.domain import (
     CompetitorProduct,
     StockProbeResult,
@@ -19,12 +25,16 @@ from takealot_ops.competitors.domain import (
     estimate_lifetime_sales,
     summarize_reviews,
 )
-from takealot_ops.competitors.repository import CompetitorRepository
+from takealot_ops.competitors.repository import (
+    NOT_FOUND_CONFIRMATION_COUNT,
+    CompetitorRepository,
+)
 from takealot_ops.competitors.stock import (
     probe_variant_stocks,
     skipped_stock_probe,
 )
 from takealot_ops.storage.models import (
+    CompetitorLinkHealth,
     CompetitorReview,
     CompetitorSnapshot,
     CompetitorTarget,
@@ -40,6 +50,8 @@ class CompetitorCollectionResult:
     title: str
     succeeded: bool
     message: str
+    retryable: bool = False
+    failure_kind: str | None = None
 
 
 @dataclass(frozen=True)
@@ -124,12 +136,93 @@ class CompetitorCollector:
                 succeeded=True,
                 message=_collection_message(stock, len(variant_stocks)),
             )
+        except CompetitorNotFoundError:
+            try:
+                control = self._latest_control_product(plid)
+                control_verified = False
+                control_plid: str | None = None
+                if control is not None:
+                    control_plid, control_url = control
+                    try:
+                        await self._client.confirm_product_page_absent(
+                            url,
+                            control_url,
+                        )
+                    except CompetitorPageValidationError as exc:
+                        return CompetitorCollectionResult(
+                            plid=plid,
+                            title=f"PLID{plid}",
+                            succeeded=False,
+                            message=str(exc),
+                            retryable=True,
+                            failure_kind="validation-uncertain",
+                        )
+                    except CompetitorNetworkError as exc:
+                        return CompetitorCollectionResult(
+                            plid=plid,
+                            title=f"PLID{plid}",
+                            succeeded=False,
+                            message=str(exc),
+                            retryable=True,
+                            failure_kind="network",
+                        )
+                    control_verified = True
+                checked_at = datetime.now(UTC)
+                with Session(self._engine) as session:
+                    repository = CompetitorRepository(session)
+                    with session.begin():
+                        decision = repository.record_not_found(
+                            plid=plid,
+                            url=url,
+                            checked_at=checked_at,
+                            control_plid=control_plid,
+                            control_check_ok=control_verified,
+                        )
+            except SQLAlchemyError as exc:
+                return CompetitorCollectionResult(
+                    plid=plid,
+                    title=f"PLID{plid}",
+                    succeeded=False,
+                    message=f"记录链接复核状态失败：{exc}",
+                    failure_kind="other",
+                )
+            confirmed = decision.status == "confirmed_invalid"
+            return CompetitorCollectionResult(
+                plid=plid,
+                title=f"PLID{plid}",
+                succeeded=False,
+                message=_not_found_message(
+                    confirmed=confirmed,
+                    count=decision.confirmed_not_found_count,
+                    evidence_counted=decision.evidence_counted,
+                    control_verified=control_verified,
+                ),
+                failure_kind=(
+                    "confirmed-invalid" if confirmed else "suspected-invalid"
+                ),
+            )
+        except CompetitorNetworkError as exc:
+            return CompetitorCollectionResult(
+                plid=plid,
+                title=f"PLID{plid}",
+                succeeded=False,
+                message=str(exc),
+                retryable=True,
+                failure_kind="network",
+            )
         except (OSError, RuntimeError, ValueError, SQLAlchemyError) as exc:
             return CompetitorCollectionResult(
                 plid=plid,
                 title=f"PLID{plid}",
                 succeeded=False,
                 message=str(exc),
+                failure_kind="other",
+            )
+
+    def _latest_control_product(self, plid: str) -> tuple[str, str] | None:
+        with Session(self._engine) as session:
+            return CompetitorRepository(session).latest_control_product(
+                exclude_plid=plid
             )
 
     async def _collect_variant_stocks(
@@ -212,6 +305,67 @@ def _collection_message(stock: StockProbeResult, variant_count: int) -> str:
     return f"采集成功；已记录 {variant_count} 个变体，评论按商品共用一份"
 
 
+def _not_found_message(
+    *,
+    confirmed: bool,
+    count: int,
+    evidence_counted: bool,
+    control_verified: bool,
+) -> str:
+    if confirmed:
+        return (
+            f"商品页持续为空且正常对照商品可用，已完成 {count} 次间隔复核，"
+            "确认链接失效；本批后续续爬将自动跳过，重新点击“开始采集”仍可人工复核"
+        )
+    if not control_verified:
+        return (
+            "Takealot 商品数据返回 404，暂标记为疑似失效；"
+            "当前没有可用的正常对照商品，本次不做永久判定并保留重试"
+        )
+    if not evidence_counted:
+        return (
+            f"商品页为空且正常对照商品可用，仍为疑似失效（有效复核 "
+            f"{count}/{NOT_FOUND_CONFIRMATION_COUNT}）；距离上次复核不足 10 分钟，"
+            "本次不累计并保留重试"
+        )
+    return (
+        f"商品页为空且正常对照商品可用，暂标记为疑似失效（有效复核 "
+        f"{count}/{NOT_FOUND_CONFIRMATION_COUNT}）；至少间隔 10 分钟后再次复核"
+    )
+
+
+def load_competitor_link_health(engine: Engine) -> list[dict[str, object]]:
+    """Load suspected/confirmed invalid links for the operator review list."""
+    try:
+        with Session(engine) as session:
+            rows = list(
+                session.scalars(
+                    select(CompetitorLinkHealth)
+                    .where(CompetitorLinkHealth.status != "healthy")
+                    .order_by(
+                        CompetitorLinkHealth.status.desc(),
+                        CompetitorLinkHealth.last_checked_at.desc(),
+                    )
+                )
+            )
+    except SQLAlchemyError:
+        return []
+    return [
+        {
+            "plid": row.plid,
+            "url": row.url,
+            "status": row.status,
+            "confirmed_not_found_count": row.confirmed_not_found_count,
+            "first_not_found_at": row.first_not_found_at,
+            "last_checked_at": row.last_checked_at,
+            "control_plid": row.control_plid,
+            "control_check_ok": row.control_check_ok,
+            "last_error": row.last_error,
+        }
+        for row in rows
+    ]
+
+
 def load_competitor_dataset(engine: Engine) -> CompetitorDataset:
     """Load all competitor views without changing database state."""
     try:
@@ -253,9 +407,39 @@ def load_competitor_dataset(engine: Engine) -> CompetitorDataset:
     latest_by_plid: dict[str, CompetitorSnapshot] = {}
     for snapshot in snapshots:
         latest_by_plid.setdefault(snapshot.plid, snapshot)
+    variant_signatures: dict[int, frozenset[tuple[str, str, str]]] = {}
+    for variant in variants:
+        signature = variant_signatures.setdefault(variant.snapshot_id, frozenset())
+        variant_signatures[variant.snapshot_id] = signature | {
+            (
+                variant.variant_key,
+                variant.sku or "",
+                variant.seller_id or "",
+            )
+        }
+    stale_stock_by_plid: dict[str, CompetitorSnapshot] = {}
+    for plid, latest in latest_by_plid.items():
+        if latest.stock_quantity is not None:
+            continue
+        latest_signature = variant_signatures.get(latest.id, frozenset())
+        for candidate in snapshots:
+            if candidate.plid != plid or candidate.id == latest.id:
+                continue
+            if candidate.stock_quantity is None:
+                continue
+            if candidate.sku != latest.sku or candidate.seller_id != latest.seller_id:
+                continue
+            if variant_signatures.get(candidate.id, frozenset()) != latest_signature:
+                continue
+            stale_stock_by_plid[plid] = candidate
+            break
     active_plids = {target.plid for target in targets}
     current = pd.DataFrame(
-        [_snapshot_row(row) for plid, row in latest_by_plid.items() if plid in active_plids]
+        [
+            _snapshot_row(row, stale_stock=stale_stock_by_plid.get(plid))
+            for plid, row in latest_by_plid.items()
+            if plid in active_plids
+        ]
     )
     history = pd.DataFrame([_snapshot_row(row) for row in snapshots])
     review_frame = pd.DataFrame(
@@ -280,7 +464,7 @@ def load_competitor_dataset(engine: Engine) -> CompetitorDataset:
     )
 
 
-def _snapshot_row(row: CompetitorSnapshot) -> dict[str, object]:
+def _stock_text(row: CompetitorSnapshot) -> str:
     stock_text = "未探测"
     if row.stock_method in {"not-platform-stock", "all-variants-out-of-stock"}:
         stock_text = "没货"
@@ -290,6 +474,15 @@ def _snapshot_row(row: CompetitorSnapshot) -> dict[str, object]:
             if row.stock_exact
             else f"至少{row.stock_quantity}"
         )
+    return stock_text
+
+
+def _snapshot_row(
+    row: CompetitorSnapshot,
+    *,
+    stale_stock: CompetitorSnapshot | None = None,
+) -> dict[str, object]:
+    stock_text = _stock_text(row)
     period_range = "待积累"
     if row.period_sales_min is not None and row.period_sales_max is not None:
         period_range = (
@@ -306,12 +499,23 @@ def _snapshot_row(row: CompetitorSnapshot) -> dict[str, object]:
         "库存上限": stock_text,
         "库存数量": row.stock_quantity,
         "库存精确": row.stock_exact,
+        "库存说明": row.stock_note,
+        "库存参考过期": stale_stock is not None,
+        "上次成功库存": _stock_text(stale_stock) if stale_stock is not None else None,
+        "上次成功库存数量": (
+            stale_stock.stock_quantity if stale_stock is not None else None
+        ),
+        "上次成功库存精确": (
+            stale_stock.stock_exact if stale_stock is not None else False
+        ),
+        "上次成功库存时间": (
+            stale_stock.collected_at if stale_stock is not None else None
+        ),
         "评论数": row.review_count,
         "评分": float(row.rating) if row.rating is not None else None,
         "好评": row.positive_reviews,
         "中评": row.neutral_reviews,
         "差评": row.negative_reviews,
-        "累计销量估算": f"{row.lifetime_sales_min}–{row.lifetime_sales_max}",
         "观察期销量信号": period_range,
         "观察期估算下限": row.period_sales_min,
         "观察期估算上限": row.period_sales_max,

@@ -1,9 +1,21 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
-from unittest.mock import MagicMock, patch
+import asyncio
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
+from unittest.mock import AsyncMock, MagicMock, patch
 
-from takealot_ops.competitors.api import CompetitorPublicClient, extract_plid
+import pytest
+from sqlalchemy import create_engine
+from sqlalchemy.orm import Session
+
+from takealot_ops.competitors.api import (
+    CompetitorNetworkError,
+    CompetitorNotFoundError,
+    CompetitorPageValidationError,
+    CompetitorPublicClient,
+    extract_plid,
+)
 from takealot_ops.competitors.domain import (
     CompetitorReviewRecord,
     PreviousObservation,
@@ -11,12 +23,265 @@ from takealot_ops.competitors.domain import (
     estimate_lifetime_sales,
     summarize_reviews,
 )
-from takealot_ops.competitors.service import parse_competitor_urls
+from takealot_ops.competitors.repository import CompetitorRepository
+from takealot_ops.competitors.service import (
+    CompetitorCollector,
+    load_competitor_link_health,
+    parse_competitor_urls,
+)
 from takealot_ops.competitors.stock import _parse_warehouse_stock_message
+from takealot_ops.storage.models import Base, CompetitorLinkHealth
 
 
 async def _fake_delay(self: object, a: float, b: float) -> None:
     pass
+
+
+def _failing_browser_stack(
+    error: BaseException,
+) -> tuple[MagicMock, MagicMock, MagicMock, MagicMock, MagicMock]:
+    page = MagicMock()
+    page.add_init_script = AsyncMock()
+    page.goto = AsyncMock(side_effect=error)
+    context = MagicMock()
+    context.new_page = AsyncMock(return_value=page)
+    context.close = AsyncMock()
+    browser = MagicMock()
+    browser.new_context = AsyncMock(return_value=context)
+    browser.close = AsyncMock()
+    playwright = MagicMock()
+    playwright.chromium.launch = AsyncMock(return_value=browser)
+    playwright.stop = AsyncMock()
+    manager = MagicMock()
+    manager.start = AsyncMock(return_value=playwright)
+    return manager, playwright, browser, context, page
+
+
+async def test_public_client_cleans_up_when_proxy_fails_during_warmup() -> None:
+    manager, playwright, browser, context, page = _failing_browser_stack(
+        OSError("proxy unavailable")
+    )
+    client = CompetitorPublicClient()
+
+    with (
+        patch("takealot_ops.competitors.api.async_playwright", return_value=manager),
+        patch(
+            "takealot_ops.competitors.api._find_browser_executable",
+            return_value=Path("chrome.exe"),
+        ),
+        patch.object(client, "_human_delay", AsyncMock()),
+        pytest.raises(CompetitorNetworkError, match="梯子或代理"),
+    ):
+        await client.start()
+
+    assert page.goto.await_count == 3
+    context.close.assert_awaited_once()
+    browser.close.assert_awaited_once()
+    playwright.stop.assert_awaited_once()
+    assert client._playwright is None
+    assert client._browser is None
+    assert client._context is None
+    assert client._page is None
+
+
+async def test_public_client_cleans_up_when_start_is_cancelled() -> None:
+    manager, playwright, browser, context, _ = _failing_browser_stack(
+        asyncio.CancelledError()
+    )
+    client = CompetitorPublicClient()
+
+    with (
+        patch("takealot_ops.competitors.api.async_playwright", return_value=manager),
+        patch(
+            "takealot_ops.competitors.api._find_browser_executable",
+            return_value=Path("chrome.exe"),
+        ),
+        pytest.raises(asyncio.CancelledError),
+    ):
+        await client.start()
+
+    context.close.assert_awaited_once()
+    browser.close.assert_awaited_once()
+    playwright.stop.assert_awaited_once()
+
+
+async def test_collector_marks_takealot_network_failure_as_retryable(
+    tmp_path: Path,
+) -> None:
+    client = MagicMock()
+    client.fetch_product = AsyncMock(
+        side_effect=CompetitorNetworkError("Takealot 暂时不可访问")
+    )
+    collector = CompetitorCollector(
+        engine=MagicMock(),
+        project_root=tmp_path,
+        client=client,
+    )
+
+    result = await collector.collect(
+        "https://www.takealot.com/example/PLID12345678",
+        with_stock_probe=False,
+    )
+
+    assert result.succeeded is False
+    assert result.retryable is True
+    assert result.message == "Takealot 暂时不可访问"
+
+
+async def test_public_client_keeps_api_404_separate_from_network_failure() -> None:
+    response = MagicMock()
+    response.status = 404
+    page = MagicMock()
+    page.goto = AsyncMock(return_value=response)
+    client = CompetitorPublicClient()
+    client._page = page
+
+    with pytest.raises(CompetitorNotFoundError, match="商品数据返回 404"):
+        await client._get_json(
+            "https://api.takealot.com/rest/v-1-10-0/product-details/PLID123",
+        )
+
+    page.goto.assert_awaited_once()
+
+
+async def test_public_client_cross_checks_target_against_known_good_page() -> None:
+    client = CompetitorPublicClient()
+    client._product_page_state = AsyncMock(  # type: ignore[method-assign]
+        side_effect=["not-found", "product"]
+    )
+
+    await client.confirm_product_page_absent(
+        "https://www.takealot.com/missing/PLID111",
+        "https://www.takealot.com/control/PLID222",
+    )
+
+    client._product_page_state = AsyncMock(  # type: ignore[method-assign]
+        side_effect=["product", "product"]
+    )
+    with pytest.raises(CompetitorPageValidationError, match="接口暂时返回 404"):
+        await client.confirm_product_page_absent(
+            "https://www.takealot.com/visible/PLID111",
+            "https://www.takealot.com/control/PLID222",
+        )
+
+
+@pytest.mark.parametrize(
+    ("status", "title", "headings", "expected"),
+    [
+        (200, "404, Page Not found", ["404, Page Not found"], "not-found"),
+        (
+            200,
+            "Product | Shop Today. Get it Tomorrow! | takealot.com",
+            ["", "Actual product title"],
+            "product",
+        ),
+        (404, "404, Page Not found", ["404, Page Not found"], "not-found"),
+        (200, "Takealot.com", [], "uncertain"),
+    ],
+)
+async def test_public_client_classifies_rendered_product_page(
+    status: int,
+    title: str,
+    headings: list[str],
+    expected: str,
+) -> None:
+    response = MagicMock()
+    response.status = status
+    locator = MagicMock()
+    locator.all_text_contents = AsyncMock(return_value=headings)
+    page = MagicMock()
+    page.goto = AsyncMock(return_value=response)
+    page.title = AsyncMock(return_value=title)
+    page.locator.return_value = locator
+    page.wait_for_timeout = AsyncMock()
+    client = CompetitorPublicClient()
+    client._page = page
+
+    assert await client._product_page_state(  # type: ignore[attr-defined]
+        "https://www.takealot.com/example/PLID123"
+    ) == expected
+
+
+async def test_collector_keeps_uncertain_page_validation_out_of_network_failures(
+    tmp_path: Path,
+) -> None:
+    client = MagicMock()
+    client.fetch_product = AsyncMock(side_effect=CompetitorNotFoundError())
+    client.confirm_product_page_absent = AsyncMock(
+        side_effect=CompetitorPageValidationError("页面复核结果不确定")
+    )
+    collector = CompetitorCollector(
+        engine=MagicMock(),
+        project_root=tmp_path,
+        client=client,
+    )
+    collector._latest_control_product = MagicMock(  # type: ignore[method-assign]
+        return_value=("222", "https://www.takealot.com/control/PLID222")
+    )
+
+    result = await collector.collect(
+        "https://www.takealot.com/example/PLID12345678",
+        with_stock_probe=False,
+    )
+
+    assert result.succeeded is False
+    assert result.retryable is True
+    assert result.failure_kind == "validation-uncertain"
+    assert result.message == "页面复核结果不确定"
+
+
+def test_link_health_requires_three_spaced_control_verified_404s() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    start = datetime(2026, 7, 27, tzinfo=UTC)
+    url = "https://www.takealot.com/missing/PLID111"
+
+    decisions = []
+    for checked_at in (
+        start,
+        start + timedelta(minutes=5),
+        start + timedelta(minutes=10),
+        start + timedelta(minutes=20),
+    ):
+        with Session(engine) as session, session.begin():
+            decisions.append(
+                CompetitorRepository(session).record_not_found(
+                    plid="111",
+                    url=url,
+                    checked_at=checked_at,
+                    control_plid="222",
+                    control_check_ok=True,
+                )
+            )
+
+    assert [decision.confirmed_not_found_count for decision in decisions] == [
+        1,
+        1,
+        2,
+        3,
+    ]
+    assert [decision.evidence_counted for decision in decisions] == [
+        True,
+        False,
+        True,
+        True,
+    ]
+    assert decisions[-1].status == "confirmed_invalid"
+    assert load_competitor_link_health(engine)[0]["status"] == "confirmed_invalid"
+
+    with Session(engine) as session, session.begin():
+        CompetitorRepository(session).mark_link_healthy(
+            plid="111",
+            url=url,
+            checked_at=start + timedelta(minutes=21),
+        )
+    with Session(engine) as session:
+        row = session.get(CompetitorLinkHealth, "111")
+        assert row is not None
+        assert row.status == "healthy"
+        assert row.confirmed_not_found_count == 0
+    assert load_competitor_link_health(engine) == []
+    engine.dispose()
 
 
 def test_parse_competitor_urls_deduplicates_by_plid() -> None:

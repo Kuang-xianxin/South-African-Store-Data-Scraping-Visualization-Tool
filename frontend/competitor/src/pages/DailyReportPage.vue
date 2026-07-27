@@ -1,22 +1,31 @@
 <script setup lang="ts">
-import { computed, ref, watch } from "vue";
+import { computed, nextTick, ref, watch } from "vue";
 
 import {
   confirmDailyReportEntry,
-  confirmReadyDailyReportEntries,
+  deleteDailyReportNote,
   dismissDailyReportStockAlert,
   fetchDailyReport,
   fetchDailyReportExport,
   generateDailyReportExport,
   saveDailyReportManual,
   saveDailyReportNote,
+  updateDailyReportNote,
 } from "../api";
 import { formatChinaDateTime } from "../time";
 import type {
   DailyReportExport,
   DailyReportItem,
+  DailyReportPendingAction,
   DailyReportPayload,
 } from "../types";
+
+type MatrixDailyReportItem =
+  DailyReportPayload["comparison_history"][number]["items"][number];
+type EditableDailyReportItem =
+  | DailyReportPendingAction
+  | (MatrixDailyReportItem & { business_date: string });
+type DailyReportNote = DailyReportItem["operator_notes"][number];
 
 const props = defineProps<{ asOf: string; canOperate?: boolean }>();
 const report = ref<DailyReportPayload | null>(null);
@@ -25,25 +34,71 @@ const loading = ref(false);
 const saving = ref(false);
 const message = ref("");
 const search = ref("");
-const filter = ref<"review" | "all" | "sales" | "stock">("review");
+const filter = ref<"review" | "all" | "sales" | "stock" | "missing">("all");
+const page = ref(1);
+const pageSize = 24;
+const slots = ["morning", "evening"] as const;
+const matrixScroll = ref<HTMLElement | null>(null);
 const editor = ref<{
-  mode: "manual" | "confirm" | "note" | "dismiss" | "bulk" | null;
-  item: DailyReportItem | null;
-}>({ mode: null, item: null });
+  mode: "manual" | "confirm" | "note" | "edit_note" | "dismiss" | null;
+  item: EditableDailyReportItem | null;
+  note: DailyReportNote | null;
+}>({ mode: null, item: null, note: null });
+const noteManager = ref<EditableDailyReportItem | null>(null);
 const form = ref({
   page_views_30_days: "",
   ordered_units: "",
   platform_stock: "",
   reason: "platform_delay",
-  source: "evening" as "morning" | "evening" | "manual",
+  source: "latest" as "morning" | "evening" | "latest" | "manual",
+  note_issue: "general" as
+    | "general"
+    | "capture_difference"
+    | "stock_continuity",
   note: "",
 });
 
 watch(() => props.asOf, load, { immediate: true });
 
+const comparisonHistory = computed(() => report.value?.comparison_history ?? []);
+const manualRuns = computed(
+  () => report.value?.runs.filter((run) => run.slot === "manual") ?? [],
+);
+const successfulManualRuns = computed(
+  () => manualRuns.value.filter((run) => run.status === "success"),
+);
+const latestManualRun = computed(
+  () => manualRuns.value[manualRuns.value.length - 1] ?? null,
+);
+const matrixBaseItems = computed(() => {
+  const itemsByOffer = new Map<
+    string,
+    DailyReportPayload["comparison_history"][number]["items"][number]
+  >();
+  for (const day of comparisonHistory.value) {
+    for (const item of day.items) itemsByOffer.set(item.offer_id, item);
+  }
+  for (const item of report.value?.items ?? []) {
+    itemsByOffer.set(item.offer_id, item);
+  }
+  return [...itemsByOffer.values()];
+});
+const comparisonLookup = computed(() => {
+  const result = new Map<
+    string,
+    Map<string, DailyReportPayload["comparison_history"][number]["items"][number]>
+  >();
+  for (const day of comparisonHistory.value) {
+    result.set(
+      day.business_date,
+      new Map(day.items.map((item) => [item.offer_id, item])),
+    );
+  }
+  return result;
+});
 const filteredItems = computed(() => {
   const term = search.value.trim().toLowerCase();
-  return (report.value?.items ?? []).filter((item) => {
+  return matrixBaseItems.value.filter((item) => {
     if (
       term &&
       !`${item.sku ?? ""} ${item.title} ${item.offer_id}`.toLowerCase().includes(term)
@@ -54,9 +109,32 @@ const filteredItems = computed(() => {
     if (filter.value === "stock") {
       return item.stock_check.mismatch && !item.stock_check.dismissed;
     }
-    if (filter.value === "review") return item.status !== "confirmed";
+    if (filter.value === "missing") return item.missing_capture;
+    if (filter.value === "review") {
+      return item.status === "needs_review";
+    }
     return true;
   });
+});
+const pageCount = computed(() =>
+  Math.max(1, Math.ceil(filteredItems.value.length / pageSize)),
+);
+const visibleItems = computed(() =>
+  filteredItems.value.slice((page.value - 1) * pageSize, page.value * pageSize),
+);
+const actionItems = computed(() => report.value?.pending_actions ?? []);
+const missingPageViewsCount = computed(
+  () =>
+    report.value?.items.filter((item) =>
+      item.missing_fields.includes("page_views_30_days"),
+    ).length ?? 0,
+);
+
+watch([search, filter], () => {
+  page.value = 1;
+});
+watch(pageCount, (count) => {
+  if (page.value > count) page.value = count;
 });
 
 async function load() {
@@ -67,6 +145,10 @@ async function load() {
       fetchDailyReport(props.asOf),
       fetchDailyReportExport(props.asOf),
     ]);
+    await nextTick();
+    if (matrixScroll.value) {
+      matrixScroll.value.scrollTop = matrixScroll.value.scrollHeight;
+    }
   } catch (error) {
     message.value = error instanceof Error ? error.message : "运营日报读取失败";
   } finally {
@@ -75,27 +157,39 @@ async function load() {
 }
 
 function openEditor(
-  mode: "manual" | "confirm" | "note" | "dismiss" | "bulk",
-  item: DailyReportItem | null = null,
+  mode: "manual" | "confirm" | "note" | "edit_note" | "dismiss",
+  item: EditableDailyReportItem | null = null,
+  note: DailyReportNote | null = null,
 ) {
-  editor.value = { mode, item };
+  editor.value = { mode, item, note };
   const current = item?.current;
+  const pendingItem = item && "review_issues" in item ? item : null;
   form.value = {
     page_views_30_days: toInput(current?.page_views_30_days),
     ordered_units: toInput(current?.ordered_units),
     platform_stock: toInput(current?.platform_stock),
     reason: "platform_delay",
-    source: item?.manual_note
+    source: pendingItem?.manual_note
       ? "manual"
-      : item?.evening
-        ? "evening"
-        : "morning",
-    note: "",
+      : pendingItem?.capture_versions.length
+        ? "latest"
+        : pendingItem?.evening
+          ? "evening"
+          : "morning",
+    note_issue: note?.issue_type ?? (
+      pendingItem && hasReviewIssue(pendingItem, "capture_difference")
+        ? "capture_difference"
+        : pendingItem && hasReviewIssue(pendingItem, "stock_continuity")
+          ? "stock_continuity"
+          : "general"
+    ),
+    note: note?.note ?? "",
   };
+  noteManager.value = null;
 }
 
 function closeEditor() {
-  editor.value = { mode: null, item: null };
+  editor.value = { mode: null, item: null, note: null };
 }
 
 async function submitEditor() {
@@ -106,7 +200,7 @@ async function submitEditor() {
   message.value = "";
   try {
     if (mode === "manual" && item) {
-      await saveDailyReportManual(props.asOf, item.offer_id, {
+      await saveDailyReportManual(item.business_date, item.offer_id, {
         page_views_30_days: parseInput(form.value.page_views_30_days),
         ordered_units: parseInput(form.value.ordered_units),
         platform_stock: parseInput(form.value.platform_stock),
@@ -116,7 +210,7 @@ async function submitEditor() {
       message.value = "人工候选值已保存并标记，仍需最终确认。";
     } else if (mode === "confirm" && item) {
       const result = await confirmDailyReportEntry(
-        props.asOf,
+        item.business_date,
         item.offer_id,
         form.value.source,
         form.value.note,
@@ -125,21 +219,61 @@ async function submitEditor() {
         ? "数据已确认；当天全部完成，Excel 已自动导出。"
         : "该商品已确认合并。";
     } else if (mode === "note" && item) {
-      await saveDailyReportNote(props.asOf, item.offer_id, form.value.note);
-      message.value = "异常备注已保存。";
+      await saveDailyReportNote(
+        item.business_date,
+        item.offer_id,
+        form.value.note,
+        form.value.note_issue,
+      );
+      message.value = "备注已新增，不会改变待办状态。";
+    } else if (mode === "edit_note" && item && editor.value.note) {
+      await updateDailyReportNote(
+        item.business_date,
+        item.offer_id,
+        editor.value.note.id,
+        form.value.note,
+        form.value.note_issue,
+      );
+      message.value = "备注已修改，原内容与修改记录已保留在审计中。";
     } else if (mode === "dismiss" && item) {
-      await dismissDailyReportStockAlert(props.asOf, item.offer_id, form.value.note);
-      message.value = "库存红色标记已取消，原因已留痕。";
-    } else if (mode === "bulk") {
-      const result = await confirmReadyDailyReportEntries(props.asOf, form.value.note);
-      message.value = result.exported
-        ? `已合并 ${result.confirmed} 个无差异商品，Excel 已自动导出。`
-        : `已合并 ${result.confirmed} 个无差异商品。`;
+      await dismissDailyReportStockAlert(
+        item.business_date,
+        item.offer_id,
+        form.value.note,
+      );
+      message.value = "库存连续性差异已人工确认，原因已留痕。";
     }
     closeEditor();
     await load();
   } catch (error) {
     message.value = error instanceof Error ? error.message : "保存失败";
+  } finally {
+    saving.value = false;
+  }
+}
+
+function openNoteManager(item: EditableDailyReportItem) {
+  noteManager.value = item;
+}
+
+function closeNoteManager() {
+  noteManager.value = null;
+}
+
+async function removeNote(item: EditableDailyReportItem, note: DailyReportNote) {
+  if (!props.canOperate || saving.value) return;
+  if (!window.confirm(`确定删除备注“${note.note}”吗？删除操作会保留审计记录。`)) {
+    return;
+  }
+  saving.value = true;
+  message.value = "";
+  try {
+    await deleteDailyReportNote(item.business_date, item.offer_id, note.id);
+    message.value = "备注已删除，删除操作已留痕。";
+    closeNoteManager();
+    await load();
+  } catch (error) {
+    message.value = error instanceof Error ? error.message : "删除备注失败";
   } finally {
     saving.value = false;
   }
@@ -161,11 +295,75 @@ async function runExport() {
 
 function statusLabel(status: DailyReportItem["status"]) {
   return {
-    awaiting_evening: "等待18:00",
-    ready: "无差异待合并",
+    awaiting_evening: "等待下一次拉取",
+    ready: "无差异已自动采用",
     needs_review: "数据有差异",
+    missing_capture: "漏爬已自动补缺",
     confirmed: "已确认",
   }[status];
+}
+
+function captureStatusLabel(slot: "morning" | "evening") {
+  const state = report.value?.capture_status[slot];
+  if (!state) return "未记录";
+  return {
+    success: `已采集 ${state.product_count} 个商品`,
+    failed: "采集失败",
+    missing: "未生成记录",
+    pending: "等待计划时间",
+  }[state.status];
+}
+
+function slotLabel(slot: "morning" | "evening") {
+  return slot === "morning" ? "10:05早间" : "18:00晚间";
+}
+
+function productLabel(item: { sku: string | null; offer_id: string }) {
+  return item.sku || item.offer_id;
+}
+
+function notesForIssue(
+  item: { operator_notes: DailyReportNote[] },
+  issueType: "general" | "capture_difference" | "stock_continuity",
+) {
+  return item.operator_notes.filter((note) => note.issue_type === issueType);
+}
+
+function hasReviewIssue(
+  item: DailyReportItem,
+  issueType: "capture_difference" | "stock_continuity",
+) {
+  return item.review_issues.some((issue) => issue.type === issueType);
+}
+
+function comparisonItem(businessDate: string, offerId: string) {
+  return comparisonLookup.value.get(businessDate)?.get(offerId);
+}
+
+function editableComparisonItem(
+  businessDate: string,
+  offerId: string,
+): EditableDailyReportItem | null {
+  const item = comparisonItem(businessDate, offerId);
+  return item ? { ...item, business_date: businessDate } : null;
+}
+
+function noteIssueLabel(issueType: DailyReportNote["issue_type"]) {
+  return {
+    general: "通用",
+    capture_difference: "版本",
+    stock_continuity: "库存",
+  }[issueType];
+}
+
+function matrixNoteText(item: MatrixDailyReportItem | undefined) {
+  if (!item) return "";
+  if (item.operator_notes.length) {
+    return item.operator_notes
+      .map((note) => `（${noteIssueLabel(note.issue_type)}：${note.note}）`)
+      .join(" ");
+  }
+  return item.operator_note ? `（${item.operator_note}）` : "";
 }
 
 function fieldLabel(key: string) {
@@ -176,12 +374,21 @@ function fieldLabel(key: string) {
   }[key] ?? key;
 }
 
-function manualReasonLabel(reason: string | null) {
+function stockContinuityText(item: DailyReportItem) {
+  const check = item.stock_check;
+  if (!check.mismatch || check.dismissed) return "";
+  return `库存连续性：${value(check.previous_stock)} − ${value(item.current.ordered_units)} = ${value(check.expected_stock)}，实际 ${value(check.actual_stock)}`;
+}
+
+function comparisonBeforeLabel(
+  state: "matched" | "mismatch" | "unavailable" | undefined,
+) {
+  if (!state) return "历史记录未保存当时状态";
   return {
-    platform_delay: "平台延迟人工值",
-    stock_adjustment: "库存核对人工值",
-    other: "其他人工值",
-  }[reason ?? ""] ?? "人工值";
+    matched: "当时相符",
+    mismatch: "当时按临时值也不相符",
+    unavailable: "当时因版本未定暂未计算",
+  }[state];
 }
 
 function value(value: number | null | undefined) {
@@ -202,10 +409,10 @@ function parseInput(value: string): number | null {
     <div class="page-intro">
       <div>
         <p class="section-kicker">DAILY RECONCILIATION</p>
-        <h2>早晚两版数据，由运营确认最终值</h2>
+        <h2>每日10:00至次日10:00，自动核对全部定时与手动拉取</h2>
       </div>
       <div class="daily-run-times">
-        <span>10:05 早间</span><i>→</i><span>18:00 晚间</span><i>→</i><span>18:30 待办快照</span>
+        <span>10:00 周期开始</span><i>→</i><span>10:05 / 18:00 定时</span><i>→</i><span>期间每次手动刷新</span>
       </div>
     </div>
 
@@ -219,36 +426,72 @@ function parseInput(value: string): number | null {
 
     <section class="daily-kpis">
       <article><small>商品</small><strong>{{ report?.counts.products ?? 0 }}</strong></article>
-      <article class="sales"><small>今日有销量</small><strong>{{ report?.counts.with_sales ?? 0 }}</strong></article>
-      <article class="review"><small>数据有差异</small><strong>{{ report?.counts.needs_review ?? 0 }}</strong></article>
-      <article><small>无差异待合并</small><strong>{{ report?.counts.ready ?? 0 }}</strong></article>
+      <article class="sales"><small>日报日有销量</small><strong>{{ report?.counts.with_sales ?? 0 }}</strong></article>
+      <article class="review"><small>人工核对待办</small><strong>{{ actionItems.length }}</strong></article>
+      <article class="missing">
+        <small>暂缺近30天浏览量</small>
+        <strong>{{ missingPageViewsCount }}<span> 个商品</span></strong>
+      </article>
       <article class="danger"><small>库存不平</small><strong>{{ report?.counts.stock_alerts ?? 0 }}</strong></article>
       <article class="confirmed"><small>已确认</small><strong>{{ report?.counts.confirmed ?? 0 }}</strong></article>
+    </section>
+
+    <section v-if="report?.capture_issues.length" class="capture-notice">
+      <div class="capture-notice-title">
+        <strong>数据完整性说明：{{ report.capture_issues.length }} 条</strong>
+        <span>漏爬不算冲突，系统按本周期最新非空版本自动补缺</span>
+      </div>
+      <details>
+        <summary>查看具体漏爬原因</summary>
+        <ul>
+          <li v-for="(issue, index) in report.capture_issues.slice(0, 8)" :key="`${issue.offer_id || issue.slot}-${index}`">
+            <b>{{ issue.slot === "morning" ? "早间" : issue.slot === "evening" ? "晚间" : issue.slot === "manual" ? "手动" : "字段" }}</b>
+            <span v-if="issue.sku">{{ issue.sku }}：</span>
+            {{ issue.reason }}
+          </li>
+        </ul>
+        <small v-if="report.capture_issues.length > 8">
+          另有 {{ report.capture_issues.length - 8 }} 条商品级说明，完整内容已写入 Excel 的“漏爬说明”工作表。
+        </small>
+      </details>
     </section>
 
     <section class="erp-panel daily-workspace">
       <div class="daily-toolbar">
         <div class="daily-run-state">
           <span
-            v-for="run in report?.runs ?? []"
-            :key="run.run_id"
-            :class="run.slot"
+            v-for="slot in slots"
+            :key="slot"
+            :class="[slot, report?.capture_status[slot].status]"
+            :title="report?.capture_status[slot].reason || ''"
           >
-            {{ run.slot === "morning" ? "早间" : "晚间" }}
-            {{ formatChinaDateTime(run.captured_at, "—") }}
+            {{ slot === "morning" ? "10:05 早间" : "18:00 晚间" }}：
+            {{ captureStatusLabel(slot) }}
+            <small v-if="report?.capture_status[slot].captured_at">
+              {{ formatChinaDateTime(report.capture_status[slot].captured_at, "—") }}
+            </small>
+            <em v-if="report?.capture_status[slot].recovered">
+              第{{ report.capture_status[slot].attempt_count }}次恢复
+            </em>
           </span>
-          <span v-if="!report?.runs.length">当天还没有日报采集版本</span>
+          <span
+            class="manual"
+            :class="{ failed: manualRuns.length > successfulManualRuns.length }"
+            :title="latestManualRun?.status === 'failed' ? String(latestManualRun.counts.missing_reason || '') : ''"
+          >
+            当前周期手动刷新：已核对 {{ successfulManualRuns.length }} 次
+            <small v-if="latestManualRun">
+              最近 {{ formatChinaDateTime(latestManualRun.captured_at, "—") }}
+            </small>
+            <em v-if="manualRuns.length > successfulManualRuns.length">
+              {{ manualRuns.length - successfulManualRuns.length }} 次失败已留日志
+            </em>
+          </span>
         </div>
         <div class="daily-actions">
           <button
-            :disabled="!props.canOperate || !report?.counts.ready"
-            @click="openEditor('bulk')"
-          >
-            批量合并无差异
-          </button>
-          <button
             class="action-button"
-            :disabled="!props.canOperate || saving || !report?.counts.products"
+            :disabled="!props.canOperate || saving || !matrixBaseItems.length"
             @click="runExport"
           >
             {{ exportState?.blocked ? `尚有 ${exportState.unresolved.length} 处未合并` : "导出 Excel" }}
@@ -256,6 +499,27 @@ function parseInput(value: string): number | null {
           <a v-if="exportState?.download_url" :href="exportState.download_url">下载已导出版本</a>
         </div>
       </div>
+
+      <details
+        v-if="slots.some((slot) => report?.capture_status[slot].attempts.length)"
+        class="capture-attempt-log"
+      >
+        <summary>查看采集保护与重试记录</summary>
+        <div v-for="slot in slots" :key="slot">
+          <template v-if="report?.capture_status[slot].attempts.length">
+            <strong>{{ slotLabel(slot) }}</strong>
+            <span
+              v-for="attempt in report.capture_status[slot].attempts"
+              :key="`${slot}-${attempt.attempt}`"
+              :class="attempt.status"
+            >
+              第{{ attempt.attempt }}次 · {{ attempt.strategy }} ·
+              {{ attempt.status === "success" ? "成功" : "失败" }} ·
+              {{ attempt.reason }}
+            </span>
+          </template>
+        </div>
+      </details>
 
       <div v-if="exportState?.blocked" class="export-blocker">
         <strong>现在不能导出</strong>
@@ -268,95 +532,406 @@ function parseInput(value: string): number | null {
       <div class="daily-filters">
         <input v-model="search" placeholder="搜索平台 SKU、商品名或 Offer ID" />
         <button :class="{ active: filter === 'review' }" @click="filter = 'review'">待处理</button>
+        <button :class="{ active: filter === 'missing' }" @click="filter = 'missing'">漏爬说明</button>
         <button :class="{ active: filter === 'sales' }" @click="filter = 'sales'">有销量</button>
         <button :class="{ active: filter === 'stock' }" @click="filter = 'stock'">库存不平</button>
         <button :class="{ active: filter === 'all' }" @click="filter = 'all'">全部</button>
       </div>
 
-      <div class="daily-table-wrap">
-        <table class="daily-table">
+      <div class="matrix-meta">
+        <div>
+          <strong>最近 {{ comparisonHistory.length }} 个有数据业务日</strong>
+          <span>一次完整显示5日；上下滑动查看更多日期，打开时定位到最新日期。</span>
+          <div class="matrix-legend">
+            <i class="date"></i>日期起始
+            <i class="sales"></i>当天有订单
+            <i class="stock"></i>库存公式不平
+            <i class="missing"></i>接口未提供
+          </div>
+        </div>
+        <div class="matrix-pages">
+          <button :disabled="page <= 1" @click="page -= 1">上一组</button>
+          <span>{{ page }} / {{ pageCount }}（共 {{ filteredItems.length }} 个商品）</span>
+          <button :disabled="page >= pageCount" @click="page += 1">下一组</button>
+        </div>
+      </div>
+      <div ref="matrixScroll" class="daily-matrix-wrap">
+        <table class="daily-matrix">
           <thead>
             <tr>
-              <th>商品</th>
-              <th>10:05 早间<br />订单 / 库存</th>
-              <th>18:00 晚间<br />订单 / 库存</th>
-              <th>人工候选<br />订单 / 库存</th>
-              <th>当前采用<br />订单 / 库存</th>
-              <th>库存核对</th>
-              <th>状态与操作</th>
+              <th class="metric-head">指标</th>
+              <th class="date-head">日期</th>
+              <th
+                v-for="item in visibleItems"
+                :key="item.offer_id"
+                class="matrix-product"
+                :class="{
+                  'has-conflict': item.status === 'needs_review',
+                  'has-missing': item.missing_capture,
+                }"
+                :title="`${item.title}\n${productLabel(item)}${item.missing_reason ? `\n${item.missing_reason}` : ''}`"
+              >
+                <strong>{{ item.title }}</strong>
+                <code>{{ productLabel(item) }}</code>
+              </th>
             </tr>
           </thead>
           <tbody>
-            <tr v-for="item in filteredItems" :key="item.offer_id">
-              <td class="product-cell">
-                <strong>{{ item.title }}</strong>
-                <code>{{ item.sku || item.offer_id }}</code>
-                <small>近30天浏览量 {{ value(item.current.page_views_30_days) }}</small>
-                <span v-if="item.operator_note">备注：{{ item.operator_note }}</span>
-              </td>
-              <td :class="{ 'sales-hit': Number(item.morning?.ordered_units || 0) > 0 }">
-                <strong>{{ value(item.morning?.ordered_units) }} / {{ value(item.morning?.platform_stock) }}</strong>
-              </td>
-              <td :class="{ 'sales-hit': Number(item.evening?.ordered_units || 0) > 0 }">
-                <strong>{{ value(item.evening?.ordered_units) }} / {{ value(item.evening?.platform_stock) }}</strong>
-              </td>
-              <td>
-                <strong>{{ value(item.manual?.ordered_units) }} / {{ value(item.manual?.platform_stock) }}</strong>
-                <em v-if="item.manual_note">{{ manualReasonLabel(item.manual_reason) }}</em>
-                <small v-if="item.manual_note">{{ item.manual_note }}</small>
-              </td>
-              <td
-                :class="{
-                  'sales-hit': Number(item.current.ordered_units || 0) > 0,
-                  'stock-value-mismatch': item.stock_check.mismatch && !item.stock_check.dismissed,
-                }"
-              >
-                <strong>{{ value(item.current.ordered_units) }} / {{ value(item.current.platform_stock) }}</strong>
-                <small v-if="item.differences.length">
-                  差异：{{ item.differences.map(fieldLabel).join("、") }}
-                </small>
-              </td>
-              <td
-                class="stock-check"
-                :class="{
-                  mismatch: item.stock_check.mismatch && !item.stock_check.dismissed,
-                  dismissed: item.stock_check.dismissed,
-                }"
-              >
-                <template v-if="item.stock_check.previous_stock !== null">
-                  <span>{{ item.stock_check.previous_stock }} - {{ item.current.ordered_units || 0 }}</span>
-                  <strong>= {{ item.stock_check.expected_stock }}</strong>
-                  <small>实际 {{ value(item.stock_check.actual_stock) }}</small>
-                </template>
-                <span v-else>缺少前一日库存</span>
-                <small v-if="item.stock_check.dismissed">已人工取消红标</small>
-              </td>
-              <td class="row-actions">
-                <span class="status-badge" :class="item.status">{{ statusLabel(item.status) }}</span>
-                <button v-if="props.canOperate" @click="openEditor('manual', item)">人工修改</button>
-                <button
-                  v-if="props.canOperate && item.status !== 'confirmed'"
-                  @click="openEditor('confirm', item)"
+            <template v-for="day in comparisonHistory" :key="day.business_date">
+              <tr class="visitor-total date-start">
+                <th>近30天浏览量</th>
+                <td class="matrix-date">{{ day.business_date }}</td>
+                <td
+                  v-for="item in visibleItems"
+                  :key="item.offer_id"
+                  :class="{ 'missing-value': comparisonItem(day.business_date, item.offer_id)?.current.page_views_30_days == null }"
+                  :title="comparisonItem(day.business_date, item.offer_id)?.missing_reason || ''"
                 >
-                  确认合并
-                </button>
-                <button v-if="props.canOperate" @click="openEditor('note', item)">加备注</button>
-                <button
-                  v-if="props.canOperate && item.stock_check.mismatch && !item.stock_check.dismissed"
-                  class="danger-link"
-                  @click="openEditor('dismiss', item)"
+                  {{ value(comparisonItem(day.business_date, item.offer_id)?.current.page_views_30_days) }}
+                </td>
+              </tr>
+              <tr>
+                <th>当天订单数</th>
+                <td></td>
+                <td
+                  v-for="item in visibleItems"
+                  :key="item.offer_id"
+                  :class="{ 'sales-hit': Number(comparisonItem(day.business_date, item.offer_id)?.current.ordered_units || 0) > 0 }"
                 >
-                  取消库存红标
-                </button>
-              </td>
-            </tr>
-            <tr v-if="!loading && !filteredItems.length">
-              <td colspan="7" class="empty-row">当前筛选没有商品。</td>
+                  {{ value(comparisonItem(day.business_date, item.offer_id)?.current.ordered_units) }}
+                </td>
+              </tr>
+              <tr>
+                <th>平台库存数量</th>
+                <td></td>
+                <td
+                  v-for="item in visibleItems"
+                  :key="item.offer_id"
+                  :class="{
+                    'stock-value-mismatch':
+                      comparisonItem(day.business_date, item.offer_id)?.stock_check.mismatch &&
+                      !comparisonItem(day.business_date, item.offer_id)?.stock_check.dismissed,
+                    'missing-value': comparisonItem(day.business_date, item.offer_id)?.current.platform_stock == null,
+                  }"
+                  :title="
+                    comparisonItem(day.business_date, item.offer_id)?.missing_reason ||
+                    comparisonItem(day.business_date, item.offer_id)?.stock_check.note ||
+                    ''
+                  "
+                >
+                  {{ value(comparisonItem(day.business_date, item.offer_id)?.current.platform_stock) }}
+                </td>
+              </tr>
+              <tr class="date-end matrix-note-row">
+                <th>备注</th>
+                <td></td>
+                <td
+                  v-for="item in visibleItems"
+                  :key="item.offer_id"
+                  class="matrix-note-cell"
+                  :title="matrixNoteText(comparisonItem(day.business_date, item.offer_id))"
+                >
+                  <button
+                    v-if="
+                      props.canOperate &&
+                      editableComparisonItem(day.business_date, item.offer_id)
+                    "
+                    type="button"
+                    class="matrix-note-manager"
+                    @click="
+                      openNoteManager(
+                        editableComparisonItem(day.business_date, item.offer_id)!,
+                      )
+                    "
+                  >
+                    <span v-if="matrixNoteText(comparisonItem(day.business_date, item.offer_id))">
+                      {{ matrixNoteText(comparisonItem(day.business_date, item.offer_id)) }}
+                    </span>
+                    <span v-else class="empty-note">＋ 添加备注</span>
+                  </button>
+                  <span v-else-if="matrixNoteText(comparisonItem(day.business_date, item.offer_id))">
+                    {{ matrixNoteText(comparisonItem(day.business_date, item.offer_id)) }}
+                  </span>
+                  <span v-else>—</span>
+                </td>
+              </tr>
+            </template>
+            <tr v-if="!loading && !visibleItems.length">
+              <td colspan="3" class="empty-row">当前筛选没有商品。</td>
             </tr>
           </tbody>
         </table>
       </div>
     </section>
+
+    <section class="erp-panel review-panel">
+      <div class="review-title">
+        <div>
+          <p class="section-kicker">全部未处理核对</p>
+          <h3>人工核对待办</h3>
+        </div>
+        <span>
+          包含同一日报日内多次拉取差异和前后日报日库存连续性差异；每张卡只显示该日期所属周期的版本，顶部手动次数只统计当前周期
+        </span>
+      </div>
+      <div v-if="actionItems.length" class="review-list">
+        <article
+          v-for="item in actionItems"
+          :key="`${item.business_date}-${item.offer_id}`"
+        >
+          <div class="review-product">
+            <strong>{{ item.title }}</strong>
+            <code>{{ productLabel(item) }}</code>
+            <small>{{ item.business_date }}</small>
+            <span class="status-badge" :class="item.status">{{ statusLabel(item.status) }}</span>
+          </div>
+          <div class="review-issues">
+            <section
+              v-if="hasReviewIssue(item, 'capture_difference')"
+              class="review-issue capture-issue"
+            >
+              <header>
+                <strong>同周期版本差异</strong>
+                <span>只确认各次拉取发生的变化，不计算库存连续性</span>
+              </header>
+              <div
+                v-for="field in item.differences"
+                :key="field"
+                class="issue-field-values"
+              >
+                <b>{{ fieldLabel(field) }}</b>
+                <span
+                  v-for="(version, versionIndex) in item.review_versions"
+                  :key="`${field}-${version.kind}-${version.run_id || versionIndex}`"
+                  :class="{ 'confirmed-version': version.kind === 'confirmed' }"
+                >
+                  {{ version.label }}：{{ value(version.values[field]) }}
+                  <small v-if="version.kind === 'confirmed'">
+                    {{ version.source_label }} · {{ version.user_name }} · 北京时间
+                    {{ formatChinaDateTime(version.captured_at, "—") }}
+                  </small>
+                </span>
+              </div>
+              <div v-if="item.manual_note" class="issue-note">
+                人工修改备注：{{ item.manual_note }}
+              </div>
+              <div
+                v-for="note in notesForIssue(item, 'capture_difference')"
+                :key="note.id"
+                class="issue-note"
+              >
+                <span>
+                  {{ note.user_name }} · 北京时间
+                  {{ formatChinaDateTime(note.created_at, "—") }}：
+                  {{ note.note }}
+                  <small v-if="note.updated_at">
+                    （{{ note.updated_by || "未知操作人" }} 于北京时间
+                    {{ formatChinaDateTime(note.updated_at, "—") }}修改）
+                  </small>
+                </span>
+                <span v-if="props.canOperate" class="note-actions">
+                  <button type="button" @click="openEditor('edit_note', item, note)">修改</button>
+                  <button type="button" class="danger-link" @click="removeNote(item, note)">删除</button>
+                </span>
+              </div>
+            </section>
+
+            <section
+              v-if="hasReviewIssue(item, 'stock_continuity')"
+              class="review-issue stock-issue"
+            >
+              <header>
+                <strong>前后日报日库存连续性</strong>
+                <span>这里只比较前一日报日与当前日报日</span>
+              </header>
+              <div class="stock-formula-data">
+                <span>
+                  前一日报日：{{ item.stock_context?.business_date || "—" }}，
+                  库存 {{ value(item.stock_check.previous_stock) }}
+                </span>
+                <small>
+                  {{ item.stock_context?.source_label || "没有可用的前一日报日库存" }}
+                  <template v-if="item.stock_context?.capture_label">
+                    · {{ item.stock_context.capture_label }}
+                  </template>
+                </small>
+                <small v-if="item.stock_context?.confirmed_by">
+                  前一日报日确认：{{ item.stock_context.confirmed_by }} · 北京时间
+                  {{ formatChinaDateTime(item.stock_context.confirmed_at, "—") }}
+                  <template v-if="item.stock_context.confirm_note">
+                    · {{ item.stock_context.confirm_note }}
+                  </template>
+                </small>
+                <span>
+                  当前日报日：{{ item.business_date }}，订单
+                  {{ value(item.current.ordered_units) }}，应有库存
+                  {{ value(item.stock_check.expected_stock) }}，实际库存
+                  {{ value(item.stock_check.actual_stock) }}
+                </span>
+                <strong>{{ stockContinuityText(item) }}</strong>
+              </div>
+              <div v-if="item.confirmation_trigger" class="propagated-conflict">
+                <strong>{{ item.confirmation_trigger.message }}</strong>
+                <span>
+                  前一日确认：{{ item.confirmation_trigger.confirmation_source_label }} /
+                  {{ item.confirmation_trigger.confirmed_by || "未知操作人" }} /
+                  {{ formatChinaDateTime(item.confirmation_trigger.confirmed_at, "—") }}
+                </span>
+                <span>确认备注：{{ item.confirmation_trigger.confirmation_note }}</span>
+                <span>
+                  确认前：{{ value(item.confirmation_trigger.previous_stock_before_confirmation) }}
+                  − {{ value(item.confirmation_trigger.current_ordered_units) }}
+                  = {{ value(item.confirmation_trigger.expected_stock_before_confirmation) }}，
+                  实际 {{ value(item.confirmation_trigger.actual_stock) }}（{{
+                    comparisonBeforeLabel(item.confirmation_trigger.comparison_before_state)
+                  }}）
+                </span>
+                <span>
+                  确认后：{{ value(item.confirmation_trigger.confirmed_previous_stock) }}
+                  − {{ value(item.confirmation_trigger.current_ordered_units) }}
+                  = {{ value(item.confirmation_trigger.expected_stock_after_confirmation) }}，
+                  实际 {{ value(item.confirmation_trigger.actual_stock) }}（产生冲突）
+                </span>
+                <span v-if="item.confirmation_trigger.affected_previous_final">
+                  本待办此前确认值：订单
+                  {{ value(item.confirmation_trigger.affected_previous_final.ordered_units) }} /
+                  库存 {{ value(item.confirmation_trigger.affected_previous_final.platform_stock) }}；
+                  {{ item.confirmation_trigger.affected_previous_confirmed_by || "未知操作人" }}
+                  于
+                  {{ formatChinaDateTime(item.confirmation_trigger.affected_previous_confirmed_at, "—") }}
+                  确认，备注：{{ item.confirmation_trigger.affected_previous_confirm_note || "—" }}
+                </span>
+              </div>
+              <div
+                v-for="note in notesForIssue(item, 'stock_continuity')"
+                :key="note.id"
+                class="issue-note"
+              >
+                <span>
+                  {{ note.user_name }} · 北京时间
+                  {{ formatChinaDateTime(note.created_at, "—") }}：
+                  {{ note.note }}
+                  <small v-if="note.updated_at">
+                    （{{ note.updated_by || "未知操作人" }} 于北京时间
+                    {{ formatChinaDateTime(note.updated_at, "—") }}修改）
+                  </small>
+                </span>
+                <span v-if="props.canOperate" class="note-actions">
+                  <button type="button" @click="openEditor('edit_note', item, note)">修改</button>
+                  <button type="button" class="danger-link" @click="removeNote(item, note)">删除</button>
+                </span>
+              </div>
+            </section>
+
+            <section
+              v-if="
+                notesForIssue(item, 'general').length ||
+                (item.operator_note && !item.operator_notes.length)
+              "
+              class="review-issue note-issue"
+            >
+              <header><strong>独立备注记录</strong></header>
+              <div
+                v-for="note in notesForIssue(item, 'general')"
+                :key="note.id"
+                class="issue-note"
+              >
+                <span>
+                  {{ note.user_name }} · 北京时间
+                  {{ formatChinaDateTime(note.created_at, "—") }}：
+                  {{ note.note }}
+                  <small v-if="note.updated_at">
+                    （{{ note.updated_by || "未知操作人" }} 于北京时间
+                    {{ formatChinaDateTime(note.updated_at, "—") }}修改）
+                  </small>
+                </span>
+                <span v-if="props.canOperate" class="note-actions">
+                  <button type="button" @click="openEditor('edit_note', item, note)">修改</button>
+                  <button type="button" class="danger-link" @click="removeNote(item, note)">删除</button>
+                </span>
+              </div>
+              <div v-if="item.operator_note && !item.operator_notes.length" class="issue-note">
+                历史备注：{{ item.operator_note }}
+              </div>
+            </section>
+          </div>
+          <div class="row-actions">
+            <button v-if="props.canOperate" @click="openEditor('manual', item)">人工修改</button>
+            <button
+              v-if="props.canOperate && hasReviewIssue(item, 'capture_difference')"
+              @click="openEditor('confirm', item)"
+            >
+              确认合并
+            </button>
+            <button v-if="props.canOperate" @click="openEditor('note', item)">单独加备注</button>
+            <button
+              v-if="props.canOperate && hasReviewIssue(item, 'stock_continuity')"
+              class="danger-link"
+              @click="openEditor('dismiss', item)"
+            >
+              确认库存差异
+            </button>
+          </div>
+        </article>
+      </div>
+      <div v-else class="review-empty">
+        截至 {{ props.asOf }} 没有未处理的采集版本差异或库存连续性差异。
+      </div>
+    </section>
+
+    <div
+      v-if="noteManager"
+      class="daily-modal-backdrop"
+      @click.self="closeNoteManager"
+    >
+      <section class="daily-modal note-manager-modal">
+        <p class="section-kicker">DATE NOTE</p>
+        <h3>{{ noteManager.business_date }} 备注</h3>
+        <p class="modal-product">
+          {{ noteManager.title }} · {{ noteManager.sku || noteManager.offer_id }}
+        </p>
+        <div v-if="noteManager.operator_notes.length" class="note-manager-list">
+          <article v-for="note in noteManager.operator_notes" :key="note.id">
+            <div>
+              <strong>{{ noteIssueLabel(note.issue_type) }}备注</strong>
+              <p>（{{ note.note }}）</p>
+              <small>
+                {{ note.user_name }} · 北京时间
+                {{ formatChinaDateTime(note.created_at, "—") }}
+                <template v-if="note.updated_at">
+                  · {{ note.updated_by || "未知操作人" }} 于
+                  {{ formatChinaDateTime(note.updated_at, "—") }}修改
+                </template>
+              </small>
+            </div>
+            <div v-if="props.canOperate" class="note-manager-actions">
+              <button type="button" @click="openEditor('edit_note', noteManager, note)">
+                修改
+              </button>
+              <button
+                type="button"
+                class="danger-link"
+                @click="removeNote(noteManager, note)"
+              >
+                删除
+              </button>
+            </div>
+          </article>
+        </div>
+        <p v-else class="review-empty">这个日期和商品还没有备注。</p>
+        <div class="modal-actions">
+          <button type="button" @click="closeNoteManager">关闭</button>
+          <button
+            v-if="props.canOperate"
+            type="button"
+            class="action-button"
+            @click="openEditor('note', noteManager)"
+          >
+            新增备注
+          </button>
+        </div>
+      </section>
+    </div>
 
     <div v-if="editor.mode" class="daily-modal-backdrop" @click.self="closeEditor">
       <form class="daily-modal" @submit.prevent="submitEditor">
@@ -368,14 +943,15 @@ function parseInput(value: string): number | null {
               : editor.mode === "confirm"
                 ? "确认最终采用值"
                 : editor.mode === "dismiss"
-                  ? "取消库存红色标记"
-                  : editor.mode === "bulk"
-                    ? "批量合并无差异商品"
-                    : "记录异常备注"
+                  ? "确认库存连续性差异"
+                  : editor.mode === "edit_note"
+                    ? "修改备注"
+                    : "新增备注"
           }}
         </h3>
         <p v-if="editor.item" class="modal-product">
-          {{ editor.item.title }} · {{ editor.item.sku || editor.item.offer_id }}
+          {{ editor.item.business_date }} · {{ editor.item.title }} ·
+          {{ editor.item.sku || editor.item.offer_id }}
         </p>
         <div v-if="editor.mode === 'manual'" class="manual-grid">
           <label>近30天浏览量<input v-model="form.page_views_30_days" type="number" min="0" /></label>
@@ -393,13 +969,30 @@ function parseInput(value: string): number | null {
         <label v-if="editor.mode === 'confirm'">
           最终采用
           <select v-model="form.source">
+            <option value="latest">本周期最新拉取值</option>
             <option value="morning">10:05 早间值</option>
             <option value="evening">18:00 晚间值</option>
             <option value="manual">人工候选值</option>
           </select>
         </label>
+        <label v-if="editor.mode === 'note' || editor.mode === 'edit_note'">
+          备注关联问题
+          <select v-model="form.note_issue">
+            <option value="general">整条待办的通用备注</option>
+            <option value="capture_difference">同周期版本差异</option>
+            <option value="stock_continuity">前后日报日库存连续性</option>
+          </select>
+        </label>
         <label>
-          {{ editor.mode === "confirm" || editor.mode === "bulk" ? "合并备注（必填）" : "操作备注（必填）" }}
+          {{
+            editor.mode === "confirm"
+              ? "合并备注（必填）"
+              : editor.mode === "note"
+                ? "新增备注内容（必填）"
+                : editor.mode === "edit_note"
+                  ? "修改后的备注内容（必填）"
+                  : "操作备注（必填）"
+          }}
           <textarea v-model="form.note" required maxlength="2000"></textarea>
         </label>
         <div class="modal-actions">
@@ -414,7 +1007,14 @@ function parseInput(value: string): number | null {
 </template>
 
 <style scoped>
-.daily-report-page { display: grid; gap: 18px; }
+.daily-report-page {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  width: 100%;
+  min-width: 0;
+  gap: 18px;
+}
+.daily-report-page > * { width: 100%; min-width: 0; max-width: 100%; }
 .daily-run-times { display: flex; align-items: center; gap: 10px; color: #506158; font-size: 12px; }
 .daily-run-times span { padding: 8px 11px; border: 1px solid #d9e1db; border-radius: 999px; background: #f9fbf8; }
 .daily-run-times i { color: #9aa79f; font-style: normal; }
@@ -428,43 +1028,128 @@ function parseInput(value: string): number | null {
 .daily-kpis strong { margin-top: 4px; color: #28473b; font-size: 23px; }
 .daily-kpis .sales strong { color: #bb622a; }
 .daily-kpis .review strong, .daily-kpis .danger strong { color: #bf4e3b; }
+.daily-kpis .missing strong { color: #a06613; }
+.daily-kpis .missing strong span { font-size: 11px; font-weight: 500; }
 .daily-kpis .confirmed strong { color: #1e7954; }
+.capture-notice { padding: 12px 16px; border: 1px solid #e0c27b; border-left: 5px solid #d6a42b; border-radius: 12px; background: #fff9e8; color: #6e5317; }
+.capture-notice-title { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 8px 18px; }
+.capture-notice-title span, .capture-notice small { color: #856f39; font-size: 11px; }
+.capture-notice details { margin-top: 7px; }
+.capture-notice summary { width: fit-content; cursor: pointer; color: #765716; font-size: 11px; font-weight: 700; }
+.capture-notice ul { display: grid; gap: 5px; margin: 9px 0 4px; padding-left: 19px; font-size: 12px; line-height: 1.55; }
+.capture-notice li b { display: inline-block; min-width: 38px; }
 .daily-workspace { overflow: hidden; }
 .daily-toolbar { display: flex; justify-content: space-between; gap: 16px; padding: 18px 20px; border-bottom: 1px solid #e0e5e1; }
 .daily-run-state, .daily-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 9px; }
 .daily-run-state span { padding: 6px 9px; border-radius: 7px; background: #edf2ee; color: #52635a; font-size: 11px; }
 .daily-run-state span.morning { border-left: 3px solid #3c8abb; }
 .daily-run-state span.evening { border-left: 3px solid #d46b32; }
+.daily-run-state span.manual { border-left: 3px solid #7457a8; }
+.daily-run-state span.failed, .daily-run-state span.missing { background: #fff3d8; color: #835d0f; }
+.daily-run-state span.pending { background: #eef3f7; color: #597081; }
+.daily-run-state small { display: block; margin-top: 2px; opacity: .72; }
 .daily-actions button, .daily-actions a, .row-actions button, .daily-filters button { border: 1px solid #d4ddd6; border-radius: 7px; background: #fff; color: #315245; padding: 7px 10px; cursor: pointer; font-size: 11px; text-decoration: none; }
 .daily-actions button:disabled { cursor: not-allowed; opacity: .48; }
 .export-blocker { display: flex; gap: 12px; padding: 11px 20px; background: #fff1ee; color: #9c3d2d; font-size: 12px; }
 .daily-filters { display: flex; gap: 7px; padding: 12px 20px; border-bottom: 1px solid #e0e5e1; }
 .daily-filters input { flex: 1; min-width: 220px; padding: 9px 11px; border: 1px solid #d4ddd6; border-radius: 8px; background: #f5f8f5; }
 .daily-filters button.active { border-color: #1e5d43; background: #1e5d43; color: white; }
-.daily-table-wrap { overflow: auto; max-height: 62vh; }
-.daily-table { width: 100%; min-width: 1220px; border-collapse: separate; border-spacing: 0; font-size: 12px; }
-.daily-table th { position: sticky; top: 0; z-index: 3; padding: 11px 10px; border-bottom: 1px solid #cfd9d2; background: #edf2ee; color: #4b5b53; text-align: center; }
-.daily-table td { padding: 11px 10px; border-bottom: 1px solid #e5e9e6; background: rgba(255,255,255,.72); text-align: center; vertical-align: middle; }
-.daily-table tbody tr:hover td { background: #f4f8f4; }
-.daily-table td.sales-hit { background: #fce4d6; color: #8c3d16; }
-.product-cell { width: 280px; text-align: left !important; }
-.product-cell strong, .product-cell code, .product-cell small, .product-cell span { display: block; }
-.product-cell strong { max-width: 280px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.product-cell code { margin: 4px 0; color: #1e5d43; font-size: 11px; }
-.product-cell small { color: #7b8780; }
-.product-cell span { margin-top: 5px; color: #a14d2b; font-size: 10px; }
-.daily-table td > small { display: block; margin-top: 5px; color: #8a6250; }
-.daily-table td > em { display: block; width: fit-content; margin: 5px auto 0; padding: 3px 6px; border-radius: 5px; background: #ffe8ca; color: #92560e; font-size: 9px; font-style: normal; }
-.daily-table td.stock-value-mismatch { background: #ffc7ce !important; color: #8d1f28; }
-.stock-check span, .stock-check strong, .stock-check small { display: block; }
-.stock-check.mismatch { background: #ffc7ce !important; color: #8d1f28; }
-.stock-check.dismissed { background: #f2f3ef !important; color: #6f766d; text-decoration: line-through; }
-.row-actions { width: 190px; }
+.matrix-meta { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 13px 20px; border-bottom: 1px solid #d9dedb; background: #fbfcfa; }
+.matrix-meta strong, .matrix-meta span { display: block; }
+.matrix-meta strong { color: #263f35; }
+.matrix-meta span { margin-top: 3px; color: #718077; font-size: 11px; }
+.matrix-legend { display: flex; flex-wrap: wrap; gap: 5px 13px; margin-top: 7px; color: #65746b; font-size: 10px; }
+.matrix-legend i { width: 11px; height: 11px; margin-right: -8px; border: 1px solid rgba(39, 57, 48, .14); border-radius: 2px; }
+.matrix-legend .date { background: #d9e5f5; }
+.matrix-legend .sales { background: #fce4d6; }
+.matrix-legend .stock { background: #ffc7ce; }
+.matrix-legend .missing { background: #f5f1e8; }
+.matrix-pages { display: flex; align-items: center; gap: 9px; white-space: nowrap; }
+.matrix-pages button { padding: 6px 9px; border: 1px solid #cfd8d2; border-radius: 6px; background: white; color: #315245; cursor: pointer; }
+.matrix-pages button:disabled { cursor: not-allowed; opacity: .4; }
+.daily-matrix-wrap {
+  --daily-data-row-height: 38px;
+  --daily-note-row-height: 52px;
+  --daily-header-height: 64px;
+  overflow: auto;
+  max-height: calc(
+    var(--daily-header-height) +
+    15 * var(--daily-data-row-height) +
+    5 * var(--daily-note-row-height)
+  );
+  background: white;
+}
+.daily-matrix { width: max-content; min-width: 100%; border-collapse: separate; border-spacing: 0; font-family: "SimSun", "宋体", serif; font-size: 13px; table-layout: fixed; }
+.daily-matrix th, .daily-matrix td { box-sizing: border-box; min-width: 158px; max-width: 158px; height: var(--daily-data-row-height); padding: 5px 9px; border-right: 1px solid #d7dad8; border-bottom: 1px solid #d7dad8; text-align: center; vertical-align: middle; }
+.daily-matrix thead th { position: sticky; top: 0; z-index: 5; height: var(--daily-header-height); border-color: #474747; background: #ffff00; color: #202020; font-weight: 400; }
+.daily-matrix .metric-head, .daily-matrix tbody th { position: sticky; left: 0; z-index: 7; min-width: 170px; max-width: 170px; }
+.daily-matrix .date-head, .daily-matrix tbody td:first-of-type { position: sticky; left: 188px; z-index: 6; min-width: 138px; max-width: 138px; }
+.daily-matrix tbody th, .daily-matrix tbody td:first-of-type { background: #fff; font-weight: 400; }
+.daily-matrix .visitor-total th, .daily-matrix .visitor-total td { background: #d9e5f5; }
+.daily-matrix tbody .visitor-total td:first-of-type { background: #d9e5f5; }
+.daily-matrix .date-start > * { border-top: 3px solid #7898b6; }
+.daily-matrix .date-end > * { border-bottom: 2px solid #a7b3ac; }
+.daily-matrix .matrix-date { color: #294d70; font-weight: 700; }
+.daily-matrix tbody tr:hover td { outline: 1px solid rgba(33, 93, 67, .22); outline-offset: -1px; }
+.matrix-product { font-family: "Microsoft YaHei UI", "微软雅黑", sans-serif; }
+.matrix-product strong { display: -webkit-box; overflow: hidden; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-height: 1.22; font-weight: 500; }
+.matrix-product code { display: block; overflow: hidden; margin-top: 4px; font-family: inherit; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.matrix-product.has-conflict { box-shadow: inset 0 5px #c94d3d; }
+.matrix-product.has-missing:not(.has-conflict) { box-shadow: inset 0 5px #d6a42b; }
+.daily-matrix td.sales-hit { background: #fce4d6; color: #6a391d; }
+.daily-matrix td.stock-value-mismatch { background: #ffc7ce; color: #8d1f28; font-weight: 700; }
+.daily-matrix td.missing-value { background: #f5f1e8; color: #8b7952; }
+.daily-matrix .matrix-note-row > * { height: var(--daily-note-row-height); background: #f8faf8; }
+.daily-matrix .matrix-note-row th { color: #53685d; font-weight: 700; }
+.matrix-note-cell { color: #596a61; font-family: "Microsoft YaHei UI", "微软雅黑", sans-serif; font-size: 10px; line-height: 1.35; }
+.matrix-note-manager { width: 100%; max-width: 100%; padding: 4px 5px; border: 1px solid #d8e0da; border-radius: 6px; background: #fff; color: #596a61; cursor: pointer; font: inherit; line-height: inherit; }
+.matrix-note-manager > span:not(.empty-note) { display: -webkit-box; overflow: hidden; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow-wrap: anywhere; }
+.matrix-note-manager .empty-note { color: #6f8277; }
+.review-panel { overflow: hidden; padding: 18px 20px; }
+.review-title { display: flex; flex-wrap: wrap; align-items: end; justify-content: space-between; gap: 12px; }
+.review-title h3 { margin: 0; }
+.review-title > span { color: #7c8981; font-size: 11px; }
+.review-list { display: grid; grid-template-columns: minmax(0, 1fr); gap: 9px; margin-top: 14px; }
+.review-list article { display: grid; grid-template-columns: minmax(0, 1.2fr) minmax(0, 2fr) minmax(160px, 190px); align-items: center; gap: 16px; min-width: 0; padding: 12px 14px; border: 1px solid #dfe5e0; border-radius: 10px; background: #fbfcfa; }
+.review-product, .review-issues { min-width: 0; }
+.review-product strong, .review-product code, .review-product small { display: block; }
+.review-product strong { overflow-wrap: anywhere; }
+.review-product code { margin: 3px 0 5px; color: #1e5d43; font-size: 11px; }
+.review-product small { margin-bottom: 5px; color: #7b8780; }
+.review-issues { display: grid; gap: 9px; }
+.review-issue { min-width: 0; padding: 10px 11px; border-radius: 8px; background: #f0f4f1; }
+.review-issue header { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 5px 12px; }
+.review-issue header strong { color: #315245; font-size: 12px; }
+.review-issue header span { color: #748178; font-size: 9px; }
+.review-issue.capture-issue { border-left: 4px solid #7d62a8; background: #f5f1fa; }
+.review-issue.stock-issue { border-left: 4px solid #c94d3d; background: #fff0ed; }
+.review-issue.note-issue { border-left: 4px solid #768a7e; }
+.issue-field-values { display: grid; grid-template-columns: minmax(100px, .5fr) repeat(auto-fit, minmax(160px, 1fr)); gap: 4px 9px; margin-top: 7px; color: #596a61; font-size: 11px; line-height: 1.45; }
+.issue-field-values b { color: #4b3966; }
+.issue-field-values span { min-width: 0; padding: 4px 6px; border-radius: 5px; }
+.issue-field-values span small { display: block; margin-top: 2px; color: #786d80; font-size: 9px; overflow-wrap: anywhere; }
+.issue-field-values span.confirmed-version { background: #e9e1f2; color: #4b3966; font-weight: 700; }
+.stock-formula-data { display: grid; gap: 4px; margin-top: 7px; font-size: 11px; line-height: 1.5; }
+.stock-formula-data span, .stock-formula-data small, .stock-formula-data strong { display: block; }
+.stock-formula-data small { color: #7a6d67; }
+.stock-formula-data strong { color: #9c3d2d; }
+.propagated-conflict { margin-top: 8px; padding: 8px 9px; border: 1px solid #e8ad7d; border-left: 4px solid #d46b32; border-radius: 7px; background: #fff6ed; color: #714126; font-size: 10px; line-height: 1.5; }
+.propagated-conflict > strong, .propagated-conflict span { display: block; }
+.propagated-conflict > strong { margin-bottom: 5px; color: #a23f1d; }
+.issue-note { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; margin-top: 7px; padding: 6px 8px; border-radius: 6px; background: rgba(255, 255, 255, .72); color: #596a61; font-size: 10px; line-height: 1.5; overflow-wrap: anywhere; }
+.issue-note > span:first-child { min-width: 0; }
+.issue-note small { color: #7a867f; }
+.note-actions { display: flex; flex: 0 0 auto; gap: 4px; }
+.note-actions button, .note-manager-actions button { padding: 3px 6px; border: 1px solid #cfd9d2; border-radius: 5px; background: #fff; color: #315245; cursor: pointer; font-size: 9px; }
+.note-actions button.danger-link, .note-manager-actions button.danger-link { border-color: #e3a294; color: #ad442f; }
+.review-empty { margin-top: 14px; padding: 20px; border: 1px dashed #ccd8d0; border-radius: 10px; color: #718077; text-align: center; }
+.row-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; width: auto; min-width: 0; }
 .row-actions button { margin: 3px; padding: 5px 7px; }
 .row-actions button.danger-link { border-color: #e3a294; color: #ad442f; }
 .status-badge { display: block; width: fit-content; margin: 0 auto 5px; padding: 4px 7px; border-radius: 999px; background: #e8ece9; color: #536159; font-size: 10px; }
 .status-badge.needs_review { background: #ffe2dc; color: #a63d2d; }
 .status-badge.ready { background: #fff1d6; color: #8a5a0d; }
+.status-badge.missing_capture { background: #fff1c9; color: #775611; }
 .status-badge.confirmed { background: #dff2e7; color: #236446; }
 .empty-row { padding: 50px !important; color: #7a8880; }
 .daily-modal-backdrop { position: fixed; inset: 0; z-index: 50; display: grid; place-items: center; padding: 20px; background: rgba(13, 35, 26, .48); backdrop-filter: blur(3px); }
@@ -474,12 +1159,28 @@ function parseInput(value: string): number | null {
 .daily-modal label { display: grid; gap: 6px; margin-top: 13px; color: #4e5f56; font-size: 11px; }
 .daily-modal input, .daily-modal select, .daily-modal textarea { width: 100%; padding: 9px 10px; border: 1px solid #d1dad4; border-radius: 8px; background: white; }
 .daily-modal textarea { min-height: 100px; font-family: inherit; line-height: 1.5; }
+.note-manager-modal { width: min(680px, 100%); }
+.note-manager-list { display: grid; gap: 8px; margin-top: 15px; }
+.note-manager-list article { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; padding: 10px 11px; border: 1px solid #dce3de; border-radius: 8px; background: white; }
+.note-manager-list article > div:first-child { min-width: 0; }
+.note-manager-list strong, .note-manager-list small { display: block; }
+.note-manager-list p { margin: 5px 0; color: #4f6258; overflow-wrap: anywhere; }
+.note-manager-list small { color: #7a877f; font-size: 9px; }
+.note-manager-actions { display: flex; flex: 0 0 auto; gap: 5px; }
+.capture-attempt-log { margin: 0 0 13px; padding: 11px 14px; border: 1px solid #d7e0da; border-radius: 10px; background: #f7faf8; }
+.capture-attempt-log summary { cursor: pointer; color: #385346; font-size: 12px; font-weight: 700; }
+.capture-attempt-log > div { display: grid; grid-template-columns: 120px minmax(0, 1fr); gap: 6px 12px; margin-top: 10px; }
+.capture-attempt-log strong { color: #466055; font-size: 11px; }
+.capture-attempt-log span { overflow-wrap: anywhere; color: #64746b; font-size: 11px; }
+.capture-attempt-log span.failed { color: #9b4039; }
+.daily-run-state em { display: block; color: #9a6420; font-size: 10px; font-style: normal; font-weight: 700; }
 .manual-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 0 12px; }
 .modal-actions { display: flex; justify-content: flex-end; gap: 9px; margin-top: 18px; }
 .modal-actions button { padding: 9px 15px; border: 1px solid #d1dad4; border-radius: 8px; background: white; cursor: pointer; }
 @media (max-width: 1000px) {
   .daily-kpis { grid-template-columns: repeat(3, 1fr); }
   .daily-toolbar, .daily-run-times { align-items: flex-start; flex-direction: column; }
+  .review-list article { grid-template-columns: 1fr; }
 }
 @media (max-width: 640px) {
   .daily-kpis { grid-template-columns: repeat(2, 1fr); }

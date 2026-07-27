@@ -10,7 +10,12 @@ from typing import Any
 
 import httpx
 
-from takealot_ops.api.errors import ApiResponseError, AuthenticationError, RateLimitError
+from takealot_ops.api.errors import (
+    ApiResponseError,
+    ApiTransportError,
+    AuthenticationError,
+    RateLimitError,
+)
 from takealot_ops.domain import OfferRecord, SaleRecord
 from takealot_ops.settings import Settings
 
@@ -27,6 +32,8 @@ class TakealotClient:
         settings: Settings,
         transport: httpx.BaseTransport | None = None,
         sleep: Callable[[float], None] | None = None,
+        *,
+        trust_env: bool = True,
     ) -> None:
         self._api_key = settings.api_key
         self._sleep = sleep or time.sleep
@@ -35,6 +42,7 @@ class TakealotClient:
             headers={"X-API-Key": settings.api_key},
             timeout=settings.request_timeout_seconds,
             transport=transport,
+            trust_env=trust_env,
         )
 
     def iter_items(self, path: str, params: Mapping[str, Any]) -> Iterator[dict[str, Any]]:
@@ -110,7 +118,13 @@ class TakealotClient:
             raise ValueError("TakealotClient permits only GET requests")
 
         for attempt in range(len(RETRY_DELAYS) + 1):
-            response = self._send_get(path, params)
+            try:
+                response = self._send_get(path, params)
+            except ApiTransportError:
+                if attempt < len(RETRY_DELAYS):
+                    self._sleep(RETRY_DELAYS[attempt])
+                    continue
+                raise
 
             if response.status_code in {401, 403}:
                 raise AuthenticationError(self._error_message(response))
@@ -133,7 +147,8 @@ class TakealotClient:
             return self._client.request("GET", path.lstrip("/"), params=params)
         except httpx.HTTPError as error:
             error_message = self._sanitize(str(error))
-        raise ApiResponseError(error_message)
+            error_type = type(error).__name__
+        raise ApiTransportError(f"{error_type}: {error_message}")
 
     def _json_object(self, response: httpx.Response) -> Mapping[str, Any]:
         try:

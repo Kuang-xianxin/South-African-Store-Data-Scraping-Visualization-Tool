@@ -27,12 +27,14 @@ def test_refresh_runs_complete_daily_workflow_with_project_python(tmp_path: Path
     result = run_dashboard_refresh(project_root, runner=runner)
 
     assert result.succeeded is True
-    assert result.message == "数据刷新完成，页面已读取最新指标。"
+    assert result.message == "数据刷新完成，本次手动数据已纳入当前10:00核对周期。"
     assert captured["command"] == [
         str(project_root / ".venv" / "Scripts" / "python.exe"),
         "-m",
         "takealot_ops.cli",
-        "daily-run",
+        "daily-report-run",
+        "--slot",
+        "manual",
     ]
     assert captured["kwargs"]["cwd"] == project_root.resolve()
     assert captured["kwargs"]["timeout"] == 600

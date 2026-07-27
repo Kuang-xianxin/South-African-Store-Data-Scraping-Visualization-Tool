@@ -13,11 +13,12 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
-from takealot_ops.competitors.api import extract_plid
+from takealot_ops.competitors.api import CompetitorNetworkError, extract_plid
 from takealot_ops.competitors.service import (
     CompetitorCollector,
     CompetitorDataset,
     load_competitor_dataset,
+    load_competitor_link_health,
 )
 from takealot_ops.settings import DashboardSettings
 from takealot_ops.storage.migrations import (
@@ -57,6 +58,15 @@ def create_app(project_root: Path | None = None) -> FastAPI:
         dataset = _load_dataset(root)
         return {"items": _frame_records(dataset.current)}
 
+    @app.get("/api/competitors/link-health")
+    def competitor_link_health() -> dict[str, list[dict[str, Any]]]:
+        settings = DashboardSettings.from_env(root)
+        engine = create_read_only_engine(settings.database_url)
+        try:
+            return {"items": load_competitor_link_health(engine)}
+        finally:
+            engine.dispose()
+
     @app.get("/api/competitors/{plid}")
     def competitor_detail(plid: str) -> dict[str, list[dict[str, Any]]]:
         dataset = _load_dataset(root)
@@ -87,16 +97,26 @@ def create_app(project_root: Path | None = None) -> FastAPI:
         engine = create_engine_for_settings(settings)
         try:
             create_schema(engine)
-            async with CompetitorCollector(engine=engine, project_root=root) as collector:
-                result = await collector.collect(
-                    request.url,
-                    with_stock_probe=request.with_stock_probe,
-                    visible_browser=request.visible_browser,
-                )
+            try:
+                async with CompetitorCollector(
+                    engine=engine,
+                    project_root=root,
+                ) as collector:
+                    result = await collector.collect(
+                        request.url,
+                        with_stock_probe=request.with_stock_probe,
+                        visible_browser=request.visible_browser,
+                    )
+            except CompetitorNetworkError as exc:
+                raise HTTPException(status_code=503, detail=str(exc)) from exc
         finally:
             engine.dispose()
         if not result.succeeded:
-            raise HTTPException(status_code=422, detail=result.message)
+            status_code = _collection_failure_status(
+                result.failure_kind,
+                retryable=result.retryable,
+            )
+            raise HTTPException(status_code=status_code, detail=result.message)
         return {
             "plid": result.plid,
             "title": result.title,
@@ -114,6 +134,22 @@ def create_app(project_root: Path | None = None) -> FastAPI:
                 "<p>请在 frontend/competitor 目录执行 npm run build。</p>"
             )
     return app
+
+
+def _collection_failure_status(
+    failure_kind: str | None,
+    *,
+    retryable: bool,
+) -> int:
+    if failure_kind == "network":
+        return 503
+    if failure_kind == "validation-uncertain":
+        return 409
+    if failure_kind == "suspected-invalid":
+        return 404
+    if failure_kind == "confirmed-invalid":
+        return 410
+    return 503 if retryable else 422
 
 
 def _load_dataset(project_root: Path) -> CompetitorDataset:

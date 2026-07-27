@@ -7,6 +7,8 @@ import asyncio
 import logging
 import os
 import sys
+import time
+from collections.abc import Callable
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Sequence
@@ -24,12 +26,20 @@ from takealot_ops.erp.daily_report import (
     create_deadline_snapshot,
     daily_report_payload,
     export_operations_workbook,
+    operations_business_date,
+    record_daily_report_failure,
     unresolved_locations,
 )
 from takealot_ops.metrics.service import MetricService
 from takealot_ops.quality import verify_quality
 from takealot_ops.reporting import generate_daily_reports
-from takealot_ops.scheduler import SystemClock, run_daily, verify_database_integrity
+from takealot_ops.scheduler import (
+    Clock,
+    DailyRunResult,
+    SystemClock,
+    run_daily,
+    verify_database_integrity,
+)
 from takealot_ops.settings import DashboardSettings, Settings, SettingsError
 from takealot_ops.storage.migrations import create_engine_for_settings, create_schema
 from takealot_ops.storage.mysql_migration import migrate_sqlite_to_mysql
@@ -40,6 +50,11 @@ EXIT_CONFIGURATION = 2
 EXIT_COLLECTION = 3
 EXIT_QUALITY = 4
 EXIT_OPERATION = 5
+_DAILY_REPORT_RETRY_PLAN = (
+    ("标准接口", True, 0.0),
+    ("新会话重试", True, 20.0),
+    ("直连备用", False, 60.0),
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -61,13 +76,19 @@ def build_parser() -> argparse.ArgumentParser:
         "daily-report-run",
         help="执行完整采集并冻结运营日报早间或晚间版本",
     )
-    daily_report_run.add_argument("--slot", choices=("morning", "evening"), required=True)
+    daily_report_run.add_argument(
+        "--slot",
+        choices=("morning", "evening", "manual"),
+        required=True,
+    )
     daily_report_capture = commands.add_parser(
         "daily-report-capture",
         help="不访问平台，直接把当前数据库冻结为运营日报版本",
     )
     daily_report_capture.add_argument(
-        "--slot", choices=("morning", "evening"), required=True
+        "--slot",
+        choices=("morning", "evening", "manual"),
+        required=True,
     )
     daily_report_capture.add_argument("--date", type=_parse_date)
     commands.add_parser(
@@ -236,23 +257,161 @@ def _daily_command(project_root: Path) -> int:
 def _daily_report_run_command(project_root: Path, slot: str) -> int:
     settings = Settings.from_env(project_root)
     clock = SystemClock()
-    result = run_daily(settings, clock)
-    if result.status not in {"success", "quality_failed"}:
-        if result.error:
-            print(result.error, file=sys.stderr)
-        return result.exit_code
     captured_at = clock.now()
-    capture = _capture_report_values(
+    business_date = operations_business_date(captured_at)
+    result, attempts = _run_protected_daily_report_collection(
         settings,
-        business_date=result.end_date,
+        clock,
+        business_date=business_date,
         slot=slot,
-        captured_at=captured_at,
     )
+    finalized_at = clock.now()
+    if not _complete_collection_succeeded(result):
+        final_reason = str(attempts[-1]["reason"]) if attempts else "采集流程未返回结果"
+        reason = (
+            f"自动保护共尝试 {len(attempts)} 次仍失败；"
+            f"最终原因：{final_reason}"
+        )
+        _record_report_failure(
+            settings,
+            business_date=business_date,
+            slot=slot,
+            captured_at=finalized_at,
+            reason=reason,
+            attempts=attempts,
+        )
+        print(reason, file=sys.stderr)
+        return result.exit_code
+    try:
+        capture = _capture_report_values(
+            settings,
+            business_date=business_date,
+            slot=slot,
+            captured_at=finalized_at,
+            capture_details={
+                "attempts": attempts,
+                "recovered": len(attempts) > 1,
+                "capture_method": attempts[-1]["strategy"],
+                "downstream_status": result.status,
+            },
+        )
+    except Exception as exc:
+        _record_report_failure(
+            settings,
+            business_date=business_date,
+            slot=slot,
+            captured_at=finalized_at,
+            reason=f"{type(exc).__name__}: 日报冻结失败",
+            attempts=attempts,
+        )
+        raise
     print(
         f"运营日报 {slot} 版本已冻结：{capture.product_count} 个商品，"
-        f"重新待确认 {capture.reopened_count} 个。"
+        f"业务日 {business_date}，重新待确认 {capture.reopened_count} 个。"
     )
     return result.exit_code
+
+
+def _run_protected_daily_report_collection(
+    settings: Settings,
+    clock: Clock,
+    *,
+    business_date: date,
+    slot: str,
+    runner: Callable[..., DailyRunResult] = run_daily,
+    sleeper: Callable[[float], None] = time.sleep,
+) -> tuple[DailyRunResult, list[dict[str, object]]]:
+    """Retry a complete capture with a fresh client and a direct-network fallback."""
+    logger = logging.getLogger("takealot_ops.cli")
+    attempts: list[dict[str, object]] = []
+    last_result: DailyRunResult | None = None
+    for attempt_number, (strategy, trust_env, delay) in enumerate(
+        _DAILY_REPORT_RETRY_PLAN,
+        start=1,
+    ):
+        if delay:
+            sleeper(delay)
+        started_at = clock.now()
+        try:
+            result = runner(
+                settings,
+                clock,
+                report_date=business_date,
+                trust_env=trust_env,
+            )
+        except Exception as exc:
+            result = DailyRunResult(
+                status="collection_failed",
+                start_date=business_date,
+                end_date=business_date,
+                error=f"{type(exc).__name__}: 采集流程异常退出",
+            )
+        last_result = result
+        succeeded = _complete_collection_succeeded(result)
+        reason = _daily_attempt_reason(result)
+        attempt = {
+            "attempt": attempt_number,
+            "strategy": strategy,
+            "trust_env": trust_env,
+            "started_at": started_at.isoformat(),
+            "finished_at": clock.now().isoformat(),
+            "status": "success" if succeeded else "failed",
+            "workflow_status": result.status,
+            "reason": reason,
+            "offer_run_id": (
+                result.offer_result.run_id if result.offer_result is not None else None
+            ),
+            "sales_run_id": (
+                result.sales_result.run_id if result.sales_result is not None else None
+            ),
+        }
+        attempts.append(attempt)
+        logger.info(
+            "daily-report capture date=%s slot=%s attempt=%s strategy=%s "
+            "status=%s workflow_status=%s reason=%s",
+            business_date,
+            slot,
+            attempt_number,
+            strategy,
+            attempt["status"],
+            result.status,
+            reason,
+        )
+        if succeeded:
+            return result, attempts
+    if last_result is None:
+        raise RuntimeError("日报采集保护层没有执行任何尝试")
+    logger.error(
+        "daily-report capture exhausted date=%s slot=%s attempts=%s final_reason=%s",
+        business_date,
+        slot,
+        len(attempts),
+        attempts[-1]["reason"],
+    )
+    return last_result, attempts
+
+
+def _complete_collection_succeeded(result: DailyRunResult) -> bool:
+    return bool(
+        result.offer_result is not None
+        and result.offer_result.succeeded
+        and result.sales_result is not None
+        and result.sales_result.succeeded
+    )
+
+
+def _daily_attempt_reason(result: DailyRunResult) -> str:
+    if result.offer_result is None:
+        return result.error or f"完整采集未启动（{result.status}）"
+    if not result.offer_result.succeeded:
+        return f"Offers 失败：{result.offer_result.error or result.status}"
+    if result.sales_result is None:
+        return result.error or f"Sales 未启动（{result.status}）"
+    if not result.sales_result.succeeded:
+        return f"Sales 失败：{result.sales_result.error or result.status}"
+    if result.status not in {"success", "quality_failed"}:
+        return f"Offers/Sales 已完整获取；后处理状态 {result.status}"
+    return "Offers/Sales 完整获取"
 
 
 def _daily_report_capture_command(
@@ -262,7 +421,7 @@ def _daily_report_capture_command(
 ) -> int:
     settings = Settings.from_env(project_root)
     captured_at = SystemClock().now()
-    business_date = report_date or sast_date(captured_at)
+    business_date = report_date or operations_business_date(captured_at)
     result = _capture_report_values(
         settings,
         business_date=business_date,
@@ -279,7 +438,7 @@ def _daily_report_capture_command(
 def _daily_report_deadline_command(project_root: Path) -> int:
     settings = Settings.from_env(project_root)
     captured_at = SystemClock().now()
-    business_date = sast_date(captured_at)
+    business_date = operations_business_date(captured_at)
     engine = create_engine_for_settings(settings)
     try:
         create_schema(engine)
@@ -324,6 +483,7 @@ def _capture_report_values(
     business_date: date,
     slot: str,
     captured_at: datetime,
+    capture_details: dict[str, object] | None = None,
 ) -> ReportCaptureResult:
     engine = create_engine_for_settings(settings)
     try:
@@ -333,6 +493,31 @@ def _capture_report_values(
             business_date=business_date,
             slot=slot,
             captured_at=captured_at,
+            capture_details=capture_details,
+        )
+    finally:
+        engine.dispose()
+
+
+def _record_report_failure(
+    settings: Settings,
+    *,
+    business_date: date,
+    slot: str,
+    captured_at: datetime,
+    reason: str,
+    attempts: list[dict[str, object]] | None = None,
+) -> None:
+    engine = create_engine_for_settings(settings)
+    try:
+        create_schema(engine)
+        record_daily_report_failure(
+            engine,
+            business_date=business_date,
+            slot=slot,
+            captured_at=captured_at,
+            reason=reason,
+            attempts=attempts,
         )
     finally:
         engine.dispose()

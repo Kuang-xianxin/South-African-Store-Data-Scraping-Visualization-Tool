@@ -1,15 +1,21 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, ref, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 
 import {
+  ApiRequestError,
   collectCompetitor,
+  fetchCompetitorBatchStatus,
   fetchCompetitorDetail,
+  fetchCompetitorLinkHealth,
   fetchCompetitors,
+  logCompetitorBatchEvent,
+  type CompetitorBatchStatus,
 } from "../api";
 import type {
   CollectResult,
   CompetitorDetail,
   CompetitorItem,
+  CompetitorLinkHealthItem,
 } from "../types";
 import { formatChinaDateTime } from "../time";
 
@@ -31,6 +37,35 @@ interface LinkValidationIssue {
   message: string;
 }
 
+interface CollectionQueueItem {
+  index: number;
+  url: string;
+}
+
+interface CollectionCheckpoint {
+  version: 1 | 2 | 3 | 4;
+  rawUrls: string;
+  batchUrls: string[];
+  attemptedIndexes: number[];
+  failedIndexes: number[];
+  terminalIndexes?: number[];
+  results: CollectResult[];
+  errors: string[];
+  stopReason: string;
+  withStockProbe: boolean;
+  visibleBrowser: boolean;
+  savedAt: string;
+  batchId?: string;
+  running?: boolean;
+  activeIndex?: number | null;
+  activeRequestId?: string | null;
+}
+
+type CollectionRunMode = "start" | "resume" | "auto_resume";
+
+const collectionCheckpointKey = "takealot-competitor-collection-v1";
+const collectionClientKey = "takealot-competitor-client-v1";
+const collectionClientId = restoreCollectionClientId();
 const rawUrls = ref(sampleUrls.join("\n"));
 const urlInput = ref<HTMLTextAreaElement | null>(null);
 const linkValidationIssue = ref<LinkValidationIssue | null>(null);
@@ -40,6 +75,9 @@ const visibleBrowser = ref(false);
 const competitors = ref<CompetitorItem[]>([]);
 const selectedPlid = ref("");
 const detail = ref<CompetitorDetail>({ history: [], reviews: [], variants: [] });
+const detailModalOpen = ref(false);
+const detailLoading = ref(false);
+const detailError = ref("");
 const loading = ref(true);
 const collecting = ref(false);
 const abortController = ref<AbortController | null>(null);
@@ -47,6 +85,36 @@ const completed = ref(0);
 const total = ref(0);
 const collectionResults = ref<CollectResult[]>([]);
 const collectionErrors = ref<string[]>([]);
+const collectionStopReason = ref("");
+const batchUrls = ref<string[]>([]);
+const attemptedIndexes = ref<number[]>([]);
+const failedIndexes = ref<number[]>([]);
+const terminalIndexes = ref<number[]>([]);
+const batchId = ref("");
+const activeIndex = ref<number | null>(null);
+const activeRequestId = ref<string | null>(null);
+const restoredRunWasActive = ref(false);
+const manualStopRequested = ref(false);
+const sharedBatchStatus = ref<CompetitorBatchStatus>({
+  active: false,
+  batch_id: null,
+  owner_username: null,
+  owner_display_name: null,
+  event: "idle",
+  completed: 0,
+  total: 0,
+  pending: 0,
+  succeeded: 0,
+  failed: 0,
+  terminal: 0,
+  current_index: null,
+  current_plid: null,
+  current_request_id: null,
+  reason: "",
+  started_at: null,
+  updated_at: null,
+});
+const linkHealth = ref<CompetitorLinkHealthItem[]>([]);
 const pageError = ref("");
 const reviewFilter = ref<"全部" | "好评" | "中评" | "差评">("全部");
 const reviewStartDate = ref("");
@@ -54,9 +122,61 @@ const reviewEndDate = ref("");
 const reviewSort = ref<
   "date_desc" | "date_asc" | "rating_desc" | "rating_asc"
 >("date_desc");
+const competitorQuery = ref("");
+const competitorStockFilter = ref<"全部" | "有货" | "没货" | "未探测">("全部");
+const competitorSignalFilter = ref("全部");
 
 const selected = computed(
   () => competitors.value.find((item) => item.plid === selectedPlid.value) ?? null,
+);
+const anotherBatchIsActive = computed(
+  () =>
+    sharedBatchStatus.value.active
+    && sharedBatchStatus.value.batch_id !== batchId.value,
+);
+const sharedBatchOwner = computed(
+  () =>
+    sharedBatchStatus.value.owner_display_name
+    || sharedBatchStatus.value.owner_username
+    || "其他用户",
+);
+const competitorSignalOptions = computed(() =>
+  [...new Set(competitors.value.map((item) => item.趋势判断).filter(Boolean))].sort(
+    (first, second) => first.localeCompare(second, "zh-CN"),
+  ),
+);
+const filteredCompetitors = computed(() => {
+  const query = competitorQuery.value.trim().toLocaleLowerCase();
+  return competitors.value.filter((item) => {
+    if (
+      query
+      && ![
+        item.商品,
+        item.plid,
+        item.当前卖家 ?? "",
+        item.库存上限,
+        item.趋势判断,
+      ].some((value) => value.toLocaleLowerCase().includes(query))
+    ) {
+      return false;
+    }
+    if (
+      competitorStockFilter.value !== "全部"
+      && competitorStockState(item) !== competitorStockFilter.value
+    ) {
+      return false;
+    }
+    return (
+      competitorSignalFilter.value === "全部"
+      || item.趋势判断 === competitorSignalFilter.value
+    );
+  });
+});
+const competitorFiltersActive = computed(
+  () =>
+    Boolean(competitorQuery.value.trim())
+    || competitorStockFilter.value !== "全部"
+    || competitorSignalFilter.value !== "全部",
 );
 const exactStockCount = computed(
   () => competitors.value.filter((item) => item.库存精确).length,
@@ -102,18 +222,97 @@ const filteredReviews = computed(() => {
 const progress = computed(() =>
   total.value ? Math.round((completed.value / total.value) * 100) : 0,
 );
+const successfulPlids = computed(
+  () => new Set(collectionResults.value.map((result) => result.plid)),
+);
+const confirmedInvalidCount = computed(
+  () =>
+    linkHealth.value.filter((item) => item.status === "confirmed_invalid").length,
+);
+const suspectedInvalidCount = computed(
+  () =>
+    linkHealth.value.filter((item) => item.status === "suspected_invalid").length,
+);
+const resumeQueue = computed<CollectionQueueItem[]>(() => {
+  if (!batchUrls.value.length) return [];
+  const failedStart = failedIndexes.value.length
+    ? Math.min(...failedIndexes.value)
+    : Number.POSITIVE_INFINITY;
+  const attempted = new Set(attemptedIndexes.value);
+  const terminal = new Set(terminalIndexes.value);
+  const firstUnattempted = batchUrls.value.findIndex(
+    (_, index) => !attempted.has(index),
+  );
+  const start = Math.min(
+    failedStart,
+    firstUnattempted < 0 ? Number.POSITIVE_INFINITY : firstUnattempted,
+  );
+  if (!Number.isFinite(start)) return [];
+  return batchUrls.value
+    .map((url, index) => ({ index, url }))
+    .filter(
+      ({ index, url }) =>
+        index >= start
+        && !terminal.has(index)
+        && !successfulPlids.value.has(plidFromUrl(url)),
+    );
+});
+const pendingResumeCount = computed(() => resumeQueue.value.length);
 const collectionNotices = computed(() =>
   collectionResults.value.filter((result) => result.message !== "采集成功"),
 );
 
-onMounted(loadOverview);
+onMounted(async () => {
+  window.addEventListener("keydown", handleWindowKeydown);
+  restoreCollectionCheckpoint();
+  await Promise.all([loadOverview(), loadSharedBatchStatus()]);
+  sharedBatchTimer = window.setInterval(
+    () => void loadSharedBatchStatus(),
+    2_000,
+  );
+  batchHeartbeatTimer = window.setInterval(() => {
+    if (collecting.value) void recordBatchEvent("heartbeat");
+  }, 10_000);
+  if (restoredRunWasActive.value) {
+    void resumeInterruptedCollection();
+  }
+});
 
+onBeforeUnmount(() => {
+  window.removeEventListener("keydown", handleWindowKeydown);
+  if (sharedBatchTimer !== null) window.clearInterval(sharedBatchTimer);
+  if (batchHeartbeatTimer !== null) window.clearInterval(batchHeartbeatTimer);
+  document.body.style.overflow = "";
+});
+
+let sharedBatchTimer: number | null = null;
+let batchHeartbeatTimer: number | null = null;
+
+let detailRequestId = 0;
 watch(selectedPlid, async (plid) => {
+  const requestId = ++detailRequestId;
   if (!plid) {
     detail.value = { history: [], reviews: [], variants: [] };
+    detailLoading.value = false;
+    detailError.value = "";
     return;
   }
-  detail.value = await fetchCompetitorDetail(plid);
+  detailLoading.value = true;
+  detailError.value = "";
+  try {
+    const result = await fetchCompetitorDetail(plid);
+    if (requestId === detailRequestId) detail.value = result;
+  } catch (error) {
+    if (requestId === detailRequestId) {
+      detailError.value = error instanceof Error ? error.message : "读取商品详情失败";
+    }
+  } finally {
+    if (requestId === detailRequestId) detailLoading.value = false;
+  }
+});
+
+watch(detailModalOpen, (open) => {
+  document.body.style.overflow = open ? "hidden" : "";
 });
 
 watch(reviewStartDate, (start) => {
@@ -199,11 +398,46 @@ function clearReviewDates() {
   reviewEndDate.value = "";
 }
 
+function competitorStockState(
+  item: CompetitorItem,
+): "有货" | "没货" | "未探测" {
+  if (item.库存参考过期) return "未探测";
+  if (item.库存数量 !== null) return item.库存数量 > 0 ? "有货" : "没货";
+  const label = item.库存上限.trim();
+  if (label.includes("没货") || label.includes("售罄")) return "没货";
+  if (/\d/.test(label)) return "有货";
+  return "未探测";
+}
+
+function clearCompetitorFilters(): void {
+  competitorQuery.value = "";
+  competitorStockFilter.value = "全部";
+  competitorSignalFilter.value = "全部";
+}
+
+function openProductModal(item: CompetitorItem) {
+  selectedPlid.value = item.plid;
+  detailModalOpen.value = true;
+}
+
+function closeProductModal() {
+  detailModalOpen.value = false;
+}
+
+function handleWindowKeydown(event: KeyboardEvent) {
+  if (event.key === "Escape" && detailModalOpen.value) closeProductModal();
+}
+
 async function loadOverview() {
   loading.value = true;
   pageError.value = "";
   try {
-    competitors.value = await fetchCompetitors();
+    const [competitorItems, healthItems] = await Promise.all([
+      fetchCompetitors(),
+      fetchCompetitorLinkHealth(),
+    ]);
+    competitors.value = competitorItems;
+    linkHealth.value = healthItems;
     if (!selectedPlid.value && competitors.value.length) {
       selectedPlid.value = competitors.value[0].plid;
     }
@@ -211,6 +445,14 @@ async function loadOverview() {
     pageError.value = error instanceof Error ? error.message : "读取竞品数据失败";
   } finally {
     loading.value = false;
+  }
+}
+
+async function loadSharedBatchStatus() {
+  try {
+    sharedBatchStatus.value = await fetchCompetitorBatchStatus();
+  } catch {
+    // Keep the last shared progress during a short local-service interruption.
   }
 }
 
@@ -275,9 +517,9 @@ function clearLinkValidation() {
   linkValidationIssue.value = null;
   linkErrorPulse.value = false;
   if (hadValidationIssue) {
-    collectionErrors.value = [];
-    completed.value = 0;
-    total.value = 0;
+    collectionErrors.value = collectionErrors.value.filter(
+      (message) => !/^第 \d+ 行：/.test(message),
+    );
   }
 }
 
@@ -304,11 +546,155 @@ function delay(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function collectionId(prefix: "batch" | "request" | "client") {
+  const randomId =
+    typeof crypto.randomUUID === "function"
+      ? crypto.randomUUID()
+      : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  return `${prefix}-${randomId}`;
+}
+
+function restoreCollectionClientId(): string {
+  try {
+    const saved = sessionStorage.getItem(collectionClientKey);
+    if (saved) return saved;
+    const created = collectionId("client");
+    sessionStorage.setItem(collectionClientKey, created);
+    return created;
+  } catch {
+    return collectionId("client");
+  }
+}
+
+function plidFromUrl(url: string) {
+  return url.match(/PLID(\d+)/i)?.[1] ?? "";
+}
+
+function markAttempted(index: number) {
+  if (!attemptedIndexes.value.includes(index)) {
+    attemptedIndexes.value = [...attemptedIndexes.value, index].sort(
+      (first, second) => first - second,
+    );
+  }
+  completed.value = attemptedIndexes.value.length;
+}
+
+function markFailed(index: number, failed: boolean) {
+  const indexes = new Set(failedIndexes.value);
+  if (failed) indexes.add(index);
+  else indexes.delete(index);
+  failedIndexes.value = [...indexes].sort((first, second) => first - second);
+}
+
+function markTerminal(index: number, terminal: boolean) {
+  const indexes = new Set(terminalIndexes.value);
+  if (terminal) indexes.add(index);
+  else indexes.delete(index);
+  terminalIndexes.value = [...indexes].sort((first, second) => first - second);
+}
+
+function removeCollectionError(plid: string) {
+  const prefix = `PLID${plid}：`;
+  collectionErrors.value = collectionErrors.value.filter(
+    (message) => !message.startsWith(prefix),
+  );
+}
+
+function persistCollectionCheckpoint() {
+  if (!batchUrls.value.length) return;
+  const checkpoint: CollectionCheckpoint = {
+    version: 4,
+    rawUrls: rawUrls.value,
+    batchUrls: batchUrls.value,
+    attemptedIndexes: attemptedIndexes.value,
+    failedIndexes: failedIndexes.value,
+    terminalIndexes: terminalIndexes.value,
+    results: collectionResults.value,
+    errors: collectionErrors.value,
+    stopReason: collectionStopReason.value,
+    withStockProbe: withStockProbe.value,
+    visibleBrowser: visibleBrowser.value,
+    savedAt: new Date().toISOString(),
+    batchId: batchId.value,
+    running: collecting.value && !manualStopRequested.value,
+    activeIndex: activeIndex.value,
+    activeRequestId: activeRequestId.value,
+  };
+  try {
+    localStorage.setItem(collectionCheckpointKey, JSON.stringify(checkpoint));
+  } catch {
+    // Keep the live in-memory checkpoint when browser storage is unavailable.
+  }
+}
+
+function restoreCollectionCheckpoint() {
+  let checkpoint: CollectionCheckpoint;
+  try {
+    const raw = localStorage.getItem(collectionCheckpointKey);
+    if (!raw) return;
+    checkpoint = JSON.parse(raw) as CollectionCheckpoint;
+  } catch {
+    try {
+      localStorage.removeItem(collectionCheckpointKey);
+    } catch {
+      // Ignore unavailable browser storage and continue with a fresh batch.
+    }
+    return;
+  }
+  if (
+    ![1, 2, 3, 4].includes(checkpoint.version)
+    || !Array.isArray(checkpoint.batchUrls)
+    || !Array.isArray(checkpoint.attemptedIndexes)
+    || !Array.isArray(checkpoint.failedIndexes)
+    || !Array.isArray(checkpoint.results)
+    || !Array.isArray(checkpoint.errors)
+  ) {
+    try {
+      localStorage.removeItem(collectionCheckpointKey);
+    } catch {
+      // Ignore unavailable browser storage and continue with a fresh batch.
+    }
+    return;
+  }
+  rawUrls.value = checkpoint.rawUrls;
+  batchUrls.value = checkpoint.batchUrls;
+  attemptedIndexes.value = checkpoint.attemptedIndexes;
+  failedIndexes.value = checkpoint.failedIndexes;
+  terminalIndexes.value = Array.isArray(checkpoint.terminalIndexes)
+    ? checkpoint.terminalIndexes
+    : [];
+  collectionResults.value = checkpoint.results;
+  collectionErrors.value = checkpoint.errors;
+  collectionStopReason.value =
+    checkpoint.stopReason
+      === "连续 2 次无法连接 Takealot，已暂停剩余链接。请恢复梯子或代理后点击“继续失败/未完成”。"
+      ? "上次批次被旧版页面判定为连接失败；该误判已修复，请点击“继续失败/未完成”重新检查剩余链接。"
+      : checkpoint.stopReason;
+  withStockProbe.value = checkpoint.withStockProbe;
+  visibleBrowser.value = checkpoint.visibleBrowser;
+  total.value = batchUrls.value.length;
+  completed.value = attemptedIndexes.value.length;
+  batchId.value = checkpoint.batchId || collectionId("batch");
+  activeIndex.value =
+    typeof checkpoint.activeIndex === "number" ? checkpoint.activeIndex : null;
+  activeRequestId.value =
+    typeof checkpoint.activeRequestId === "string"
+      ? checkpoint.activeRequestId
+      : null;
+  restoredRunWasActive.value =
+    checkpoint.version === 4
+    && checkpoint.running === true
+    && !checkpoint.stopReason
+    && resumeQueue.value.length > 0;
+}
+
 async function startCollection() {
   if (!props.canOperate) return;
-  collectionResults.value = [];
-  collectionErrors.value = [];
-  completed.value = 0;
+  if (anotherBatchIsActive.value) {
+    collectionStopReason.value =
+      `${sharedBatchOwner.value} 正在采集竞品，请等待当前批次结束或暂停。`;
+    return;
+  }
   try {
     clearLinkValidation();
     const { urls, issue } = parseUrls();
@@ -320,38 +706,227 @@ async function startCollection() {
       return;
     }
     if (!urls.length) throw new Error("请至少填写一个 Takealot 竞品链接");
+    collectionResults.value = [];
+    collectionErrors.value = [];
+    collectionStopReason.value = "";
+    completed.value = 0;
+    batchUrls.value = urls;
+    attemptedIndexes.value = [];
+    failedIndexes.value = [];
+    terminalIndexes.value = [];
+    batchId.value = collectionId("batch");
+    activeIndex.value = null;
+    activeRequestId.value = null;
+    restoredRunWasActive.value = false;
+    manualStopRequested.value = false;
     total.value = urls.length;
-    collecting.value = true;
-    const controller = new AbortController();
-    abortController.value = controller;
-    for (const url of urls) {
-      if (controller.signal.aborted) break;
-      try {
-        collectionResults.value.push(
-          await collectCompetitor(url, withStockProbe.value, visibleBrowser.value, controller.signal),
-        );
-      } catch (error) {
-        if (controller.signal.aborted) break;
-        const plid = url.match(/PLID(\d+)/i)?.[1] ?? "未知商品";
-        const message = error instanceof Error ? error.message : "采集失败";
-        collectionErrors.value.push(`PLID${plid}：${message}`);
-      } finally {
-        completed.value += 1;
-      }
-      if (completed.value < total.value) await delay(5_000);
-    }
-    await loadOverview();
+    persistCollectionCheckpoint();
+    await runCollection(
+      urls.map((url, index) => ({ index, url })),
+      "start",
+    );
   } catch (error) {
     collectionErrors.value = [
       error instanceof Error ? error.message : "无法开始采集",
     ];
-  } finally {
+  }
+}
+
+async function resumeCollection(mode: "resume" | "auto_resume" = "resume") {
+  if (!props.canOperate || collecting.value || !pendingResumeCount.value) return;
+  if (anotherBatchIsActive.value) {
+    collectionStopReason.value =
+      `${sharedBatchOwner.value} 正在采集竞品，请等待当前批次结束或暂停。`;
+    return;
+  }
+  clearLinkValidation();
+  const { urls, issue } = parseUrls();
+  if (issue) {
+    collectionErrors.value = [
+      `第 ${issue.lineNumber} 行：${issue.message}：${issue.url}`,
+    ];
+    await focusInvalidLink(issue);
+    return;
+  }
+  const originalPlids = batchUrls.value.map(plidFromUrl);
+  const currentPlids = urls.map(plidFromUrl);
+  if (
+    originalPlids.length !== currentPlids.length
+    || originalPlids.some((plid, index) => plid !== currentPlids[index])
+  ) {
+    collectionStopReason.value =
+      "链接列表或顺序已经变化，请点击“开始采集”建立一个新批次。";
+    return;
+  }
+  batchUrls.value = urls;
+  if (!batchId.value) batchId.value = collectionId("batch");
+  collectionStopReason.value = "";
+  manualStopRequested.value = false;
+  await runCollection(resumeQueue.value, mode);
+}
+
+async function resumeInterruptedCollection() {
+  if (
+    !props.canOperate
+    || collecting.value
+    || !restoredRunWasActive.value
+    || !pendingResumeCount.value
+  ) {
+    return;
+  }
+  restoredRunWasActive.value = false;
+  collectionStopReason.value =
+    "检测到页面刷新或会话中断，正在自动从断点恢复采集……";
+  await delay(1_200);
+  await resumeCollection("auto_resume");
+}
+
+async function recordBatchEvent(
+  event:
+    | "start"
+    | "resume"
+    | "auto_resume"
+    | "progress"
+    | "heartbeat"
+    | "paused"
+    | "manual_stop"
+    | "completed",
+  reason = "",
+  required = false,
+) {
+  if (!batchId.value) return;
+  try {
+    sharedBatchStatus.value = await logCompetitorBatchEvent({
+      batchId: batchId.value,
+      clientId: collectionClientId,
+      event,
+      completed: completed.value,
+      total: total.value,
+      pending: pendingResumeCount.value,
+      succeeded: collectionResults.value.length,
+      failed: failedIndexes.value.length,
+      terminal: terminalIndexes.value.length,
+      reason,
+    });
+  } catch (error) {
+    if (required) throw error;
+    // Collection must continue even when diagnostic logging is unavailable.
+  }
+}
+
+async function runCollection(
+  queue: CollectionQueueItem[],
+  mode: CollectionRunMode,
+) {
+  const interruptedIndex = mode === "auto_resume" ? activeIndex.value : null;
+  const interruptedRequestId =
+    mode === "auto_resume" ? activeRequestId.value : null;
+  collecting.value = true;
+  manualStopRequested.value = false;
+  total.value = batchUrls.value.length;
+  const controller = new AbortController();
+  abortController.value = controller;
+  let consecutiveConnectionFailures = 0;
+  persistCollectionCheckpoint();
+  try {
+    await recordBatchEvent(mode, "", true);
+  } catch (error) {
+    collectionStopReason.value =
+      error instanceof Error ? error.message : "其他用户正在采集竞品";
     collecting.value = false;
     abortController.value = null;
+    persistCollectionCheckpoint();
+    await loadSharedBatchStatus();
+    return;
+  }
+  try {
+    for (const { index, url } of queue) {
+      if (controller.signal.aborted) break;
+      const plid = plidFromUrl(url) || "未知商品";
+      removeCollectionError(plid);
+      const requestId =
+        index === interruptedIndex && interruptedRequestId
+          ? interruptedRequestId
+          : collectionId("request");
+      activeIndex.value = index;
+      activeRequestId.value = requestId;
+      persistCollectionCheckpoint();
+      let settled = false;
+      try {
+        const result = await collectCompetitor(
+          url,
+          withStockProbe.value,
+          visibleBrowser.value,
+          controller.signal,
+          {
+            batchId: batchId.value,
+            clientId: collectionClientId,
+            requestId,
+            itemIndex: index,
+            totalItems: total.value,
+          },
+        );
+        collectionResults.value = [
+          ...collectionResults.value.filter((item) => item.plid !== result.plid),
+          result,
+        ];
+        markFailed(index, false);
+        markTerminal(index, false);
+        consecutiveConnectionFailures = 0;
+        settled = true;
+      } catch (error) {
+        if (controller.signal.aborted) break;
+        const message = error instanceof Error ? error.message : "采集失败";
+        collectionErrors.value.push(`PLID${plid}：${message}`);
+        const confirmedInvalid =
+          error instanceof ApiRequestError && error.status === 410;
+        markFailed(index, !confirmedInvalid);
+        markTerminal(index, confirmedInvalid);
+        const isConnectionFailure =
+          error instanceof ApiRequestError
+          && (error.status === 0 || error.status >= 500);
+        consecutiveConnectionFailures = isConnectionFailure
+          ? consecutiveConnectionFailures + 1
+          : 0;
+        if (consecutiveConnectionFailures >= 2) {
+          collectionStopReason.value =
+            "连续 2 次发生真实连接失败或 Takealot 临时服务错误，已暂停剩余链接。请确认网络和平台恢复后点击“继续失败/未完成”。";
+        }
+        settled = true;
+      } finally {
+        if (settled) markAttempted(index);
+        activeIndex.value = null;
+        activeRequestId.value = null;
+        persistCollectionCheckpoint();
+      }
+      await recordBatchEvent("progress");
+      if (collectionStopReason.value) break;
+      if (index !== queue[queue.length - 1]?.index) await delay(5_000);
+    }
+    await loadOverview();
+  } finally {
+    if (!manualStopRequested.value && collectionStopReason.value) {
+      await recordBatchEvent("paused", collectionStopReason.value);
+    } else if (!manualStopRequested.value && !controller.signal.aborted) {
+      await recordBatchEvent(
+        "completed",
+        pendingResumeCount.value
+          ? `本轮结束，仍有 ${pendingResumeCount.value} 个失败或未完成链接`
+          : "本批全部链接已检查",
+      );
+    }
+    collecting.value = false;
+    abortController.value = null;
+    persistCollectionCheckpoint();
   }
 }
 
 function stopCollection() {
+  manualStopRequested.value = true;
+  collectionStopReason.value =
+    "已手动暂停；可以点击“继续失败/未完成”从断点恢复。";
+  persistCollectionCheckpoint();
+  void recordBatchEvent("manual_stop", collectionStopReason.value);
   abortController.value?.abort();
 }
 
@@ -369,6 +944,10 @@ function reviewTone(stars: number) {
   if (stars >= 4) return "positive";
   if (stars === 3) return "neutral";
   return "negative";
+}
+
+function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
+  return status === "confirmed_invalid" ? "确认失效" : "疑似失效";
 }
 </script>
 
@@ -396,6 +975,27 @@ function reviewTone(stars: number) {
         </div>
         <p class="section-note">每行一个链接，重复 PLID 会自动去重</p>
       </div>
+      <div
+        v-if="sharedBatchStatus.active"
+        class="shared-collection-status"
+        role="status"
+        aria-live="polite"
+      >
+        <div>
+          <strong>全员同步采集中 · {{ sharedBatchOwner }}</strong>
+          <span>
+            已检查 {{ sharedBatchStatus.completed }}/{{ sharedBatchStatus.total }}
+            · 成功 {{ sharedBatchStatus.succeeded }}
+            · 失败 {{ sharedBatchStatus.failed }}
+            · 待续爬 {{ sharedBatchStatus.pending }}
+          </span>
+        </div>
+        <span v-if="sharedBatchStatus.current_plid" class="shared-current-plid">
+          当前第 {{ (sharedBatchStatus.current_index ?? 0) + 1 }} 条 ·
+          PLID{{ sharedBatchStatus.current_plid }}
+        </span>
+        <span v-else>正在准备下一条商品</span>
+      </div>
       <textarea
         ref="urlInput"
         v-model="rawUrls"
@@ -406,7 +1006,7 @@ function reviewTone(stars: number) {
           'link-input-error': linkValidationIssue,
           'link-input-error-pulse': linkErrorPulse,
         }"
-        :disabled="collecting || !props.canOperate"
+        :disabled="collecting || anotherBatchIsActive || !props.canOperate"
         spellcheck="false"
         @input="clearLinkValidation"
       ></textarea>
@@ -430,7 +1030,7 @@ function reviewTone(stars: number) {
           <input
             v-model="withStockProbe"
             type="checkbox"
-            :disabled="collecting || !props.canOperate"
+            :disabled="collecting || anotherBatchIsActive || !props.canOperate"
           />
           <span class="switch"></span>
           <span>
@@ -442,18 +1042,31 @@ function reviewTone(stars: number) {
           <input
             v-model="visibleBrowser"
             type="checkbox"
-            :disabled="collecting || !withStockProbe || !props.canOperate"
+            :disabled="
+              collecting
+              || anotherBatchIsActive
+              || !withStockProbe
+              || !props.canOperate
+            "
           />
           <span class="switch"></span>
           <span><strong>显示检测浏览器</strong></span>
         </label>
         <button
           class="primary-button"
-          :disabled="!props.canOperate"
+          :disabled="!props.canOperate || anotherBatchIsActive"
           @click="startCollection"
           v-if="!collecting"
         >
           开始采集
+        </button>
+        <button
+          v-if="!collecting && pendingResumeCount"
+          class="primary-button resume-button"
+          :disabled="!props.canOperate || anotherBatchIsActive"
+          @click="resumeCollection()"
+        >
+          继续失败/未完成（{{ pendingResumeCount }}）
         </button>
         <button
           class="primary-button stop-button"
@@ -469,12 +1082,24 @@ function reviewTone(stars: number) {
       <p v-if="collecting" class="method-note collection-persistence-note">
         采集正在后台继续；切换到其他页面后再返回，进度和结果仍会保留。
       </p>
-      <div v-if="collectionResults.length || collectionErrors.length" class="result-strip">
+      <div
+        v-if="collectionResults.length || collectionErrors.length || collectionStopReason"
+        class="result-strip"
+      >
         <span v-if="collectionResults.length" class="result-good">
           成功 {{ collectionResults.length }} 个
         </span>
         <span v-if="collectionErrors.length" class="result-bad">
           失败 {{ collectionErrors.length }} 个
+        </span>
+        <span v-if="terminalIndexes.length" class="result-terminal">
+          已确认失效 {{ terminalIndexes.length }} 个，本批后续自动跳过
+        </span>
+        <span v-if="batchUrls.length">
+          本批已检查 {{ completed }}/{{ total }}，待续爬 {{ pendingResumeCount }} 个
+        </span>
+        <span v-if="collectionStopReason" class="result-bad">
+          {{ collectionStopReason }}
         </span>
         <span v-for="notice in collectionNotices" :key="notice.plid">
           PLID{{ notice.plid }}：{{ notice.message }}
@@ -506,6 +1131,58 @@ function reviewTone(stars: number) {
       </article>
     </section>
 
+    <section v-if="linkHealth.length" class="panel link-health-panel">
+      <div class="section-heading">
+        <div>
+          <p class="section-kicker">LINK REVIEW QUEUE</p>
+          <h2>链接复核状态</h2>
+        </div>
+        <p class="section-note">
+          疑似 {{ suspectedInvalidCount }} 个 · 确认失效 {{ confirmedInvalidCount }} 个
+        </p>
+      </div>
+      <div class="table-wrap">
+        <table class="link-health-table">
+          <thead>
+            <tr>
+              <th>商品链接</th>
+              <th>状态</th>
+              <th>有效复核</th>
+              <th>正常对照</th>
+              <th>最近检查（北京时间）</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="item in linkHealth" :key="item.plid">
+              <td>
+                <a :href="item.url" target="_blank" rel="noreferrer">
+                  PLID{{ item.plid }}
+                </a>
+              </td>
+              <td>
+                <span class="link-health-pill" :class="item.status">
+                  {{ linkHealthLabel(item.status) }}
+                </span>
+              </td>
+              <td>{{ item.confirmed_not_found_count }}/3</td>
+              <td>
+                {{
+                  item.control_check_ok && item.control_plid
+                    ? `PLID${item.control_plid}`
+                    : "未取得有效对照"
+                }}
+              </td>
+              <td>{{ formatChinaDateTime(item.last_checked_at) }}</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <p class="method-note">
+        单次 404 不会删除链接。只有目标商品页为空、同一浏览器中的已知正常商品可打开，且至少间隔
+        10 分钟累计 3 次，才会确认失效；确认失效只在当前断点续爬中自动跳过，重新点击“开始采集”仍可人工复核。
+      </p>
+    </section>
+
     <p v-if="pageError" class="error-banner">{{ pageError }}</p>
     <section class="panel overview">
       <div class="section-heading">
@@ -520,242 +1197,391 @@ function reviewTone(stars: number) {
         <strong>还没有竞品快照</strong>
         <span>上方 4 个样本链接已经填好，点击“开始采集”即可建立第一条基线。</span>
       </div>
-      <div v-else class="table-wrap">
-        <table>
-          <thead>
-            <tr>
-              <th>竞品</th>
-              <th>价格</th>
-              <th>库存上限</th>
-              <th>评论 / 评分</th>
-              <th>累计销量估算</th>
-              <th>观察期信号</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr
-              v-for="item in competitors"
-              :key="item.plid"
-              :class="{ selected: selectedPlid === item.plid }"
-              @click="selectedPlid = item.plid"
+      <div v-else>
+        <div class="competitor-list-filters" role="search" aria-label="筛选竞品最新状态">
+          <label class="competitor-filter-field competitor-filter-search">
+            <span>搜索商品</span>
+            <input
+              v-model="competitorQuery"
+              type="search"
+              placeholder="商品名称、PLID 或卖家"
+            />
+          </label>
+          <label class="competitor-filter-field">
+            <span>库存状态</span>
+            <select v-model="competitorStockFilter">
+              <option value="全部">全部库存</option>
+              <option value="有货">有货</option>
+              <option value="没货">没货</option>
+              <option value="未探测">未探测</option>
+            </select>
+          </label>
+          <label class="competitor-filter-field">
+            <span>经营信号</span>
+            <select v-model="competitorSignalFilter">
+              <option value="全部">全部信号</option>
+              <option v-for="signal in competitorSignalOptions" :key="signal" :value="signal">
+                {{ signal }}
+              </option>
+            </select>
+          </label>
+          <div class="competitor-filter-summary">
+            <span>显示 {{ filteredCompetitors.length }} / {{ competitors.length }} 个商品</span>
+            <button
+              v-if="competitorFiltersActive"
+              type="button"
+              class="quiet-button"
+              @click="clearCompetitorFilters"
             >
-              <td>
-                <strong>{{ item.商品 }}</strong>
-                <span>PLID{{ item.plid }} · {{ item.当前卖家 || "未知卖家" }}</span>
-              </td>
-              <td>{{ formatCurrency(item.价格) }}</td>
-              <td>
-                <span
-                  class="stock-pill"
-                  :class="{
-                    exact: item.库存精确,
-                    unavailable: item.库存上限 === '没货',
-                  }"
-                >
-                  {{ item.库存上限 }}
-                </span>
-              </td>
-              <td>{{ item.评论数 }} 条 · {{ item.评分 ?? "—" }}</td>
-              <td><strong>{{ item.累计销量估算 }}</strong></td>
-              <td>
-                <span class="signal-label">{{ item.趋势判断 }}</span>
-                <small>{{ item.观察期销量信号 }}</small>
-              </td>
-            </tr>
-          </tbody>
-        </table>
-      </div>
-      <p class="method-note">
-        累计销量按 2%–5% 假设评论率反推，只表示商品维度量级；不是平台官方销量。
-      </p>
-    </section>
-
-    <template v-if="selected">
-      <section class="detail-grid">
-        <article class="panel decision-card">
-          <p class="section-kicker">OPERATING SIGNAL</p>
-          <h2>{{ selected.趋势判断 }}</h2>
-          <p>{{ selected.判断说明 }}</p>
-          <div class="decision-stats">
-            <span><small>库存上限</small><strong>{{ selected.库存上限 }}</strong></span>
-            <span><small>累计评论</small><strong>{{ selected.评论数 }}</strong></span>
-            <span><small>观察期估算</small><strong>{{ selected.观察期销量信号 }}</strong></span>
+              清除筛选
+            </button>
           </div>
-          <a :href="selected.链接" target="_blank" rel="noreferrer">打开 Takealot 商品页</a>
-        </article>
-
-        <article class="panel review-balance">
-          <p class="section-kicker">REVIEW BALANCE</p>
-          <h2>评论结构</h2>
-          <div class="balance-row positive">
-            <span>好评 4–5 星</span><strong>{{ selected.好评 }}</strong>
-            <i :style="{ width: `${(selected.好评 / Math.max(1, selected.评论数)) * 100}%` }"></i>
-          </div>
-          <div class="balance-row neutral">
-            <span>中评 3 星</span><strong>{{ selected.中评 }}</strong>
-            <i :style="{ width: `${(selected.中评 / Math.max(1, selected.评论数)) * 100}%` }"></i>
-          </div>
-          <div class="balance-row negative">
-            <span>差评 1–2 星</span><strong>{{ selected.差评 }}</strong>
-            <i :style="{ width: `${(selected.差评 / Math.max(1, selected.评论数)) * 100}%` }"></i>
-          </div>
-        </article>
-      </section>
-
-      <section class="panel variant-panel">
-        <div class="section-heading">
-          <div>
-            <p class="section-kicker">VARIANT INVENTORY</p>
-            <h2>各变体库存</h2>
-          </div>
-          <span>{{ detail.variants.length }} 个变体 · 评论共用商品数据</span>
         </div>
-        <div v-if="!detail.variants.length" class="empty-state slim">
-          这条历史快照尚无变体明细，重新采集后会逐个显示。
+        <div v-if="!filteredCompetitors.length" class="empty-state competitor-filter-empty">
+          <strong>没有符合条件的竞品</strong>
+          <span>可以调整关键词、库存状态或经营信号。</span>
         </div>
         <div v-else class="table-wrap">
-          <table class="variant-table">
+          <table>
             <thead>
               <tr>
-                <th>变体</th>
-                <th>平台 SKU</th>
-                <th>卖家</th>
+                <th>竞品</th>
                 <th>价格</th>
-                <th>平台仓库存</th>
-                <th>说明</th>
+                <th>库存上限</th>
+                <th>评论 / 评分</th>
+                <th>观察期信号</th>
               </tr>
             </thead>
             <tbody>
-              <tr v-for="variant in detail.variants" :key="variant.变体键">
+              <tr
+                v-for="item in filteredCompetitors"
+                :key="item.plid"
+                :class="{ selected: selectedPlid === item.plid }"
+                tabindex="0"
+                role="button"
+                aria-haspopup="dialog"
+                @click="openProductModal(item)"
+                @keydown.enter="openProductModal(item)"
+                @keydown.space.prevent="openProductModal(item)"
+              >
                 <td>
-                  <a :href="variant.链接" target="_blank" rel="noreferrer">
-                    {{ variant.变体 }}
-                  </a>
+                  <strong>{{ item.商品 }}</strong>
+                  <span>PLID{{ item.plid }} · {{ item.当前卖家 || "未知卖家" }}</span>
                 </td>
-                <td>{{ variant.SKU || "—" }}</td>
-                <td>{{ variant.卖家 || "未知卖家" }}</td>
-                <td>{{ formatCurrency(variant.价格) }}</td>
+                <td>{{ formatCurrency(item.价格) }}</td>
                 <td>
                   <span
                     class="stock-pill"
                     :class="{
-                      exact: variant.库存精确,
-                      unavailable: variant.库存 === '没货',
+                      exact: item.库存精确,
+                      unavailable: item.库存上限 === '没货',
                     }"
                   >
-                    {{ variant.库存 }}
+                    {{ item.库存上限 }}
                   </span>
+                  <small v-if="item.库存参考过期 && item.上次成功库存">
+                    本次未探测成功；上次成功 {{ item.上次成功库存 }}
+                    · {{ formatChinaDateTime(item.上次成功库存时间) }}
+                  </small>
                 </td>
+                <td>{{ item.评论数 }} 条 · {{ item.评分 ?? "—" }}</td>
                 <td>
-                  <small>{{ variant.库存说明 || "—" }}</small>
+                  <span class="signal-label">{{ item.趋势判断 }}</span>
+                  <small>{{ item.观察期销量信号 }}</small>
                 </td>
               </tr>
             </tbody>
           </table>
         </div>
-        <p class="method-note">
-          库存按变体分别探测；供应商调货、长时效到货和当前不可购买的变体按平台仓没货处理。
-          评论按 PLID 商品维度共用，不因变体重复采集或重复计数。
-        </p>
-      </section>
+      </div>
+    </section>
 
-      <section class="panel history-panel">
-        <div class="section-heading">
-          <div>
-            <p class="section-kicker">OBSERVATION HISTORY</p>
-            <h2>历史快照</h2>
-          </div>
-          <span>{{ detail.history.length }} 个时间点</span>
-        </div>
-        <div v-if="detail.history.length < 2" class="empty-state slim">
-          再次采集后，这里会显示库存净流出、新增评论和观察期销量信号。
-        </div>
-        <div v-else class="timeline">
-          <article v-for="item in detail.history" :key="item.采集时间">
-            <time>{{ formatChinaDateTime(item.采集时间) }}</time>
-            <strong>{{ item.趋势判断 }}</strong>
-            <span>库存 {{ item.库存上限 }} · 评论 {{ item.评论数 }}</span>
-            <small>净流出 {{ item.库存净流出 ?? "—" }} · 新增评论 {{ item.新增评论 ?? "—" }}</small>
-          </article>
-        </div>
-      </section>
-
-      <section class="panel reviews-panel">
-        <div class="section-heading">
-          <div>
-            <p class="section-kicker">VOICE OF CUSTOMER</p>
-            <h2>公开评论</h2>
-          </div>
-          <span class="review-result-count">
-            显示 {{ filteredReviews.length }} / {{ detail.reviews.length }} 条
-          </span>
-        </div>
-        <div class="review-filter-bar">
-          <div class="filter-tabs">
-            <button
-              v-for="filter in ['全部', '好评', '中评', '差评'] as const"
-              :key="filter"
-              :class="{ active: reviewFilter === filter }"
-              @click="reviewFilter = filter"
-            >
-              {{ filter }}
-            </button>
-          </div>
-          <div class="review-controls">
-            <label>
-              <span>开始日期</span>
-              <input
-                v-model="reviewStartDate"
-                type="date"
-                :min="reviewMinDate || undefined"
-                :max="reviewEndDate || reviewMaxDate || undefined"
-              />
-            </label>
-            <label>
-              <span>结束日期</span>
-              <input
-                v-model="reviewEndDate"
-                type="date"
-                :min="reviewStartDate || reviewMinDate || undefined"
-                :max="reviewMaxDate || undefined"
-              />
-            </label>
-            <label>
-              <span>展示排序</span>
-              <select v-model="reviewSort">
-                <option value="date_desc">最新评论优先</option>
-                <option value="date_asc">最早评论优先</option>
-                <option value="rating_desc">评分从高到低</option>
-                <option value="rating_asc">评分从低到高</option>
-              </select>
-            </label>
-            <button
-              v-if="reviewStartDate || reviewEndDate"
-              class="clear-review-dates"
-              @click="clearReviewDates"
-            >
-              清除时间
-            </button>
-          </div>
-        </div>
-        <div v-if="!filteredReviews.length" class="empty-state slim">暂无对应评论。</div>
-        <div v-else class="review-list">
-          <article
-            v-for="(review, reviewIndex) in filteredReviews"
-            :key="`${review.评论日期}-${review.标题}-${review.评论人}-${reviewIndex}`"
-          >
-            <span class="review-score" :class="reviewTone(review.星级)">
-              {{ review.星级 }} 星
-            </span>
+    <Teleport to="body">
+      <div
+        v-if="detailModalOpen && selected"
+        class="competitor-modal-backdrop"
+        @click.self="closeProductModal"
+      >
+        <section
+          class="competitor-modal"
+          role="dialog"
+          aria-modal="true"
+          :aria-label="`${selected.商品} 竞品详情`"
+        >
+          <header class="competitor-modal-header">
             <div>
-              <strong>{{ review.标题 || "未填写标题" }}</strong>
-              <p>{{ review.评论内容 || "未填写评论内容" }}</p>
-              <small>{{ review.评论人 || "匿名用户" }} · {{ review.评论日期 || "日期未知" }}</small>
+              <p class="section-kicker">COMPETITOR DETAIL</p>
+              <h2>{{ selected.商品 }}</h2>
+              <span>PLID{{ selected.plid }} · {{ selected.当前卖家 || "未知卖家" }}</span>
             </div>
-          </article>
-        </div>
-      </section>
-    </template>
+            <button
+              type="button"
+              class="competitor-modal-close"
+              aria-label="关闭商品详情"
+              @click="closeProductModal"
+            >
+              ×
+            </button>
+          </header>
+
+          <div v-if="detailLoading" class="empty-state slim">正在读取商品详情……</div>
+          <p v-else-if="detailError" class="error-banner">{{ detailError }}</p>
+          <template v-else>
+            <div class="competitor-modal-metrics">
+              <article>
+                <small>当前价格</small>
+                <strong>{{ formatCurrency(selected.价格) }}</strong>
+              </article>
+              <article>
+                <small>平台仓库存</small>
+                <strong>{{ selected.库存上限 }}</strong>
+                <span v-if="selected.库存参考过期 && selected.上次成功库存">
+                  本次未探测；上次成功 {{ selected.上次成功库存 }}
+                  · {{ formatChinaDateTime(selected.上次成功库存时间) }}
+                </span>
+              </article>
+              <article>
+                <small>评论 / 评分</small>
+                <strong>{{ selected.评论数 }} 条 · {{ selected.评分 ?? "—" }}</strong>
+              </article>
+              <article>
+                <small>最近采集</small>
+                <strong>{{ formatChinaDateTime(selected.采集时间) }}</strong>
+              </article>
+            </div>
+
+            <div class="competitor-modal-content">
+              <section class="detail-grid modal-detail-grid">
+                <article class="panel decision-card">
+                  <p class="section-kicker">OPERATING SIGNAL</p>
+                  <h2>{{ selected.趋势判断 }}</h2>
+                  <p>{{ selected.判断说明 }}</p>
+                  <div class="decision-stats">
+                    <span>
+                      <small>库存上限</small>
+                      <strong>{{ selected.库存上限 }}</strong>
+                      <em
+                        v-if="selected.库存参考过期 && selected.上次成功库存"
+                        class="stale-stock-note"
+                      >
+                        过期参考：{{ selected.上次成功库存 }}
+                        · {{ formatChinaDateTime(selected.上次成功库存时间) }}
+                      </em>
+                    </span>
+                    <span><small>累计评论</small><strong>{{ selected.评论数 }}</strong></span>
+                    <span>
+                      <small>观察期估算</small>
+                      <strong>{{ selected.观察期销量信号 }}</strong>
+                    </span>
+                  </div>
+                  <a :href="selected.链接" target="_blank" rel="noreferrer">
+                    打开 Takealot 商品页
+                  </a>
+                </article>
+
+                <article class="panel review-balance">
+                  <p class="section-kicker">REVIEW BALANCE</p>
+                  <h2>评论结构</h2>
+                  <div class="balance-row positive">
+                    <span>好评 4–5 星</span><strong>{{ selected.好评 }}</strong>
+                    <i
+                      :style="{
+                        width: `${(selected.好评 / Math.max(1, selected.评论数)) * 100}%`,
+                      }"
+                    ></i>
+                  </div>
+                  <div class="balance-row neutral">
+                    <span>中评 3 星</span><strong>{{ selected.中评 }}</strong>
+                    <i
+                      :style="{
+                        width: `${(selected.中评 / Math.max(1, selected.评论数)) * 100}%`,
+                      }"
+                    ></i>
+                  </div>
+                  <div class="balance-row negative">
+                    <span>差评 1–2 星</span><strong>{{ selected.差评 }}</strong>
+                    <i
+                      :style="{
+                        width: `${(selected.差评 / Math.max(1, selected.评论数)) * 100}%`,
+                      }"
+                    ></i>
+                  </div>
+                </article>
+              </section>
+
+              <section class="panel variant-panel">
+                <div class="section-heading">
+                  <div>
+                    <p class="section-kicker">VARIANT INVENTORY</p>
+                    <h2>各变体库存</h2>
+                  </div>
+                  <span>{{ detail.variants.length }} 个变体 · 评论共用商品数据</span>
+                </div>
+                <div v-if="!detail.variants.length" class="empty-state slim">
+                  这条历史快照尚无变体明细，重新采集后会逐个显示。
+                </div>
+                <div v-else class="table-wrap">
+                  <table class="variant-table">
+                    <thead>
+                      <tr>
+                        <th>变体</th>
+                        <th>平台 SKU</th>
+                        <th>卖家</th>
+                        <th>价格</th>
+                        <th>平台仓库存</th>
+                        <th>说明</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <tr v-for="variant in detail.variants" :key="variant.变体键">
+                        <td>
+                          <a :href="variant.链接" target="_blank" rel="noreferrer">
+                            {{ variant.变体 }}
+                          </a>
+                        </td>
+                        <td>{{ variant.SKU || "—" }}</td>
+                        <td>{{ variant.卖家 || "未知卖家" }}</td>
+                        <td>{{ formatCurrency(variant.价格) }}</td>
+                        <td>
+                          <span
+                            class="stock-pill"
+                            :class="{
+                              exact: variant.库存精确,
+                              unavailable: variant.库存 === '没货',
+                            }"
+                          >
+                            {{ variant.库存 }}
+                          </span>
+                        </td>
+                        <td>
+                          <small>{{ variant.库存说明 || "—" }}</small>
+                        </td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+                <p class="method-note">
+                  库存按变体分别探测；供应商调货、长时效到货和当前不可购买的变体按平台仓没货处理。
+                  评论按 PLID 商品维度共用，不因变体重复采集或重复计数。
+                </p>
+              </section>
+
+              <section class="panel history-panel">
+                <div class="section-heading">
+                  <div>
+                    <p class="section-kicker">OBSERVATION HISTORY</p>
+                    <h2>历史快照</h2>
+                  </div>
+                  <span>{{ detail.history.length }} 个时间点</span>
+                </div>
+                <div v-if="detail.history.length < 2" class="empty-state slim">
+                  再次采集后，这里会显示库存净流出、新增评论和观察期销量信号。
+                </div>
+                <div v-else class="timeline">
+                  <article v-for="item in detail.history" :key="item.采集时间">
+                    <time>{{ formatChinaDateTime(item.采集时间) }}</time>
+                    <strong>{{ item.趋势判断 }}</strong>
+                    <span>库存 {{ item.库存上限 }} · 评论 {{ item.评论数 }}</span>
+                    <small>
+                      净流出 {{ item.库存净流出 ?? "—" }}
+                      · 新增评论 {{ item.新增评论 ?? "—" }}
+                    </small>
+                  </article>
+                </div>
+              </section>
+
+              <section class="panel reviews-panel">
+                <div class="section-heading">
+                  <div>
+                    <p class="section-kicker">VOICE OF CUSTOMER</p>
+                    <h2>公开评论</h2>
+                  </div>
+                  <span class="review-result-count">
+                    显示 {{ filteredReviews.length }} / {{ detail.reviews.length }} 条
+                  </span>
+                </div>
+                <div class="review-filter-bar">
+                  <div class="filter-tabs">
+                    <button
+                      v-for="filter in ['全部', '好评', '中评', '差评'] as const"
+                      :key="filter"
+                      :class="{ active: reviewFilter === filter }"
+                      @click="reviewFilter = filter"
+                    >
+                      {{ filter }}
+                    </button>
+                  </div>
+                  <div class="review-controls">
+                    <label>
+                      <span>开始日期</span>
+                      <input
+                        v-model="reviewStartDate"
+                        type="date"
+                        :min="reviewMinDate || undefined"
+                        :max="reviewEndDate || reviewMaxDate || undefined"
+                      />
+                    </label>
+                    <label>
+                      <span>结束日期</span>
+                      <input
+                        v-model="reviewEndDate"
+                        type="date"
+                        :min="reviewStartDate || reviewMinDate || undefined"
+                        :max="reviewMaxDate || undefined"
+                      />
+                    </label>
+                    <label>
+                      <span>展示排序</span>
+                      <select v-model="reviewSort">
+                        <option value="date_desc">最新评论优先</option>
+                        <option value="date_asc">最早评论优先</option>
+                        <option value="rating_desc">评分从高到低</option>
+                        <option value="rating_asc">评分从低到高</option>
+                      </select>
+                    </label>
+                    <button
+                      v-if="reviewStartDate || reviewEndDate"
+                      class="clear-review-dates"
+                      @click="clearReviewDates"
+                    >
+                      清除时间
+                    </button>
+                  </div>
+                </div>
+                <div v-if="!filteredReviews.length" class="empty-state slim">
+                  暂无对应评论。
+                </div>
+                <div v-else class="review-list">
+                  <article
+                    v-for="(review, reviewIndex) in filteredReviews"
+                    :key="`${review.评论日期}-${review.标题}-${review.评论人}-${reviewIndex}`"
+                  >
+                    <span class="review-score" :class="reviewTone(review.星级)">
+                      {{ review.星级 }} 星
+                    </span>
+                    <div>
+                      <strong>{{ review.标题 || "未填写标题" }}</strong>
+                      <p>{{ review.评论内容 || "未填写评论内容" }}</p>
+                      <small>
+                        {{ review.评论人 || "匿名用户" }}
+                        · {{ review.评论日期 || "日期未知" }}
+                      </small>
+                    </div>
+                  </article>
+                </div>
+              </section>
+            </div>
+
+            <div class="competitor-modal-actions">
+              <a :href="selected.链接" target="_blank" rel="noreferrer">
+                打开 Takealot 商品页
+              </a>
+              <button type="button" @click="closeProductModal">关闭</button>
+            </div>
+          </template>
+        </section>
+      </div>
+    </Teleport>
 
     <footer class="module-footer">
       库存是各变体在隔离匿名会话中的购物车可售上限；评论按商品共用。所有估算均需结合连续快照判断。

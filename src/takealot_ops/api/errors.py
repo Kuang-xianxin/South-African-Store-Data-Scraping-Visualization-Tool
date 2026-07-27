@@ -9,5 +9,9 @@ class AuthenticationError(ApiResponseError):
     """Raised when the configured API key is rejected."""
 
 
+class ApiTransportError(ApiResponseError):
+    """Raised when DNS, connection, TLS, proxy, or timeout prevents a response."""
+
+
 class RateLimitError(ApiResponseError):
     """Raised when API rate-limit retries have been exhausted."""

@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 from sqlalchemy import select
@@ -18,11 +19,24 @@ from takealot_ops.competitors.domain import (
     VariantStockObservation,
 )
 from takealot_ops.storage.models import (
+    CompetitorLinkHealth,
     CompetitorReview,
     CompetitorSnapshot,
     CompetitorTarget,
     CompetitorVariantSnapshot,
 )
+
+NOT_FOUND_CONFIRMATION_COUNT = 3
+NOT_FOUND_CONFIRMATION_INTERVAL = timedelta(minutes=10)
+
+
+@dataclass(frozen=True)
+class LinkHealthDecision:
+    """Result of persisting one cross-checked 404 observation."""
+
+    status: str
+    confirmed_not_found_count: int
+    evidence_counted: bool
 
 
 class CompetitorRepository:
@@ -67,6 +81,126 @@ class CompetitorRepository:
             review_count=row.review_count,
         )
 
+    def latest_control_product(
+        self,
+        *,
+        exclude_plid: str,
+    ) -> tuple[str, str] | None:
+        """Return the most recently collected different product as a control."""
+        row = self._session.execute(
+            select(CompetitorTarget.plid, CompetitorTarget.url)
+            .join(
+                CompetitorSnapshot,
+                CompetitorSnapshot.plid == CompetitorTarget.plid,
+            )
+            .where(
+                CompetitorTarget.active.is_(True),
+                CompetitorTarget.plid != exclude_plid,
+            )
+            .order_by(CompetitorSnapshot.collected_at.desc())
+            .limit(1)
+        ).first()
+        if row is None:
+            return None
+        return str(row.plid), str(row.url)
+
+    def record_not_found(
+        self,
+        *,
+        plid: str,
+        url: str,
+        checked_at: datetime,
+        control_plid: str | None,
+        control_check_ok: bool,
+    ) -> LinkHealthDecision:
+        """Persist one 404 without confirming invalidity too quickly."""
+        now = checked_at.astimezone(UTC)
+        row = self._session.get(CompetitorLinkHealth, plid)
+        if row is None:
+            row = CompetitorLinkHealth(
+                plid=plid,
+                url=url,
+                status="suspected_invalid",
+                confirmed_not_found_count=0,
+                first_not_found_at=now,
+                last_evidence_at=None,
+                last_checked_at=now,
+                last_success_at=None,
+                control_plid=control_plid,
+                control_check_ok=control_check_ok,
+                last_error="Takealot 商品数据返回 404",
+            )
+            self._session.add(row)
+
+        evidence_counted = False
+        last_evidence = _as_utc(row.last_evidence_at)
+        if (
+            control_check_ok
+            and (
+                last_evidence is None
+                or now - last_evidence >= NOT_FOUND_CONFIRMATION_INTERVAL
+            )
+        ):
+            row.confirmed_not_found_count += 1
+            row.last_evidence_at = now
+            evidence_counted = True
+
+        row.url = url
+        row.last_checked_at = now
+        row.control_plid = control_plid
+        row.control_check_ok = control_check_ok
+        row.last_error = "Takealot 商品数据返回 404"
+        if row.first_not_found_at is None:
+            row.first_not_found_at = now
+        row.status = (
+            "confirmed_invalid"
+            if row.confirmed_not_found_count >= NOT_FOUND_CONFIRMATION_COUNT
+            else "suspected_invalid"
+        )
+        self._session.flush()
+        return LinkHealthDecision(
+            status=row.status,
+            confirmed_not_found_count=row.confirmed_not_found_count,
+            evidence_counted=evidence_counted,
+        )
+
+    def mark_link_healthy(
+        self,
+        *,
+        plid: str,
+        url: str,
+        checked_at: datetime,
+    ) -> None:
+        """Reset any previous 404 suspicion after a successful collection."""
+        now = checked_at.astimezone(UTC)
+        row = self._session.get(CompetitorLinkHealth, plid)
+        if row is None:
+            row = CompetitorLinkHealth(
+                plid=plid,
+                url=url,
+                status="healthy",
+                confirmed_not_found_count=0,
+                first_not_found_at=None,
+                last_evidence_at=None,
+                last_checked_at=now,
+                last_success_at=now,
+                control_plid=None,
+                control_check_ok=None,
+                last_error=None,
+            )
+            self._session.add(row)
+            return
+        row.url = url
+        row.status = "healthy"
+        row.confirmed_not_found_count = 0
+        row.first_not_found_at = None
+        row.last_evidence_at = None
+        row.last_checked_at = now
+        row.last_success_at = now
+        row.control_plid = None
+        row.control_check_ok = None
+        row.last_error = None
+
     def save_observation(
         self,
         *,
@@ -96,6 +230,11 @@ class CompetitorRepository:
             target.title = product.title
             target.active = True
             target.updated_at = now
+        self.mark_link_healthy(
+            plid=product.plid,
+            url=product.url,
+            checked_at=now,
+        )
 
         snapshot = CompetitorSnapshot(
             plid=product.plid,
@@ -203,3 +342,11 @@ class CompetitorRepository:
             row.customer_name = review.customer_name
             row.review_date = review.review_date
             row.last_seen_at = seen_at
+
+
+def _as_utc(value: datetime | None) -> datetime | None:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)
