@@ -1176,7 +1176,8 @@ function parseInput(value: string): number | null {
 .daily-run-state em { display: block; color: #9a6420; font-size: 10px; font-style: normal; font-weight: 700; }
 .manual-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 0 12px; }
 .modal-actions { display: flex; justify-content: flex-end; gap: 9px; margin-top: 18px; }
-.modal-actions button { padding: 9px 15px; border: 1px solid #d1dad4; border-radius: 8px; background: white; cursor: pointer; }
+.modal-actions button { padding: 9px 15px; border: 1px solid #d1dad4; border-radius: 8px; background: white; color: #315245; cursor: pointer; }
+.modal-actions button.action-button { border-color: var(--green); background: var(--green); color: white; }
 @media (max-width: 1000px) {
   .daily-kpis { grid-template-columns: repeat(3, 1fr); }
   .daily-toolbar, .daily-run-times { align-items: flex-start; flex-direction: column; }
