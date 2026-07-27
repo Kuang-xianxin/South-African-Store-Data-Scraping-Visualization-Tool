@@ -35,6 +35,7 @@ const loading = ref(false);
 const saving = ref(false);
 const message = ref("");
 const editorError = ref("");
+const editorStatus = ref("");
 const search = ref("");
 const filter = ref<"review" | "all" | "sales" | "stock" | "missing">("all");
 const page = ref(1);
@@ -42,6 +43,7 @@ const pageSize = 24;
 const slots = ["morning", "evening"] as const;
 const matrixScroll = ref<HTMLElement | null>(null);
 const searchInput = ref<HTMLInputElement | null>(null);
+const editorNoteInput = ref<HTMLTextAreaElement | null>(null);
 const editor = ref<{
   mode:
     | "manual"
@@ -199,6 +201,7 @@ function openEditor(
 ) {
   editor.value = { mode, item, note };
   editorError.value = "";
+  editorStatus.value = "";
   const fullItem = item && "manual" in item ? item : null;
   const current = mode === "manual" && fullItem?.manual_at && fullItem.manual
     ? fullItem.manual
@@ -232,18 +235,45 @@ function openEditor(
   noteManager.value = null;
 }
 
-function closeEditor() {
+function closeEditor(force = false) {
+  if (saving.value && !force) return;
   editor.value = { mode: null, item: null, note: null };
   editorError.value = "";
+  editorStatus.value = "";
 }
 
 async function submitEditor() {
-  if (!props.canOperate || !editor.value.mode) return;
+  if (saving.value) return;
+  if (!props.canOperate) {
+    editorError.value = "当前账号没有执行此操作的权限。";
+    return;
+  }
   const mode = editor.value.mode;
   const item = editor.value.item;
+  if (!mode || !item) {
+    editorError.value = "这条待办已失效，请关闭弹窗并刷新日报后重试。";
+    return;
+  }
+  const note = String(form.value.note ?? "").trim();
+  if (!note) {
+    editorError.value = mode === "revert"
+      ? "请先填写撤销原因，再点击“确认撤销”。"
+      : mode === "confirm"
+        ? "请先填写合并备注，再点击“确认合并”。"
+        : "请先填写操作备注，再提交。";
+    await nextTick();
+    editorNoteInput.value?.focus();
+    return;
+  }
   saving.value = true;
   message.value = "";
   editorError.value = "";
+  editorStatus.value = mode === "revert"
+    ? "正在撤销上次确认并重新计算相关待办，请稍候…"
+    : mode === "confirm"
+      ? "正在确认合并并重新计算库存连续性，请稍候…"
+      : "正在保存并重新计算相关数据，请稍候…";
+  let successMessage = "";
   try {
     if (mode === "manual" && item) {
       await saveDailyReportManual(item.business_date, item.offer_id, {
@@ -251,59 +281,61 @@ async function submitEditor() {
         ordered_units: parseInput(form.value.ordered_units),
         platform_stock: parseInput(form.value.platform_stock),
         reason: form.value.reason,
-        note: form.value.note,
+        note,
       });
-      message.value = "人工候选值已更新并标记，仍需最终确认；历次修改均已留痕。";
+      successMessage = "人工候选值已更新并标记，仍需最终确认；历次修改均已留痕。";
     } else if (mode === "confirm" && item) {
       const result = await confirmDailyReportEntry(
         item.business_date,
         item.offer_id,
         form.value.source,
-        form.value.note,
+        note,
       );
-      message.value = result.exported
+      successMessage = result.exported
         ? "数据已确认；当天全部完成，Excel 已自动导出。"
         : "该商品已确认合并。";
     } else if (mode === "revert" && item) {
       await revertDailyReportConfirmation(
         item.business_date,
         item.offer_id,
-        form.value.note,
+        note,
       );
-      message.value = "已撤销确认并恢复待核对；原确认和撤销原因均已留痕。";
+      successMessage = "已撤销确认并恢复待核对；原确认和撤销原因均已留痕。";
     } else if (mode === "note" && item) {
       await saveDailyReportNote(
         item.business_date,
         item.offer_id,
-        form.value.note,
+        note,
         form.value.note_issue,
       );
-      message.value = "备注已新增，不会改变待办状态。";
+      successMessage = "备注已新增，不会改变待办状态。";
     } else if (mode === "edit_note" && item && editor.value.note) {
       await updateDailyReportNote(
         item.business_date,
         item.offer_id,
         editor.value.note.id,
-        form.value.note,
+        note,
         form.value.note_issue,
       );
-      message.value = "备注已修改，原内容与修改记录已保留在审计中。";
+      successMessage = "备注已修改，原内容与修改记录已保留在审计中。";
     } else if (mode === "dismiss" && item) {
       await dismissDailyReportStockAlert(
         item.business_date,
         item.offer_id,
-        form.value.note,
+        note,
       );
-      message.value = "库存连续性差异已人工确认，原因已留痕。";
+      successMessage = "库存连续性差异已人工确认，原因已留痕。";
     }
-    closeEditor();
     await load();
+    message.value = successMessage;
+    closeEditor(true);
   } catch (error) {
     const detail = error instanceof Error ? error.message : "保存失败";
     editorError.value = detail;
     message.value = detail;
   } finally {
     saving.value = false;
+    editorStatus.value = "";
   }
 }
 
@@ -1211,8 +1243,8 @@ function parseInput(value: string | number): number | null {
       </section>
     </div>
 
-    <div v-if="editor.mode" class="daily-modal-backdrop" @click.self="closeEditor">
-      <form class="daily-modal" @submit.prevent="submitEditor">
+    <div v-if="editor.mode" class="daily-modal-backdrop" @click.self="closeEditor()">
+      <form class="daily-modal" novalidate @submit.prevent="submitEditor">
         <p class="section-kicker">OPERATOR ACTION</p>
         <h3>
           {{
@@ -1290,22 +1322,37 @@ function parseInput(value: string | number): number | null {
                   ? "修改后的备注内容（必填）"
                   : "操作备注（必填）"
           }}
-          <textarea v-model="form.note" required maxlength="2000"></textarea>
+          <textarea
+            ref="editorNoteInput"
+            v-model="form.note"
+            required
+            maxlength="2000"
+            :disabled="saving"
+          ></textarea>
         </label>
-        <p v-if="editorError" class="modal-error">{{ editorError }}</p>
+        <p v-if="editorError" class="modal-error" role="alert">{{ editorError }}</p>
+        <p v-else-if="editorStatus" class="modal-progress" role="status">
+          {{ editorStatus }}
+        </p>
         <div class="modal-actions">
-          <button type="button" @click="closeEditor">取消</button>
+          <button type="button" :disabled="saving" @click="closeEditor()">取消</button>
           <button
             type="submit"
             class="action-button"
-            :disabled="saving || !form.note.trim()"
+            :disabled="saving"
           >
             {{
               saving
-                ? "正在保存…"
+                ? editor.mode === "revert"
+                  ? "正在撤销…"
+                  : editor.mode === "confirm"
+                    ? "正在合并…"
+                    : "正在保存…"
                 : editor.mode === "revert"
                   ? "确认撤销"
-                  : "确认保存"
+                  : editor.mode === "confirm"
+                    ? "确认合并"
+                    : "确认保存"
             }}
           </button>
         </div>
@@ -1479,6 +1526,7 @@ function parseInput(value: string | number): number | null {
 .daily-modal input, .daily-modal select, .daily-modal textarea { width: 100%; padding: 9px 10px; border: 1px solid #d1dad4; border-radius: 8px; background: white; }
 .daily-modal textarea { min-height: 100px; font-family: inherit; line-height: 1.5; }
 .modal-error { margin: 12px 0 0; padding: 8px 10px; border: 1px solid #e7aaa0; border-radius: 7px; background: #fff1ee; color: #a43c2d; font-size: 10px; line-height: 1.5; }
+.modal-progress { margin: 12px 0 0; padding: 8px 10px; border: 1px solid #abcbbb; border-radius: 7px; background: #edf7f1; color: #315f49; font-size: 10px; line-height: 1.5; }
 .note-manager-modal { width: min(680px, 100%); }
 .note-manager-list { display: grid; gap: 8px; margin-top: 15px; }
 .note-manager-list article { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; padding: 10px 11px; border: 1px solid #dce3de; border-radius: 8px; background: white; }
@@ -1507,6 +1555,7 @@ function parseInput(value: string | number): number | null {
 .modal-actions { display: flex; justify-content: flex-end; gap: 9px; margin-top: 18px; }
 .modal-actions button { padding: 9px 15px; border: 1px solid #d1dad4; border-radius: 8px; background: white; color: #315245; cursor: pointer; }
 .modal-actions button.action-button { border-color: var(--green); background: var(--green); color: white; }
+.modal-actions button:disabled { cursor: wait; opacity: .68; }
 @media (max-width: 1000px) {
   .daily-kpis { grid-template-columns: repeat(3, 1fr); }
   .daily-toolbar, .daily-run-times { align-items: flex-start; flex-direction: column; }
