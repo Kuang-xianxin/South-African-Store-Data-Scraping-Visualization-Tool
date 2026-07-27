@@ -310,6 +310,25 @@ export interface DailyReportItem {
     confirmed_at: string;
     confirm_note: string | null;
   } | null;
+  confirmation_revert: {
+    previous_confirmation: {
+      values: DailyReportValues;
+      source: "morning" | "evening" | "latest" | "manual";
+      source_label: string;
+      confirmed_by: string | null;
+      confirmed_at: string | null;
+      confirm_note: string | null;
+    };
+    previous_stock_alert: {
+      dismissed: boolean;
+      note: string | null;
+      dismissed_by: string | null;
+      dismissed_at: string | null;
+    };
+    reverted_by: string | null;
+    reverted_at: string;
+    revert_note: string;
+  } | null;
   review_versions: Array<{
     kind: "confirmed" | "capture" | "manual";
     run_id: string | null;
@@ -360,7 +379,10 @@ export interface DailyReportItem {
   } | null;
   differences: Array<keyof DailyReportValues>;
   review_issues: Array<{
-    type: "capture_difference" | "stock_continuity";
+    type:
+      | "capture_difference"
+      | "stock_continuity"
+      | "confirmation_reverted";
     fields: Array<keyof DailyReportValues>;
   }>;
   missing_capture: boolean;
@@ -453,6 +475,8 @@ export interface DailyReportPayload {
         | "stock_check"
         | "operator_note"
         | "operator_notes"
+        | "confirmation_baseline"
+        | "confirmation_revert"
       >
     >;
   }>;

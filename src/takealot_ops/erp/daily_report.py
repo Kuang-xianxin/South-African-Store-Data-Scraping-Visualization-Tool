@@ -283,6 +283,10 @@ def daily_report_payload(engine: Engine, business_date: date) -> dict[str, Any]:
             session,
             list(resolutions.values()),
         )
+        confirmation_reverts = _confirmation_revert_map(
+            session,
+            business_date,
+        )
         previous_contexts = _previous_stock_contexts(session, business_date)
         offer_ids = sorted(all_observations)
         items = [
@@ -298,6 +302,7 @@ def daily_report_payload(engine: Engine, business_date: date) -> dict[str, Any]:
                 confirmation_triggers.get(offer_id),
                 operator_notes.get(offer_id, []),
                 confirmation_baselines.get(offer_id),
+                confirmation_reverts.get(offer_id),
             )
             for offer_id in offer_ids
         ]
@@ -582,6 +587,9 @@ def confirm_entry(
             capture_rows,
             resolution,
         )
+        reconfirming_reverted_entry = bool(
+            _confirmation_revert_map(session, business_date).get(offer_id)
+        ) and not _has_confirmation_baseline(resolution)
         previous_effective_stock = _effective_stock_before_confirmation(
             session,
             resolution,
@@ -632,9 +640,94 @@ def confirm_entry(
             note=clean_note,
             user_id=user_id,
             confirmed_at=now,
-            resolved_version_difference=bool(resolved_version_differences),
+            resolved_version_difference=(
+                bool(resolved_version_differences)
+                or reconfirming_reverted_entry
+            ),
         )
         _resolve_deadline_if_complete(session, business_date, now)
+
+
+def revert_confirmation(
+    engine: Engine,
+    *,
+    business_date: date,
+    offer_id: str,
+    note: str,
+    user_id: int,
+) -> None:
+    """Reopen a confirmed entry without deleting the original audit trail."""
+    clean_note = _required_note(note, "撤销确认必须填写原因")
+    now = _utc_now()
+    with Session(engine) as session, session.begin():
+        resolution = _resolution_or_error(session, business_date, offer_id)
+        if not _has_confirmation_baseline(resolution):
+            raise DailyReportConflictError("该商品没有可撤销的人工确认")
+
+        previous_confirmation = {
+            "values": _final_values(resolution),
+            "source": resolution.selected_source,
+            "source_label": _confirmation_source_label(
+                str(resolution.selected_source)
+            ),
+            "confirmed_by": _user_display_name(session, resolution.confirmed_by),
+            "confirmed_at": (
+                resolution.confirmed_at.isoformat()
+                if resolution.confirmed_at is not None
+                else None
+            ),
+            "confirm_note": resolution.confirm_note,
+        }
+        previous_stock_alert = {
+            "dismissed": resolution.stock_alert_dismissed,
+            "note": resolution.stock_alert_note,
+            "dismissed_by": _user_display_name(
+                session,
+                resolution.stock_alert_dismissed_by,
+            ),
+            "dismissed_at": (
+                resolution.stock_alert_dismissed_at.isoformat()
+                if resolution.stock_alert_dismissed_at is not None
+                else None
+            ),
+        }
+        reverted_by = _user_display_name(session, user_id)
+
+        resolution.selected_source = None
+        resolution.final_page_views_30_days = None
+        resolution.final_ordered_units = None
+        resolution.final_platform_stock = None
+        resolution.confirm_note = None
+        resolution.confirmed_by = None
+        resolution.confirmed_at = None
+        resolution.stock_alert_dismissed = False
+        resolution.stock_alert_note = None
+        resolution.stock_alert_dismissed_by = None
+        resolution.stock_alert_dismissed_at = None
+        resolution.status = "needs_review"
+        resolution.updated_at = now
+        _audit(
+            session,
+            business_date,
+            offer_id,
+            "confirmation_reverted",
+            {
+                "previous_confirmation": previous_confirmation,
+                "previous_stock_alert": previous_stock_alert,
+                "reverted_by": reverted_by,
+                "reverted_at": now.isoformat(),
+                "revert_note": clean_note,
+            },
+            clean_note,
+            user_id,
+            now,
+        )
+        _defer_following_stock_continuity(
+            session,
+            resolution=resolution,
+            deferred_at=now,
+        )
+        _refresh_deadline_snapshot(session, business_date, now)
 
 
 def confirm_ready_entries(
@@ -1649,7 +1742,7 @@ def _defer_following_stock_continuity(
                 "previous_status": previous_status,
                 "new_status": following.status,
             },
-            "前一日报日出现版本差异，库存连续性待办暂停，待正确版本确认后重算。",
+            "前一日报日正确值未定，库存连续性待办暂停，待正确值确认后重算。",
             None,
             deferred_at,
         )
@@ -1718,6 +1811,7 @@ def _item_payload(
     confirmation_trigger: dict[str, Any] | None,
     operator_notes: list[dict[str, Any]],
     confirmation_baseline: dict[str, Any] | None,
+    confirmation_revert: dict[str, Any] | None,
 ) -> dict[str, Any]:
     previous_stock = (
         previous_context.get("stock") if previous_context is not None else None
@@ -1847,6 +1941,8 @@ def _item_payload(
         status = "needs_review"
     elif mismatch and not dismissed:
         status = "needs_review"
+    elif confirmation_revert is not None and not has_confirmation_baseline:
+        status = "needs_review"
     elif has_confirmation_baseline:
         status = "confirmed"
     elif (
@@ -1871,6 +1967,13 @@ def _item_payload(
             {
                 "type": "stock_continuity",
                 "fields": ["ordered_units", "platform_stock"],
+            }
+        )
+    elif confirmation_revert is not None and not has_confirmation_baseline:
+        review_issues.append(
+            {
+                "type": "confirmation_reverted",
+                "fields": [],
             }
         )
     return {
@@ -1900,6 +2003,9 @@ def _item_payload(
         ),
         "final": final_values if has_confirmation_baseline else None,
         "confirmation_baseline": confirmation_baseline,
+        "confirmation_revert": (
+            confirmation_revert if not has_confirmation_baseline else None
+        ),
         "review_versions": review_versions,
         "selected_source": resolution.selected_source if resolution is not None else None,
         "confirm_note": resolution.confirm_note if resolution is not None else None,
@@ -1926,7 +2032,12 @@ def _item_payload(
                 "当前日报日仍有同周期版本差异，确认正确版本后再计算库存连续性"
                 if differences
                 else (
-                    "前一日报日仍有同周期版本差异，确认正确版本后再计算库存连续性"
+                    (
+                        "前一日报日的人工确认已撤销，重新确认正确值后再计算库存连续性"
+                        if previous_context is not None
+                        and "已撤销" in str(previous_context.get("source_label") or "")
+                        else "前一日报日仍有同周期版本差异，确认正确版本后再计算库存连续性"
+                    )
                     if previous_context is not None and not previous_ready
                     else None
                 )
@@ -1973,6 +2084,8 @@ def _comparison_history(
                         "stock_check": item["stock_check"],
                         "operator_note": item["operator_note"],
                         "operator_notes": item["operator_notes"],
+                        "confirmation_baseline": item["confirmation_baseline"],
+                        "confirmation_revert": item["confirmation_revert"],
                     }
                     for item in items
                 ],
@@ -2051,6 +2164,10 @@ def _comparison_items_for_date(
         session,
         list(resolutions.values()),
     )
+    confirmation_reverts = _confirmation_revert_map(
+        session,
+        business_date,
+    )
     previous_contexts = _previous_stock_contexts(session, business_date)
     offer_ids = sorted(all_observations)
     return [
@@ -2066,6 +2183,7 @@ def _comparison_items_for_date(
             confirmation_triggers.get(offer_id),
             operator_notes.get(offer_id, []),
             confirmation_baselines.get(offer_id),
+            confirmation_reverts.get(offer_id),
         )
         for offer_id in offer_ids
     ]
@@ -2219,6 +2337,26 @@ def _confirmation_baseline_map(
     }
 
 
+def _confirmation_revert_map(
+    session: Session,
+    business_date: date,
+) -> dict[str, dict[str, Any]]:
+    """Return the latest append-only confirmation rollback for each offer."""
+    result: dict[str, dict[str, Any]] = {}
+    rows = session.scalars(
+        select(DailyReportAudit)
+        .where(
+            DailyReportAudit.business_date == business_date,
+            DailyReportAudit.action == "confirmation_reverted",
+        )
+        .order_by(DailyReportAudit.created_at, DailyReportAudit.id)
+    )
+    for row in rows:
+        if row.offer_id is not None and isinstance(row.payload, dict):
+            result[row.offer_id] = row.payload
+    return result
+
+
 def _previous_stock_contexts(
     session: Session,
     business_date: date,
@@ -2238,6 +2376,7 @@ def _previous_stock_contexts(
         )
     )
     captures = _all_observations(session, previous_date)
+    confirmation_reverts = _confirmation_revert_map(session, previous_date)
     user_ids = {
         row.confirmed_by
         for row in rows
@@ -2256,6 +2395,26 @@ def _previous_stock_contexts(
             latest_pair[-1] if latest_pair else (None, None)
         )
         version_differences = _version_differences(latest_pair, row)
+        confirmation_revert = confirmation_reverts.get(row.offer_id)
+        if confirmation_revert is not None and not _has_confirmation_baseline(row):
+            result[row.offer_id] = {
+                "business_date": previous_date.isoformat(),
+                "stock": None,
+                "source": "version_difference",
+                "source_label": "前一日报日的人工确认已撤销，待重新确认后再计算库存连续性",
+                "selected_source": None,
+                "confirmed_by": None,
+                "confirmed_at": None,
+                "confirm_note": None,
+                "capture_label": (
+                    _capture_run_label(latest_run)
+                    if latest_run is not None
+                    else None
+                ),
+                "continuity_ready": False,
+                "version_differences": version_differences,
+            }
+            continue
         if version_differences:
             result[row.offer_id] = {
                 "business_date": previous_date.isoformat(),
@@ -2415,6 +2574,30 @@ def _resolve_deadline_if_complete(
     snapshot = session.get(DailyReportDeadlineSnapshot, business_date)
     if snapshot is not None and remaining == 0:
         snapshot.resolved_at = now
+
+
+def _refresh_deadline_snapshot(
+    session: Session,
+    business_date: date,
+    now: datetime,
+) -> None:
+    snapshot = session.get(DailyReportDeadlineSnapshot, business_date)
+    if snapshot is None:
+        return
+    unresolved = list(
+        session.scalars(
+            select(DailyReportResolution).where(
+                DailyReportResolution.business_date == business_date,
+                DailyReportResolution.status.in_(OPEN_STATUSES),
+            )
+        )
+    )
+    snapshot.unresolved_count = len(unresolved)
+    snapshot.details = [
+        {"offer_id": row.offer_id, "status": row.status}
+        for row in unresolved
+    ]
+    snapshot.resolved_at = now if not unresolved else None
 
 
 def _audit(

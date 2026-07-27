@@ -21,6 +21,7 @@ from takealot_ops.erp.daily_report import (
     operations_business_date,
     record_daily_report_failure,
     reminder_payload,
+    revert_confirmation,
     save_manual_candidate,
     save_operator_note,
     update_operator_note,
@@ -375,6 +376,37 @@ def test_manual_candidate_and_confirm_are_separate_audited_states() -> None:
     assert product["manual"]["ordered_units"] == 3
     assert product["current"]["ordered_units"] == 1
 
+    save_manual_candidate(
+        engine,
+        business_date=REPORT_DATE,
+        offer_id="offer-a",
+        values={"ordered_units": 4, "platform_stock": 8},
+        reason="stock_adjustment",
+        note="第二次核对后改为订单4、库存8",
+        user_id=1,
+    )
+    revised = daily_report_payload(engine, REPORT_DATE)
+    product = next(row for row in revised["items"] if row["offer_id"] == "offer-a")
+    assert product["manual"]["ordered_units"] == 4
+    assert product["manual"]["platform_stock"] == 8
+    assert product["manual_reason"] == "stock_adjustment"
+    assert product["manual_note"] == "第二次核对后改为订单4、库存8"
+    with Session(engine) as session:
+        edits = list(
+            session.scalars(
+                select(DailyReportAudit)
+                .where(
+                    DailyReportAudit.offer_id == "offer-a",
+                    DailyReportAudit.action == "manual_candidate",
+                )
+                .order_by(DailyReportAudit.id)
+            )
+        )
+    assert len(edits) == 2
+    assert edits[1].payload["before"]["ordered_units"] == 3
+    assert edits[1].payload["after"]["ordered_units"] == 4
+    assert edits[1].payload["after"]["platform_stock"] == 8
+
     confirm_entry(
         engine,
         business_date=REPORT_DATE,
@@ -386,8 +418,180 @@ def test_manual_candidate_and_confirm_are_separate_audited_states() -> None:
     after = daily_report_payload(engine, REPORT_DATE)
     product = next(row for row in after["items"] if row["offer_id"] == "offer-a")
     assert product["status"] == "confirmed"
-    assert product["final"]["ordered_units"] == 3
-    assert product["final"]["platform_stock"] == 9
+    assert product["final"]["ordered_units"] == 4
+    assert product["final"]["platform_stock"] == 8
+
+
+def test_confirmation_can_be_reverted_and_reconfirmed_with_full_audit() -> None:
+    engine = _engine()
+    for slot, hour in (("morning", 2), ("evening", 10)):
+        capture_daily_report(
+            engine,
+            business_date=REPORT_DATE,
+            slot=slot,
+            captured_at=datetime(2026, 7, 24, hour, tzinfo=UTC),
+        )
+    confirm_entry(
+        engine,
+        business_date=REPORT_DATE,
+        offer_id="offer-a",
+        source="latest",
+        note="首次采用本周期最新值",
+        user_id=1,
+    )
+
+    revert_confirmation(
+        engine,
+        business_date=REPORT_DATE,
+        offer_id="offer-a",
+        note="复核后发现选错来源，需要重新确认",
+        user_id=1,
+    )
+    reopened = next(
+        item
+        for item in daily_report_payload(engine, REPORT_DATE)["items"]
+        if item["offer_id"] == "offer-a"
+    )
+    assert reopened["status"] == "needs_review"
+    assert reopened["confirmation_baseline"] is None
+    assert reopened["review_issues"] == [
+        {"type": "confirmation_reverted", "fields": []}
+    ]
+    assert reopened["confirmation_revert"]["revert_note"] == (
+        "复核后发现选错来源，需要重新确认"
+    )
+    assert reopened["confirmation_revert"]["previous_confirmation"]["source"] == (
+        "latest"
+    )
+    assert reopened["confirmation_revert"]["previous_confirmation"]["values"][
+        "platform_stock"
+    ] == 9
+
+    confirm_entry(
+        engine,
+        business_date=REPORT_DATE,
+        offer_id="offer-a",
+        source="morning",
+        note="重新核对后采用早间值",
+        user_id=1,
+    )
+    reconfirmed = next(
+        item
+        for item in daily_report_payload(engine, REPORT_DATE)["items"]
+        if item["offer_id"] == "offer-a"
+    )
+    assert reconfirmed["status"] == "confirmed"
+    assert reconfirmed["confirmation_revert"] is None
+    with Session(engine) as session:
+        actions = list(
+            session.scalars(
+                select(DailyReportAudit.action)
+                .where(DailyReportAudit.offer_id == "offer-a")
+                .order_by(DailyReportAudit.id)
+            )
+        )
+    assert actions[-3:] == ["confirm", "confirmation_reverted", "confirm"]
+
+    with pytest.raises(DailyReportConflictError, match="没有可撤销"):
+        revert_confirmation(
+            engine,
+            business_date=REPORT_DATE,
+            offer_id="offer-b",
+            note="不存在确认记录",
+            user_id=1,
+        )
+
+
+def test_revert_pauses_following_continuity_until_reconfirmation() -> None:
+    engine = _engine()
+    for slot, hour in (("morning", 2), ("evening", 10)):
+        capture_daily_report(
+            engine,
+            business_date=REPORT_DATE,
+            slot=slot,
+            captured_at=datetime(2026, 7, 24, hour, tzinfo=UTC),
+        )
+    confirm_entry(
+        engine,
+        business_date=REPORT_DATE,
+        offer_id="offer-a",
+        source="latest",
+        note="确认首日库存9",
+        user_id=1,
+    )
+
+    next_date = REPORT_DATE + timedelta(days=1)
+    with Session(engine) as session, session.begin():
+        session.get(OfferCurrent, "offer-a").takealot_available_stock = 7
+        session.add(
+            SaleItem(
+                order_item_id="sale-a-after-revert",
+                order_date=datetime(2026, 7, 25, 1, tzinfo=UTC),
+                sales_day=next_date,
+                offer_id="offer-a",
+                sku="9900000000001",
+                quantity=1,
+                raw_payload={},
+            )
+        )
+    for slot, hour in (("morning", 2), ("evening", 10)):
+        capture_daily_report(
+            engine,
+            business_date=next_date,
+            slot=slot,
+            captured_at=datetime(2026, 7, 25, hour, tzinfo=UTC),
+        )
+    before = next(
+        item
+        for item in daily_report_payload(engine, next_date)["pending_actions"]
+        if item["business_date"] == next_date.isoformat()
+        and item["offer_id"] == "offer-a"
+    )
+    assert before["review_issues"][0]["type"] == "stock_continuity"
+
+    revert_confirmation(
+        engine,
+        business_date=REPORT_DATE,
+        offer_id="offer-a",
+        note="首日确认来源需要重新核对",
+        user_id=1,
+    )
+    paused = next(
+        item
+        for item in daily_report_payload(engine, next_date)["items"]
+        if item["offer_id"] == "offer-a"
+    )
+    assert paused["review_issues"] == []
+    assert paused["stock_check"]["mismatch"] is False
+    assert paused["stock_check"]["deferred_reason"] == (
+        "前一日报日的人工确认已撤销，重新确认正确值后再计算库存连续性"
+    )
+    assert not any(
+        item["business_date"] == next_date.isoformat()
+        and item["offer_id"] == "offer-a"
+        for item in daily_report_payload(engine, next_date)["pending_actions"]
+    )
+
+    confirm_entry(
+        engine,
+        business_date=REPORT_DATE,
+        offer_id="offer-a",
+        source="latest",
+        note="重新确认首日库存9",
+        user_id=1,
+    )
+    resumed = next(
+        item
+        for item in daily_report_payload(engine, next_date)["pending_actions"]
+        if item["business_date"] == next_date.isoformat()
+        and item["offer_id"] == "offer-a"
+    )
+    assert resumed["review_issues"][0]["type"] == "stock_continuity"
+    assert resumed["stock_check"]["expected_stock"] == 8
+    assert resumed["stock_check"]["actual_stock"] == 7
+    assert resumed["confirmation_trigger"]["confirmation_note"] == (
+        "重新确认首日库存9"
+    )
 
 
 def test_export_is_blocked_until_every_entry_is_confirmed(tmp_path: Path) -> None:

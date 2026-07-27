@@ -602,5 +602,27 @@ def test_daily_report_api_reads_versions_and_bulk_confirms_ready_rows(
         assert confirmed.status_code == 200
         assert confirmed.json()["confirmed"] == 1
         assert confirmed.json()["exported"] is True
+        reverted = client.post(
+            "/api/erp/daily-report/2026-07-24/offer-a/revert-confirmation",
+            headers={"X-CSRF-Token": str(issued["csrf_token"])},
+            json={"note": "复核后发现需要重新选择版本"},
+        )
+        assert reverted.status_code == 200
+        reopened = client.get(
+            "/api/erp/daily-report?business_date=2026-07-24"
+        ).json()
+        assert reopened["items"][0]["status"] == "needs_review"
+        assert reopened["items"][0]["review_issues"] == [
+            {"type": "confirmation_reverted", "fields": []}
+        ]
+        assert reopened["items"][0]["confirmation_revert"]["reverted_by"] == (
+            "Local Admin"
+        )
+        repeated_revert = client.post(
+            "/api/erp/daily-report/2026-07-24/offer-a/revert-confirmation",
+            headers={"X-CSRF-Token": str(issued["csrf_token"])},
+            json={"note": "重复撤销"},
+        )
+        assert repeated_revert.status_code == 409
         exported = tmp_path / "exports" / "operations-daily" / "2026-07-24"
         assert any(exported.glob("*.xlsx"))

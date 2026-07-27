@@ -60,6 +60,7 @@ from takealot_ops.erp.daily_report import (
     export_operations_workbook,
     operations_business_date,
     reminder_payload,
+    revert_confirmation,
     save_manual_candidate,
     save_operator_note,
     unresolved_locations,
@@ -164,6 +165,10 @@ class DailyReportManualRequest(BaseModel):
 
 class DailyReportConfirmRequest(BaseModel):
     source: str
+    note: str = Field(min_length=1, max_length=2000)
+
+
+class DailyReportRevertRequest(BaseModel):
     note: str = Field(min_length=1, max_length=2000)
 
 
@@ -566,6 +571,27 @@ def create_app(project_root: Path | None = None) -> FastAPI:
             "ok": True,
             "exported": _auto_export_operations_if_ready(root, business_date),
         }
+
+    @app.post(
+        "/api/erp/daily-report/{business_date}/{offer_id}/revert-confirmation"
+    )
+    def operations_daily_report_revert_confirmation(
+        business_date: date,
+        offer_id: str,
+        payload: DailyReportRevertRequest,
+        request: Request,
+    ) -> dict[str, object]:
+        _write_daily_report(
+            root,
+            lambda engine: revert_confirmation(
+                engine,
+                business_date=business_date,
+                offer_id=offer_id,
+                note=payload.note,
+                user_id=request.state.erp_user.id,
+            ),
+        )
+        return {"ok": True}
 
     @app.post("/api/erp/daily-report/{business_date}/confirm-ready")
     def operations_daily_report_confirm_ready(

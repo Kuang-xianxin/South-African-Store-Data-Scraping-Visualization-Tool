@@ -421,6 +421,21 @@ export function confirmDailyReportEntry(
   );
 }
 
+export function revertDailyReportConfirmation(
+  businessDate: string,
+  offerId: string,
+  note: string,
+): Promise<{ ok: boolean }> {
+  return request(
+    `/api/erp/daily-report/${encodeURIComponent(businessDate)}/${encodeURIComponent(offerId)}/revert-confirmation`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ note }),
+    },
+  );
+}
+
 export function confirmReadyDailyReportEntries(
   businessDate: string,
   note: string,

@@ -8,6 +8,7 @@ import {
   fetchDailyReport,
   fetchDailyReportExport,
   generateDailyReportExport,
+  revertDailyReportConfirmation,
   saveDailyReportManual,
   saveDailyReportNote,
   updateDailyReportNote,
@@ -40,7 +41,14 @@ const pageSize = 24;
 const slots = ["morning", "evening"] as const;
 const matrixScroll = ref<HTMLElement | null>(null);
 const editor = ref<{
-  mode: "manual" | "confirm" | "note" | "edit_note" | "dismiss" | null;
+  mode:
+    | "manual"
+    | "confirm"
+    | "revert"
+    | "note"
+    | "edit_note"
+    | "dismiss"
+    | null;
   item: EditableDailyReportItem | null;
   note: DailyReportNote | null;
 }>({ mode: null, item: null, note: null });
@@ -157,18 +165,23 @@ async function load() {
 }
 
 function openEditor(
-  mode: "manual" | "confirm" | "note" | "edit_note" | "dismiss",
+  mode: "manual" | "confirm" | "revert" | "note" | "edit_note" | "dismiss",
   item: EditableDailyReportItem | null = null,
   note: DailyReportNote | null = null,
 ) {
   editor.value = { mode, item, note };
-  const current = item?.current;
+  const fullItem = item && "manual" in item ? item : null;
+  const current = mode === "manual" && fullItem?.manual
+    ? fullItem.manual
+    : item?.current;
   const pendingItem = item && "review_issues" in item ? item : null;
   form.value = {
     page_views_30_days: toInput(current?.page_views_30_days),
     ordered_units: toInput(current?.ordered_units),
     platform_stock: toInput(current?.platform_stock),
-    reason: "platform_delay",
+    reason: mode === "manual" && fullItem?.manual_reason
+      ? fullItem.manual_reason
+      : "platform_delay",
     source: pendingItem?.manual_note
       ? "manual"
       : pendingItem?.capture_versions.length
@@ -183,7 +196,9 @@ function openEditor(
           ? "stock_continuity"
           : "general"
     ),
-    note: note?.note ?? "",
+    note: note?.note ?? (
+      mode === "manual" && fullItem?.manual_note ? fullItem.manual_note : ""
+    ),
   };
   noteManager.value = null;
 }
@@ -207,7 +222,7 @@ async function submitEditor() {
         reason: form.value.reason,
         note: form.value.note,
       });
-      message.value = "人工候选值已保存并标记，仍需最终确认。";
+      message.value = "人工候选值已更新并标记，仍需最终确认；历次修改均已留痕。";
     } else if (mode === "confirm" && item) {
       const result = await confirmDailyReportEntry(
         item.business_date,
@@ -218,6 +233,13 @@ async function submitEditor() {
       message.value = result.exported
         ? "数据已确认；当天全部完成，Excel 已自动导出。"
         : "该商品已确认合并。";
+    } else if (mode === "revert" && item) {
+      await revertDailyReportConfirmation(
+        item.business_date,
+        item.offer_id,
+        form.value.note,
+      );
+      message.value = "已撤销确认并恢复待核对；原确认和撤销原因均已留痕。";
     } else if (mode === "note" && item) {
       await saveDailyReportNote(
         item.business_date,
@@ -322,6 +344,9 @@ function reviewStatusLabel(item: DailyReportItem) {
         : "前后日报库存不平",
     );
   }
+  if (hasReviewIssue(item, "confirmation_reverted")) {
+    labels.push("已撤销确认待重核");
+  }
   return labels.join("；") || "待人工核对";
 }
 
@@ -339,8 +364,10 @@ function reviewStatusClass(item: DailyReportItem) {
   if (item.status !== "needs_review") return "";
   const hasCapture = hasReviewIssue(item, "capture_difference");
   const hasStock = hasReviewIssue(item, "stock_continuity");
+  const hasRevert = hasReviewIssue(item, "confirmation_reverted");
   if (hasCapture && hasStock) return "mixed-review";
-  return hasStock ? "stock-review" : "version-review";
+  if (hasStock) return "stock-review";
+  return hasRevert ? "revert-review" : "version-review";
 }
 
 function captureStatusLabel(slot: "morning" | "evening") {
@@ -371,7 +398,10 @@ function notesForIssue(
 
 function hasReviewIssue(
   item: DailyReportItem,
-  issueType: "capture_difference" | "stock_continuity",
+  issueType:
+    | "capture_difference"
+    | "stock_continuity"
+    | "confirmation_reverted",
 ) {
   return item.review_issues.some((issue) => issue.type === issueType);
 }
@@ -678,6 +708,12 @@ function parseInput(value: string): number | null {
                     "
                     type="button"
                     class="matrix-note-manager"
+                    :class="{
+                      'has-confirmation': comparisonItem(
+                        day.business_date,
+                        item.offer_id,
+                      )?.confirmation_baseline,
+                    }"
                     @click="
                       openNoteManager(
                         editableComparisonItem(day.business_date, item.offer_id)!,
@@ -686,6 +722,14 @@ function parseInput(value: string): number | null {
                   >
                     <span v-if="matrixNoteText(comparisonItem(day.business_date, item.offer_id))">
                       {{ matrixNoteText(comparisonItem(day.business_date, item.offer_id)) }}
+                    </span>
+                    <span
+                      v-else-if="
+                        comparisonItem(day.business_date, item.offer_id)
+                          ?.confirmation_baseline
+                      "
+                    >
+                      已确认 · 管理或撤销
                     </span>
                     <span v-else class="empty-note">＋ 添加备注</span>
                   </button>
@@ -869,6 +913,34 @@ function parseInput(value: string): number | null {
             </section>
 
             <section
+              v-if="hasReviewIssue(item, 'confirmation_reverted') && item.confirmation_revert"
+              class="review-issue revert-issue"
+            >
+              <header>
+                <strong>确认合并已撤销，等待重新核对</strong>
+                <span>原确认没有删除，撤销原因和操作人均已留痕</span>
+              </header>
+              <div class="revert-context">
+                <span>
+                  原确认：{{ item.confirmation_revert.previous_confirmation.source_label }}，
+                  订单 {{ value(item.confirmation_revert.previous_confirmation.values.ordered_units) }} /
+                  库存 {{ value(item.confirmation_revert.previous_confirmation.values.platform_stock) }}
+                </span>
+                <small>
+                  {{ item.confirmation_revert.previous_confirmation.confirmed_by || "未知操作人" }}
+                  · 北京时间
+                  {{ formatChinaDateTime(item.confirmation_revert.previous_confirmation.confirmed_at, "—") }}
+                  · {{ item.confirmation_revert.previous_confirmation.confirm_note || "无确认备注" }}
+                </small>
+                <strong>
+                  {{ item.confirmation_revert.reverted_by || "未知操作人" }} 于北京时间
+                  {{ formatChinaDateTime(item.confirmation_revert.reverted_at, "—") }}撤销：
+                  {{ item.confirmation_revert.revert_note }}
+                </strong>
+              </div>
+            </section>
+
+            <section
               v-if="
                 notesForIssue(item, 'general').length ||
                 (item.operator_note && !item.operator_notes.length)
@@ -903,7 +975,13 @@ function parseInput(value: string): number | null {
           <div class="row-actions">
             <button v-if="props.canOperate" @click="openEditor('manual', item)">人工修改</button>
             <button
-              v-if="props.canOperate && hasReviewIssue(item, 'capture_difference')"
+              v-if="
+                props.canOperate &&
+                (
+                  hasReviewIssue(item, 'capture_difference') ||
+                  hasReviewIssue(item, 'confirmation_reverted')
+                )
+              "
               @click="openEditor('confirm', item)"
             >
               确认合并
@@ -915,6 +993,13 @@ function parseInput(value: string): number | null {
               @click="openEditor('dismiss', item)"
             >
               确认库存差异
+            </button>
+            <button
+              v-if="props.canOperate && item.confirmation_baseline"
+              class="danger-link"
+              @click="openEditor('revert', item)"
+            >
+              撤销上次确认
             </button>
           </div>
         </article>
@@ -931,10 +1016,50 @@ function parseInput(value: string): number | null {
     >
       <section class="daily-modal note-manager-modal">
         <p class="section-kicker">DATE NOTE</p>
-        <h3>{{ noteManager.business_date }} 备注</h3>
+        <h3>{{ noteManager.business_date }} 备注与确认记录</h3>
         <p class="modal-product">
           {{ noteManager.title }} · {{ noteManager.sku || noteManager.offer_id }}
         </p>
+        <section
+          v-if="noteManager.confirmation_baseline"
+          class="confirmation-manager"
+        >
+          <div>
+            <strong>当前人工确认</strong>
+            <p>
+              {{ noteManager.confirmation_baseline.source_label }} ·
+              订单 {{ value(noteManager.confirmation_baseline.values.ordered_units) }} /
+              库存 {{ value(noteManager.confirmation_baseline.values.platform_stock) }}
+            </p>
+            <small>
+              {{ noteManager.confirmation_baseline.confirmed_by }} · 北京时间
+              {{ formatChinaDateTime(noteManager.confirmation_baseline.confirmed_at, "—") }}
+              · {{ noteManager.confirmation_baseline.confirm_note || "无确认备注" }}
+            </small>
+          </div>
+          <button
+            v-if="props.canOperate"
+            type="button"
+            class="danger-link"
+            @click="openEditor('revert', noteManager)"
+          >
+            撤销确认合并
+          </button>
+        </section>
+        <section
+          v-else-if="noteManager.confirmation_revert"
+          class="confirmation-manager reverted"
+        >
+          <div>
+            <strong>最近一次确认已撤销</strong>
+            <p>撤销原因：{{ noteManager.confirmation_revert.revert_note }}</p>
+            <small>
+              {{ noteManager.confirmation_revert.reverted_by || "未知操作人" }}
+              · 北京时间
+              {{ formatChinaDateTime(noteManager.confirmation_revert.reverted_at, "—") }}
+            </small>
+          </div>
+        </section>
         <div v-if="noteManager.operator_notes.length" class="note-manager-list">
           <article v-for="note in noteManager.operator_notes" :key="note.id">
             <div>
@@ -963,7 +1088,7 @@ function parseInput(value: string): number | null {
             </div>
           </article>
         </div>
-        <p v-else class="review-empty">这个日期和商品还没有备注。</p>
+        <p v-else class="review-empty">这个日期和商品还没有单独备注。</p>
         <div class="modal-actions">
           <button type="button" @click="closeNoteManager">关闭</button>
           <button
@@ -984,9 +1109,11 @@ function parseInput(value: string): number | null {
         <h3>
           {{
             editor.mode === "manual"
-              ? "记录人工候选值"
+              ? "修改人工候选值"
               : editor.mode === "confirm"
                 ? "确认最终采用值"
+                : editor.mode === "revert"
+                  ? "撤销确认合并"
                 : editor.mode === "dismiss"
                   ? "确认库存连续性差异"
                   : editor.mode === "edit_note"
@@ -997,6 +1124,9 @@ function parseInput(value: string): number | null {
         <p v-if="editor.item" class="modal-product">
           {{ editor.item.business_date }} · {{ editor.item.title }} ·
           {{ editor.item.sku || editor.item.offer_id }}
+        </p>
+        <p v-if="editor.mode === 'revert'" class="revert-warning">
+          撤销后会恢复为待核对；原确认记录不会删除，相邻日报日的库存连续性会在重新确认后重新计算。
         </p>
         <div v-if="editor.mode === 'manual'" class="manual-grid">
           <label>近30天浏览量<input v-model="form.page_views_30_days" type="number" min="0" /></label>
@@ -1032,6 +1162,8 @@ function parseInput(value: string): number | null {
           {{
             editor.mode === "confirm"
               ? "合并备注（必填）"
+              : editor.mode === "revert"
+                ? "撤销原因（必填）"
               : editor.mode === "note"
                 ? "新增备注内容（必填）"
                 : editor.mode === "edit_note"
@@ -1043,7 +1175,13 @@ function parseInput(value: string): number | null {
         <div class="modal-actions">
           <button type="button" @click="closeEditor">取消</button>
           <button class="action-button" :disabled="saving || !form.note.trim()">
-            {{ saving ? "正在保存…" : "确认保存" }}
+            {{
+              saving
+                ? "正在保存…"
+                : editor.mode === "revert"
+                  ? "确认撤销"
+                  : "确认保存"
+            }}
           </button>
         </div>
       </form>
@@ -1148,6 +1286,7 @@ function parseInput(value: string): number | null {
 .daily-matrix .matrix-note-row th { color: #53685d; font-weight: 700; }
 .matrix-note-cell { color: #596a61; font-family: "Microsoft YaHei UI", "微软雅黑", sans-serif; font-size: 10px; line-height: 1.35; }
 .matrix-note-manager { width: 100%; max-width: 100%; padding: 4px 5px; border: 1px solid #d8e0da; border-radius: 6px; background: #fff; color: #596a61; cursor: pointer; font: inherit; line-height: inherit; }
+.matrix-note-manager.has-confirmation { border-color: #7db398; background: #eef8f2; color: #236446; font-weight: 700; }
 .matrix-note-manager > span:not(.empty-note) { display: -webkit-box; overflow: hidden; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow-wrap: anywhere; }
 .matrix-note-manager .empty-note { color: #6f8277; }
 .review-panel { overflow: hidden; padding: 18px 20px; }
@@ -1168,6 +1307,7 @@ function parseInput(value: string): number | null {
 .review-issue header span { color: #748178; font-size: 9px; }
 .review-issue.capture-issue { border-left: 4px solid #7d62a8; background: #f5f1fa; }
 .review-issue.stock-issue { border-left: 4px solid #c94d3d; background: #fff0ed; }
+.review-issue.revert-issue { border-left: 4px solid #d18a21; background: #fff8e8; }
 .review-issue.note-issue { border-left: 4px solid #768a7e; }
 .issue-field-values { display: grid; grid-template-columns: minmax(100px, .5fr) repeat(auto-fit, minmax(160px, 1fr)); gap: 4px 9px; margin-top: 7px; color: #596a61; font-size: 11px; line-height: 1.45; }
 .issue-field-values b { color: #4b3966; }
@@ -1181,6 +1321,9 @@ function parseInput(value: string): number | null {
 .propagated-conflict { margin-top: 8px; padding: 8px 9px; border: 1px solid #e8ad7d; border-left: 4px solid #d46b32; border-radius: 7px; background: #fff6ed; color: #714126; font-size: 10px; line-height: 1.5; }
 .propagated-conflict > strong, .propagated-conflict span { display: block; }
 .propagated-conflict > strong { margin-bottom: 5px; color: #a23f1d; }
+.revert-context { display: grid; gap: 4px; margin-top: 7px; color: #765716; font-size: 11px; line-height: 1.5; }
+.revert-context small { color: #8a7442; }
+.revert-context strong { color: #9b5e12; }
 .issue-note { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; margin-top: 7px; padding: 6px 8px; border-radius: 6px; background: rgba(255, 255, 255, .72); color: #596a61; font-size: 10px; line-height: 1.5; overflow-wrap: anywhere; }
 .issue-note > span:first-child { min-width: 0; }
 .issue-note small { color: #7a867f; }
@@ -1194,6 +1337,7 @@ function parseInput(value: string): number | null {
 .status-badge { display: block; width: fit-content; margin: 0 auto 5px; padding: 4px 7px; border-radius: 999px; background: #e8ece9; color: #536159; font-size: 10px; }
 .status-badge.needs_review.version-review { background: #eee7f7; color: #604982; }
 .status-badge.needs_review.stock-review { background: #ffe2dc; color: #a63d2d; }
+.status-badge.needs_review.revert-review { background: #fff0c9; color: #8e5a0d; }
 .status-badge.needs_review.mixed-review { background: #ffe8cf; color: #9a4d18; }
 .status-badge.ready { background: #fff1d6; color: #8a5a0d; }
 .status-badge.missing_capture { background: #fff1c9; color: #775611; }
@@ -1214,6 +1358,12 @@ function parseInput(value: string): number | null {
 .note-manager-list p { margin: 5px 0; color: #4f6258; overflow-wrap: anywhere; }
 .note-manager-list small { color: #7a877f; font-size: 9px; }
 .note-manager-actions { display: flex; flex: 0 0 auto; gap: 5px; }
+.confirmation-manager { display: flex; align-items: flex-start; justify-content: space-between; gap: 14px; margin-top: 14px; padding: 11px 12px; border: 1px solid #aad0bb; border-left: 4px solid #3f8b65; border-radius: 9px; background: #eff8f2; }
+.confirmation-manager.reverted { border-color: #e2c17e; border-left-color: #d18a21; background: #fff8e8; }
+.confirmation-manager p { margin: 5px 0; color: #365c49; font-size: 11px; }
+.confirmation-manager small { color: #6d8176; font-size: 9px; }
+.confirmation-manager button { flex: 0 0 auto; padding: 6px 8px; border: 1px solid #e3a294; border-radius: 6px; background: #fff; color: #ad442f; cursor: pointer; font-size: 10px; }
+.revert-warning { padding: 9px 10px; border-left: 4px solid #d18a21; border-radius: 7px; background: #fff4d9; color: #805314; font-size: 11px; line-height: 1.5; }
 .capture-attempt-log { margin: 0 0 13px; padding: 11px 14px; border: 1px solid #d7e0da; border-radius: 10px; background: #f7faf8; }
 .capture-attempt-log summary { cursor: pointer; color: #385346; font-size: 12px; font-weight: 700; }
 .capture-attempt-log > div { display: grid; grid-template-columns: 120px minmax(0, 1fr); gap: 6px 12px; margin-top: 10px; }
