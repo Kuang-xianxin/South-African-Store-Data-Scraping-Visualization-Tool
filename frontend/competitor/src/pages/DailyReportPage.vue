@@ -41,6 +41,7 @@ const page = ref(1);
 const pageSize = 24;
 const slots = ["morning", "evening"] as const;
 const matrixScroll = ref<HTMLElement | null>(null);
+const searchInput = ref<HTMLInputElement | null>(null);
 const editor = ref<{
   mode:
     | "manual"
@@ -145,6 +146,32 @@ watch([search, filter], () => {
 watch(pageCount, (count) => {
   if (page.value > count) page.value = count;
 });
+
+async function searchPendingSku(
+  item: DailyReportPendingAction,
+  event?: MouseEvent,
+) {
+  const target = event?.target;
+  if (
+    target instanceof Element &&
+    target.closest("button, a, input, select, textarea, summary")
+  ) {
+    return;
+  }
+  const sku = item.sku?.trim();
+  if (!sku) {
+    message.value = "该待办没有平台 SKU，无法自动搜索。";
+    return;
+  }
+  search.value = sku;
+  filter.value = "all";
+  page.value = 1;
+  message.value = `已定位平台 SKU：${sku}`;
+  await nextTick();
+  searchInput.value?.focus();
+  searchInput.value?.select();
+  searchInput.value?.scrollIntoView({ behavior: "smooth", block: "center" });
+}
 
 async function load() {
   loading.value = true;
@@ -603,7 +630,11 @@ function parseInput(value: string | number): number | null {
       </div>
 
       <div class="daily-filters">
-        <input v-model="search" placeholder="搜索平台 SKU、商品名或 Offer ID" />
+        <input
+          ref="searchInput"
+          v-model="search"
+          placeholder="搜索平台 SKU、商品名或 Offer ID"
+        />
         <button :class="{ active: filter === 'review' }" @click="filter = 'review'">待处理</button>
         <button :class="{ active: filter === 'missing' }" @click="filter = 'missing'">漏爬说明</button>
         <button :class="{ active: filter === 'sales' }" @click="filter = 'sales'">有销量</button>
@@ -765,6 +796,8 @@ function parseInput(value: string | number): number | null {
         <article
           v-for="item in actionItems"
           :key="`${item.business_date}-${item.offer_id}`"
+          title="点击卡片，按平台 SKU 定位到上方日报表"
+          @click="searchPendingSku(item, $event)"
         >
           <div class="review-product">
             <strong>{{ item.title }}</strong>
@@ -1314,7 +1347,10 @@ function parseInput(value: string | number): number | null {
 .review-title h3 { margin: 0; }
 .review-title > span { color: #7c8981; font-size: 11px; }
 .review-list { display: grid; grid-template-columns: minmax(0, 1fr); gap: 9px; margin-top: 14px; }
-.review-list article { display: grid; grid-template-columns: minmax(0, 1.2fr) minmax(0, 2fr) minmax(160px, 190px); align-items: center; gap: 16px; min-width: 0; padding: 12px 14px; border: 1px solid #dfe5e0; border-radius: 10px; background: #fbfcfa; }
+.review-list article { display: grid; grid-template-columns: minmax(0, 1.2fr) minmax(0, 2fr) minmax(160px, 190px); align-items: center; gap: 16px; min-width: 0; padding: 12px 14px; border: 1px solid #dfe5e0; border-radius: 10px; background: #fbfcfa; cursor: pointer; transition: border-color .16s ease, background .16s ease, box-shadow .16s ease; }
+.review-list article:hover { border-color: #92b6a3; background: #f7fbf8; box-shadow: 0 5px 14px rgba(28, 76, 55, .08); }
+.review-list article button, .review-list article a, .review-list article input, .review-list article select, .review-list article textarea { cursor: auto; }
+.review-list article button, .review-list article a { cursor: pointer; }
 .review-product, .review-issues { min-width: 0; }
 .review-product strong, .review-product code, .review-product small { display: block; }
 .review-product strong { overflow-wrap: anywhere; }
