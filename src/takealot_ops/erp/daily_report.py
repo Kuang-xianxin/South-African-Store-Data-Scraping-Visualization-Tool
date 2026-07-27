@@ -775,10 +775,14 @@ def revert_confirmation(
             user_id,
             now,
         )
-        _defer_following_stock_continuity(
+        _queue_following_revert_impact(
             session,
             resolution=resolution,
-            deferred_at=now,
+            previous_confirmation=previous_confirmation,
+            reverted_by=reverted_by,
+            revert_note=clean_note,
+            reverted_at=now,
+            user_id=user_id,
         )
         _refresh_deadline_snapshot(session, business_date, now)
 
@@ -1910,13 +1914,114 @@ def _propagate_confirmation_stock_conflict(
         deadline.details = details
 
 
+def _queue_following_revert_impact(
+    session: Session,
+    *,
+    resolution: DailyReportResolution,
+    previous_confirmation: Mapping[str, Any],
+    reverted_by: str | None,
+    revert_note: str,
+    reverted_at: datetime,
+    user_id: int,
+) -> None:
+    """Keep the following day pending until the reverted value is reconfirmed."""
+    next_date = session.scalar(
+        select(func.min(DailyReportResolution.business_date)).where(
+            DailyReportResolution.business_date > resolution.business_date
+        )
+    )
+    if next_date is None:
+        return
+    following = session.scalar(
+        select(DailyReportResolution).where(
+            DailyReportResolution.business_date == next_date,
+            DailyReportResolution.offer_id == resolution.offer_id,
+        )
+    )
+    if following is None:
+        return
+    latest = _latest_observation_any_slot(
+        session,
+        next_date,
+        following.offer_id,
+    )
+    if latest is None:
+        return
+    previous_status = following.status
+    current_values = _resolution_current_values(session, following)
+    previous_stock = previous_confirmation.get("values", {}).get(
+        "platform_stock"
+    )
+    ordered_units = current_values.get("ordered_units")
+    actual_stock = current_values.get("platform_stock")
+    expected_stock = (
+        int(previous_stock) - int(ordered_units)
+        if previous_stock is not None and ordered_units is not None
+        else None
+    )
+    following.status = "needs_review"
+    following.updated_at = reverted_at
+    message = (
+        f"{resolution.business_date.isoformat()} 人工确认撤销后，"
+        f"{next_date.isoformat()} 库存连续性等待重新核对"
+    )
+    _audit(
+        session,
+        next_date,
+        following.offer_id,
+        "stock_continuity_after_confirmation_revert",
+        {
+            "kind": "previous_confirmation_reverted",
+            "message": message,
+            "trigger_business_date": resolution.business_date.isoformat(),
+            "affected_business_date": next_date.isoformat(),
+            "previous_confirmation": dict(previous_confirmation),
+            "reverted_by": reverted_by,
+            "reverted_at": reverted_at.isoformat(),
+            "revert_note": revert_note,
+            "current_ordered_units": ordered_units,
+            "expected_stock_before_revert": expected_stock,
+            "actual_stock": actual_stock,
+            "affected_previous_status": previous_status,
+            "affected_current_values": current_values,
+        },
+        message,
+        user_id,
+        reverted_at,
+    )
+    deadline = session.get(DailyReportDeadlineSnapshot, next_date)
+    if deadline is not None:
+        deadline.resolved_at = None
+        unresolved = list(
+            session.scalars(
+                select(DailyReportResolution).where(
+                    DailyReportResolution.business_date == next_date,
+                    DailyReportResolution.status.in_(OPEN_STATUSES),
+                )
+            )
+        )
+        deadline.unresolved_count = len(unresolved)
+        deadline.details = [
+            {
+                "offer_id": row.offer_id,
+                "status": row.status,
+                **(
+                    {"reason": "confirmation_revert_impact"}
+                    if row.offer_id == following.offer_id
+                    else {}
+                ),
+            }
+            for row in unresolved
+        ]
+
+
 def _defer_following_stock_continuity(
     session: Session,
     *,
     resolution: DailyReportResolution,
     deferred_at: datetime,
 ) -> None:
-    """Remove a following-day continuity task while this day has no correct value."""
+    """Pause a following-day continuity task while this day's versions differ."""
     next_date = session.scalar(
         select(func.min(DailyReportResolution.business_date)).where(
             DailyReportResolution.business_date > resolution.business_date
@@ -2166,6 +2271,10 @@ def _item_payload(
         previous_context is not None
         and previous_context.get("continuity_ready", True)
     )
+    previous_confirmation_reverted = bool(
+        previous_context is not None
+        and previous_context.get("source") == "confirmation_reverted"
+    )
     expected_stock = (
         previous_stock - orders
         if previous_stock is not None and previous_ready and not differences
@@ -2184,6 +2293,8 @@ def _item_payload(
     elif mismatch and not dismissed:
         status = "needs_review"
     elif confirmation_revert is not None and not has_confirmation_baseline:
+        status = "needs_review"
+    elif previous_confirmation_reverted:
         status = "needs_review"
     elif has_confirmation_baseline:
         status = "confirmed"
@@ -2216,6 +2327,13 @@ def _item_payload(
             {
                 "type": "confirmation_reverted",
                 "fields": [],
+            }
+        )
+    elif previous_confirmation_reverted:
+        review_issues.append(
+            {
+                "type": "confirmation_revert_impact",
+                "fields": ["ordered_units", "platform_stock"],
             }
         )
     return {
@@ -2275,9 +2393,8 @@ def _item_payload(
                 if differences
                 else (
                     (
-                        "前一日报日的人工确认已撤销，重新确认正确值后再计算库存连续性"
-                        if previous_context is not None
-                        and "已撤销" in str(previous_context.get("source_label") or "")
+                        "前一日报日的人工确认已撤销；本日保留待办，待重新确认后立即重算库存连续性"
+                        if previous_confirmation_reverted
                         else "前一日报日仍有同周期版本差异，确认正确版本后再计算库存连续性"
                     )
                     if previous_context is not None and not previous_ready
@@ -2651,7 +2768,7 @@ def _previous_stock_contexts(
             result[row.offer_id] = {
                 "business_date": previous_date.isoformat(),
                 "stock": None,
-                "source": "version_difference",
+                "source": "confirmation_reverted",
                 "source_label": "前一日报日的人工确认已撤销，待重新确认后再计算库存连续性",
                 "selected_source": None,
                 "confirmed_by": None,
@@ -2664,6 +2781,7 @@ def _previous_stock_contexts(
                 ),
                 "continuity_ready": False,
                 "version_differences": version_differences,
+                "confirmation_revert": confirmation_revert,
             }
             continue
         if version_differences:

@@ -370,6 +370,9 @@ function reviewStatusLabel(item: DailyReportItem) {
   if (hasReviewIssue(item, "confirmation_reverted")) {
     labels.push("已撤销确认待重核");
   }
+  if (hasReviewIssue(item, "confirmation_revert_impact")) {
+    labels.push("撤销确认后库存待重算");
+  }
   return labels.join("；") || "待人工核对";
 }
 
@@ -388,9 +391,13 @@ function reviewStatusClass(item: DailyReportItem) {
   const hasCapture = hasReviewIssue(item, "capture_difference");
   const hasStock = hasReviewIssue(item, "stock_continuity");
   const hasRevert = hasReviewIssue(item, "confirmation_reverted");
+  const hasRevertImpact = hasReviewIssue(
+    item,
+    "confirmation_revert_impact",
+  );
   if (hasCapture && hasStock) return "mixed-review";
   if (hasStock) return "stock-review";
-  return hasRevert ? "revert-review" : "version-review";
+  return hasRevert || hasRevertImpact ? "revert-review" : "version-review";
 }
 
 function captureStatusLabel(slot: "morning" | "evening") {
@@ -424,7 +431,8 @@ function hasReviewIssue(
   issueType:
     | "capture_difference"
     | "stock_continuity"
-    | "confirmation_reverted",
+    | "confirmation_reverted"
+    | "confirmation_revert_impact",
 ) {
   return item.review_issues.some((issue) => issue.type === issueType);
 }
@@ -477,6 +485,16 @@ function stockContinuityText(item: DailyReportItem) {
   const check = item.stock_check;
   if (!check.mismatch || check.dismissed) return "";
   return `库存连续性：${value(check.previous_stock)} − ${value(item.current.ordered_units)} = ${value(check.expected_stock)}，实际 ${value(check.actual_stock)}`;
+}
+
+function revertedConfirmationExpectedStock(item: DailyReportItem) {
+  const previousStock =
+    item.stock_context?.confirmation_revert?.previous_confirmation.values
+      .platform_stock;
+  const orderedUnits = item.current.ordered_units;
+  if (previousStock === null || previousStock === undefined) return null;
+  if (orderedUnits === null || orderedUnits === undefined) return null;
+  return previousStock - orderedUnits;
 }
 
 function comparisonBeforeLabel(
@@ -945,6 +963,60 @@ function parseInput(value: string | number): number | null {
                   <button type="button" @click="openEditor('edit_note', item, note)">修改</button>
                   <button type="button" class="danger-link" @click="removeNote(item, note)">删除</button>
                 </span>
+              </div>
+            </section>
+
+            <section
+              v-if="
+                hasReviewIssue(item, 'confirmation_revert_impact') &&
+                item.stock_context?.confirmation_revert
+              "
+              class="review-issue revert-issue"
+            >
+              <header>
+                <strong>前一日报确认已撤销，库存连续性保留待办</strong>
+                <span>重新确认前一日报正确值后，本待办会立即重算或自动解除</span>
+              </header>
+              <div class="revert-context">
+                <span>
+                  前一日报日：{{ item.stock_context.business_date }}，原确认
+                  {{ item.stock_context.confirmation_revert.previous_confirmation.source_label }}，
+                  库存
+                  {{
+                    value(
+                      item.stock_context.confirmation_revert.previous_confirmation.values
+                        .platform_stock,
+                    )
+                  }}
+                </span>
+                <span>
+                  当前日报日：{{ item.business_date }}，订单
+                  {{ value(item.current.ordered_units) }}，实际库存
+                  {{ value(item.current.platform_stock) }}
+                </span>
+                <span>
+                  撤销前公式：
+                  {{
+                    value(
+                      item.stock_context.confirmation_revert.previous_confirmation.values
+                        .platform_stock,
+                    )
+                  }}
+                  − {{ value(item.current.ordered_units) }} =
+                  {{ value(revertedConfirmationExpectedStock(item)) }}，实际
+                  {{ value(item.current.platform_stock) }}
+                </span>
+                <strong>
+                  {{ item.stock_context.confirmation_revert.reverted_by || "未知操作人" }}
+                  于北京时间
+                  {{
+                    formatChinaDateTime(
+                      item.stock_context.confirmation_revert.reverted_at,
+                      "—",
+                    )
+                  }}撤销：
+                  {{ item.stock_context.confirmation_revert.revert_note }}
+                </strong>
               </div>
             </section>
 

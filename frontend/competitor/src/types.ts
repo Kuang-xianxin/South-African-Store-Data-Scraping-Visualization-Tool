@@ -283,6 +283,26 @@ export interface DailyReportValues {
   platform_stock: number | null;
 }
 
+export interface DailyReportConfirmationRevert {
+  previous_confirmation: {
+    values: DailyReportValues;
+    source: "morning" | "evening" | "latest" | "manual";
+    source_label: string;
+    confirmed_by: string | null;
+    confirmed_at: string | null;
+    confirm_note: string | null;
+  };
+  previous_stock_alert: {
+    dismissed: boolean;
+    note: string | null;
+    dismissed_by: string | null;
+    dismissed_at: string | null;
+  };
+  reverted_by: string | null;
+  reverted_at: string;
+  revert_note: string;
+}
+
 export interface DailyReportItem {
   offer_id: string;
   sku: string | null;
@@ -310,25 +330,7 @@ export interface DailyReportItem {
     confirmed_at: string;
     confirm_note: string | null;
   } | null;
-  confirmation_revert: {
-    previous_confirmation: {
-      values: DailyReportValues;
-      source: "morning" | "evening" | "latest" | "manual";
-      source_label: string;
-      confirmed_by: string | null;
-      confirmed_at: string | null;
-      confirm_note: string | null;
-    };
-    previous_stock_alert: {
-      dismissed: boolean;
-      note: string | null;
-      dismissed_by: string | null;
-      dismissed_at: string | null;
-    };
-    reverted_by: string | null;
-    reverted_at: string;
-    revert_note: string;
-  } | null;
+  confirmation_revert: DailyReportConfirmationRevert | null;
   review_versions: Array<{
     kind: "confirmed" | "capture" | "manual";
     run_id: string | null;
@@ -382,7 +384,8 @@ export interface DailyReportItem {
     type:
       | "capture_difference"
       | "stock_continuity"
-      | "confirmation_reverted";
+      | "confirmation_reverted"
+      | "confirmation_revert_impact";
     fields: Array<keyof DailyReportValues>;
   }>;
   missing_capture: boolean;
@@ -394,7 +397,11 @@ export interface DailyReportItem {
   stock_context: {
     business_date: string;
     stock: number | null;
-    source: "confirmed" | "latest_capture" | "version_difference";
+    source:
+      | "confirmed"
+      | "latest_capture"
+      | "version_difference"
+      | "confirmation_reverted";
     source_label: string;
     selected_source: "morning" | "evening" | "latest" | "manual" | null;
     confirmed_by: string | null;
@@ -403,6 +410,7 @@ export interface DailyReportItem {
     capture_label: string | null;
     continuity_ready: boolean;
     version_differences: Array<keyof DailyReportValues>;
+    confirmation_revert?: DailyReportConfirmationRevert | null;
   } | null;
   stock_check: {
     previous_stock: number | null;
