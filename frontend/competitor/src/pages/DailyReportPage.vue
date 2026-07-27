@@ -324,18 +324,8 @@ function reviewStatusLabel(item: DailyReportItem) {
   );
   const labels: string[] = [];
   if (captureIssue) {
-    const hasOrders = captureIssue.fields.includes("ordered_units");
-    const hasStock = captureIssue.fields.includes("platform_stock");
     const prefix = item.confirmation_baseline ? "确认后" : "";
-    if (hasOrders && hasStock) {
-      labels.push(`${prefix}订单与库存版本有差异`);
-    } else if (hasOrders) {
-      labels.push(`${prefix}订单版本有差异`);
-    } else if (hasStock) {
-      labels.push(`${prefix}库存版本有差异`);
-    } else {
-      labels.push(`${prefix}同周期版本有差异`);
-    }
+    labels.push(`${prefix}销量版本有差异`);
   }
   if (hasStockContinuity) {
     labels.push(
@@ -678,7 +668,7 @@ function parseInput(value: string): number | null {
                 </td>
               </tr>
               <tr>
-                <th>平台库存数量</th>
+                <th>平台库存数量（当日10:05）</th>
                 <td></td>
                 <td
                   v-for="item in visibleItems"
@@ -786,8 +776,8 @@ function parseInput(value: string): number | null {
               class="review-issue capture-issue"
             >
               <header>
-                <strong>同周期版本差异</strong>
-                <span>只确认各次拉取发生的变化，不计算库存连续性</span>
+                <strong>同周期销量版本差异</strong>
+                <span>只比较早间、晚间和全部手动拉取的当天销量，库存固定采用业务日10:05快照</span>
               </header>
               <div
                 v-for="field in item.differences"

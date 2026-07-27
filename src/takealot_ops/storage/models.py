@@ -392,6 +392,25 @@ class DailyReportRun(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
 
 
+class DailyInventorySnapshot(Base):
+    """One immutable 10:05 inventory snapshot keyed by its actual Beijing date."""
+
+    __tablename__ = "daily_inventory_snapshots"
+    __table_args__ = (UniqueConstraint("inventory_date", "offer_id"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    inventory_date: Mapped[date] = mapped_column(Date, nullable=False, index=True)
+    offer_id: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
+    run_id: Mapped[str] = mapped_column(
+        ForeignKey("daily_report_runs.run_id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    captured_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    platform_stock: Mapped[int | None] = mapped_column(Integer)
+    stock_source: Mapped[str | None] = mapped_column(String(50))
+
+
 class DailyReportObservation(Base):
     """One product value set frozen at a daily-report capture time."""
 

@@ -23,6 +23,7 @@ from sqlalchemy import Engine, func, select
 from sqlalchemy.orm import Session
 
 from takealot_ops.storage.models import (
+    DailyInventorySnapshot,
     DailyReportAudit,
     DailyReportDeadlineSnapshot,
     DailyReportObservation,
@@ -53,6 +54,13 @@ class ReportCaptureResult:
     slot: str
     product_count: int
     reopened_count: int
+
+
+@dataclass(frozen=True)
+class InventorySnapshotBackfillResult:
+    snapshots_created: int
+    observations_updated: int
+    observations_missing_snapshot: int
 
 
 class DailyReportInputError(ValueError):
@@ -145,7 +153,7 @@ def capture_daily_report(
     captured_at: datetime,
     capture_details: Mapping[str, object] | None = None,
 ) -> ReportCaptureResult:
-    """Freeze current order/stock values without overwriting earlier captures."""
+    """Freeze one sales version and attach the business day's 10:05 stock."""
     if slot not in CAPTURE_SLOTS:
         raise DailyReportInputError("采集时段只能是 morning、evening 或 manual")
     now = _naive_utc(captured_at)
@@ -179,15 +187,60 @@ def capture_daily_report(
             slot=slot,
             captured_at=now,
             status="success",
-            counts=counts,
+            counts=dict(counts),
             created_at=now,
         )
         session.add(run)
         session.flush()
+        if slot == "morning":
+            inventory_date, created_inventory_snapshots = (
+                _freeze_morning_inventory_snapshots(
+                    session,
+                    run=run,
+                    offers=offers,
+                )
+            )
+            counts["captured_inventory_date"] = inventory_date.isoformat()
+            counts["captured_inventory_snapshots"] = created_inventory_snapshots
+        inventory_snapshots = _daily_inventory_snapshot_map(
+            session,
+            business_date,
+        )
+        counts["reported_inventory_date"] = business_date.isoformat()
+        counts["reported_inventory_snapshots"] = len(inventory_snapshots)
+        counts["reported_inventory_missing"] = sum(
+            1
+            for offer in offers
+            if (
+                offer.offer_id not in inventory_snapshots
+                or inventory_snapshots[offer.offer_id].platform_stock is None
+            )
+        )
+        if counts["reported_inventory_missing"]:
+            counts["reported_inventory_reason"] = (
+                f"{business_date.isoformat()} 10:05库存快照缺失；"
+                "次日实时库存未写回该业务日"
+            )
+        run.counts = dict(counts)
         previous = _previous_values(session, business_date)
         captured_by_offer = _all_observations(session, business_date)
         for offer in offers:
-            platform_stock, stock_source = _platform_stock(offer)
+            inventory_snapshot = inventory_snapshots.get(offer.offer_id)
+            platform_stock = (
+                inventory_snapshot.platform_stock
+                if inventory_snapshot is not None
+                else None
+            )
+            stock_source = (
+                "business_date_1005"
+                if inventory_snapshot is not None
+                and inventory_snapshot.platform_stock is not None
+                else (
+                    "business_date_1005_value_missing"
+                    if inventory_snapshot is not None
+                    else "business_date_1005_snapshot_missing"
+                )
+            )
             observation = DailyReportObservation(
                 run_id=run_id,
                 offer_id=offer.offer_id,
@@ -849,8 +902,10 @@ def backfill_stock_continuity_reviews(
             dict[str, list[tuple[DailyReportRun, DailyReportObservation]]],
         ] = {}
         previous_by_date: dict[date, dict[str, int | None]] = {}
+        report_dates: set[date] = set()
         for resolution in rows:
             report_date = resolution.business_date
+            report_dates.add(report_date)
             if report_date not in observations_by_date:
                 observations_by_date[report_date] = _all_observations(
                     session,
@@ -888,14 +943,122 @@ def backfill_stock_continuity_reviews(
                 {
                     "before": old_status,
                     "after": new_status,
-                    "rule": "version_difference_before_stock_continuity",
+                    "rule": "sales_version_difference_before_stock_continuity",
                 },
-                "按“先确认当日版本、再核对前后日报日库存”规则重算待办状态。",
+                "按“先确认当日销量版本、再核对前后日报日库存”规则重算待办状态。",
                 None,
                 now,
             )
             updated += 1
+        for report_date in report_dates:
+            _refresh_deadline_snapshot(session, report_date, now)
     return updated
+
+
+def backfill_daily_inventory_snapshots(
+    engine: Engine,
+    *,
+    through: date | None = None,
+) -> InventorySnapshotBackfillResult:
+    """Build 10:05 inventory history and remove next-day stock from report rows."""
+    snapshots_created = 0
+    observations_updated = 0
+    observations_missing_snapshot = 0
+    with Session(engine) as session, session.begin():
+        existing_keys = {
+            (inventory_date, offer_id)
+            for inventory_date, offer_id in session.execute(
+                select(
+                    DailyInventorySnapshot.inventory_date,
+                    DailyInventorySnapshot.offer_id,
+                )
+            )
+        }
+        morning_rows = session.execute(
+            select(DailyReportRun, DailyReportObservation)
+            .join(
+                DailyReportObservation,
+                DailyReportObservation.run_id == DailyReportRun.run_id,
+            )
+            .where(
+                DailyReportRun.status == "success",
+                DailyReportRun.slot == "morning",
+            )
+            .order_by(
+                DailyReportRun.captured_at,
+                DailyReportRun.run_id,
+                DailyReportObservation.offer_id,
+            )
+        ).all()
+        for run, observation in morning_rows:
+            inventory_date = _beijing_date(run.captured_at)
+            key = (inventory_date, observation.offer_id)
+            if key in existing_keys:
+                continue
+            session.add(
+                DailyInventorySnapshot(
+                    inventory_date=inventory_date,
+                    offer_id=observation.offer_id,
+                    run_id=run.run_id,
+                    captured_at=run.captured_at,
+                    platform_stock=observation.platform_stock,
+                    stock_source=observation.stock_source,
+                )
+            )
+            existing_keys.add(key)
+            snapshots_created += 1
+        session.flush()
+
+        snapshots = {
+            (row.inventory_date, row.offer_id): row
+            for row in session.scalars(select(DailyInventorySnapshot))
+        }
+        statement = (
+            select(DailyReportRun, DailyReportObservation)
+            .join(
+                DailyReportObservation,
+                DailyReportObservation.run_id == DailyReportRun.run_id,
+            )
+            .where(DailyReportRun.status == "success")
+            .order_by(
+                DailyReportRun.business_date,
+                DailyReportRun.captured_at,
+                DailyReportObservation.offer_id,
+            )
+        )
+        if through is not None:
+            statement = statement.where(DailyReportRun.business_date <= through)
+        for run, observation in session.execute(statement):
+            snapshot = snapshots.get(
+                (run.business_date, observation.offer_id)
+            )
+            expected_stock = (
+                snapshot.platform_stock if snapshot is not None else None
+            )
+            expected_source = (
+                "business_date_1005"
+                if snapshot is not None and snapshot.platform_stock is not None
+                else (
+                    "business_date_1005_value_missing"
+                    if snapshot is not None
+                    else "business_date_1005_snapshot_missing"
+                )
+            )
+            if snapshot is None or snapshot.platform_stock is None:
+                observations_missing_snapshot += 1
+            if (
+                observation.platform_stock == expected_stock
+                and observation.stock_source == expected_source
+            ):
+                continue
+            observation.platform_stock = expected_stock
+            observation.stock_source = expected_source
+            observations_updated += 1
+    return InventorySnapshotBackfillResult(
+        snapshots_created=snapshots_created,
+        observations_updated=observations_updated,
+        observations_missing_snapshot=observations_missing_snapshot,
+    )
 
 
 def create_deadline_snapshot(
@@ -1047,7 +1210,7 @@ def export_operations_workbook(
         labels = (
             "近30天浏览量",
             "当天订单数",
-            "平台库存数量",
+            "平台库存数量（当日10:05）",
             "备注",
         )
         for offset, label in enumerate(labels):
@@ -1160,7 +1323,7 @@ def unresolved_locations(engine: Engine, through: date) -> list[dict[str, Any]]:
 
 
 _VALUE_KEYS = ("page_views_30_days", "ordered_units", "platform_stock")
-_RECONCILIATION_KEYS = ("ordered_units", "platform_stock")
+_RECONCILIATION_KEYS = ("ordered_units",)
 
 
 def _platform_stock(offer: OfferCurrent) -> tuple[int | None, str | None]:
@@ -1169,6 +1332,55 @@ def _platform_stock(offer: OfferCurrent) -> tuple[int | None, str | None]:
     if offer.total_stock is not None:
         return int(offer.total_stock), "total_stock_fallback"
     return None, None
+
+
+def _freeze_morning_inventory_snapshots(
+    session: Session,
+    *,
+    run: DailyReportRun,
+    offers: list[OfferCurrent],
+) -> tuple[date, int]:
+    """Freeze the first successful 10:05 stock by its actual Beijing date."""
+    inventory_date = _beijing_date(run.captured_at)
+    existing_offer_ids = set(
+        session.scalars(
+            select(DailyInventorySnapshot.offer_id).where(
+                DailyInventorySnapshot.inventory_date == inventory_date
+            )
+        )
+    )
+    created = 0
+    for offer in offers:
+        if offer.offer_id in existing_offer_ids:
+            continue
+        platform_stock, stock_source = _platform_stock(offer)
+        session.add(
+            DailyInventorySnapshot(
+                inventory_date=inventory_date,
+                offer_id=offer.offer_id,
+                run_id=run.run_id,
+                captured_at=run.captured_at,
+                platform_stock=platform_stock,
+                stock_source=stock_source,
+            )
+        )
+        created += 1
+    session.flush()
+    return inventory_date, created
+
+
+def _daily_inventory_snapshot_map(
+    session: Session,
+    inventory_date: date,
+) -> dict[str, DailyInventorySnapshot]:
+    return {
+        row.offer_id: row
+        for row in session.scalars(
+            select(DailyInventorySnapshot)
+            .where(DailyInventorySnapshot.inventory_date == inventory_date)
+            .order_by(DailyInventorySnapshot.offer_id)
+        )
+    }
 
 
 def _status_after_capture(
@@ -1818,6 +2030,11 @@ def _item_payload(
     confirmation_baseline: dict[str, Any] | None,
     confirmation_revert: dict[str, Any] | None,
 ) -> dict[str, Any]:
+    report_date = (
+        resolution.business_date
+        if resolution is not None
+        else capture_rows[0][0].business_date
+    )
     previous_stock = (
         previous_context.get("stock") if previous_context is not None else None
     )
@@ -1906,6 +2123,16 @@ def _item_payload(
         for key in _VALUE_KEYS
         if capture_values and any(values.get(key) is None for values in capture_values)
     ]
+    inventory_snapshot_missing = bool(
+        capture_rows
+        and all(
+            observation.platform_stock is None
+            and str(observation.stock_source or "").startswith(
+                "business_date_1005"
+            )
+            for _, observation in capture_rows
+        )
+    )
     stored_status = resolution.status if resolution is not None else "awaiting_evening"
     missing_reasons = [
         _missing_slot_reason(slot, capture_status[slot])
@@ -1917,10 +2144,20 @@ def _item_payload(
             + "、".join(_capture_run_label(run) for run in missing_runs)
             + "；本次记为漏爬，不计入数据冲突"
         )
-    if missing_fields:
+    if inventory_snapshot_missing:
+        missing_reasons.append(
+            f"{report_date.isoformat()} 10:05库存快照缺失；"
+            "次日早间、晚间和手动刷新取得的实时库存均未写回该业务日"
+        )
+    generic_missing_fields = [
+        field
+        for field in missing_fields
+        if field != "platform_stock" or not inventory_snapshot_missing
+    ]
+    if generic_missing_fields:
         missing_reasons.append(
             "至少一次采集在"
-            + "、".join(_field_label(field) for field in missing_fields)
+            + "、".join(_field_label(field) for field in generic_missing_fields)
             + "字段返回空值，已自动采用本周期其他版本的可用值"
         )
     orders = int(current.get("ordered_units") or 0)
@@ -2917,6 +3154,11 @@ def _naive_utc(value: datetime) -> datetime:
     if value.tzinfo is None:
         return value
     return value.astimezone(UTC).replace(tzinfo=None)
+
+
+def _beijing_date(value: datetime) -> date:
+    aware = value.replace(tzinfo=UTC) if value.tzinfo is None else value
+    return aware.astimezone(ZoneInfo("Asia/Shanghai")).date()
 
 
 def _utc_now() -> datetime:

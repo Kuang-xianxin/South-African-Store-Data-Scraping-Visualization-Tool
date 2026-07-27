@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 
 from takealot_ops.erp.daily_report import (
     DailyReportConflictError,
+    backfill_daily_inventory_snapshots,
     backfill_stock_continuity_reviews,
     capture_daily_report,
     confirm_entry,
@@ -28,7 +29,10 @@ from takealot_ops.erp.daily_report import (
 )
 from takealot_ops.storage.migrations import create_schema
 from takealot_ops.storage.models import (
+    DailyInventorySnapshot,
     DailyReportAudit,
+    DailyReportObservation,
+    DailyReportRun,
     DailyReportResolution,
     ErpUser,
     OfferCurrent,
@@ -105,6 +109,40 @@ def _engine():
     engine = create_engine("sqlite://")
     create_schema(engine)
     _seed(engine)
+    with Session(engine) as session, session.begin():
+        source_run_id = "inventory-source-2026-07-24"
+        captured_at = datetime(2026, 7, 24, 2, 5)
+        session.add(
+            DailyReportRun(
+                run_id=source_run_id,
+                business_date=REPORT_DATE - timedelta(days=1),
+                slot="morning",
+                captured_at=captured_at,
+                status="success",
+                counts={"products": 2},
+                created_at=captured_at,
+            )
+        )
+        session.add_all(
+            [
+                DailyInventorySnapshot(
+                    inventory_date=REPORT_DATE,
+                    offer_id="offer-a",
+                    run_id=source_run_id,
+                    captured_at=captured_at,
+                    platform_stock=9,
+                    stock_source="takealot_available_stock",
+                ),
+                DailyInventorySnapshot(
+                    inventory_date=REPORT_DATE,
+                    offer_id="offer-b",
+                    run_id=source_run_id,
+                    captured_at=captured_at,
+                    platform_stock=4,
+                    stock_source="takealot_available_stock",
+                ),
+            ]
+        )
     return engine
 
 
@@ -131,9 +169,9 @@ def test_capture_keeps_morning_and_evening_versions_and_requires_review() -> Non
     assert product["morning"]["ordered_units"] == 1
     assert product["morning"]["platform_stock"] == 9
     assert product["evening"]["ordered_units"] == 2
-    assert product["evening"]["platform_stock"] == 7
+    assert product["evening"]["platform_stock"] == 9
     assert product["status"] == "needs_review"
-    assert set(product["differences"]) == {"ordered_units", "platform_stock"}
+    assert product["differences"] == ["ordered_units"]
     assert product["review_issues"] == [
         {
             "type": "capture_difference",
@@ -176,7 +214,7 @@ def test_every_manual_refresh_in_the_ten_to_ten_cycle_is_compared() -> None:
     product = next(row for row in payload["items"] if row["offer_id"] == "offer-a")
 
     assert product["status"] == "needs_review"
-    assert set(product["differences"]) == {"ordered_units", "platform_stock"}
+    assert product["differences"] == ["ordered_units"]
     assert product["current"]["ordered_units"] == 1
     assert product["current"]["platform_stock"] == 9
     assert [row["slot"] for row in product["capture_versions"]] == [
@@ -188,6 +226,146 @@ def test_every_manual_refresh_in_the_ten_to_ten_cycle_is_compared() -> None:
         "capture_difference"
     ]
     assert len([run for run in payload["runs"] if run["slot"] == "manual"]) == 2
+
+
+def test_later_capture_stock_is_not_written_over_the_1005_snapshot() -> None:
+    engine = _engine()
+    capture_daily_report(
+        engine,
+        business_date=REPORT_DATE,
+        slot="morning",
+        captured_at=datetime(2026, 7, 25, 2, 5, tzinfo=UTC),
+    )
+    with Session(engine) as session, session.begin():
+        session.get(OfferCurrent, "offer-a").takealot_available_stock = 7
+    capture_daily_report(
+        engine,
+        business_date=REPORT_DATE,
+        slot="evening",
+        captured_at=datetime(2026, 7, 25, 10, 0, tzinfo=UTC),
+    )
+    with Session(engine) as session, session.begin():
+        session.get(OfferCurrent, "offer-a").takealot_available_stock = 6
+    capture_daily_report(
+        engine,
+        business_date=REPORT_DATE,
+        slot="manual",
+        captured_at=datetime(2026, 7, 25, 11, 0, tzinfo=UTC),
+    )
+
+    payload = daily_report_payload(engine, REPORT_DATE)
+    product = next(row for row in payload["items"] if row["offer_id"] == "offer-a")
+
+    assert product["status"] == "ready"
+    assert product["differences"] == []
+    assert product["review_issues"] == []
+    assert product["current"]["platform_stock"] == 9
+    assert [
+        version["values"]["platform_stock"]
+        for version in product["capture_versions"]
+    ] == [9, 9, 9]
+    assert reminder_payload(engine, REPORT_DATE)["count"] == 0
+
+
+def test_missing_business_date_1005_stock_does_not_fall_back_to_next_day() -> None:
+    engine = create_engine("sqlite://")
+    create_schema(engine)
+    _seed(engine)
+
+    capture_daily_report(
+        engine,
+        business_date=REPORT_DATE,
+        slot="morning",
+        captured_at=datetime(2026, 7, 25, 2, 5, tzinfo=UTC),
+    )
+
+    payload = daily_report_payload(engine, REPORT_DATE)
+    product = next(row for row in payload["items"] if row["offer_id"] == "offer-a")
+    assert product["current"]["platform_stock"] is None
+    assert product["status"] == "missing_capture"
+    assert "2026-07-24 10:05库存快照缺失" in product["missing_reason"]
+    assert "次日早间、晚间和手动刷新取得的实时库存均未写回" in (
+        product["missing_reason"]
+    )
+    morning_run = next(run for run in payload["runs"] if run["slot"] == "morning")
+    assert morning_run["counts"]["reported_inventory_missing"] == 2
+    assert morning_run["counts"]["captured_inventory_date"] == "2026-07-25"
+
+
+def test_inventory_backfill_moves_old_morning_stock_to_its_actual_date() -> None:
+    engine = create_engine("sqlite://")
+    create_schema(engine)
+    _seed(engine)
+    with Session(engine) as session, session.begin():
+        source_run = DailyReportRun(
+            run_id="old-morning-source",
+            business_date=REPORT_DATE - timedelta(days=1),
+            slot="morning",
+            captured_at=datetime(2026, 7, 24, 2, 5),
+            status="success",
+            counts={"products": 1},
+            created_at=datetime(2026, 7, 24, 2, 5),
+        )
+        report_run = DailyReportRun(
+            run_id="old-next-day-report",
+            business_date=REPORT_DATE,
+            slot="morning",
+            captured_at=datetime(2026, 7, 25, 2, 5),
+            status="success",
+            counts={"products": 1},
+            created_at=datetime(2026, 7, 25, 2, 5),
+        )
+        session.add_all([source_run, report_run])
+        session.add_all(
+            [
+                DailyReportObservation(
+                    run_id=source_run.run_id,
+                    offer_id="offer-a",
+                    sku="9900000000001",
+                    title="Product A",
+                    page_views_30_days=50,
+                    ordered_units=1,
+                    platform_stock=9,
+                    stock_source="takealot_available_stock",
+                ),
+                DailyReportObservation(
+                    run_id=report_run.run_id,
+                    offer_id="offer-a",
+                    sku="9900000000001",
+                    title="Product A",
+                    page_views_30_days=50,
+                    ordered_units=1,
+                    platform_stock=7,
+                    stock_source="takealot_available_stock",
+                ),
+            ]
+        )
+
+    result = backfill_daily_inventory_snapshots(engine, through=REPORT_DATE)
+
+    assert result.snapshots_created == 2
+    assert result.observations_updated == 2
+    with Session(engine) as session:
+        snapshot = session.scalar(
+            select(DailyInventorySnapshot).where(
+                DailyInventorySnapshot.inventory_date == REPORT_DATE,
+                DailyInventorySnapshot.offer_id == "offer-a",
+            )
+        )
+        report_observation = session.scalar(
+            select(DailyReportObservation).where(
+                DailyReportObservation.run_id == "old-next-day-report",
+                DailyReportObservation.offer_id == "offer-a",
+            )
+        )
+        assert snapshot is not None
+        assert snapshot.platform_stock == 9
+        assert report_observation is not None
+        assert report_observation.platform_stock == 9
+        assert report_observation.stock_source == "business_date_1005"
+    second = backfill_daily_inventory_snapshots(engine, through=REPORT_DATE)
+    assert second.snapshots_created == 0
+    assert second.observations_updated == 0
 
 
 def test_operator_notes_support_create_update_delete_and_keep_audit_history() -> None:
@@ -253,7 +431,7 @@ def test_operator_notes_support_create_update_delete_and_keep_audit_history() ->
         for row in daily_report_payload(engine, REPORT_DATE)["items"]
         if row["offer_id"] == "offer-a"
     )
-    assert product["status"] == "needs_review"
+    assert product["status"] == "ready"
     assert product["operator_note"] == "已核对晚间库存来源"
     assert [
         (
@@ -289,7 +467,7 @@ def test_operator_notes_support_create_update_delete_and_keep_audit_history() ->
     ]
 
 
-def test_confirmed_entry_reopens_only_for_new_order_or_stock_difference() -> None:
+def test_confirmed_entry_does_not_reopen_for_page_view_or_stock_changes() -> None:
     engine = _engine()
     for slot, hour in (("morning", 2), ("evening", 10)):
         capture_daily_report(
@@ -308,6 +486,7 @@ def test_confirmed_entry_reopens_only_for_new_order_or_stock_difference() -> Non
     )
     with Session(engine) as session, session.begin():
         session.get(OfferCurrent, "offer-a").page_views_30_days = 99
+        session.get(OfferCurrent, "offer-a").takealot_available_stock = 7
     capture = capture_daily_report(
         engine,
         business_date=REPORT_DATE,
@@ -323,6 +502,7 @@ def test_confirmed_entry_reopens_only_for_new_order_or_stock_difference() -> Non
     assert capture.reopened_count == 0
     assert product["status"] == "confirmed"
     assert product["differences"] == []
+    assert product["current"]["platform_stock"] == 9
 
 
 def test_page_view_change_is_kept_but_does_not_require_merge() -> None:
@@ -604,6 +784,7 @@ def test_export_is_blocked_until_every_entry_is_confirmed(tmp_path: Path) -> Non
     )
     with Session(engine) as session, session.begin():
         session.get(OfferCurrent, "offer-a").takealot_available_stock = 7
+        session.get(SaleItem, "sale-a").quantity = 2
     capture_daily_report(
         engine,
         business_date=REPORT_DATE,
@@ -647,7 +828,7 @@ def test_export_is_blocked_until_every_entry_is_confirmed(tmp_path: Path) -> Non
         assert report_sheet["A2"].value == "近30天浏览量"
         assert report_sheet["A3"].value == "当天订单数"
         assert report_sheet["C3"].fill.fgColor.rgb == "00FCE4D6"
-        assert report_sheet["A4"].value == "平台库存数量"
+        assert report_sheet["A4"].value == "平台库存数量（当日10:05）"
         assert report_sheet["A5"].value == "备注"
         assert report_sheet["C5"].value == (
             "（确认：采用晚间库存值） （库存：平台临时调仓）"
@@ -941,6 +1122,7 @@ def test_continuity_waits_until_previous_day_version_difference_is_confirmed() -
     )
     with Session(engine) as session, session.begin():
         session.get(OfferCurrent, "offer-a").takealot_available_stock = 10
+        session.get(SaleItem, "sale-a").quantity = 2
     capture_daily_report(
         engine,
         business_date=REPORT_DATE,
@@ -950,7 +1132,7 @@ def test_continuity_waits_until_previous_day_version_difference_is_confirmed() -
 
     next_date = REPORT_DATE + timedelta(days=1)
     with Session(engine) as session, session.begin():
-        session.get(OfferCurrent, "offer-a").takealot_available_stock = 8
+        session.get(OfferCurrent, "offer-a").takealot_available_stock = 7
         session.add(
             SaleItem(
                 order_item_id="sale-a-next",
@@ -1008,9 +1190,9 @@ def test_continuity_waits_until_previous_day_version_difference_is_confirmed() -
     assert [issue["type"] for issue in next_pending["review_issues"]] == [
         "stock_continuity"
     ]
-    assert next_pending["stock_check"]["previous_stock"] == 10
-    assert next_pending["stock_check"]["expected_stock"] == 9
-    assert next_pending["stock_check"]["actual_stock"] == 8
+    assert next_pending["stock_check"]["previous_stock"] == 9
+    assert next_pending["stock_check"]["expected_stock"] == 8
+    assert next_pending["stock_check"]["actual_stock"] == 7
 
 
 def test_confirmed_version_is_the_baseline_for_a_later_capture_difference() -> None:
@@ -1044,6 +1226,7 @@ def test_confirmed_version_is_the_baseline_for_a_later_capture_difference() -> N
     )
     with Session(engine) as session, session.begin():
         session.get(OfferCurrent, "offer-a").takealot_available_stock = 7
+        session.get(SaleItem, "sale-a-next").quantity = 2
     capture_daily_report(
         engine,
         business_date=next_date,
@@ -1079,11 +1262,12 @@ def test_confirmed_version_is_the_baseline_for_a_later_capture_difference() -> N
     assert [issue["type"] for issue in continuity_pending["review_issues"]] == [
         "stock_continuity"
     ]
-    assert continuity_pending["current"]["platform_stock"] == 7
-    assert continuity_pending["confirmation_baseline"]["values"]["platform_stock"] == 7
+    assert continuity_pending["current"]["platform_stock"] == 8
+    assert continuity_pending["confirmation_baseline"]["values"]["platform_stock"] == 8
 
     with Session(engine) as session, session.begin():
         session.get(OfferCurrent, "offer-a").takealot_available_stock = 6
+        session.get(SaleItem, "sale-a-next").quantity = 3
     late_capture_time = datetime.now(UTC) + timedelta(minutes=1)
     capture_daily_report(
         engine,
@@ -1103,11 +1287,11 @@ def test_confirmed_version_is_the_baseline_for_a_later_capture_difference() -> N
     ]
     assert reopened["stock_check"]["mismatch"] is False
     assert [
-        (version["kind"], version["values"]["platform_stock"])
+        (version["kind"], version["values"]["ordered_units"])
         for version in reopened["review_versions"]
     ] == [
-        ("confirmed", 7),
-        ("capture", 6),
+        ("confirmed", 2),
+        ("capture", 3),
     ]
 
     confirm_entry(
@@ -1127,9 +1311,9 @@ def test_confirmed_version_is_the_baseline_for_a_later_capture_difference() -> N
     assert [issue["type"] for issue in final_pending["review_issues"]] == [
         "stock_continuity"
     ]
-    assert final_pending["current"]["platform_stock"] == 6
-    assert final_pending["stock_check"]["expected_stock"] == 8
-    assert final_pending["stock_check"]["actual_stock"] == 6
+    assert final_pending["current"]["platform_stock"] == 8
+    assert final_pending["stock_check"]["expected_stock"] == 6
+    assert final_pending["stock_check"]["actual_stock"] == 8
 
 
 def test_manual_confirmation_reopens_following_stock_conflict_and_keeps_context() -> None:
