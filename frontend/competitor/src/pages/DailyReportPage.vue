@@ -293,14 +293,54 @@ async function runExport() {
   }
 }
 
-function statusLabel(status: DailyReportItem["status"]) {
+function reviewStatusLabel(item: DailyReportItem) {
+  const captureIssue = item.review_issues.find(
+    (issue) => issue.type === "capture_difference",
+  );
+  const hasStockContinuity = item.review_issues.some(
+    (issue) => issue.type === "stock_continuity",
+  );
+  const labels: string[] = [];
+  if (captureIssue) {
+    const hasOrders = captureIssue.fields.includes("ordered_units");
+    const hasStock = captureIssue.fields.includes("platform_stock");
+    const prefix = item.confirmation_baseline ? "确认后" : "";
+    if (hasOrders && hasStock) {
+      labels.push(`${prefix}订单与库存版本有差异`);
+    } else if (hasOrders) {
+      labels.push(`${prefix}订单版本有差异`);
+    } else if (hasStock) {
+      labels.push(`${prefix}库存版本有差异`);
+    } else {
+      labels.push(`${prefix}同周期版本有差异`);
+    }
+  }
+  if (hasStockContinuity) {
+    labels.push(
+      item.confirmation_trigger
+        ? "人工确认后库存不平"
+        : "前后日报库存不平",
+    );
+  }
+  return labels.join("；") || "待人工核对";
+}
+
+function statusLabel(item: DailyReportItem) {
+  if (item.status === "needs_review") return reviewStatusLabel(item);
   return {
     awaiting_evening: "等待下一次拉取",
     ready: "无差异已自动采用",
-    needs_review: "数据有差异",
     missing_capture: "漏爬已自动补缺",
     confirmed: "已确认",
-  }[status];
+  }[item.status];
+}
+
+function reviewStatusClass(item: DailyReportItem) {
+  if (item.status !== "needs_review") return "";
+  const hasCapture = hasReviewIssue(item, "capture_difference");
+  const hasStock = hasReviewIssue(item, "stock_continuity");
+  if (hasCapture && hasStock) return "mixed-review";
+  return hasStock ? "stock-review" : "version-review";
 }
 
 function captureStatusLabel(slot: "morning" | "evening") {
@@ -683,7 +723,12 @@ function parseInput(value: string): number | null {
             <strong>{{ item.title }}</strong>
             <code>{{ productLabel(item) }}</code>
             <small>{{ item.business_date }}</small>
-            <span class="status-badge" :class="item.status">{{ statusLabel(item.status) }}</span>
+            <span
+              class="status-badge"
+              :class="[item.status, reviewStatusClass(item)]"
+            >
+              {{ statusLabel(item) }}
+            </span>
           </div>
           <div class="review-issues">
             <section
@@ -1147,7 +1192,9 @@ function parseInput(value: string): number | null {
 .row-actions button { margin: 3px; padding: 5px 7px; }
 .row-actions button.danger-link { border-color: #e3a294; color: #ad442f; }
 .status-badge { display: block; width: fit-content; margin: 0 auto 5px; padding: 4px 7px; border-radius: 999px; background: #e8ece9; color: #536159; font-size: 10px; }
-.status-badge.needs_review { background: #ffe2dc; color: #a63d2d; }
+.status-badge.needs_review.version-review { background: #eee7f7; color: #604982; }
+.status-badge.needs_review.stock-review { background: #ffe2dc; color: #a63d2d; }
+.status-badge.needs_review.mixed-review { background: #ffe8cf; color: #9a4d18; }
 .status-badge.ready { background: #fff1d6; color: #8a5a0d; }
 .status-badge.missing_capture { background: #fff1c9; color: #775611; }
 .status-badge.confirmed { background: #dff2e7; color: #236446; }
