@@ -1070,7 +1070,12 @@ def export_operations_workbook(
                 row_number + 3,
                 column,
                 _operator_note_cell_text(
-                    notes_by_key.get((report_date, offer_id), [])
+                    notes_by_key.get((report_date, offer_id), []),
+                    confirmation_note=(
+                        resolution.confirm_note
+                        if _has_confirmation_baseline(resolution)
+                        else None
+                    ),
                 ),
             )
             if int(orders or 0) > 0:
@@ -2282,17 +2287,26 @@ def _operator_note_history_map(
     }
 
 
-def _operator_note_cell_text(notes: list[dict[str, Any]]) -> str | None:
+def _operator_note_cell_text(
+    notes: list[dict[str, Any]],
+    *,
+    confirmation_note: str | None = None,
+) -> str | None:
     labels = {
         "general": "通用",
         "capture_difference": "版本",
         "stock_continuity": "库存",
     }
-    rendered = [
+    rendered = (
+        [f"（确认：{confirmation_note.strip()}）"]
+        if confirmation_note is not None and confirmation_note.strip()
+        else []
+    )
+    rendered.extend(
         f"（{labels.get(str(note.get('issue_type')), '通用')}：{note.get('note', '')}）"
         for note in notes
         if str(note.get("note") or "").strip()
-    ]
+    )
     return " ".join(rendered) or None
 
 

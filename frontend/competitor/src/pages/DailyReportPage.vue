@@ -428,12 +428,18 @@ function noteIssueLabel(issueType: DailyReportNote["issue_type"]) {
 
 function matrixNoteText(item: MatrixDailyReportItem | undefined) {
   if (!item) return "";
+  const notes: string[] = [];
+  const confirmationNote = item.confirmation_baseline?.confirm_note?.trim();
+  if (confirmationNote) notes.push(`（确认：${confirmationNote}）`);
   if (item.operator_notes.length) {
-    return item.operator_notes
+    notes.push(
+      ...item.operator_notes
       .map((note) => `（${noteIssueLabel(note.issue_type)}：${note.note}）`)
-      .join(" ");
+    );
+  } else if (item.operator_note) {
+    notes.push(`（${item.operator_note}）`);
   }
-  return item.operator_note ? `（${item.operator_note}）` : "";
+  return notes.join(" ");
 }
 
 function fieldLabel(key: string) {

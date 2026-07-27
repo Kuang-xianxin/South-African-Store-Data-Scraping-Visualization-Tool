@@ -649,7 +649,9 @@ def test_export_is_blocked_until_every_entry_is_confirmed(tmp_path: Path) -> Non
         assert report_sheet["C3"].fill.fgColor.rgb == "00FCE4D6"
         assert report_sheet["A4"].value == "平台库存数量"
         assert report_sheet["A5"].value == "备注"
-        assert report_sheet["C5"].value == "（库存：平台临时调仓）"
+        assert report_sheet["C5"].value == (
+            "（确认：采用晚间库存值） （库存：平台临时调仓）"
+        )
         assert "当天访客数" not in {
             report_sheet.cell(row=row, column=1).value
             for row in range(1, report_sheet.max_row + 1)
