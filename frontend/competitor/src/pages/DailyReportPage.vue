@@ -49,6 +49,7 @@ const pageSize = 24;
 const slots = ["morning", "evening"] as const;
 const matrixScroll = ref<HTMLElement | null>(null);
 const searchInput = ref<HTMLInputElement | null>(null);
+const locatedBusinessDate = ref("");
 const editorNoteInput = ref<HTMLTextAreaElement | null>(null);
 const editor = ref<{
   mode:
@@ -292,11 +293,35 @@ async function searchPendingSku(
   search.value = sku;
   filter.value = "all";
   page.value = 1;
-  message.value = `已定位平台 SKU：${sku}`;
+  locatedBusinessDate.value = item.business_date;
   await nextTick();
-  searchInput.value?.focus();
+  searchInput.value?.focus({ preventScroll: true });
   searchInput.value?.select();
-  searchInput.value?.scrollIntoView({ behavior: "smooth", block: "center" });
+  const container = matrixScroll.value;
+  const targetRow = Array.from(
+    container?.querySelectorAll<HTMLTableRowElement>(
+      "tr[data-business-date]",
+    ) ?? [],
+  ).find((row) => row.dataset.businessDate === item.business_date);
+  if (!container || !targetRow) {
+    message.value =
+      `已定位平台 SKU：${sku}，但 ${item.business_date} 不在当前日报表范围内。`;
+    return;
+  }
+  const headerHeight =
+    container.querySelector("thead")?.getBoundingClientRect().height ?? 0;
+  const targetTop =
+    container.scrollTop +
+    targetRow.getBoundingClientRect().top -
+    container.getBoundingClientRect().top -
+    headerHeight;
+  container.scrollIntoView({ behavior: "smooth", block: "center" });
+  container.scrollTo({
+    top: Math.max(0, targetTop),
+    behavior: "smooth",
+  });
+  message.value =
+    `已定位平台 SKU：${sku}，并跳转到 ${item.business_date} 日报数据。`;
 }
 
 async function load() {
@@ -336,10 +361,25 @@ function openEditor(
   editorError.value = "";
   editorStatus.value = "";
   const fullItem = item && "manual" in item ? item : null;
-  const current = mode === "manual" && fullItem?.manual_at && fullItem.manual
-    ? fullItem.manual
-    : item?.current;
   const pendingItem = item && "review_issues" in item ? item : null;
+  const stockOnlyManualEdit =
+    mode === "manual" &&
+    pendingItem !== null &&
+    hasReviewIssue(pendingItem, "stock_continuity") &&
+    !hasReviewIssue(pendingItem, "capture_difference");
+  const current =
+    stockOnlyManualEdit && item
+      ? {
+          page_views_30_days:
+            fullItem?.manual?.page_views_30_days ??
+            item.current.page_views_30_days,
+          ordered_units: item.current.ordered_units,
+          platform_stock:
+            fullItem?.manual?.platform_stock ?? item.current.platform_stock,
+        }
+      : mode === "manual" && fullItem?.manual_at && fullItem.manual
+        ? fullItem.manual
+        : item?.current;
   form.value = {
     page_views_30_days: toInput(current?.page_views_30_days),
     ordered_units: toInput(current?.ordered_units),
@@ -390,7 +430,9 @@ async function submitEditor() {
     return;
   }
   const note = String(form.value.note ?? "").trim();
-  if (!note) {
+  const generalNoteDeletion =
+    mode === "delete_note" && editor.value.note?.issue_type === "general";
+  if (!note && !generalNoteDeletion) {
     editorError.value = mode === "revert" || mode === "reopen_stock"
       ? "请先填写撤销原因，再点击“确认撤销”。"
       : mode === "confirm"
@@ -476,7 +518,9 @@ async function submitEditor() {
         editor.value.note.id,
         note,
       );
-      successMessage = "备注已删除；被删除内容和本次删除原因均已留痕。";
+      successMessage = editor.value.note.issue_type === "general"
+        ? "通用备注已删除；被删除内容、操作人和时间均已留痕。"
+        : "问题备注已删除；被删除内容和本次删除原因均已留痕。";
       closeNoteManager();
     } else if (mode === "dismiss" && item) {
       await dismissDailyReportStockAlert(
@@ -498,6 +542,12 @@ async function submitEditor() {
     closeEditor(true);
   } catch (error) {
     const detail = error instanceof Error ? error.message : "保存失败";
+    if (mode === "dismiss" || mode === "eliminate") {
+      await load().catch(() => undefined);
+      closeEditor(true);
+      message.value = detail;
+      return;
+    }
     editorError.value = detail;
     message.value = detail;
   } finally {
@@ -917,7 +967,14 @@ function parseInput(value: string | number): number | null {
           </thead>
           <tbody>
             <template v-for="day in comparisonHistory" :key="day.business_date">
-              <tr class="visitor-total date-start">
+              <tr
+                class="visitor-total date-start"
+                :class="{
+                  'located-date-row':
+                    locatedBusinessDate === day.business_date,
+                }"
+                :data-business-date="day.business_date"
+              >
                 <th>近30天浏览量</th>
                 <td class="matrix-date">{{ day.business_date }}</td>
                 <td
@@ -1030,7 +1087,7 @@ function parseInput(value: string | number): number | null {
         <article
           v-for="item in actionItems"
           :key="`${item.business_date}-${item.offer_id}`"
-          title="点击卡片，按平台 SKU 定位到上方日报表"
+          title="点击卡片，按平台 SKU 定位到上方日报表对应日期"
           @click="searchPendingSku(item, $event)"
         >
           <div class="review-product">
@@ -1073,6 +1130,10 @@ function parseInput(value: string | number): number | null {
               </div>
               <div v-if="item.manual_note" class="issue-note">
                 人工修改备注：{{ item.manual_note }}
+              </div>
+              <div v-if="item.stock_check.deferred_reason" class="review-guidance">
+                {{ item.stock_check.deferred_reason }}。请先点击“确认合并”确定正确销量；
+                销量稳定后系统会自动显示“消除差异”或“确认库存差异”。
               </div>
               <div
                 v-for="note in notesForIssue(item, 'capture_difference')"
@@ -1685,14 +1746,32 @@ function parseInput(value: string | number): number | null {
           撤销后原处理记录不会删除；如果库存公式仍不平，该商品会重新进入人工核对待办，表格红标始终保留。
         </p>
         <p v-if="editor.mode === 'delete_note'" class="revert-warning">
-          即将删除备注“{{ editor.note?.note }}”。被删除内容仍会保留在审计记录中，请填写本次删除原因。
+          <template v-if="editor.note?.issue_type === 'general'">
+            即将删除通用备注“{{ editor.note?.note }}”。无需填写删除原因；被删除内容、操作人和时间仍会保留在审计记录中。
+          </template>
+          <template v-else>
+            即将删除问题备注“{{ editor.note?.note }}”。被删除内容仍会保留在审计记录中，请填写本次删除原因。
+          </template>
         </p>
         <p v-if="editor.mode === 'eliminate'" class="revert-warning">
           人工修改后的库存公式已经相符；确认后会采用人工修改值并关闭待办。
         </p>
         <div v-if="editor.mode === 'manual'" class="manual-grid">
           <p class="manual-baseline-tip">
-            输入框已带入当前数据；如已有人工候选，则带入上次修改值。下方基准值始终保留用于对照。
+            <template
+              v-if="
+                editor.item &&
+                'review_issues' in editor.item &&
+                hasReviewIssue(editor.item, 'stock_continuity') &&
+                !hasReviewIssue(editor.item, 'capture_difference')
+              "
+            >
+              当前是纯库存连续性待办；销量已重新带入当前正确值。只改库存时无需调整销量，
+              旧人工候选销量不会继续沿用。
+            </template>
+            <template v-else>
+              输入框已带入当前数据；如已有人工候选，则带入上次修改值。下方基准值始终保留用于对照。
+            </template>
           </p>
           <label>
             <span>近30天浏览量<small>当前基准：{{ value(editor.item?.current.page_views_30_days) }}</small></span>
@@ -1732,7 +1811,14 @@ function parseInput(value: string | number): number | null {
             <option value="stock_continuity">前后日报日库存连续性</option>
           </select>
         </label>
-        <label>
+        <label
+          v-if="
+            !(
+              editor.mode === 'delete_note' &&
+              editor.note?.issue_type === 'general'
+            )
+          "
+        >
           {{
             editor.mode === "confirm"
               ? "合并备注（必填）"
@@ -1877,6 +1963,9 @@ function parseInput(value: string | number): number | null {
 .daily-matrix .visitor-total th, .daily-matrix .visitor-total td { background: #d9e5f5; }
 .daily-matrix tbody .visitor-total td:first-of-type { background: #d9e5f5; }
 .daily-matrix .date-start > * { border-top: 3px solid #7898b6; }
+.daily-matrix .located-date-row > * {
+  box-shadow: inset 0 3px #2a7c57, inset 0 -3px #2a7c57;
+}
 .daily-matrix .date-end > * { border-bottom: 2px solid #a7b3ac; }
 .daily-matrix .matrix-date { color: #294d70; font-weight: 700; }
 .daily-matrix tbody tr:hover td { outline: 1px solid rgba(33, 93, 67, .22); outline-offset: -1px; }
@@ -1918,6 +2007,7 @@ function parseInput(value: string | number): number | null {
 .review-issue.stock-issue { border-left: 4px solid #c94d3d; background: #fff0ed; }
 .review-issue.revert-issue { border-left: 4px solid #d18a21; background: #fff8e8; }
 .review-issue.note-issue { border-left: 4px solid #768a7e; }
+.review-guidance { margin-top: 8px; padding: 8px 10px; border-radius: 7px; background: #fff8dd; color: #765716; font-size: 10px; line-height: 1.55; }
 .issue-field-values { display: grid; grid-template-columns: minmax(100px, .5fr) repeat(auto-fit, minmax(160px, 1fr)); gap: 4px 9px; margin-top: 7px; color: #596a61; font-size: 11px; line-height: 1.45; }
 .issue-field-values b { color: #4b3966; }
 .issue-field-values span { min-width: 0; padding: 4px 6px; border-radius: 5px; }

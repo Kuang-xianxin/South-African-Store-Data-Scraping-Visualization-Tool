@@ -602,7 +602,6 @@ def delete_operator_note(
     note: str,
     user_id: int,
 ) -> None:
-    clean_note = _required_note(note, "删除备注必须填写操作备注")
     now = _utc_now()
     with Session(engine) as session, session.begin():
         resolution = _resolution_or_error(session, business_date, offer_id)
@@ -615,6 +614,14 @@ def delete_operator_note(
         )
         if existing is None:
             raise DailyReportConflictError("该备注不存在或已经删除")
+        clean_note = str(note or "").strip()
+        if existing["issue_type"] != "general":
+            clean_note = _required_note(
+                clean_note,
+                "删除问题备注必须填写删除原因",
+            )
+        elif len(clean_note) > 2000:
+            raise DailyReportInputError("备注不能超过 2000 个字符")
         _audit(
             session,
             business_date,
@@ -625,7 +632,7 @@ def delete_operator_note(
                 "deleted_note": existing["note"],
                 "issue_type": existing["issue_type"],
             },
-            clean_note,
+            clean_note or None,
             user_id,
             now,
         )

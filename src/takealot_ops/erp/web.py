@@ -179,6 +179,10 @@ class DailyReportNoteRequest(BaseModel):
     issue_type: str = "general"
 
 
+class DailyReportDeleteNoteRequest(BaseModel):
+    note: str = Field(default="", max_length=2000)
+
+
 class LoginRequest(BaseModel):
     username: str = Field(min_length=1, max_length=64)
     password: str = Field(min_length=1, max_length=128)
@@ -727,7 +731,7 @@ def create_app(project_root: Path | None = None) -> FastAPI:
         business_date: date,
         offer_id: str,
         note_id: int,
-        payload: DailyReportRevertRequest,
+        payload: DailyReportDeleteNoteRequest,
         request: Request,
     ) -> dict[str, object]:
         _write_daily_report(

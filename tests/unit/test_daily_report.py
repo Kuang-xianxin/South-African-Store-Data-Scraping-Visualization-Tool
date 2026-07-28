@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 
 from takealot_ops.erp.daily_report import (
     DailyReportConflictError,
+    DailyReportInputError,
     backfill_daily_inventory_snapshots,
     backfill_stock_continuity_reviews,
     capture_daily_report,
@@ -420,12 +421,24 @@ def test_operator_notes_support_create_update_delete_and_keep_audit_history() ->
         issue_type="stock_continuity",
         user_id=1,
     )
+    with pytest.raises(
+        DailyReportInputError,
+        match="删除问题备注必须填写删除原因",
+    ):
+        delete_operator_note(
+            engine,
+            business_date=REPORT_DATE,
+            offer_id="offer-a",
+            note_id=first_note_id,
+            note="",
+            user_id=1,
+        )
     delete_operator_note(
         engine,
         business_date=REPORT_DATE,
         offer_id="offer-a",
         note_id=second_note_id,
-        note="仓库盘点已结束，删除过期备注",
+        note="",
         user_id=1,
     )
 
@@ -475,7 +488,7 @@ def test_operator_notes_support_create_update_delete_and_keep_audit_history() ->
         "operator_note",
         "operator_note",
     ]
-    assert handled[0]["note"] == "仓库盘点已结束，删除过期备注"
+    assert handled[0]["note"] is None
     assert handled[0]["detail"]["deleted_note"] == (
         "运营补充：等待仓库盘点结果"
     )
