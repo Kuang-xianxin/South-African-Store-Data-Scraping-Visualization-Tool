@@ -17,7 +17,13 @@ from zoneinfo import ZoneInfo
 import pandas as pd
 from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.concurrency import run_in_threadpool
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
+from fastapi.responses import (
+    FileResponse,
+    HTMLResponse,
+    JSONResponse,
+    Response,
+    StreamingResponse,
+)
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
@@ -68,6 +74,7 @@ from takealot_ops.erp.daily_report import (
     unresolved_locations,
     update_operator_note,
 )
+from takealot_ops.erp.daily_report_live import daily_report_event_stream
 from takealot_ops.erp.service import (
     build_product_detail_payload,
     build_products_payload,
@@ -520,6 +527,32 @@ def create_app(project_root: Path | None = None) -> FastAPI:
             return daily_report_payload(engine, business_date)
         finally:
             engine.dispose()
+
+    @app.get("/api/erp/daily-report/events")
+    def operations_daily_report_events(request: Request) -> StreamingResponse:
+        settings = DashboardSettings.from_env(root)
+        engine = create_read_only_erp_engine(settings.database_url)
+
+        async def stream() -> AsyncIterator[str]:
+            try:
+                async for event in daily_report_event_stream(
+                    engine,
+                    is_disconnected=request.is_disconnected,
+                    business_date=_default_operations_business_date,
+                ):
+                    yield event
+            finally:
+                engine.dispose()
+
+        return StreamingResponse(
+            stream(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",
+            },
+        )
 
     @app.get("/api/erp/daily-report/reminders")
     def operations_daily_report_reminders() -> dict[str, Any]:

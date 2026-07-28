@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, ref, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 
 import {
   confirmDailyReportEntry,
@@ -86,8 +86,15 @@ const form = ref({
     | "stock_continuity",
   note: "",
 });
+let liveRefreshPending = false;
 
-watch(() => props.asOf, load, { immediate: true });
+watch(() => props.asOf, () => void load(), { immediate: true });
+onMounted(() => {
+  window.addEventListener("erp-daily-report-updated", handleLiveUpdate);
+});
+onBeforeUnmount(() => {
+  window.removeEventListener("erp-daily-report-updated", handleLiveUpdate);
+});
 
 const comparisonHistory = computed(() => report.value?.comparison_history ?? []);
 const manualRuns = computed(
@@ -324,9 +331,14 @@ async function searchPendingSku(
     `已定位平台 SKU：${sku}，并跳转到 ${item.business_date} 日报数据。`;
 }
 
-async function load() {
-  loading.value = true;
-  message.value = "";
+async function load(
+  options: { quiet?: boolean; preserveScroll?: boolean } = {},
+) {
+  const previousScrollTop = matrixScroll.value?.scrollTop ?? 0;
+  if (!options.quiet) {
+    loading.value = true;
+    message.value = "";
+  }
   try {
     [report.value, exportState.value] = await Promise.all([
       fetchDailyReport(props.asOf),
@@ -334,13 +346,31 @@ async function load() {
     ]);
     await nextTick();
     if (matrixScroll.value) {
-      matrixScroll.value.scrollTop = matrixScroll.value.scrollHeight;
+      matrixScroll.value.scrollTop = options.preserveScroll
+        ? previousScrollTop
+        : matrixScroll.value.scrollHeight;
     }
   } catch (error) {
-    message.value = error instanceof Error ? error.message : "运营日报读取失败";
+    if (!options.quiet) {
+      message.value = error instanceof Error ? error.message : "运营日报读取失败";
+    }
   } finally {
-    loading.value = false;
+    if (!options.quiet) loading.value = false;
   }
+}
+
+function handleLiveUpdate() {
+  if (saving.value || editor.value.mode !== null) {
+    liveRefreshPending = true;
+    return;
+  }
+  void load({ quiet: true, preserveScroll: true });
+}
+
+function flushLiveUpdate() {
+  if (!liveRefreshPending || saving.value || editor.value.mode !== null) return;
+  liveRefreshPending = false;
+  void load({ quiet: true, preserveScroll: true });
 }
 
 function openEditor(
@@ -413,6 +443,7 @@ function openEditor(
 function closeEditor(force = false) {
   if (saving.value && !force) return;
   editor.value = { mode: null, item: null, note: null };
+  queueMicrotask(flushLiveUpdate);
   editorError.value = "";
   editorStatus.value = "";
 }

@@ -88,6 +88,7 @@ const refreshKey = ref(0);
 const refreshing = ref(false);
 const refreshMessage = ref("");
 const mobileNavOpen = ref(false);
+let dailyReportEvents: EventSource | null = null;
 
 const isAdmin = computed(() => session.value?.user.role === "admin");
 const canOperate = computed(() =>
@@ -178,6 +179,7 @@ onMounted(async () => {
 });
 onBeforeUnmount(() => {
   window.removeEventListener("erp-auth-expired", handleExpired);
+  disconnectDailyReportEvents();
   if (refreshStatusTimer !== null) window.clearInterval(refreshStatusTimer);
   if (refreshClockTimer !== null) window.clearInterval(refreshClockTimer);
 });
@@ -210,9 +212,11 @@ function acceptSession(next: AuthSession) {
   void loadFreshness();
   void loadDailyReportReminders();
   void loadRefreshStatus();
+  connectDailyReportEvents();
 }
 
 function handleExpired() {
+  disconnectDailyReportEvents();
   session.value = null;
   setAuthSession(null);
   currentPage.value = "overview";
@@ -242,6 +246,30 @@ async function loadDailyReportReminders() {
     count: 0,
     dates: [],
   }));
+}
+
+function connectDailyReportEvents() {
+  disconnectDailyReportEvents();
+  if (!session.value) return;
+  const source = new EventSource("/api/erp/daily-report/events");
+  const publishUpdate = (event: Event) => {
+    const payload = JSON.parse((event as MessageEvent<string>).data) as {
+      business_date?: string;
+    };
+    if (payload.business_date) dailyReportAsOf.value = payload.business_date;
+    void loadDailyReportReminders();
+    window.dispatchEvent(
+      new CustomEvent("erp-daily-report-updated", { detail: payload }),
+    );
+  };
+  source.addEventListener("ready", publishUpdate);
+  source.addEventListener("daily-report-updated", publishUpdate);
+  dailyReportEvents = source;
+}
+
+function disconnectDailyReportEvents() {
+  dailyReportEvents?.close();
+  dailyReportEvents = null;
 }
 
 async function loadRefreshStatus() {

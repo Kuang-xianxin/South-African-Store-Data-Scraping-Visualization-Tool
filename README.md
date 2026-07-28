@@ -77,6 +77,8 @@ TAKEALOT_DATABASE_URL=mysql+pymysql://takealot_app:密码@127.0.0.1:3306/takealo
 
 初始化完成后，同事可打开 `http://服务器局域网IP:8501` 登录。服务器 IP 可在 PowerShell 执行 `ipconfig` 查看 IPv4 地址。正式 ERP 监听 `0.0.0.0:8501`，但 MySQL 仍只连接本机 `127.0.0.1`，数据库端口不会提供给局域网。当前方案适用于同一受信任局域网，不应把 `8501` 直接映射到公网；如需跨网络或公网访问，应增加 HTTPS 反向代理和网络访问控制。
 
+完成并验证项目修复后，使用 `.\scripts\restart_erp.ps1` 自动停止当前项目 ERP、隐藏启动新进程并等待 `/api/health` 通过。脚本只会停止命令行明确包含 `takealot_ops.erp.web:app` 的8501监听进程；端口被其他程序占用时会拒绝操作，启动输出写入 `logs\erp.stdout.log` 和 `logs\erp.stderr.log`。
+
 权限分为三级：
 
 - 查看员（`viewer`）：查看页面和下载已有文件，不能刷新、采集、上传或生成；
