@@ -142,6 +142,30 @@ const visibleItems = computed(() =>
 );
 const actionItems = computed(() => report.value?.pending_actions ?? []);
 const handledActions = computed(() => report.value?.handled_actions ?? []);
+const handledProcessingDate = ref("");
+const handledBusinessDate = ref("");
+const handledProcessingDates = computed(() =>
+  [...new Set(handledActions.value.map((item) => chinaDateKey(item.handled_at)))]
+    .filter(Boolean)
+    .sort((left, right) => right.localeCompare(left)),
+);
+const handledBusinessDates = computed(() =>
+  [...new Set(handledActions.value.map((item) => item.business_date))]
+    .filter(Boolean)
+    .sort((left, right) => right.localeCompare(left)),
+);
+const filteredHandledActions = computed(() =>
+  handledActions.value.filter(
+    (item) =>
+      (!handledProcessingDate.value ||
+        chinaDateKey(item.handled_at) === handledProcessingDate.value) &&
+      (!handledBusinessDate.value ||
+        item.business_date === handledBusinessDate.value),
+  ),
+);
+const hasHandledFilters = computed(
+  () => Boolean(handledProcessingDate.value || handledBusinessDate.value),
+);
 const missingPageViewsCount = computed(
   () =>
     report.value?.items.filter((item) =>
@@ -155,6 +179,43 @@ watch([search, filter], () => {
 watch(pageCount, (count) => {
   if (page.value > count) page.value = count;
 });
+watch(handledActions, () => {
+  if (
+    handledProcessingDate.value &&
+    !handledProcessingDates.value.includes(handledProcessingDate.value)
+  ) {
+    handledProcessingDate.value = "";
+  }
+  if (
+    handledBusinessDate.value &&
+    !handledBusinessDates.value.includes(handledBusinessDate.value)
+  ) {
+    handledBusinessDate.value = "";
+  }
+});
+
+function chinaDateKey(value: string | null): string {
+  if (!value) return "";
+  const normalized = /(Z|[+-]\d{2}:\d{2})$/i.test(value)
+    ? value
+    : `${value}Z`;
+  const parsed = new Date(normalized);
+  if (Number.isNaN(parsed.getTime())) return "";
+  const parts = new Intl.DateTimeFormat("zh-CN", {
+    timeZone: "Asia/Shanghai",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(parsed);
+  const part = (type: "year" | "month" | "day") =>
+    parts.find((item) => item.type === type)?.value ?? "";
+  return `${part("year")}-${part("month")}-${part("day")}`;
+}
+
+function clearHandledFilters() {
+  handledProcessingDate.value = "";
+  handledBusinessDate.value = "";
+}
 
 async function searchPendingSku(
   item: DailyReportPendingAction,
@@ -1183,9 +1244,49 @@ function parseInput(value: string | number): number | null {
         <h3>待办处理留痕</h3>
         <span>保留最近100次确认；撤销只改变当前状态，不删除原处理记录</span>
       </div>
-      <div v-if="handledActions.length" class="handled-action-list">
+      <div v-if="handledActions.length" class="handled-history-filters">
+        <label>
+          <span>处理日期</span>
+          <select v-model="handledProcessingDate">
+            <option value="">全部处理日期</option>
+            <option
+              v-for="dateValue in handledProcessingDates"
+              :key="dateValue"
+              :value="dateValue"
+            >
+              {{ dateValue }}
+            </option>
+          </select>
+        </label>
+        <label>
+          <span>数据日期</span>
+          <select v-model="handledBusinessDate">
+            <option value="">全部数据日期</option>
+            <option
+              v-for="dateValue in handledBusinessDates"
+              :key="dateValue"
+              :value="dateValue"
+            >
+              {{ dateValue }}
+            </option>
+          </select>
+        </label>
+        <div class="handled-filter-result">
+          <span>
+            显示 {{ filteredHandledActions.length }} / {{ handledActions.length }} 条
+          </span>
+          <button
+            v-if="hasHandledFilters"
+            type="button"
+            @click="clearHandledFilters"
+          >
+            清除筛选
+          </button>
+        </div>
+      </div>
+      <div v-if="filteredHandledActions.length" class="handled-action-list">
         <article
-          v-for="item in handledActions"
+          v-for="item in filteredHandledActions"
           :key="item.id"
           :class="{ inactive: !item.active }"
         >
@@ -1255,6 +1356,9 @@ function parseInput(value: string | number): number | null {
             </button>
           </div>
         </article>
+      </div>
+      <div v-else-if="handledActions.length" class="review-empty">
+        没有符合当前处理日期和数据日期的留痕记录。
       </div>
       <div v-else class="review-empty">目前还没有人工处理完成的待办记录。</div>
     </section>
@@ -1623,6 +1727,11 @@ function parseInput(value: string | number): number | null {
 .review-empty { margin-top: 14px; padding: 20px; border: 1px dashed #ccd8d0; border-radius: 10px; color: #718077; text-align: center; }
 .handled-history-panel { padding: 18px 20px; }
 .handled-history-panel .section-title > span { color: #7c8981; font-size: 11px; }
+.handled-history-filters { display: grid; grid-template-columns: repeat(2, minmax(160px, 220px)) minmax(180px, 1fr); align-items: end; gap: 10px 12px; margin-top: 14px; padding: 11px 12px; border: 1px solid #d6e0da; border-radius: 10px; background: #f7faf8; }
+.handled-history-filters label { display: grid; gap: 5px; color: #5d6d64; font-size: 10px; font-weight: 700; }
+.handled-history-filters select { width: 100%; min-height: 34px; padding: 6px 30px 6px 9px; border: 1px solid #cbd8d0; border-radius: 7px; background: #fff; color: #315245; font: inherit; font-weight: 500; }
+.handled-filter-result { display: flex; align-items: center; justify-content: flex-end; gap: 9px; min-height: 34px; color: #68776e; font-size: 10px; }
+.handled-filter-result button { padding: 6px 9px; border: 1px solid #b8cec1; border-radius: 7px; background: #fff; color: #315f49; cursor: pointer; }
 .handled-action-list { display: grid; gap: 9px; margin-top: 14px; }
 .handled-action-list article { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 16px; padding: 12px 14px; border: 1px solid #cddfd4; border-left: 4px solid #438761; border-radius: 10px; background: #f7fbf8; }
 .handled-action-list article.inactive { border-color: #d9dedb; border-left-color: #9ca7a0; background: #f7f8f7; opacity: .82; }
@@ -1694,6 +1803,8 @@ function parseInput(value: string | number): number | null {
   .daily-kpis { grid-template-columns: repeat(3, 1fr); }
   .daily-toolbar, .daily-run-times { align-items: flex-start; flex-direction: column; }
   .review-list article { grid-template-columns: 1fr; }
+  .handled-history-filters { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .handled-filter-result { grid-column: 1 / -1; justify-content: flex-start; }
   .handled-action-list article { grid-template-columns: 1fr; }
   .handled-action-buttons { display: flex; justify-content: flex-start; }
 }
@@ -1701,6 +1812,8 @@ function parseInput(value: string | number): number | null {
   .daily-kpis { grid-template-columns: repeat(2, 1fr); }
   .daily-filters { flex-wrap: wrap; }
   .daily-filters input { flex-basis: 100%; }
+  .handled-history-filters { grid-template-columns: 1fr; }
+  .handled-filter-result { grid-column: auto; }
   .manual-grid { grid-template-columns: 1fr; }
 }
 </style>
