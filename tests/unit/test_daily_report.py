@@ -97,6 +97,7 @@ def _seed(engine) -> None:
                     offer_id="offer-a",
                     sku="9900000000001",
                     title="Product A",
+                    image_url="https://example.invalid/product-a.png",
                     captured_at=datetime(2026, 7, 24, 2, tzinfo=UTC),
                     page_views_30_days=50,
                     takealot_available_stock=9,
@@ -105,6 +106,7 @@ def _seed(engine) -> None:
                     offer_id="offer-b",
                     sku="9900000000002",
                     title="Product B",
+                    image_url=None,
                     captured_at=datetime(2026, 7, 24, 2, tzinfo=UTC),
                     page_views_30_days=20,
                     takealot_available_stock=4,
@@ -185,6 +187,7 @@ def test_capture_keeps_morning_and_evening_versions_and_requires_review() -> Non
 
     payload = daily_report_payload(engine, REPORT_DATE)
     product = next(row for row in payload["items"] if row["offer_id"] == "offer-a")
+    assert product["image_url"] == "https://example.invalid/product-a.png"
     assert product["morning"]["ordered_units"] == 1
     assert product["morning"]["platform_stock"] == 9
     assert product["evening"]["ordered_units"] == 2
@@ -198,6 +201,12 @@ def test_capture_keeps_morning_and_evening_versions_and_requires_review() -> Non
         }
     ]
     assert product["stock_context"] is None
+    pending = next(
+        row
+        for row in payload["pending_actions"]
+        if row["offer_id"] == "offer-a"
+    )
+    assert pending["image_url"] == "https://example.invalid/product-a.png"
     unchanged = next(row for row in payload["items"] if row["offer_id"] == "offer-b")
     assert unchanged["status"] == "ready"
 
@@ -657,6 +666,10 @@ def test_manual_candidate_and_confirm_are_separate_audited_states() -> None:
         "manual_candidate",
     ]
     assert handled[0]["note"] == "采用人工核对订单，库存沿用晚间值"
+    assert all(
+        row["image_url"] == "https://example.invalid/product-a.png"
+        for row in handled[:3]
+    )
     assert handled[1]["note"] == "第二次核对后改为订单4、库存8"
     assert handled[1]["detail"]["before_values"]["ordered_units"] == 3
     assert handled[1]["detail"]["after_values"]["ordered_units"] == 4

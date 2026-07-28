@@ -50,6 +50,7 @@ const slots = ["morning", "evening"] as const;
 const matrixScroll = ref<HTMLElement | null>(null);
 const searchInput = ref<HTMLInputElement | null>(null);
 const locatedBusinessDate = ref("");
+const failedProductImages = ref<Set<string>>(new Set());
 const editorNoteInput = ref<HTMLTextAreaElement | null>(null);
 const editor = ref<{
   mode:
@@ -159,6 +160,12 @@ const visibleItems = computed(() =>
   filteredItems.value.slice((page.value - 1) * pageSize, page.value * pageSize),
 );
 const actionItems = computed(() => report.value?.pending_actions ?? []);
+const currentBusinessDatePendingCount = computed(
+  () =>
+    actionItems.value.filter(
+      (item) => item.business_date === report.value?.business_date,
+    ).length,
+);
 const handledActions = computed(() => report.value?.handled_actions ?? []);
 const handledProcessingDate = ref("");
 const handledBusinessDate = ref("");
@@ -281,9 +288,28 @@ function auditValuesSummary(values: DailyReportHandledAction["current"] | null) 
   return `浏览量 ${value(values.page_views_30_days)} / 订单 ${value(values.ordered_units)} / 库存 ${value(values.platform_stock)}`;
 }
 
-async function searchPendingSku(
-  item: DailyReportPendingAction,
-  event?: MouseEvent,
+function visibleProductImage(
+  item: object,
+) {
+  const imageUrl =
+    "image_url" in item && typeof item.image_url === "string"
+      ? item.image_url.trim()
+      : "";
+  return imageUrl && !failedProductImages.value.has(imageUrl)
+    ? imageUrl
+    : null;
+}
+
+function markProductImageFailed(imageUrl: string) {
+  failedProductImages.value = new Set([
+    ...failedProductImages.value,
+    imageUrl,
+  ]);
+}
+
+async function locateReportEntry(
+  item: Pick<DailyReportPendingAction, "sku" | "business_date">,
+  event?: Event,
 ) {
   const target = event?.target;
   if (
@@ -832,13 +858,20 @@ function parseInput(value: string | number): number | null {
       </div>
     </div>
 
-    <p v-if="message" class="global-notice">{{ message }}</p>
-    <div v-if="report?.prior_reminders.length" class="daily-reminder">
-      <strong>开始今日工作前，请先处理历史未合并数据</strong>
-      <span v-for="row in report.prior_reminders" :key="row.business_date">
-        {{ row.business_date }}：{{ row.unresolved_count }} 个
-      </span>
-    </div>
+      <p v-if="message" class="global-notice">{{ message }}</p>
+      <div v-if="report?.prior_reminders.length" class="daily-reminder">
+        <strong>
+          开始今日工作前，请先处理历史未合并数据（不含当前日报日）
+        </strong>
+        <span v-for="row in report.prior_reminders" :key="row.business_date">
+          {{ row.business_date }}：{{ row.unresolved_count }} 个
+        </span>
+        <span v-if="currentBusinessDatePendingCount">
+          当前日报日 {{ report.business_date }}：另有
+          {{ currentBusinessDatePendingCount }} 个；下方待办合计
+          {{ actionItems.length }} 个
+        </span>
+      </div>
 
     <section class="daily-kpis">
       <article><small>商品</small><strong>{{ report?.counts.products ?? 0 }}</strong></article>
@@ -1118,19 +1151,35 @@ function parseInput(value: string | number): number | null {
         <article
           v-for="item in actionItems"
           :key="`${item.business_date}-${item.offer_id}`"
+          tabindex="0"
           title="点击卡片，按平台 SKU 定位到上方日报表对应日期"
-          @click="searchPendingSku(item, $event)"
+          @click="locateReportEntry(item, $event)"
+          @keydown.enter.self="locateReportEntry(item, $event)"
+          @keydown.space.self.prevent="locateReportEntry(item, $event)"
         >
           <div class="review-product">
-            <strong>{{ item.title }}</strong>
-            <code>{{ productLabel(item) }}</code>
-            <small>{{ item.business_date }}</small>
-            <span
-              class="status-badge"
-              :class="[item.status, reviewStatusClass(item)]"
-            >
-              {{ statusLabel(item) }}
-            </span>
+            <div class="daily-product-identity">
+              <span class="daily-product-image">
+                <img
+                  v-if="visibleProductImage(item)"
+                  :src="visibleProductImage(item)!"
+                  :alt="`${item.title} 商品图片`"
+                  @error="markProductImageFailed(visibleProductImage(item)!)"
+                />
+                <span v-else>暂无图片</span>
+              </span>
+              <div>
+                <strong>{{ item.title }}</strong>
+                <code>{{ productLabel(item) }}</code>
+                <small>{{ item.business_date }}</small>
+                <span
+                  class="status-badge"
+                  :class="[item.status, reviewStatusClass(item)]"
+                >
+                  {{ statusLabel(item) }}
+                </span>
+              </div>
+            </div>
           </div>
           <div class="review-issues">
             <section
@@ -1501,10 +1550,15 @@ function parseInput(value: string | number): number | null {
         <article
           v-for="item in filteredHandledActions"
           :key="item.id"
+          tabindex="0"
+          title="点击留痕，按平台 SKU 定位到上方日报表对应日期"
           :class="{
             inactive: isHandledDecision(item) && !item.active,
             'audit-event': !isHandledDecision(item),
           }"
+          @click="locateReportEntry(item, $event)"
+          @keydown.enter.self="locateReportEntry(item, $event)"
+          @keydown.space.self.prevent="locateReportEntry(item, $event)"
         >
           <div class="handled-action-main">
             <header>
@@ -1518,10 +1572,23 @@ function parseInput(value: string | number): number | null {
                 {{ handledStateLabel(item) }}
               </span>
             </header>
-            <strong>{{ item.title }}</strong>
-            <div class="handled-action-identity">
-              <code>{{ item.sku || item.offer_id }}</code>
-              <span>{{ item.business_date }}</span>
+            <div class="daily-product-identity handled-product-identity">
+              <span class="daily-product-image">
+                <img
+                  v-if="visibleProductImage(item)"
+                  :src="visibleProductImage(item)!"
+                  :alt="`${item.title} 商品图片`"
+                  @error="markProductImageFailed(visibleProductImage(item)!)"
+                />
+                <span v-else>暂无图片</span>
+              </span>
+              <div>
+                <strong>{{ item.title }}</strong>
+                <div class="handled-action-identity">
+                  <code>{{ item.sku || item.offer_id }}</code>
+                  <span>{{ item.business_date }}</span>
+                </div>
+              </div>
             </div>
             <p v-if="item.action_type === 'stock_difference'">
               库存公式：
@@ -1650,9 +1717,20 @@ function parseInput(value: string | number): number | null {
       <section class="daily-modal note-manager-modal">
         <p class="section-kicker">DATE NOTE</p>
         <h3>{{ noteManager.business_date }} 备注与确认记录</h3>
-        <p class="modal-product">
-          {{ noteManager.title }} · {{ noteManager.sku || noteManager.offer_id }}
-        </p>
+        <div class="daily-product-identity modal-product-identity">
+          <span class="daily-product-image">
+            <img
+              v-if="visibleProductImage(noteManager)"
+              :src="visibleProductImage(noteManager)!"
+              :alt="`${noteManager.title} 商品图片`"
+              @error="markProductImageFailed(visibleProductImage(noteManager)!)"
+            />
+            <span v-else>暂无图片</span>
+          </span>
+          <p class="modal-product">
+            {{ noteManager.title }} · {{ noteManager.sku || noteManager.offer_id }}
+          </p>
+        </div>
         <section
           v-if="noteManager.confirmation_baseline"
           class="confirmation-manager"
@@ -1762,10 +1840,24 @@ function parseInput(value: string | number): number | null {
                     : "新增备注"
           }}
         </h3>
-        <p v-if="editor.item" class="modal-product">
-          {{ editor.item.business_date }} · {{ editor.item.title }} ·
-          {{ editor.item.sku || editor.item.offer_id }}
-        </p>
+        <div
+          v-if="editor.item"
+          class="daily-product-identity modal-product-identity"
+        >
+          <span class="daily-product-image">
+            <img
+              v-if="visibleProductImage(editor.item)"
+              :src="visibleProductImage(editor.item)!"
+              :alt="`${editor.item.title} 商品图片`"
+              @error="markProductImageFailed(visibleProductImage(editor.item)!)"
+            />
+            <span v-else>暂无图片</span>
+          </span>
+          <p class="modal-product">
+            {{ editor.item.business_date }} · {{ editor.item.title }} ·
+            {{ editor.item.sku || editor.item.offer_id }}
+          </p>
+        </div>
         <p v-if="editor.mode === 'revert'" class="revert-warning">
           {{
             revertingStockElimination
@@ -2021,7 +2113,7 @@ function parseInput(value: string | number): number | null {
 .review-title > span { color: #7c8981; font-size: 11px; }
 .review-list { display: grid; grid-template-columns: minmax(0, 1fr); gap: 9px; margin-top: 14px; }
 .review-list article { display: grid; grid-template-columns: minmax(0, 1.2fr) minmax(0, 2fr) minmax(160px, 190px); align-items: center; gap: 16px; min-width: 0; padding: 12px 14px; border: 1px solid #dfe5e0; border-radius: 10px; background: #fbfcfa; cursor: pointer; transition: border-color .16s ease, background .16s ease, box-shadow .16s ease; }
-.review-list article:hover { border-color: #92b6a3; background: #f7fbf8; box-shadow: 0 5px 14px rgba(28, 76, 55, .08); }
+.review-list article:hover, .review-list article:focus-visible { border-color: #92b6a3; outline: none; background: #f7fbf8; box-shadow: 0 5px 14px rgba(28, 76, 55, .08), 0 0 0 3px rgba(42, 124, 87, .12); }
 .review-list article button, .review-list article a, .review-list article input, .review-list article select, .review-list article textarea { cursor: auto; }
 .review-list article button, .review-list article a { cursor: pointer; }
 .review-product, .review-issues { min-width: 0; }
@@ -2029,6 +2121,10 @@ function parseInput(value: string | number): number | null {
 .review-product strong { overflow-wrap: anywhere; }
 .review-product code { margin: 3px 0 5px; color: #1e5d43; font-size: 11px; }
 .review-product small { margin-bottom: 5px; color: #7b8780; }
+.daily-product-identity { display: grid; grid-template-columns: 58px minmax(0, 1fr); align-items: start; gap: 10px; min-width: 0; }
+.daily-product-image { display: grid; width: 58px; height: 58px; overflow: hidden; place-items: center; border: 1px solid #d9e2dc; border-radius: 9px; background: #fff; }
+.daily-product-image img { display: block; width: 100%; height: 100%; object-fit: contain; }
+.daily-product-image > span { padding: 5px; color: #7d8982; font-size: 9px; font-weight: 700; line-height: 1.35; text-align: center; }
 .review-issues { display: grid; gap: 9px; }
 .review-issue { min-width: 0; padding: 10px 11px; border-radius: 8px; background: #f0f4f1; }
 .review-issue header { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 5px 12px; }
@@ -2069,9 +2165,11 @@ function parseInput(value: string | number): number | null {
 .handled-filter-result { display: flex; align-items: center; justify-content: flex-end; gap: 9px; min-height: 34px; color: #68776e; font-size: 10px; }
 .handled-filter-result button { padding: 6px 9px; border: 1px solid #b8cec1; border-radius: 7px; background: #fff; color: #315f49; cursor: pointer; }
 .handled-action-list { display: grid; gap: 9px; margin-top: 14px; }
-.handled-action-list article { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 16px; padding: 12px 14px; border: 1px solid #cddfd4; border-left: 4px solid #438761; border-radius: 10px; background: #f7fbf8; }
+.handled-action-list article { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 16px; padding: 12px 14px; border: 1px solid #cddfd4; border-left: 4px solid #438761; border-radius: 10px; background: #f7fbf8; cursor: pointer; transition: border-color .16s ease, background .16s ease, box-shadow .16s ease; }
+.handled-action-list article:hover, .handled-action-list article:focus-visible { border-color: #8eb7a0; outline: none; background: #f4faf6; box-shadow: 0 5px 14px rgba(28, 76, 55, .08), 0 0 0 3px rgba(42, 124, 87, .12); }
 .handled-action-list article.inactive { border-color: #d9dedb; border-left-color: #9ca7a0; background: #f7f8f7; opacity: .82; }
 .handled-action-list article.audit-event { border-left-color: #789c88; background: #f9fbfa; }
+.handled-action-list article button, .handled-action-list article a { cursor: pointer; }
 .handled-action-main { min-width: 0; }
 .handled-action-main header { display: flex; flex-wrap: wrap; align-items: center; gap: 7px; margin-bottom: 7px; }
 .handled-action-type, .handled-action-state { width: fit-content; padding: 3px 7px; border-radius: 999px; font-size: 9px; font-weight: 700; }
@@ -2085,7 +2183,7 @@ function parseInput(value: string | number): number | null {
 .handled-action-type.confirmation_reverted,
 .handled-action-type.stock_alert_reopened { background: #fff0d5; color: #915c18; }
 .handled-action-state { background: #edf0ee; color: #65736b; }
-.handled-action-main > strong { display: block; overflow-wrap: anywhere; }
+.handled-product-identity strong { display: block; overflow-wrap: anywhere; }
 .handled-action-identity { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 3px; color: #6a786f; font-size: 10px; }
 .handled-action-identity code { color: #1e5d43; font-family: inherit; }
 .handled-action-main p { margin: 8px 0 5px; color: #4d6156; font-size: 11px; }
@@ -2113,7 +2211,8 @@ function parseInput(value: string | number): number | null {
 .daily-modal-backdrop { position: fixed; inset: 0; z-index: 50; display: grid; place-items: center; padding: 20px; background: rgba(13, 35, 26, .48); backdrop-filter: blur(3px); }
 .daily-modal { width: min(590px, 100%); max-height: calc(100vh - 40px); overflow: auto; padding: 24px; border-radius: 17px; background: #f9fbf8; box-shadow: 0 30px 80px rgba(7, 31, 20, .25); }
 .daily-modal h3 { margin: 0 0 7px; }
-.modal-product { color: #6e7c74; font-size: 12px; }
+.modal-product-identity { align-items: center; margin-top: 10px; padding: 9px; border: 1px solid #dce4de; border-radius: 10px; background: #fff; }
+.modal-product { margin: 0; color: #6e7c74; font-size: 12px; line-height: 1.55; overflow-wrap: anywhere; }
 .daily-modal label { display: grid; gap: 6px; margin-top: 13px; color: #4e5f56; font-size: 11px; }
 .daily-modal input, .daily-modal select, .daily-modal textarea { width: 100%; padding: 9px 10px; border: 1px solid #d1dad4; border-radius: 8px; background: white; }
 .daily-modal textarea { min-height: 100px; font-family: inherit; line-height: 1.5; }

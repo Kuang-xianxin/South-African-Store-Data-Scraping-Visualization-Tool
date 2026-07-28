@@ -307,6 +307,7 @@ export interface DailyReportItem {
   offer_id: string;
   sku: string | null;
   title: string;
+  image_url: string | null;
   status: DailyReportStatus;
   morning: DailyReportValues | null;
   evening: DailyReportValues | null;
@@ -444,6 +445,7 @@ export interface DailyReportHandledAction {
   offer_id: string;
   sku: string | null;
   title: string;
+  image_url: string | null;
   handled_by: string;
   handled_at: string;
   note: string | null;
@@ -525,6 +527,7 @@ export interface DailyReportPayload {
         | "offer_id"
         | "sku"
         | "title"
+        | "image_url"
         | "status"
         | "missing_capture"
         | "missing_reason"

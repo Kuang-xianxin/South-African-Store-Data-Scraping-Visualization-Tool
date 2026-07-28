@@ -31,6 +31,7 @@ from takealot_ops.storage.models import (
     DailyReportRun,
     ErpUser,
     OfferCurrent,
+    OfferSnapshot,
     SaleItem,
 )
 
@@ -359,6 +360,7 @@ def daily_report_payload(engine: Engine, business_date: date) -> dict[str, Any]:
         )
         previous_contexts = _previous_stock_contexts(session, business_date)
         offer_ids = sorted(all_observations)
+        image_urls = _offer_image_map(session, offer_ids)
         items = [
             _item_payload(
                 offer_id,
@@ -373,6 +375,7 @@ def daily_report_payload(engine: Engine, business_date: date) -> dict[str, Any]:
                 operator_notes.get(offer_id, []),
                 confirmation_baselines.get(offer_id),
                 confirmation_reverts.get(offer_id),
+                image_urls.get(offer_id),
             )
             for offer_id in offer_ids
         ]
@@ -2455,6 +2458,7 @@ def _item_payload(
     operator_notes: list[dict[str, Any]],
     confirmation_baseline: dict[str, Any] | None,
     confirmation_revert: dict[str, Any] | None,
+    image_url: str | None,
 ) -> dict[str, Any]:
     report_date = (
         resolution.business_date
@@ -2699,6 +2703,7 @@ def _item_payload(
         "offer_id": offer_id,
         "sku": identity.sku if identity is not None else None,
         "title": identity.title if identity is not None else offer_id,
+        "image_url": image_url,
         "status": status,
         "morning": morning_values,
         "evening": evening_values,
@@ -2796,6 +2801,7 @@ def _comparison_history(
                         "offer_id": item["offer_id"],
                         "sku": item["sku"],
                         "title": item["title"],
+                        "image_url": item["image_url"],
                         "status": item["status"],
                         "missing_capture": item["missing_capture"],
                         "missing_reason": item["missing_reason"],
@@ -2890,6 +2896,7 @@ def _handled_actions(
             select(OfferCurrent).where(OfferCurrent.offer_id.in_(offer_ids))
         )
     }
+    image_urls = _offer_image_map(session, offer_ids)
     snapshot_identities: dict[
         tuple[date, str],
         DailyReportObservation,
@@ -2926,7 +2933,7 @@ def _handled_actions(
     def identity_for(
         report_date: date,
         offer_id: str,
-    ) -> tuple[str | None, str]:
+    ) -> tuple[str | None, str, str | None]:
         snapshot_identity = snapshot_identities.get((report_date, offer_id))
         current_identity = identities.get(offer_id)
         sku = (
@@ -2943,7 +2950,7 @@ def _handled_actions(
             if current_identity is not None and current_identity.title
             else offer_id
         )
-        return sku, title
+        return sku, title, image_urls.get(offer_id)
 
     def audit_user_name(audit: DailyReportAudit) -> str:
         return (
@@ -2979,7 +2986,7 @@ def _handled_actions(
     ) -> dict[str, Any]:
         assert audit.offer_id is not None
         offer_id = audit.offer_id
-        sku, title = identity_for(audit.business_date, offer_id)
+        sku, title, image_url = identity_for(audit.business_date, offer_id)
         current = audit_values(audit, payload)
         before_values = payload.get("before")
         after_values = payload.get("after")
@@ -2990,6 +2997,7 @@ def _handled_actions(
             "offer_id": offer_id,
             "sku": sku,
             "title": title,
+            "image_url": image_url,
             "handled_by": audit_user_name(audit),
             "handled_at": audit.created_at.isoformat(),
             "note": audit.note,
@@ -3061,7 +3069,7 @@ def _handled_actions(
                     "note": "已被后续处理记录替代",
                 }
             current = audit_values(audit, payload)
-            sku, title = identity_for(audit.business_date, offer_id)
+            sku, title, image_url = identity_for(audit.business_date, offer_id)
             entry = {
                 "id": audit.id,
                 "action_type": action_type,
@@ -3069,6 +3077,7 @@ def _handled_actions(
                 "offer_id": offer_id,
                 "sku": sku,
                 "title": title,
+                "image_url": image_url,
                 "handled_by": audit_user_name(audit),
                 "handled_at": audit.created_at.isoformat(),
                 "note": audit.note,
@@ -3188,6 +3197,7 @@ def _comparison_items_for_date(
     )
     previous_contexts = _previous_stock_contexts(session, business_date)
     offer_ids = sorted(all_observations)
+    image_urls = _offer_image_map(session, offer_ids)
     return [
         _item_payload(
             offer_id,
@@ -3202,6 +3212,7 @@ def _comparison_items_for_date(
             operator_notes.get(offer_id, []),
             confirmation_baselines.get(offer_id),
             confirmation_reverts.get(offer_id),
+            image_urls.get(offer_id),
         )
         for offer_id in offer_ids
     ]
@@ -3694,6 +3705,43 @@ def _identity_map(
                 {"sku": row.sku, "title": row.title},
             )
     return current
+
+
+def _offer_image_map(
+    session: Session,
+    offer_ids: list[str],
+) -> dict[str, str]:
+    """Resolve current images, falling back to the latest historical snapshot."""
+    if not offer_ids:
+        return {}
+    result = {
+        offer_id: image_url
+        for offer_id, image_url in session.execute(
+            select(OfferCurrent.offer_id, OfferCurrent.image_url).where(
+                OfferCurrent.offer_id.in_(offer_ids),
+                OfferCurrent.image_url.is_not(None),
+            )
+        )
+        if image_url
+    }
+    missing = set(offer_ids) - set(result)
+    if not missing:
+        return result
+    history = session.execute(
+        select(OfferSnapshot.offer_id, OfferSnapshot.image_url)
+        .where(
+            OfferSnapshot.offer_id.in_(missing),
+            OfferSnapshot.image_url.is_not(None),
+        )
+        .order_by(
+            OfferSnapshot.snapshot_date.desc(),
+            OfferSnapshot.id.desc(),
+        )
+    )
+    for offer_id, image_url in history:
+        if image_url:
+            result.setdefault(offer_id, image_url)
+    return result
 
 
 def _all_previous_stock(
