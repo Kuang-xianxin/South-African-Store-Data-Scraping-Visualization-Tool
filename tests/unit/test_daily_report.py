@@ -424,6 +424,7 @@ def test_operator_notes_support_create_update_delete_and_keep_audit_history() ->
         business_date=REPORT_DATE,
         offer_id="offer-a",
         note_id=second_note_id,
+        note="仓库盘点已结束，删除过期备注",
         user_id=1,
     )
 
@@ -466,6 +467,20 @@ def test_operator_notes_support_create_update_delete_and_keep_audit_history() ->
         "operator_note_updated",
         "operator_note_deleted",
     ]
+    handled = daily_report_payload(engine, REPORT_DATE)["handled_actions"]
+    assert [row["action_type"] for row in handled[:4]] == [
+        "operator_note_deleted",
+        "operator_note_updated",
+        "operator_note",
+        "operator_note",
+    ]
+    assert handled[0]["note"] == "仓库盘点已结束，删除过期备注"
+    assert handled[0]["detail"]["deleted_note"] == (
+        "运营补充：等待仓库盘点结果"
+    )
+    assert handled[1]["note"] == "已核对晚间库存来源"
+    assert handled[1]["detail"]["before_note"] == "先核对晚间库存来源"
+    assert handled[1]["detail"]["after_note"] == "已核对晚间库存来源"
 
 
 def test_confirmed_entry_does_not_reopen_for_page_view_or_stock_changes() -> None:
@@ -601,6 +616,16 @@ def test_manual_candidate_and_confirm_are_separate_audited_states() -> None:
     assert product["status"] == "confirmed"
     assert product["final"]["ordered_units"] == 4
     assert product["final"]["platform_stock"] == 8
+    handled = after["handled_actions"]
+    assert [row["action_type"] for row in handled[:3]] == [
+        "confirmation",
+        "manual_candidate",
+        "manual_candidate",
+    ]
+    assert handled[0]["note"] == "采用人工核对订单，库存沿用晚间值"
+    assert handled[1]["note"] == "第二次核对后改为订单4、库存8"
+    assert handled[1]["detail"]["before_values"]["ordered_units"] == 3
+    assert handled[1]["detail"]["after_values"]["ordered_units"] == 4
 
 
 def test_confirmation_can_be_reverted_and_reconfirmed_with_full_audit() -> None:
@@ -647,6 +672,23 @@ def test_confirmation_can_be_reverted_and_reconfirmed_with_full_audit() -> None:
     assert reopened["confirmation_revert"]["previous_confirmation"]["values"][
         "platform_stock"
     ] == 9
+    handled_after_revert = daily_report_payload(
+        engine,
+        REPORT_DATE,
+    )["handled_actions"]
+    assert handled_after_revert[0]["action_type"] == "confirmation_reverted"
+    assert handled_after_revert[0]["note"] == (
+        "复核后发现选错来源，需要重新确认"
+    )
+    original_confirmation = next(
+        row
+        for row in handled_after_revert
+        if row["action_type"] == "confirmation"
+    )
+    assert original_confirmation["active"] is False
+    assert original_confirmation["reversal"]["note"] == (
+        "复核后发现选错来源，需要重新确认"
+    )
 
     confirm_entry(
         engine,
@@ -1359,14 +1401,10 @@ def test_stock_continuity_mismatch_is_a_cross_date_pending_action(
     assert handled["title"] == "Product A"
     assert handled["handled_by"] == "Operator"
     assert handled["active"] is True
-    assert handled["detail"] == {
-        "source": None,
-        "source_label": None,
-        "previous_stock": 9,
-        "ordered_units": 0,
-        "expected_stock": 9,
-        "actual_stock": 8,
-    }
+    assert handled["detail"]["previous_stock"] == 9
+    assert handled["detail"]["ordered_units"] == 0
+    assert handled["detail"]["expected_stock"] == 9
+    assert handled["detail"]["actual_stock"] == 8
     exported = export_operations_workbook(
         engine,
         business_date=next_date,
@@ -1407,7 +1445,14 @@ def test_stock_continuity_mismatch_is_a_cross_date_pending_action(
     assert reopened_item["status"] == "needs_review"
     assert reopened_item["stock_check"]["mismatch"] is True
     assert reopened_item["stock_check"]["dismissed"] is False
-    history = reopened["handled_actions"][0]
+    reversal = reopened["handled_actions"][0]
+    assert reversal["action_type"] == "stock_alert_reopened"
+    assert reversal["note"] == "误点确认，恢复库存差异待办"
+    history = next(
+        row
+        for row in reopened["handled_actions"]
+        if row["action_type"] == "stock_difference"
+    )
     assert history["active"] is False
     assert history["reversal"]["kind"] == "stock_alert_reopened"
     assert history["reversal"]["handled_by"] == "Operator"

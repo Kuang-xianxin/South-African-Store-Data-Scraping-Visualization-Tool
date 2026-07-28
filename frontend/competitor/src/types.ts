@@ -429,7 +429,15 @@ export interface DailyReportPendingAction extends DailyReportItem {
 
 export interface DailyReportHandledAction {
   id: number;
-  action_type: "confirmation" | "stock_difference";
+  action_type:
+    | "confirmation"
+    | "stock_difference"
+    | "manual_candidate"
+    | "operator_note"
+    | "operator_note_updated"
+    | "operator_note_deleted"
+    | "confirmation_reverted"
+    | "stock_alert_reopened";
   business_date: string;
   offer_id: string;
   sku: string | null;
@@ -452,6 +460,17 @@ export interface DailyReportHandledAction {
     ordered_units: number | null;
     expected_stock: number | null;
     actual_stock: number | null;
+    reason: string | null;
+    issue_type:
+      | "general"
+      | "capture_difference"
+      | "stock_continuity"
+      | null;
+    before_note: string | null;
+    after_note: string | null;
+    deleted_note: string | null;
+    before_values: DailyReportValues | null;
+    after_values: DailyReportValues | null;
   };
 }
 

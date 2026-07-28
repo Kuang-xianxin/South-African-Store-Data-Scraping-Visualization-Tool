@@ -47,6 +47,10 @@ HANDLED_ACTIONS = frozenset({"confirm", "bulk_confirm", "dismiss_stock_alert"})
 HANDLED_REVERSALS = frozenset(
     {"confirmation_reverted", "stock_alert_reopened"}
 )
+HANDLED_SUPPORT_ACTIONS = frozenset({"manual_candidate"}) | NOTE_AUDIT_ACTIONS
+HANDLED_AUDIT_ACTIONS = (
+    HANDLED_ACTIONS | HANDLED_REVERSALS | HANDLED_SUPPORT_ACTIONS
+)
 OPEN_STATUSES = frozenset({"needs_review"})
 EXPORTABLE_STATUSES = frozenset({"ready", "confirmed", "missing_capture"})
 
@@ -584,8 +588,10 @@ def delete_operator_note(
     business_date: date,
     offer_id: str,
     note_id: int,
+    note: str,
     user_id: int,
 ) -> None:
+    clean_note = _required_note(note, "删除备注必须填写操作备注")
     now = _utc_now()
     with Session(engine) as session, session.begin():
         resolution = _resolution_or_error(session, business_date, offer_id)
@@ -608,7 +614,7 @@ def delete_operator_note(
                 "deleted_note": existing["note"],
                 "issue_type": existing["issue_type"],
             },
-            existing["note"],
+            clean_note,
             user_id,
             now,
         )
@@ -2596,9 +2602,7 @@ def _handled_actions(
             .where(
                 DailyReportAudit.business_date <= through,
                 DailyReportAudit.offer_id.is_not(None),
-                DailyReportAudit.action.in_(
-                    HANDLED_ACTIONS | HANDLED_REVERSALS
-                ),
+                DailyReportAudit.action.in_(HANDLED_AUDIT_ACTIONS),
             )
             .order_by(DailyReportAudit.created_at, DailyReportAudit.id)
         )
@@ -2653,10 +2657,119 @@ def _handled_actions(
     }
     result: list[dict[str, Any]] = []
     active: dict[tuple[date, str, str], dict[str, Any]] = {}
+
+    def identity_for(
+        report_date: date,
+        offer_id: str,
+    ) -> tuple[str | None, str]:
+        snapshot_identity = snapshot_identities.get((report_date, offer_id))
+        current_identity = identities.get(offer_id)
+        sku = (
+            snapshot_identity.sku
+            if snapshot_identity is not None and snapshot_identity.sku
+            else current_identity.sku
+            if current_identity is not None
+            else None
+        )
+        title = (
+            snapshot_identity.title
+            if snapshot_identity is not None and snapshot_identity.title
+            else current_identity.title
+            if current_identity is not None and current_identity.title
+            else offer_id
+        )
+        return sku, title
+
+    def audit_user_name(audit: DailyReportAudit) -> str:
+        return (
+            users.get(audit.user_id, "系统")
+            if audit.user_id is not None
+            else "系统"
+        )
+
+    def audit_values(
+        audit: DailyReportAudit,
+        payload: dict[str, Any],
+    ) -> dict[str, int | None]:
+        values = payload.get("values")
+        if not isinstance(values, dict):
+            values = payload.get("after")
+        if not isinstance(values, dict):
+            resolution = resolutions.get(
+                (audit.business_date, str(audit.offer_id))
+            )
+            values = (
+                _export_values(session, resolution)
+                if resolution is not None
+                else {}
+            )
+        return {
+            key_name: values.get(key_name)
+            for key_name in _VALUE_KEYS
+        }
+
+    def support_entry(
+        audit: DailyReportAudit,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        assert audit.offer_id is not None
+        offer_id = audit.offer_id
+        sku, title = identity_for(audit.business_date, offer_id)
+        current = audit_values(audit, payload)
+        before_values = payload.get("before")
+        after_values = payload.get("after")
+        return {
+            "id": audit.id,
+            "action_type": audit.action,
+            "business_date": audit.business_date.isoformat(),
+            "offer_id": offer_id,
+            "sku": sku,
+            "title": title,
+            "handled_by": audit_user_name(audit),
+            "handled_at": audit.created_at.isoformat(),
+            "note": audit.note,
+            "active": False,
+            "reversal": None,
+            "current": current,
+            "detail": {
+                "source": None,
+                "source_label": None,
+                "previous_stock": None,
+                "ordered_units": current.get("ordered_units"),
+                "expected_stock": None,
+                "actual_stock": current.get("platform_stock"),
+                "reason": payload.get("reason"),
+                "issue_type": payload.get("issue_type"),
+                "before_note": payload.get("before_note"),
+                "after_note": payload.get("note"),
+                "deleted_note": payload.get("deleted_note"),
+                "before_values": (
+                    {
+                        key_name: before_values.get(key_name)
+                        for key_name in _VALUE_KEYS
+                    }
+                    if isinstance(before_values, dict)
+                    else None
+                ),
+                "after_values": (
+                    {
+                        key_name: after_values.get(key_name)
+                        for key_name in _VALUE_KEYS
+                    }
+                    if isinstance(after_values, dict)
+                    else None
+                ),
+            },
+        }
+
     for audit in audits:
         if audit.offer_id is None:
             continue
         offer_id = audit.offer_id
+        payload = audit.payload if isinstance(audit.payload, dict) else {}
+        if audit.action in HANDLED_SUPPORT_ACTIONS:
+            result.append(support_entry(audit, payload))
+            continue
         action_type = (
             "stock_difference"
             if audit.action == "dismiss_stock_alert"
@@ -2671,45 +2784,12 @@ def _handled_actions(
                 previous["active"] = False
                 previous["reversal"] = {
                     "kind": "superseded",
-                    "handled_by": (
-                        users.get(audit.user_id, "系统")
-                        if audit.user_id is not None
-                        else "系统"
-                    ),
+                    "handled_by": audit_user_name(audit),
                     "handled_at": audit.created_at.isoformat(),
                     "note": "已被后续处理记录替代",
                 }
-            payload = audit.payload if isinstance(audit.payload, dict) else {}
-            values = payload.get("values")
-            if not isinstance(values, dict):
-                resolution = resolutions.get((audit.business_date, offer_id))
-                values = (
-                    _export_values(session, resolution)
-                    if resolution is not None
-                    else {}
-                )
-            current = {
-                key_name: values.get(key_name)
-                for key_name in _VALUE_KEYS
-            }
-            snapshot_identity = snapshot_identities.get(
-                (audit.business_date, offer_id)
-            )
-            current_identity = identities.get(offer_id)
-            sku = (
-                snapshot_identity.sku
-                if snapshot_identity is not None and snapshot_identity.sku
-                else current_identity.sku
-                if current_identity is not None
-                else None
-            )
-            title = (
-                snapshot_identity.title
-                if snapshot_identity is not None and snapshot_identity.title
-                else current_identity.title
-                if current_identity is not None and current_identity.title
-                else offer_id
-            )
+            current = audit_values(audit, payload)
+            sku, title = identity_for(audit.business_date, offer_id)
             entry = {
                 "id": audit.id,
                 "action_type": action_type,
@@ -2717,11 +2797,7 @@ def _handled_actions(
                 "offer_id": offer_id,
                 "sku": sku,
                 "title": title,
-                "handled_by": (
-                    users.get(audit.user_id, "系统")
-                    if audit.user_id is not None
-                    else "系统"
-                ),
+                "handled_by": audit_user_name(audit),
                 "handled_at": audit.created_at.isoformat(),
                 "note": audit.note,
                 "active": True,
@@ -2745,6 +2821,13 @@ def _handled_actions(
                         "actual_stock",
                         current.get("platform_stock"),
                     ),
+                    "reason": None,
+                    "issue_type": None,
+                    "before_note": None,
+                    "after_note": None,
+                    "deleted_note": None,
+                    "before_values": None,
+                    "after_values": None,
                 },
             }
             result.append(entry)
@@ -2761,14 +2844,11 @@ def _handled_actions(
             target["active"] = False
             target["reversal"] = {
                 "kind": audit.action,
-                "handled_by": (
-                    users.get(audit.user_id, "系统")
-                    if audit.user_id is not None
-                    else "系统"
-                ),
+                "handled_by": audit_user_name(audit),
                 "handled_at": audit.created_at.isoformat(),
                 "note": audit.note,
             }
+        result.append(support_entry(audit, payload))
     for key, entry in active.items():
         report_date, offer_id, action_type = key
         resolution = resolutions.get((report_date, offer_id))

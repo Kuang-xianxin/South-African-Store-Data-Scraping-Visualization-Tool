@@ -517,10 +517,15 @@ export function deleteDailyReportNote(
   businessDate: string,
   offerId: string,
   noteId: number,
+  note: string,
 ): Promise<{ ok: boolean }> {
   return request(
     `/api/erp/daily-report/${encodeURIComponent(businessDate)}/${encodeURIComponent(offerId)}/note/${noteId}`,
-    { method: "DELETE" },
+    {
+      method: "DELETE",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ note }),
+    },
   );
 }
 

@@ -56,6 +56,7 @@ const editor = ref<{
     | "revert"
     | "note"
     | "edit_note"
+    | "delete_note"
     | "dismiss"
     | "reopen_stock"
     | null;
@@ -217,6 +218,50 @@ function clearHandledFilters() {
   handledBusinessDate.value = "";
 }
 
+function isHandledDecision(item: DailyReportHandledAction) {
+  return item.action_type === "confirmation" ||
+    item.action_type === "stock_difference";
+}
+
+function handledActionLabel(actionType: DailyReportHandledAction["action_type"]) {
+  const labels: Record<DailyReportHandledAction["action_type"], string> = {
+    confirmation: "已确认合并",
+    stock_difference: "已确认库存差异",
+    manual_candidate: "人工修改候选值",
+    operator_note: "新增独立备注",
+    operator_note_updated: "修改独立备注",
+    operator_note_deleted: "删除独立备注",
+    confirmation_reverted: "撤销确认合并",
+    stock_alert_reopened: "撤销库存差异确认",
+  };
+  return labels[actionType];
+}
+
+function handledStateLabel(item: DailyReportHandledAction) {
+  if (!isHandledDecision(item)) return "操作已留痕";
+  return item.active ? "当前有效" : "已撤销或已被后续操作替代";
+}
+
+function manualReasonLabel(reason: string | null) {
+  if (reason === "platform_delay") return "平台订单延迟";
+  if (reason === "stock_adjustment") return "库存核对调整";
+  if (reason === "other") return "其他";
+  return "未标明";
+}
+
+function auditNoteIssueLabel(
+  issueType: DailyReportHandledAction["detail"]["issue_type"],
+) {
+  if (issueType === "capture_difference") return "同周期版本差异";
+  if (issueType === "stock_continuity") return "前后日报日库存连续性";
+  return "整条待办的通用备注";
+}
+
+function auditValuesSummary(values: DailyReportHandledAction["current"] | null) {
+  if (!values) return "—";
+  return `浏览量 ${value(values.page_views_30_days)} / 订单 ${value(values.ordered_units)} / 库存 ${value(values.platform_stock)}`;
+}
+
 async function searchPendingSku(
   item: DailyReportPendingAction,
   event?: MouseEvent,
@@ -269,6 +314,7 @@ function openEditor(
     | "revert"
     | "note"
     | "edit_note"
+    | "delete_note"
     | "dismiss"
     | "reopen_stock",
   item: OperatorActionItem | null = null,
@@ -303,9 +349,11 @@ function openEditor(
           ? "stock_continuity"
           : "general"
     ),
-    note: note?.note ?? (
-      mode === "manual" && fullItem?.manual_note ? fullItem.manual_note : ""
-    ),
+    note: mode === "delete_note"
+      ? ""
+      : note?.note ?? (
+        mode === "manual" && fullItem?.manual_note ? fullItem.manual_note : ""
+      ),
   };
   noteManager.value = null;
 }
@@ -402,6 +450,15 @@ async function submitEditor() {
         form.value.note_issue,
       );
       successMessage = "备注已修改，原内容与修改记录已保留在审计中。";
+    } else if (mode === "delete_note" && item && editor.value.note) {
+      await deleteDailyReportNote(
+        item.business_date,
+        item.offer_id,
+        editor.value.note.id,
+        note,
+      );
+      successMessage = "备注已删除；被删除内容和本次删除原因均已留痕。";
+      closeNoteManager();
     } else if (mode === "dismiss" && item) {
       await dismissDailyReportStockAlert(
         item.business_date,
@@ -431,23 +488,9 @@ function closeNoteManager() {
   noteManager.value = null;
 }
 
-async function removeNote(item: EditableDailyReportItem, note: DailyReportNote) {
+function removeNote(item: EditableDailyReportItem, note: DailyReportNote) {
   if (!props.canOperate || saving.value) return;
-  if (!window.confirm(`确定删除备注“${note.note}”吗？删除操作会保留审计记录。`)) {
-    return;
-  }
-  saving.value = true;
-  message.value = "";
-  try {
-    await deleteDailyReportNote(item.business_date, item.offer_id, note.id);
-    message.value = "备注已删除，删除操作已留痕。";
-    closeNoteManager();
-    await load();
-  } catch (error) {
-    message.value = error instanceof Error ? error.message : "删除备注失败";
-  } finally {
-    saving.value = false;
-  }
+  openEditor("delete_note", item, note);
 }
 
 async function runExport() {
@@ -1242,7 +1285,9 @@ function parseInput(value: string | number): number | null {
       <div class="section-title">
         <p>OPERATION AUDIT</p>
         <h3>待办处理留痕</h3>
-        <span>保留最近100次确认；撤销只改变当前状态，不删除原处理记录</span>
+        <span>
+          保留最近100次人工操作；每一步单独记录操作人、北京时间和备注，撤销不删除原记录
+        </span>
       </div>
       <div v-if="handledActions.length" class="handled-history-filters">
         <label>
@@ -1288,7 +1333,10 @@ function parseInput(value: string | number): number | null {
         <article
           v-for="item in filteredHandledActions"
           :key="item.id"
-          :class="{ inactive: !item.active }"
+          :class="{
+            inactive: isHandledDecision(item) && !item.active,
+            'audit-event': !isHandledDecision(item),
+          }"
         >
           <div class="handled-action-main">
             <header>
@@ -1296,14 +1344,10 @@ function parseInput(value: string | number): number | null {
                 class="handled-action-type"
                 :class="item.action_type"
               >
-                {{
-                  item.action_type === "stock_difference"
-                    ? "已确认库存差异"
-                    : "已确认合并"
-                }}
+                {{ handledActionLabel(item.action_type) }}
               </span>
               <span class="handled-action-state">
-                {{ item.active ? "当前有效" : "已撤销或已被后续操作替代" }}
+                {{ handledStateLabel(item) }}
               </span>
             </header>
             <strong>{{ item.title }}</strong>
@@ -1319,23 +1363,80 @@ function parseInput(value: string | number): number | null {
               {{ value(item.detail.actual_stock) }}
               <em>表格红标继续保留</em>
             </p>
-            <p v-else>
+            <p v-else-if="item.action_type === 'confirmation'">
               采用 {{ item.detail.source_label || "人工确认值" }}：
               订单 {{ value(item.current.ordered_units) }} /
               库存 {{ value(item.current.platform_stock) }}
             </p>
-            <small>
-              {{ item.handled_by }} · 北京时间
-              {{ formatChinaDateTime(item.handled_at, "—") }} ·
-              {{ item.note || "无处理备注" }}
-            </small>
-            <small v-if="item.reversal" class="handled-reversal">
-              撤销/替代：{{ item.reversal.handled_by }} · 北京时间
-              {{ formatChinaDateTime(item.reversal.handled_at, "—") }} ·
-              {{ item.reversal.note || "未填写原因" }}
-            </small>
+            <div
+              v-else-if="item.action_type === 'manual_candidate'"
+              class="handled-operation-detail"
+            >
+              <span>修改原因：{{ manualReasonLabel(item.detail.reason) }}</span>
+              <span>修改前：{{ auditValuesSummary(item.detail.before_values) }}</span>
+              <span>修改后：{{ auditValuesSummary(item.detail.after_values) }}</span>
+            </div>
+            <div
+              v-else-if="
+                item.action_type === 'operator_note' ||
+                item.action_type === 'operator_note_updated' ||
+                item.action_type === 'operator_note_deleted'
+              "
+              class="handled-operation-detail"
+            >
+              <span>关联问题：{{ auditNoteIssueLabel(item.detail.issue_type) }}</span>
+              <span v-if="item.action_type === 'operator_note_updated'">
+                原备注：{{ item.detail.before_note || "—" }}
+              </span>
+              <span v-if="item.action_type === 'operator_note_updated'">
+                修改后：{{ item.detail.after_note || "—" }}
+              </span>
+              <span v-if="item.action_type === 'operator_note_deleted'">
+                被删除内容：{{ item.detail.deleted_note || "—" }}
+              </span>
+            </div>
+            <p
+              v-else-if="
+                item.action_type === 'confirmation_reverted' ||
+                item.action_type === 'stock_alert_reopened'
+              "
+              class="handled-operation-detail"
+            >
+              本次撤销已单独留痕；原处理记录保留，并标记为已撤销。
+            </p>
+            <dl class="handled-operation-meta">
+              <div>
+                <dt>操作人</dt>
+                <dd>{{ item.handled_by }}</dd>
+              </div>
+              <div>
+                <dt>操作时间</dt>
+                <dd>北京时间 {{ formatChinaDateTime(item.handled_at, "—") }}</dd>
+              </div>
+              <div>
+                <dt>操作备注</dt>
+                <dd>{{ item.note || "—" }}</dd>
+              </div>
+            </dl>
+            <dl v-if="item.reversal" class="handled-operation-meta handled-reversal">
+              <div>
+                <dt>撤销人</dt>
+                <dd>{{ item.reversal.handled_by }}</dd>
+              </div>
+              <div>
+                <dt>撤销时间</dt>
+                <dd>北京时间 {{ formatChinaDateTime(item.reversal.handled_at, "—") }}</dd>
+              </div>
+              <div>
+                <dt>撤销备注</dt>
+                <dd>{{ item.reversal.note || "—" }}</dd>
+              </div>
+            </dl>
           </div>
-          <div v-if="props.canOperate && item.active" class="handled-action-buttons">
+          <div
+            v-if="props.canOperate && item.active && isHandledDecision(item)"
+            class="handled-action-buttons"
+          >
             <button
               type="button"
               class="danger-link"
@@ -1470,6 +1571,8 @@ function parseInput(value: string | number): number | null {
                   ? "撤销确认合并"
                 : editor.mode === "reopen_stock"
                   ? "撤销库存差异确认"
+                : editor.mode === "delete_note"
+                  ? "删除备注"
                 : editor.mode === "dismiss"
                   ? "确认库存连续性差异"
                   : editor.mode === "edit_note"
@@ -1486,6 +1589,9 @@ function parseInput(value: string | number): number | null {
         </p>
         <p v-if="editor.mode === 'reopen_stock'" class="revert-warning">
           撤销后原处理记录不会删除；如果库存公式仍不平，该商品会重新进入人工核对待办，表格红标始终保留。
+        </p>
+        <p v-if="editor.mode === 'delete_note'" class="revert-warning">
+          即将删除备注“{{ editor.note?.note }}”。被删除内容仍会保留在审计记录中，请填写本次删除原因。
         </p>
         <div v-if="editor.mode === 'manual'" class="manual-grid">
           <p class="manual-baseline-tip">
@@ -1539,6 +1645,8 @@ function parseInput(value: string | number): number | null {
                 ? "新增备注内容（必填）"
                 : editor.mode === "edit_note"
                   ? "修改后的备注内容（必填）"
+                  : editor.mode === "delete_note"
+                    ? "删除原因（必填）"
                   : "操作备注（必填）"
           }}
           <textarea
@@ -1564,11 +1672,15 @@ function parseInput(value: string | number): number | null {
               saving
                 ? editor.mode === "revert" || editor.mode === "reopen_stock"
                   ? "正在撤销…"
+                  : editor.mode === "delete_note"
+                    ? "正在删除…"
                   : editor.mode === "confirm"
                     ? "正在合并…"
                     : "正在保存…"
                 : editor.mode === "revert" || editor.mode === "reopen_stock"
                   ? "确认撤销"
+                  : editor.mode === "delete_note"
+                    ? "确认删除"
                   : editor.mode === "confirm"
                     ? "确认合并"
                     : "确认保存"
@@ -1735,19 +1847,31 @@ function parseInput(value: string | number): number | null {
 .handled-action-list { display: grid; gap: 9px; margin-top: 14px; }
 .handled-action-list article { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 16px; padding: 12px 14px; border: 1px solid #cddfd4; border-left: 4px solid #438761; border-radius: 10px; background: #f7fbf8; }
 .handled-action-list article.inactive { border-color: #d9dedb; border-left-color: #9ca7a0; background: #f7f8f7; opacity: .82; }
+.handled-action-list article.audit-event { border-left-color: #789c88; background: #f9fbfa; }
 .handled-action-main { min-width: 0; }
 .handled-action-main header { display: flex; flex-wrap: wrap; align-items: center; gap: 7px; margin-bottom: 7px; }
 .handled-action-type, .handled-action-state { width: fit-content; padding: 3px 7px; border-radius: 999px; font-size: 9px; font-weight: 700; }
 .handled-action-type.confirmation { background: #e3f0e8; color: #2f6b4b; }
 .handled-action-type.stock_difference { background: #ffe1dc; color: #a33e2f; }
+.handled-action-type.manual_candidate { background: #e7eef8; color: #3f5f85; }
+.handled-action-type.operator_note,
+.handled-action-type.operator_note_updated,
+.handled-action-type.operator_note_deleted { background: #f0ebf8; color: #684c88; }
+.handled-action-type.confirmation_reverted,
+.handled-action-type.stock_alert_reopened { background: #fff0d5; color: #915c18; }
 .handled-action-state { background: #edf0ee; color: #65736b; }
 .handled-action-main > strong { display: block; overflow-wrap: anywhere; }
 .handled-action-identity { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 3px; color: #6a786f; font-size: 10px; }
 .handled-action-identity code { color: #1e5d43; font-family: inherit; }
 .handled-action-main p { margin: 8px 0 5px; color: #4d6156; font-size: 11px; }
 .handled-action-main p em { margin-left: 6px; color: #aa3f31; font-size: 9px; font-style: normal; font-weight: 700; }
-.handled-action-main small { display: block; color: #748179; font-size: 9px; line-height: 1.5; }
-.handled-action-main small.handled-reversal { margin-top: 4px; color: #96622a; }
+.handled-operation-detail { display: grid; gap: 3px; margin: 8px 0; color: #4d6156; font-size: 11px; line-height: 1.5; overflow-wrap: anywhere; }
+.handled-operation-meta { display: grid; grid-template-columns: minmax(100px, .65fr) minmax(180px, 1fr) minmax(240px, 2fr); gap: 6px 12px; margin: 9px 0 0; padding: 9px 10px; border: 1px solid #dce5df; border-radius: 7px; background: #fff; }
+.handled-operation-meta > div { min-width: 0; }
+.handled-operation-meta dt { margin-bottom: 2px; color: #7a877f; font-size: 9px; font-weight: 700; }
+.handled-operation-meta dd { margin: 0; color: #4e6156; font-size: 10px; line-height: 1.45; overflow-wrap: anywhere; }
+.handled-operation-meta.handled-reversal { border-color: #ead1a9; background: #fff9ef; }
+.handled-operation-meta.handled-reversal dt { color: #9b6a2c; }
 .handled-action-buttons button { padding: 6px 9px; border: 1px solid #e0a59a; border-radius: 7px; background: #fff; color: #aa4432; cursor: pointer; white-space: nowrap; }
 .row-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; width: auto; min-width: 0; }
 .row-actions button { margin: 3px; padding: 5px 7px; }
@@ -1807,6 +1931,7 @@ function parseInput(value: string | number): number | null {
   .handled-filter-result { grid-column: 1 / -1; justify-content: flex-start; }
   .handled-action-list article { grid-template-columns: 1fr; }
   .handled-action-buttons { display: flex; justify-content: flex-start; }
+  .handled-operation-meta { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 @media (max-width: 640px) {
   .daily-kpis { grid-template-columns: repeat(2, 1fr); }
@@ -1814,6 +1939,7 @@ function parseInput(value: string | number): number | null {
   .daily-filters input { flex-basis: 100%; }
   .handled-history-filters { grid-template-columns: 1fr; }
   .handled-filter-result { grid-column: auto; }
+  .handled-operation-meta { grid-template-columns: 1fr; }
   .manual-grid { grid-template-columns: 1fr; }
 }
 </style>

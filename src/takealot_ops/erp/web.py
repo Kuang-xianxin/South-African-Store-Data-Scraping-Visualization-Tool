@@ -705,6 +705,7 @@ def create_app(project_root: Path | None = None) -> FastAPI:
         business_date: date,
         offer_id: str,
         note_id: int,
+        payload: DailyReportRevertRequest,
         request: Request,
     ) -> dict[str, object]:
         _write_daily_report(
@@ -714,6 +715,7 @@ def create_app(project_root: Path | None = None) -> FastAPI:
                 business_date=business_date,
                 offer_id=offer_id,
                 note_id=note_id,
+                note=payload.note,
                 user_id=request.state.erp_user.id,
             ),
         )

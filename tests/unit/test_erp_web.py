@@ -585,15 +585,26 @@ def test_daily_report_api_reads_versions_and_bulk_confirms_ready_rows(
         assert updated_note["note"] == "管理员修改后的库存备注"
         assert updated_note["issue_type"] == "stock_continuity"
         assert updated_note["updated_by"] == "Local Admin"
-        deleted = client.delete(
+        deleted = client.request(
+            "DELETE",
             f"/api/erp/daily-report/2026-07-24/offer-a/note/{note_id}",
             headers={"X-CSRF-Token": str(issued["csrf_token"])},
+            json={"note": "该备注已过期，确认删除"},
         )
         assert deleted.status_code == 200
         after_delete = client.get(
             "/api/erp/daily-report?business_date=2026-07-24"
         ).json()
         assert after_delete["items"][0]["operator_notes"] == []
+        assert after_delete["handled_actions"][0]["action_type"] == (
+            "operator_note_deleted"
+        )
+        assert after_delete["handled_actions"][0]["note"] == (
+            "该备注已过期，确认删除"
+        )
+        assert after_delete["handled_actions"][0]["detail"]["deleted_note"] == (
+            "管理员修改后的库存备注"
+        )
         confirmed = client.post(
             "/api/erp/daily-report/2026-07-24/confirm-ready",
             headers={"X-CSRF-Token": str(issued["csrf_token"])},
@@ -702,7 +713,16 @@ def test_daily_report_stock_difference_can_be_confirmed_logged_and_reopened(
             "/api/erp/daily-report?business_date=2026-07-25"
         ).json()
         assert final["pending_actions"][0]["offer_id"] == "offer-stock"
-        assert final["handled_actions"][0]["active"] is False
-        assert final["handled_actions"][0]["reversal"]["note"] == (
+        assert final["handled_actions"][0]["action_type"] == (
+            "stock_alert_reopened"
+        )
+        assert final["handled_actions"][0]["note"] == "误操作，恢复待办"
+        original = next(
+            row
+            for row in final["handled_actions"]
+            if row["action_type"] == "stock_difference"
+        )
+        assert original["active"] is False
+        assert original["reversal"]["note"] == (
             "误操作，恢复待办"
         )
