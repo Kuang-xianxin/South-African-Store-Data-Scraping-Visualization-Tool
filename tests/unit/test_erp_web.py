@@ -544,7 +544,7 @@ def test_daily_report_api_reads_versions_and_bulk_confirms_ready_rows(
                     engine,
                     business_date=date(2026, 7, 24),
                     slot=slot,
-                    captured_at=datetime(2026, 7, 24, hour, tzinfo=UTC),
+                    captured_at=datetime(2026, 7, 25, hour, tzinfo=UTC),
                 )
         finally:
             engine.dispose()
@@ -667,7 +667,7 @@ def test_daily_report_stock_difference_can_be_confirmed_logged_and_reopened(
                     engine,
                     business_date=date(2026, 7, 24),
                     slot=slot,
-                    captured_at=datetime(2026, 7, 24, hour, tzinfo=UTC),
+                    captured_at=datetime(2026, 7, 25, hour, tzinfo=UTC),
                 )
             with Session(engine) as session, session.begin():
                 session.get(
@@ -679,7 +679,7 @@ def test_daily_report_stock_difference_can_be_confirmed_logged_and_reopened(
                     engine,
                     business_date=date(2026, 7, 25),
                     slot=slot,
-                    captured_at=datetime(2026, 7, 25, hour, tzinfo=UTC),
+                    captured_at=datetime(2026, 7, 26, hour, tzinfo=UTC),
                 )
         finally:
             engine.dispose()

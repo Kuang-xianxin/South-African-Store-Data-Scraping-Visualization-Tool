@@ -168,7 +168,7 @@ def capture_daily_report(
     captured_at: datetime,
     capture_details: Mapping[str, object] | None = None,
 ) -> ReportCaptureResult:
-    """Freeze one sales version and attach the business day's 10:05 stock."""
+    """Freeze one sales version and attach the next morning's 10:05 stock."""
     if slot not in CAPTURE_SLOTS:
         raise DailyReportInputError("采集时段只能是 morning、evening 或 manual")
     now = _naive_utc(captured_at)
@@ -217,11 +217,12 @@ def capture_daily_report(
             )
             counts["captured_inventory_date"] = inventory_date.isoformat()
             counts["captured_inventory_snapshots"] = created_inventory_snapshots
+        reported_inventory_date = business_date + timedelta(days=1)
         inventory_snapshots = _daily_inventory_snapshot_map(
             session,
-            business_date,
+            reported_inventory_date,
         )
-        counts["reported_inventory_date"] = business_date.isoformat()
+        counts["reported_inventory_date"] = reported_inventory_date.isoformat()
         counts["reported_inventory_snapshots"] = len(inventory_snapshots)
         counts["reported_inventory_missing"] = sum(
             1
@@ -233,8 +234,9 @@ def capture_daily_report(
         )
         if counts["reported_inventory_missing"]:
             counts["reported_inventory_reason"] = (
-                f"{business_date.isoformat()} 10:05库存快照缺失；"
-                "次日实时库存未写回该业务日"
+                f"{reported_inventory_date.isoformat()} 10:05期末库存快照缺失；"
+                f"{business_date.isoformat()}整日销量仍保留，"
+                "不得用其他时点库存代替"
             )
         run.counts = dict(counts)
         previous = _previous_values(session, business_date)
@@ -247,13 +249,13 @@ def capture_daily_report(
                 else None
             )
             stock_source = (
-                "business_date_1005"
+                "next_morning_1005"
                 if inventory_snapshot is not None
                 and inventory_snapshot.platform_stock is not None
                 else (
-                    "business_date_1005_value_missing"
+                    "next_morning_1005_value_missing"
                     if inventory_snapshot is not None
-                    else "business_date_1005_snapshot_missing"
+                    else "next_morning_1005_snapshot_missing"
                 )
             )
             observation = DailyReportObservation(
@@ -1197,7 +1199,7 @@ def backfill_daily_inventory_snapshots(
     *,
     through: date | None = None,
 ) -> InventorySnapshotBackfillResult:
-    """Build 10:05 inventory history and remove next-day stock from report rows."""
+    """Build actual-date snapshots and attach next-morning stock to report rows."""
     snapshots_created = 0
     observations_updated = 0
     observations_missing_snapshot = 0
@@ -1265,20 +1267,35 @@ def backfill_daily_inventory_snapshots(
         )
         if through is not None:
             statement = statement.where(DailyReportRun.business_date <= through)
+        run_stats: dict[str, dict[str, Any]] = {}
         for run, observation in session.execute(statement):
+            reported_inventory_date = run.business_date + timedelta(days=1)
             snapshot = snapshots.get(
-                (run.business_date, observation.offer_id)
+                (reported_inventory_date, observation.offer_id)
             )
+            stats = run_stats.setdefault(
+                run.run_id,
+                {
+                    "run": run,
+                    "reported_inventory_date": reported_inventory_date,
+                    "snapshot_count": 0,
+                    "missing_count": 0,
+                },
+            )
+            if snapshot is not None:
+                stats["snapshot_count"] += 1
+            if snapshot is None or snapshot.platform_stock is None:
+                stats["missing_count"] += 1
             expected_stock = (
                 snapshot.platform_stock if snapshot is not None else None
             )
             expected_source = (
-                "business_date_1005"
+                "next_morning_1005"
                 if snapshot is not None and snapshot.platform_stock is not None
                 else (
-                    "business_date_1005_value_missing"
+                    "next_morning_1005_value_missing"
                     if snapshot is not None
-                    else "business_date_1005_snapshot_missing"
+                    else "next_morning_1005_snapshot_missing"
                 )
             )
             if snapshot is None or snapshot.platform_stock is None:
@@ -1291,6 +1308,24 @@ def backfill_daily_inventory_snapshots(
             observation.platform_stock = expected_stock
             observation.stock_source = expected_source
             observations_updated += 1
+        for stats in run_stats.values():
+            run = stats["run"]
+            reported_inventory_date = stats["reported_inventory_date"]
+            counts = dict(run.counts or {})
+            counts["reported_inventory_date"] = reported_inventory_date.isoformat()
+            counts["reported_inventory_snapshots"] = stats["snapshot_count"]
+            counts["reported_inventory_missing"] = stats["missing_count"]
+            counts["reported_inventory_reason"] = (
+                (
+                    f"{reported_inventory_date.isoformat()} "
+                    "10:05期末库存快照缺失；"
+                    f"{run.business_date.isoformat()}整日销量仍保留，"
+                    "不得用其他时点库存代替"
+                )
+                if stats["missing_count"]
+                else None
+            )
+            run.counts = counts
     return InventorySnapshotBackfillResult(
         snapshots_created=snapshots_created,
         observations_updated=observations_updated,
@@ -1447,7 +1482,7 @@ def export_operations_workbook(
         labels = (
             "近30天浏览量",
             "当天订单数",
-            "平台库存数量（当日10:05）",
+            "平台库存数量（次日10:05期末）",
             "备注",
         )
         for offset, label in enumerate(labels):
@@ -2461,7 +2496,7 @@ def _item_payload(
         and all(
             observation.platform_stock is None
             and str(observation.stock_source or "").startswith(
-                "business_date_1005"
+                "next_morning_1005"
             )
             for _, observation in capture_rows
         )
@@ -2482,9 +2517,11 @@ def _item_payload(
             + "；本次记为漏爬，不计入数据冲突"
         )
     if missing_capture and inventory_snapshot_missing:
+        inventory_date = report_date + timedelta(days=1)
         missing_reasons.append(
-            f"{report_date.isoformat()} 10:05库存快照缺失；"
-            "次日早间、晚间和手动刷新取得的实时库存均未写回该业务日"
+            f"{inventory_date.isoformat()} 10:05期末库存快照缺失；"
+            f"{report_date.isoformat()}整日销量仍保留，"
+            "其他时点库存未用于代替"
         )
     generic_missing_fields = [
         field

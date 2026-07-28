@@ -998,7 +998,7 @@ function parseInput(value: string | number): number | null {
                 </td>
               </tr>
               <tr>
-                <th>平台库存数量（当日10:05）</th>
+                <th>平台库存数量（次日10:05期末）</th>
                 <td></td>
                 <td
                   v-for="item in visibleItems"
@@ -1108,7 +1108,7 @@ function parseInput(value: string | number): number | null {
             >
               <header>
                 <strong>同周期销量版本差异</strong>
-                <span>只比较早间、晚间和全部手动拉取的当天销量，库存固定采用业务日10:05快照</span>
+                <span>只比较早间、晚间和全部手动拉取的当天销量，库存固定采用次日10:05期末快照</span>
               </header>
               <div
                 v-for="field in item.differences"
