@@ -5,6 +5,7 @@ import {
   confirmDailyReportEntry,
   deleteDailyReportNote,
   dismissDailyReportStockAlert,
+  eliminateDailyReportStockAlert,
   fetchDailyReport,
   fetchDailyReportExport,
   generateDailyReportExport,
@@ -58,12 +59,20 @@ const editor = ref<{
     | "edit_note"
     | "delete_note"
     | "dismiss"
+    | "eliminate"
     | "reopen_stock"
     | null;
   item: OperatorActionItem | null;
   note: DailyReportNote | null;
 }>({ mode: null, item: null, note: null });
 const noteManager = ref<EditableDailyReportItem | null>(null);
+const revertingStockElimination = computed(
+  () =>
+    editor.value.mode === "revert" &&
+    editor.value.item !== null &&
+    "action_type" in editor.value.item &&
+    editor.value.item.action_type === "stock_eliminated",
+);
 const form = ref({
   page_views_30_days: "",
   ordered_units: "",
@@ -220,13 +229,15 @@ function clearHandledFilters() {
 
 function isHandledDecision(item: DailyReportHandledAction) {
   return item.action_type === "confirmation" ||
-    item.action_type === "stock_difference";
+    item.action_type === "stock_difference" ||
+    item.action_type === "stock_eliminated";
 }
 
 function handledActionLabel(actionType: DailyReportHandledAction["action_type"]) {
   const labels: Record<DailyReportHandledAction["action_type"], string> = {
     confirmation: "已确认合并",
     stock_difference: "已确认库存差异",
+    stock_eliminated: "已消除库存差异",
     manual_candidate: "人工修改候选值",
     operator_note: "新增独立备注",
     operator_note_updated: "修改独立备注",
@@ -316,6 +327,7 @@ function openEditor(
     | "edit_note"
     | "delete_note"
     | "dismiss"
+    | "eliminate"
     | "reopen_stock",
   item: OperatorActionItem | null = null,
   note: DailyReportNote | null = null,
@@ -392,11 +404,15 @@ async function submitEditor() {
   message.value = "";
   editorError.value = "";
   editorStatus.value = mode === "revert"
-    ? "正在撤销上次确认并重新计算相关待办，请稍候…"
+    ? "action_type" in item && item.action_type === "stock_eliminated"
+      ? "正在撤销消除差异并重新计算相关待办，请稍候…"
+      : "正在撤销上次确认并重新计算相关待办，请稍候…"
     : mode === "reopen_stock"
       ? "正在撤销库存差异确认；如公式仍不平，将重新生成待办…"
     : mode === "confirm"
       ? "正在确认合并并重新计算库存连续性，请稍候…"
+      : mode === "eliminate"
+        ? "正在采用人工修改值并消除库存差异，请稍候…"
       : "正在保存并重新计算相关数据，请稍候…";
   let successMessage = "";
   try {
@@ -425,7 +441,10 @@ async function submitEditor() {
         item.offer_id,
         note,
       );
-      successMessage = "已撤销确认并恢复待核对；原确认和撤销原因均已留痕。";
+      successMessage =
+        "action_type" in item && item.action_type === "stock_eliminated"
+          ? "已撤销消除差异并恢复待核对；原处理和撤销原因均已留痕。"
+          : "已撤销确认并恢复待核对；原确认和撤销原因均已留痕。";
     } else if (mode === "reopen_stock" && item) {
       await reopenDailyReportStockAlert(
         item.business_date,
@@ -466,6 +485,13 @@ async function submitEditor() {
         note,
       );
       successMessage = "库存连续性差异已人工确认，原因已留痕。";
+    } else if (mode === "eliminate" && item) {
+      await eliminateDailyReportStockAlert(
+        item.business_date,
+        item.offer_id,
+        note,
+      );
+      successMessage = "已采用人工修改值，库存连续性差异已消除。";
     }
     await load();
     message.value = successMessage;
@@ -650,6 +676,32 @@ function stockContinuityText(item: DailyReportItem) {
   const check = item.stock_check;
   if (!check.mismatch) return "";
   return `库存连续性：${value(check.previous_stock)} − ${value(item.current.ordered_units)} = ${value(check.expected_stock)}，实际 ${value(check.actual_stock)}`;
+}
+
+function manualStockFormulaText(item: DailyReportItem) {
+  if (!item.manual_at) return null;
+  if (
+    item.confirmation_baseline &&
+    new Date(item.manual_at).getTime() <=
+      new Date(item.confirmation_baseline.confirmed_at).getTime()
+  ) {
+    return null;
+  }
+  const orderedUnits = item.manual?.ordered_units ?? item.current.ordered_units;
+  const platformStock = item.manual?.platform_stock ?? item.current.platform_stock;
+  const previousStock = item.stock_check.previous_stock;
+  if (
+    previousStock === null ||
+    previousStock === undefined ||
+    orderedUnits === null ||
+    orderedUnits === undefined ||
+    platformStock === null ||
+    platformStock === undefined
+  ) {
+    return null;
+  }
+  const expectedStock = previousStock - orderedUnits;
+  return `人工修改后：${previousStock} − ${orderedUnits} = ${expectedStock}，实际 ${platformStock}`;
 }
 
 function revertedConfirmationExpectedStock(item: DailyReportItem) {
@@ -1076,6 +1128,15 @@ function parseInput(value: string | number): number | null {
                   {{ value(item.stock_check.actual_stock) }}
                 </span>
                 <strong>{{ stockContinuityText(item) }}</strong>
+                <template v-if="manualStockFormulaText(item)">
+                  <span>{{ manualStockFormulaText(item) }}</span>
+                  <strong v-if="item.stock_check.resolution_action === 'eliminate'">
+                    修改后公式已相符，只能消除差异
+                  </strong>
+                  <strong v-else>
+                    修改后公式仍不相符，只能确认库存差异
+                  </strong>
+                </template>
               </div>
               <div v-if="item.confirmation_trigger" class="propagated-conflict">
                 <strong>{{ item.confirmation_trigger.message }}</strong>
@@ -1260,11 +1321,26 @@ function parseInput(value: string | number): number | null {
             </button>
             <button v-if="props.canOperate" @click="openEditor('note', item)">单独加备注</button>
             <button
-              v-if="props.canOperate && hasReviewIssue(item, 'stock_continuity')"
+              v-if="
+                props.canOperate &&
+                hasReviewIssue(item, 'stock_continuity') &&
+                item.stock_check.resolution_action === 'confirm_difference'
+              "
               class="danger-link"
               @click="openEditor('dismiss', item)"
             >
               确认库存差异
+            </button>
+            <button
+              v-if="
+                props.canOperate &&
+                hasReviewIssue(item, 'stock_continuity') &&
+                item.stock_check.resolution_action === 'eliminate'
+              "
+              class="action-button"
+              @click="openEditor('eliminate', item)"
+            >
+              消除差异
             </button>
             <button
               v-if="props.canOperate && item.confirmation_baseline"
@@ -1363,6 +1439,14 @@ function parseInput(value: string | number): number | null {
               {{ value(item.detail.actual_stock) }}
               <em>表格红标继续保留</em>
             </p>
+            <p v-else-if="item.action_type === 'stock_eliminated'">
+              修正后库存公式：
+              {{ value(item.detail.previous_stock) }} −
+              {{ value(item.detail.ordered_units) }} =
+              {{ value(item.detail.expected_stock) }}，实际
+              {{ value(item.detail.actual_stock) }}
+              <em>公式已相符，红标已消除</em>
+            </p>
             <p v-else-if="item.action_type === 'confirmation'">
               采用 {{ item.detail.source_label || "人工确认值" }}：
               订单 {{ value(item.current.ordered_units) }} /
@@ -1452,6 +1536,8 @@ function parseInput(value: string | number): number | null {
               {{
                 item.action_type === "stock_difference"
                   ? "撤销库存差异确认"
+                  : item.action_type === "stock_eliminated"
+                    ? "撤销消除差异"
                   : "撤销确认合并"
               }}
             </button>
@@ -1568,13 +1654,17 @@ function parseInput(value: string | number): number | null {
               : editor.mode === "confirm"
                 ? "确认最终采用值"
                 : editor.mode === "revert"
-                  ? "撤销确认合并"
+                  ? revertingStockElimination
+                    ? "撤销消除差异"
+                    : "撤销确认合并"
                 : editor.mode === "reopen_stock"
                   ? "撤销库存差异确认"
                 : editor.mode === "delete_note"
                   ? "删除备注"
                 : editor.mode === "dismiss"
                   ? "确认库存连续性差异"
+                : editor.mode === "eliminate"
+                  ? "消除库存连续性差异"
                   : editor.mode === "edit_note"
                     ? "修改备注"
                     : "新增备注"
@@ -1585,13 +1675,20 @@ function parseInput(value: string | number): number | null {
           {{ editor.item.sku || editor.item.offer_id }}
         </p>
         <p v-if="editor.mode === 'revert'" class="revert-warning">
-          撤销后会恢复为待核对；原确认记录不会删除，相邻日报日的库存连续性会在重新确认后重新计算。
+          {{
+            revertingStockElimination
+              ? "撤销后会恢复为待核对；原消除差异记录不会删除，相邻日报日的库存连续性会按恢复后的值重新计算。"
+              : "撤销后会恢复为待核对；原确认记录不会删除，相邻日报日的库存连续性会在重新确认后重新计算。"
+          }}
         </p>
         <p v-if="editor.mode === 'reopen_stock'" class="revert-warning">
           撤销后原处理记录不会删除；如果库存公式仍不平，该商品会重新进入人工核对待办，表格红标始终保留。
         </p>
         <p v-if="editor.mode === 'delete_note'" class="revert-warning">
           即将删除备注“{{ editor.note?.note }}”。被删除内容仍会保留在审计记录中，请填写本次删除原因。
+        </p>
+        <p v-if="editor.mode === 'eliminate'" class="revert-warning">
+          人工修改后的库存公式已经相符；确认后会采用人工修改值并关闭待办。
         </p>
         <div v-if="editor.mode === 'manual'" class="manual-grid">
           <p class="manual-baseline-tip">
@@ -1639,6 +1736,8 @@ function parseInput(value: string | number): number | null {
           {{
             editor.mode === "confirm"
               ? "合并备注（必填）"
+              : editor.mode === "eliminate"
+                ? "消除差异备注（必填）"
               : editor.mode === "revert" || editor.mode === "reopen_stock"
                 ? "撤销原因（必填）"
               : editor.mode === "note"
@@ -1676,6 +1775,8 @@ function parseInput(value: string | number): number | null {
                     ? "正在删除…"
                   : editor.mode === "confirm"
                     ? "正在合并…"
+                    : editor.mode === "eliminate"
+                      ? "正在消除…"
                     : "正在保存…"
                 : editor.mode === "revert" || editor.mode === "reopen_stock"
                   ? "确认撤销"
@@ -1683,6 +1784,8 @@ function parseInput(value: string | number): number | null {
                     ? "确认删除"
                   : editor.mode === "confirm"
                     ? "确认合并"
+                    : editor.mode === "eliminate"
+                      ? "确认消除"
                     : "确认保存"
             }}
           </button>
@@ -1853,6 +1956,7 @@ function parseInput(value: string | number): number | null {
 .handled-action-type, .handled-action-state { width: fit-content; padding: 3px 7px; border-radius: 999px; font-size: 9px; font-weight: 700; }
 .handled-action-type.confirmation { background: #e3f0e8; color: #2f6b4b; }
 .handled-action-type.stock_difference { background: #ffe1dc; color: #a33e2f; }
+.handled-action-type.stock_eliminated { background: #def3e5; color: #276b43; }
 .handled-action-type.manual_candidate { background: #e7eef8; color: #3f5f85; }
 .handled-action-type.operator_note,
 .handled-action-type.operator_note_updated,

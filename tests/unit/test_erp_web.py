@@ -726,3 +726,43 @@ def test_daily_report_stock_difference_can_be_confirmed_logged_and_reopened(
         assert original["reversal"]["note"] == (
             "误操作，恢复待办"
         )
+
+        corrected = client.post(
+            "/api/erp/daily-report/2026-07-25/offer-stock/manual",
+            headers={"X-CSRF-Token": str(issued["csrf_token"])},
+            json={
+                "platform_stock": 9,
+                "reason": "stock_adjustment",
+                "note": "盘点后修正为连续库存9",
+            },
+        )
+        assert corrected.status_code == 200
+        corrected_payload = client.get(
+            "/api/erp/daily-report?business_date=2026-07-25"
+        ).json()
+        assert (
+            corrected_payload["pending_actions"][0]["stock_check"][
+                "resolution_action"
+            ]
+            == "eliminate"
+        )
+        eliminated = client.post(
+            (
+                "/api/erp/daily-report/2026-07-25/offer-stock/"
+                "stock-alert/eliminate"
+            ),
+            headers={"X-CSRF-Token": str(issued["csrf_token"])},
+            json={"note": "采用修正库存并消除差异"},
+        )
+        assert eliminated.status_code == 200
+        eliminated_payload = client.get(
+            "/api/erp/daily-report?business_date=2026-07-25"
+        ).json()
+        assert eliminated_payload["pending_actions"] == []
+        assert (
+            eliminated_payload["items"][0]["stock_check"]["mismatch"]
+            is False
+        )
+        assert eliminated_payload["handled_actions"][0]["action_type"] == (
+            "stock_eliminated"
+        )

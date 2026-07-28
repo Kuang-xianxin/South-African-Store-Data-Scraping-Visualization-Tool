@@ -419,6 +419,7 @@ export interface DailyReportItem {
     mismatch: boolean;
     dismissed: boolean;
     note: string | null;
+    resolution_action: "eliminate" | "confirm_difference";
     deferred_reason: string | null;
   };
 }
@@ -432,6 +433,7 @@ export interface DailyReportHandledAction {
   action_type:
     | "confirmation"
     | "stock_difference"
+    | "stock_eliminated"
     | "manual_candidate"
     | "operator_note"
     | "operator_note_updated"
