@@ -662,6 +662,86 @@ def test_manual_candidate_and_confirm_are_separate_audited_states() -> None:
     assert handled[1]["detail"]["after_values"]["ordered_units"] == 4
 
 
+def test_matching_manual_fix_closes_version_difference_without_stock_action() -> None:
+    engine = _engine()
+    for slot, hour in (("morning", 2), ("evening", 10)):
+        capture_daily_report(
+            engine,
+            business_date=REPORT_DATE,
+            slot=slot,
+            captured_at=_report_capture_time(REPORT_DATE, hour),
+        )
+
+    next_date = REPORT_DATE + timedelta(days=1)
+    with Session(engine) as session, session.begin():
+        session.get(OfferCurrent, "offer-a").takealot_available_stock = 7
+        session.add(
+            SaleItem(
+                order_item_id="sale-a-next",
+                order_date=datetime(2026, 7, 25, 1, tzinfo=UTC),
+                sales_day=next_date,
+                offer_id="offer-a",
+                sku="9900000000001",
+                quantity=1,
+                raw_payload={},
+            )
+        )
+    capture_daily_report(
+        engine,
+        business_date=next_date,
+        slot="morning",
+        captured_at=_report_capture_time(next_date, 2),
+    )
+    with Session(engine) as session, session.begin():
+        session.get(SaleItem, "sale-a-next").quantity = 2
+    capture_daily_report(
+        engine,
+        business_date=next_date,
+        slot="evening",
+        captured_at=_report_capture_time(next_date, 10),
+    )
+
+    before = next(
+        item
+        for item in daily_report_payload(engine, next_date)["pending_actions"]
+        if item["offer_id"] == "offer-a"
+    )
+    assert before["differences"] == ["ordered_units"]
+
+    save_manual_candidate(
+        engine,
+        business_date=next_date,
+        offer_id="offer-a",
+        values={"ordered_units": 2, "platform_stock": 7},
+        reason="stock_adjustment",
+        note="人工核对销量为2且库存公式相符",
+        user_id=1,
+    )
+
+    payload = daily_report_payload(engine, next_date)
+    product = next(
+        item for item in payload["items"] if item["offer_id"] == "offer-a"
+    )
+    assert product["status"] == "confirmed"
+    assert product["final"]["ordered_units"] == 2
+    assert product["final"]["platform_stock"] == 7
+    assert product["differences"] == []
+    assert product["stock_check"]["mismatch"] is False
+    assert not any(
+        item["offer_id"] == "offer-a" for item in payload["pending_actions"]
+    )
+    assert reminder_payload(engine, next_date)["count"] == 0
+    confirmation = next(
+        item
+        for item in payload["handled_actions"]
+        if item["action_type"] == "confirmation"
+        and item["offer_id"] == "offer-a"
+    )
+    assert confirmation["detail"]["source"] == "manual"
+    assert confirmation["detail"]["automatic"] is True
+    assert confirmation["note"] == "人工核对销量为2且库存公式相符"
+
+
 def test_confirmation_can_be_reverted_and_reconfirmed_with_full_audit() -> None:
     engine = _engine()
     for slot, hour in (("morning", 2), ("evening", 10)):

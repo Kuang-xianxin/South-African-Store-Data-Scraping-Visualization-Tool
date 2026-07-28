@@ -489,6 +489,18 @@ def save_manual_candidate(
     now = _utc_now()
     with Session(engine) as session, session.begin():
         resolution = _resolution_or_error(session, business_date, offer_id)
+        capture_rows = _all_observations(session, business_date).get(
+            offer_id,
+            [],
+        )
+        version_differences_before_edit = _version_differences(
+            capture_rows,
+            resolution,
+        )
+        previous_effective_stock = _effective_stock_before_confirmation(
+            session,
+            resolution,
+        )
         before = _manual_values(resolution)
         if "page_views_30_days" in supplied:
             resolution.manual_page_views_30_days = supplied["page_views_30_days"]
@@ -521,6 +533,53 @@ def save_manual_candidate(
             user_id,
             now,
         )
+        manual_values = _source_values(session, resolution, "manual")
+        previous_stock = _previous_values(session, business_date).get(offer_id)
+        can_auto_confirm = bool(
+            version_differences_before_edit
+            and previous_stock is not None
+            and manual_values is not None
+            and manual_values.get("ordered_units") is not None
+            and manual_values.get("platform_stock") is not None
+            and not _stock_continuity_mismatch(previous_stock, manual_values)
+        )
+        if not can_auto_confirm or manual_values is None:
+            return
+        _apply_final(
+            resolution,
+            manual_values,
+            "manual",
+            clean_note,
+            user_id,
+            now,
+        )
+        _audit(
+            session,
+            business_date,
+            offer_id,
+            "confirm",
+            {
+                "source": "manual",
+                "values": manual_values,
+                "automatic": True,
+                "reason": "manual_version_fix_matches_stock_continuity",
+            },
+            clean_note,
+            user_id,
+            now,
+        )
+        _propagate_confirmation_stock_conflict(
+            session,
+            resolution=resolution,
+            previous_effective_stock=previous_effective_stock,
+            confirmed_values=manual_values,
+            source="manual",
+            note=clean_note,
+            user_id=user_id,
+            confirmed_at=now,
+            resolved_version_difference=True,
+        )
+        _resolve_deadline_if_complete(session, business_date, now)
 
 
 def save_operator_note(
@@ -3034,6 +3093,7 @@ def _handled_actions(
                         "actual_stock",
                         current.get("platform_stock"),
                     ),
+                    "automatic": bool(payload.get("automatic", False)),
                     "reason": None,
                     "issue_type": None,
                     "before_note": None,
