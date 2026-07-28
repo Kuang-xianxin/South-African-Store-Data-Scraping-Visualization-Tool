@@ -704,7 +704,7 @@ function captureStatusLabel(slot: "morning" | "evening") {
 }
 
 function slotLabel(slot: "morning" | "evening") {
-  return slot === "morning" ? "10:05早间" : "18:00晚间";
+  return slot === "morning" ? "早间任务（计划 10:05）" : "晚间任务（计划 18:00）";
 }
 
 function productLabel(item: { sku: string | null; offer_id: string }) {
@@ -854,7 +854,7 @@ function parseInput(value: string | number): number | null {
         <h2>每日10:00至次日10:00，自动核对全部定时与手动拉取</h2>
       </div>
       <div class="daily-run-times">
-        <span>10:00 周期开始</span><i>→</i><span>10:05 / 18:00 定时</span><i>→</i><span>期间每次手动刷新</span>
+        <span>10:00 周期开始</span><i>→</i><span>早间 / 晚间计划触发</span><i>→</i><span>期间每次手动刷新</span>
       </div>
     </div>
 
@@ -914,9 +914,10 @@ function parseInput(value: string | number): number | null {
             :class="[slot, report?.capture_status[slot].status]"
             :title="report?.capture_status[slot].reason || ''"
           >
-            {{ slot === "morning" ? "10:05 早间" : "18:00 晚间" }}：
+            {{ slotLabel(slot) }}：
             {{ captureStatusLabel(slot) }}
             <small v-if="report?.capture_status[slot].captured_at">
+              实际成功：北京时间
               {{ formatChinaDateTime(report.capture_status[slot].captured_at, "—") }}
             </small>
             <em v-if="report?.capture_status[slot].recovered">
@@ -1062,7 +1063,7 @@ function parseInput(value: string | number): number | null {
                 </td>
               </tr>
               <tr>
-                <th>平台库存数量（次日10:05期末）</th>
+                <th>平台库存数量（次日早间实采）</th>
                 <td></td>
                 <td
                   v-for="item in visibleItems"
@@ -1188,7 +1189,7 @@ function parseInput(value: string | number): number | null {
             >
               <header>
                 <strong>同周期销量版本差异</strong>
-                <span>只比较早间、晚间和全部手动拉取的当天销量，库存固定采用次日10:05期末快照</span>
+                <span>只比较早间、晚间和全部手动拉取的当天销量，库存采用次日早间任务首次成功实采值</span>
               </header>
               <div
                 v-for="field in item.differences"
@@ -1921,8 +1922,8 @@ function parseInput(value: string | number): number | null {
           最终采用
           <select v-model="form.source">
             <option value="latest">本周期最新拉取值</option>
-            <option value="morning">10:05 早间值</option>
-            <option value="evening">18:00 晚间值</option>
+            <option value="morning">早间采集值（实际时间见版本）</option>
+            <option value="evening">晚间采集值（实际时间见版本）</option>
             <option value="manual">人工候选值</option>
           </select>
         </label>

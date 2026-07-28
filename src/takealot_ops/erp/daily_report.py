@@ -169,7 +169,7 @@ def capture_daily_report(
     captured_at: datetime,
     capture_details: Mapping[str, object] | None = None,
 ) -> ReportCaptureResult:
-    """Freeze one sales version and attach the next morning's 10:05 stock."""
+    """Freeze one sales version and attach the next morning capture's stock."""
     if slot not in CAPTURE_SLOTS:
         raise DailyReportInputError("采集时段只能是 morning、evening 或 manual")
     now = _naive_utc(captured_at)
@@ -235,7 +235,8 @@ def capture_daily_report(
         )
         if counts["reported_inventory_missing"]:
             counts["reported_inventory_reason"] = (
-                f"{reported_inventory_date.isoformat()} 10:05期末库存快照缺失；"
+                f"{reported_inventory_date.isoformat()} 早间库存快照缺失"
+                "（计划10:05采集）；"
                 f"{business_date.isoformat()}整日销量仍保留，"
                 "不得用其他时点库存代替"
             )
@@ -1380,7 +1381,7 @@ def backfill_daily_inventory_snapshots(
             counts["reported_inventory_reason"] = (
                 (
                     f"{reported_inventory_date.isoformat()} "
-                    "10:05期末库存快照缺失；"
+                    "早间库存快照缺失（计划10:05采集）；"
                     f"{run.business_date.isoformat()}整日销量仍保留，"
                     "不得用其他时点库存代替"
                 )
@@ -1544,7 +1545,7 @@ def export_operations_workbook(
         labels = (
             "近30天浏览量",
             "当天订单数",
-            "平台库存数量（次日10:05期末）",
+            "平台库存数量（次日早间实采）",
             "备注",
         )
         for offset, label in enumerate(labels):
@@ -1679,7 +1680,7 @@ def _freeze_morning_inventory_snapshots(
     run: DailyReportRun,
     offers: list[OfferCurrent],
 ) -> tuple[date, int]:
-    """Freeze the first successful 10:05 stock by its actual Beijing date."""
+    """Freeze the first successful morning stock by its actual Beijing date."""
     inventory_date = _beijing_date(run.captured_at)
     existing_offer_ids = set(
         session.scalars(
@@ -1898,14 +1899,14 @@ def _coalesced_capture_values(
 
 def _capture_run_label(run: DailyReportRun) -> str:
     labels = {
-        "morning": "10:05定时",
-        "evening": "18:00定时",
+        "morning": "早间采集",
+        "evening": "晚间采集",
         "manual": "手动刷新",
     }
     captured_at = run.captured_at.replace(tzinfo=UTC).astimezone(
         ZoneInfo("Asia/Shanghai")
     )
-    return f"{labels.get(run.slot, run.slot)}（{captured_at:%m-%d %H:%M}）"
+    return f"{labels.get(run.slot, run.slot)}（实际 {captured_at:%m-%d %H:%M}）"
 
 
 def _manual_values(
@@ -2412,8 +2413,8 @@ def _defer_following_stock_continuity(
 
 def _confirmation_source_label(source: str) -> str:
     return {
-        "morning": "10:05早间值",
-        "evening": "18:00晚间值",
+        "morning": "早间采集值",
+        "evening": "晚间采集值",
         "latest": "本周期最新拉取值",
         "manual": "人工修改值",
     }.get(source, source)
@@ -2582,7 +2583,8 @@ def _item_payload(
     if missing_capture and inventory_snapshot_missing:
         inventory_date = report_date + timedelta(days=1)
         missing_reasons.append(
-            f"{inventory_date.isoformat()} 10:05期末库存快照缺失；"
+            f"{inventory_date.isoformat()} 早间库存快照缺失"
+            "（计划10:05采集）；"
             f"{report_date.isoformat()}整日销量仍保留，"
             "其他时点库存未用于代替"
         )
@@ -3799,7 +3801,7 @@ def _capture_status(
                 "captured_at": None,
                 "product_count": 0,
                 "reason": (
-                    f"{'10:05早间' if slot == 'morning' else '18:00晚间'}"
+                    f"{'早间任务（计划10:05）' if slot == 'morning' else '晚间任务（计划18:00）'}"
                     "未生成采集记录，可能是定时任务未执行、服务未启动或日志缺失"
                 ),
                 "attempts": [],
@@ -3900,7 +3902,7 @@ def _capture_issues(
 
 
 def _missing_slot_reason(slot: str, state: dict[str, Any]) -> str:
-    label = "10:05早间" if slot == "morning" else "18:00晚间"
+    label = "早间任务（计划10:05）" if slot == "morning" else "晚间任务（计划18:00）"
     if state["status"] == "success":
         return (
             f"{label}整次采集成功，但该商品未出现在接口返回结果中；"

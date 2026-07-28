@@ -173,7 +173,7 @@ def test_capture_keeps_morning_and_evening_versions_and_requires_review() -> Non
         engine,
         business_date=REPORT_DATE,
         slot="morning",
-        captured_at=_report_capture_time(REPORT_DATE, 2, 5),
+        captured_at=_report_capture_time(REPORT_DATE, 2, 37),
     )
     with Session(engine) as session, session.begin():
         session.get(OfferCurrent, "offer-a").takealot_available_stock = 7
@@ -190,6 +190,12 @@ def test_capture_keeps_morning_and_evening_versions_and_requires_review() -> Non
     assert product["image_url"] == "https://example.invalid/product-a.png"
     assert product["morning"]["ordered_units"] == 1
     assert product["morning"]["platform_stock"] == 9
+    assert product["capture_versions"][0]["label"] == (
+        "早间采集（实际 07-25 10:37）"
+    )
+    assert payload["capture_status"]["morning"]["captured_at"] == (
+        "2026-07-25T02:37:00"
+    )
     assert product["evening"]["ordered_units"] == 2
     assert product["evening"]["platform_stock"] == 9
     assert product["status"] == "needs_review"
@@ -311,7 +317,10 @@ def test_missing_next_morning_stock_does_not_fall_back_to_other_times() -> None:
     product = next(row for row in payload["items"] if row["offer_id"] == "offer-a")
     assert product["current"]["platform_stock"] is None
     assert product["status"] == "missing_capture"
-    assert "2026-07-25 10:05期末库存快照缺失" in product["missing_reason"]
+    assert (
+        "2026-07-25 早间库存快照缺失（计划10:05采集）"
+        in product["missing_reason"]
+    )
     assert "其他时点库存未用于代替" in product["missing_reason"]
     evening_run = next(run for run in payload["runs"] if run["slot"] == "evening")
     assert evening_run["counts"]["reported_inventory_missing"] == 2
@@ -1108,7 +1117,7 @@ def test_export_is_blocked_until_every_entry_is_confirmed(tmp_path: Path) -> Non
         assert report_sheet["A2"].value == "近30天浏览量"
         assert report_sheet["A3"].value == "当天订单数"
         assert report_sheet["C3"].fill.fgColor.rgb == "00FCE4D6"
-        assert report_sheet["A4"].value == "平台库存数量（次日10:05期末）"
+        assert report_sheet["A4"].value == "平台库存数量（次日早间实采）"
         assert report_sheet["A5"].value == "备注"
         assert report_sheet["C5"].value == (
             "（确认：采用晚间库存值） （库存：平台临时调仓）"
@@ -1521,7 +1530,7 @@ def test_stock_continuity_mismatch_is_a_cross_date_pending_action(
         "confirmed_by": None,
         "confirmed_at": None,
         "confirm_note": None,
-        "capture_label": "18:00定时（07-25 18:00）",
+        "capture_label": "晚间采集（实际 07-25 18:00）",
         "continuity_ready": True,
         "version_differences": [],
     }
