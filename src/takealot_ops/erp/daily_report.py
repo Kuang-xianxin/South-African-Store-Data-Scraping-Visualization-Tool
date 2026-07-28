@@ -1330,6 +1330,11 @@ def export_operations_workbook(
                         if _has_confirmation_baseline(resolution)
                         else None
                     ),
+                    stock_confirmation_note=(
+                        resolution.stock_alert_note
+                        if resolution.stock_alert_dismissed
+                        else None
+                    ),
                 ),
             )
             if int(orders or 0) > 0:
@@ -1413,6 +1418,7 @@ def unresolved_locations(engine: Engine, through: date) -> list[dict[str, Any]]:
 
 
 _VALUE_KEYS = ("page_views_30_days", "ordered_units", "platform_stock")
+_MISSING_CAPTURE_KEYS = ("ordered_units", "platform_stock")
 _RECONCILIATION_KEYS = ("ordered_units",)
 
 
@@ -1498,6 +1504,8 @@ def _status_after_capture(
         return "needs_review"
     if _has_confirmation_baseline(resolution):
         selected = _final_values(resolution)
+        if any(selected.get(key) is None for key in _MISSING_CAPTURE_KEYS):
+            return "missing_capture"
         if (
             not resolution.stock_alert_dismissed
             and _stock_continuity_mismatch(previous_stock, selected)
@@ -1505,24 +1513,11 @@ def _status_after_capture(
             return "needs_review"
         return "confirmed"
     candidates = [_value_dict(observation) for _, observation in captured]
-    if any(
-        any(candidate.get(key) is None for candidate in candidates[: len(captured)])
-        for key in _VALUE_KEYS
-    ):
-        return "missing_capture"
-    if resolution.status == "missing_capture":
-        return "missing_capture"
-    successful_run_count = session.scalar(
-        select(func.count(DailyReportRun.run_id)).where(
-            DailyReportRun.business_date == resolution.business_date,
-            DailyReportRun.status == "success",
-        )
-    )
-    if len(captured) < int(successful_run_count or 0):
+    selected = _coalesced_capture_values(candidates[: len(captured)])
+    if any(selected.get(key) is None for key in _MISSING_CAPTURE_KEYS):
         return "missing_capture"
     if len(captured) < 2:
         return "awaiting_evening"
-    selected = _coalesced_capture_values(candidates[: len(captured)])
     if (
         not resolution.stock_alert_dismissed
         and _stock_continuity_mismatch(previous_stock, selected)
@@ -2311,9 +2306,10 @@ def _item_payload(
     ]
     missing_fields = [
         key
-        for key in _VALUE_KEYS
-        if capture_values and any(values.get(key) is None for values in capture_values)
+        for key in _MISSING_CAPTURE_KEYS
+        if current.get(key) is None
     ]
+    missing_capture = bool(missing_fields)
     inventory_snapshot_missing = bool(
         capture_rows
         and all(
@@ -2325,17 +2321,21 @@ def _item_payload(
         )
     )
     stored_status = resolution.status if resolution is not None else "awaiting_evening"
-    missing_reasons = [
-        _missing_slot_reason(slot, capture_status[slot])
-        for slot in missing_slots
-    ]
-    if missing_runs:
+    missing_reasons = (
+        [
+            _missing_slot_reason(slot, capture_status[slot])
+            for slot in missing_slots
+        ]
+        if missing_capture
+        else []
+    )
+    if missing_capture and missing_runs:
         missing_reasons.append(
             "以下成功采集批次没有返回该商品："
             + "、".join(_capture_run_label(run) for run in missing_runs)
             + "；本次记为漏爬，不计入数据冲突"
         )
-    if inventory_snapshot_missing:
+    if missing_capture and inventory_snapshot_missing:
         missing_reasons.append(
             f"{report_date.isoformat()} 10:05库存快照缺失；"
             "次日早间、晚间和手动刷新取得的实时库存均未写回该业务日"
@@ -2347,9 +2347,9 @@ def _item_payload(
     ]
     if generic_missing_fields:
         missing_reasons.append(
-            "至少一次采集在"
+            "当前采用值的"
             + "、".join(_field_label(field) for field in generic_missing_fields)
-            + "字段返回空值，已自动采用本周期其他版本的可用值"
+            + "字段为空"
         )
     orders = int(current.get("ordered_units") or 0)
     current_stock = current.get("platform_stock")
@@ -2382,13 +2382,16 @@ def _item_payload(
         status = "needs_review"
     elif previous_confirmation_reverted:
         status = "needs_review"
+    elif missing_capture:
+        status = "missing_capture"
     elif has_confirmation_baseline:
         status = "confirmed"
-    elif (
-        (missing_slots or missing_runs or missing_fields)
-        and stored_status not in {"confirmed", "needs_review"}
-    ):
-        status = "missing_capture"
+    elif stored_status == "missing_capture":
+        status = (
+            "awaiting_evening"
+            if capture_status["evening"]["status"] == "pending"
+            else "ready"
+        )
     elif stored_status == "needs_review":
         status = "ready"
     else:
@@ -2460,7 +2463,7 @@ def _item_payload(
         "confirmation_trigger": confirmation_trigger,
         "differences": differences,
         "review_issues": review_issues,
-        "missing_capture": bool(missing_slots or missing_runs or missing_fields),
+        "missing_capture": missing_capture,
         "missing_slots": missing_slots,
         "missing_run_ids": [run.run_id for run in missing_runs],
         "missing_fields": missing_fields,
@@ -2948,6 +2951,7 @@ def _operator_note_cell_text(
     notes: list[dict[str, Any]],
     *,
     confirmation_note: str | None = None,
+    stock_confirmation_note: str | None = None,
 ) -> str | None:
     labels = {
         "general": "通用",
@@ -2959,6 +2963,13 @@ def _operator_note_cell_text(
         if confirmation_note is not None and confirmation_note.strip()
         else []
     )
+    if (
+        stock_confirmation_note is not None
+        and stock_confirmation_note.strip()
+    ):
+        rendered.append(
+            f"（库存差异已确认：{stock_confirmation_note.strip()}）"
+        )
     rendered.extend(
         f"（{labels.get(str(note.get('issue_type')), '通用')}：{note.get('note', '')}）"
         for note in notes
@@ -3465,7 +3476,7 @@ def _capture_issues(
             for slot in item["missing_slots"]
             if capture_status[slot]["status"] == "success"
         ]
-        if (
+        if item["missing_capture"] and (
             product_missing_slots
             or item["missing_run_ids"]
             or item["missing_fields"]

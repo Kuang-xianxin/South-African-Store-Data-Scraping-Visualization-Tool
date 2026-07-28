@@ -952,6 +952,79 @@ def test_export_is_blocked_until_every_entry_is_confirmed(tmp_path: Path) -> Non
         workbook.close()
 
 
+def test_confirmation_and_stock_difference_notes_are_both_exported(
+    tmp_path: Path,
+) -> None:
+    engine = _engine()
+    for slot, hour in (("morning", 2), ("evening", 10)):
+        capture_daily_report(
+            engine,
+            business_date=REPORT_DATE,
+            slot=slot,
+            captured_at=datetime(2026, 7, 24, hour, tzinfo=UTC),
+        )
+    next_date = REPORT_DATE + timedelta(days=1)
+    with Session(engine) as session, session.begin():
+        session.get(OfferCurrent, "offer-a").takealot_available_stock = 8
+    for slot, hour in (("morning", 2), ("evening", 10)):
+        capture_daily_report(
+            engine,
+            business_date=next_date,
+            slot=slot,
+            captured_at=datetime(2026, 7, 25, hour, tzinfo=UTC),
+        )
+
+    confirm_entry(
+        engine,
+        business_date=next_date,
+        offer_id="offer-a",
+        source="evening",
+        note="采用晚间销量",
+        user_id=1,
+    )
+    dismiss_stock_alert(
+        engine,
+        business_date=next_date,
+        offer_id="offer-a",
+        note="平台临时调仓",
+        user_id=1,
+    )
+
+    item = next(
+        row
+        for row in daily_report_payload(engine, next_date)["items"]
+        if row["offer_id"] == "offer-a"
+    )
+    assert item["confirmation_baseline"]["confirm_note"] == "采用晚间销量"
+    assert item["stock_check"]["dismissed"] is True
+    assert item["stock_check"]["note"] == "平台临时调仓"
+
+    output = export_operations_workbook(
+        engine,
+        business_date=next_date,
+        destination=tmp_path / "confirmation-and-stock-note.xlsx",
+    )
+    workbook = load_workbook(output)
+    try:
+        sheet = workbook["运营日报"]
+        offer_column = next(
+            cell.column
+            for cell in sheet[1]
+            if cell.value and "9900000000001" in str(cell.value)
+        )
+        date_row = next(
+            cell.row
+            for cell in sheet["B"]
+            if cell.value == next_date.isoformat()
+        )
+        assert sheet.cell(date_row + 3, offer_column).value == (
+            "（确认：采用晚间销量） "
+            "（库存差异已确认：平台临时调仓）"
+        )
+    finally:
+        workbook.close()
+
+
 def test_export_does_not_create_an_empty_workbook(tmp_path: Path) -> None:
     engine = create_engine("sqlite://")
     create_schema(engine)
@@ -978,11 +1051,11 @@ def test_deadline_treats_missing_evening_capture_as_non_blocking() -> None:
         snapped_at=datetime(2026, 7, 24, 10, 30, tzinfo=UTC),
     ) == 0
     payload = daily_report_payload(engine, REPORT_DATE)
-    assert payload["counts"]["missing_capture"] == 2
+    assert payload["counts"]["missing_capture"] == 0
     assert payload["counts"]["needs_review"] == 0
-    assert backfill_stock_continuity_reviews(engine, through=REPORT_DATE) == 0
+    assert backfill_stock_continuity_reviews(engine, through=REPORT_DATE) == 2
     assert all(
-        item["status"] == "missing_capture"
+        item["status"] != "missing_capture"
         for item in daily_report_payload(engine, REPORT_DATE)["items"]
     )
     assert reminder_payload(engine, REPORT_DATE) == {
@@ -1027,9 +1100,9 @@ def test_failed_capture_reason_is_reported_and_does_not_require_merge(
     assert "登录状态失效" in payload["capture_status"]["evening"]["reason"]
     assert payload["capture_status"]["evening"]["attempt_count"] == 2
     assert payload["capture_status"]["evening"]["attempts"][1]["strategy"] == "直连备用"
-    assert payload["counts"]["missing_capture"] == 2
+    assert payload["counts"]["missing_capture"] == 0
     assert payload["counts"]["needs_review"] == 0
-    assert all(item["status"] == "missing_capture" for item in payload["items"])
+    assert all(item["status"] == "ready" for item in payload["items"])
 
     output = export_operations_workbook(
         engine,
@@ -1063,10 +1136,62 @@ def test_null_field_is_missing_data_not_a_conflict() -> None:
     )
     payload = daily_report_payload(engine, REPORT_DATE)
     product = next(row for row in payload["items"] if row["offer_id"] == "offer-a")
-    assert product["status"] == "missing_capture"
+    assert product["status"] == "ready"
     assert product["differences"] == []
-    assert product["missing_fields"] == ["page_views_30_days"]
+    assert product["missing_fields"] == []
+    assert product["missing_capture"] is False
     assert product["current"]["page_views_30_days"] == 50
+    assert payload["counts"]["missing_capture"] == 0
+    assert not any(
+        issue["kind"] == "product" and issue["offer_id"] == "offer-a"
+        for issue in payload["capture_issues"]
+    )
+
+
+@pytest.mark.parametrize(
+    ("field", "label"),
+    (
+        ("ordered_units", "当天订单数"),
+        ("platform_stock", "平台库存"),
+    ),
+)
+def test_empty_order_or_stock_is_marked_as_missing_capture(
+    field: str,
+    label: str,
+) -> None:
+    engine = _engine()
+    for slot, hour in (("morning", 2), ("evening", 10)):
+        capture_daily_report(
+            engine,
+            business_date=REPORT_DATE,
+            slot=slot,
+            captured_at=datetime(2026, 7, 24, hour, tzinfo=UTC),
+        )
+    with Session(engine) as session, session.begin():
+        resolution = session.scalar(
+            select(DailyReportResolution).where(
+                DailyReportResolution.business_date == REPORT_DATE,
+                DailyReportResolution.offer_id == "offer-a",
+            )
+        )
+        assert resolution is not None
+        resolution.selected_source = "manual"
+        resolution.final_page_views_30_days = 50
+        resolution.final_ordered_units = 0
+        resolution.final_platform_stock = 9
+        setattr(resolution, f"final_{field}", None)
+        resolution.confirm_note = "确认当前可用字段"
+        resolution.confirmed_by = 1
+        resolution.confirmed_at = datetime(2026, 7, 24, 11)
+        resolution.status = "confirmed"
+
+    payload = daily_report_payload(engine, REPORT_DATE)
+    product = next(row for row in payload["items"] if row["offer_id"] == "offer-a")
+
+    assert product["status"] == "missing_capture"
+    assert product["missing_capture"] is True
+    assert product["missing_fields"] == [field]
+    assert label in product["missing_reason"]
 
 
 def test_payload_includes_recent_dates_for_vertical_comparison() -> None:

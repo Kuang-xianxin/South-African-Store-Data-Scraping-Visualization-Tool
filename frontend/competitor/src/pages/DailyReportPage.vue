@@ -497,7 +497,7 @@ function statusLabel(item: DailyReportItem) {
   return {
     awaiting_evening: "等待下一次拉取",
     ready: "无差异已自动采用",
-    missing_capture: "漏爬已自动补缺",
+    missing_capture: "订单或库存漏爬",
     confirmed: "已确认",
   }[item.status];
 }
@@ -679,7 +679,7 @@ function parseInput(value: string | number): number | null {
     <section v-if="report?.capture_issues.length" class="capture-notice">
       <div class="capture-notice-title">
         <strong>数据完整性说明：{{ report.capture_issues.length }} 条</strong>
-        <span>漏爬不算冲突，系统按本周期最新非空版本自动补缺</span>
+        <span>只在订单数或库存仍为空时标注漏爬；漏爬不算冲突</span>
       </div>
       <details>
         <summary>查看具体漏爬原因</summary>
@@ -1657,7 +1657,7 @@ function parseInput(value: string | number): number | null {
 .daily-matrix th, .daily-matrix td { box-sizing: border-box; min-width: 158px; max-width: 158px; height: var(--daily-data-row-height); padding: 5px 9px; border-right: 1px solid #d7dad8; border-bottom: 1px solid #d7dad8; text-align: center; vertical-align: middle; }
 .daily-matrix thead th { position: sticky; top: 0; z-index: 5; height: var(--daily-header-height); border-color: #474747; background: #ffff00; color: #202020; font-weight: 400; }
 .daily-matrix .metric-head, .daily-matrix tbody th { position: sticky; left: 0; z-index: 7; min-width: 170px; max-width: 170px; }
-.daily-matrix .date-head, .daily-matrix tbody td:first-of-type { position: sticky; left: 188px; z-index: 6; min-width: 138px; max-width: 138px; }
+.daily-matrix .date-head, .daily-matrix tbody td:first-of-type { position: sticky; left: 170px; z-index: 6; min-width: 138px; max-width: 138px; }
 .daily-matrix tbody th, .daily-matrix tbody td:first-of-type { background: #fff; font-weight: 400; }
 .daily-matrix .visitor-total th, .daily-matrix .visitor-total td { background: #d9e5f5; }
 .daily-matrix tbody .visitor-total td:first-of-type { background: #d9e5f5; }
