@@ -3,6 +3,7 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue"
 
 import { fetchRisks } from "../api";
 import { PRODUCT_IMAGE_SIZE, productThumbnailUrl } from "../productImages";
+import { formatChinaDateTime } from "../time";
 import type { AnomalyItem, RiskPayload } from "../types";
 
 const props = defineProps<{ asOf: string }>();
@@ -57,6 +58,20 @@ const selectedImageUrl = computed(() => {
     ? productThumbnailUrl(url, PRODUCT_IMAGE_SIZE.detail)
     : "";
 });
+const selectedEvidence = computed(() => buildAnomalyEvidence(selectedAnomaly.value));
+
+interface EvidenceMetric {
+  label: string;
+  value: string;
+  hint: string;
+  tone?: "trigger" | "threshold" | "context";
+}
+
+interface AnomalyEvidence {
+  title: string;
+  conclusion: string;
+  metrics: EvidenceMetric[];
+}
 
 watch(() => props.asOf, load, { immediate: true });
 watch(anomalyTypeOptions, (options) => {
@@ -127,6 +142,211 @@ function formatCurrency(value: number | null | undefined) {
         currency: "ZAR",
         maximumFractionDigits: 2,
       }).format(value);
+}
+
+function formatDecimal(value: number | null | undefined, suffix = "") {
+  return value === null || value === undefined
+    ? "—"
+    : `${new Intl.NumberFormat("zh-CN", { maximumFractionDigits: 2 }).format(value)}${suffix}`;
+}
+
+function signedDifference(value: number | null) {
+  if (value === null) return "—";
+  const prefix = value > 0 ? "+" : "";
+  return `${prefix}${formatDecimal(value, " 件/日")}`;
+}
+
+function numericDifference(left: number | undefined, right: number | undefined) {
+  return left === undefined || right === undefined ? null : left - right;
+}
+
+function buildAnomalyEvidence(item: AnomalyItem | null): AnomalyEvidence | null {
+  if (!item || item.anomaly_type === "non_buyable") return null;
+  const details = item.details ?? {};
+
+  if (item.anomaly_type === "sales_drop" || item.anomaly_type === "sales_spike") {
+    const shortDays = details.short_window_days ?? 3;
+    const longDays = details.long_window_days ?? 15;
+    const shortAverage = details.short_window_average_units;
+    const longAverage = details.long_window_average_units;
+    const comparison = item.anomaly_type === "sales_drop" ? "低于" : "高于";
+    return {
+      title: "销量趋势触发证据",
+      conclusion: `近${shortDays}日平均${comparison}近${longDays}日平均，因此触发“${item.anomaly_label}”。`,
+      metrics: [
+        {
+          label: `近${shortDays}日平均`,
+          value: formatDecimal(shortAverage, " 件/日"),
+          hint: "本次判定值",
+          tone: "trigger",
+        },
+        {
+          label: `近${longDays}日平均`,
+          value: formatDecimal(longAverage, " 件/日"),
+          hint: "长期对比基准",
+          tone: "threshold",
+        },
+        {
+          label: "两组均值差",
+          value: signedDifference(numericDifference(shortAverage, longAverage)),
+          hint: `近${shortDays}日减近${longDays}日`,
+          tone: "context",
+        },
+      ],
+    };
+  }
+
+  if (item.anomaly_type === "high_views_low_conversion") {
+    return {
+      title: "高浏览低转化触发证据",
+      conclusion: "浏览量达到高浏览边界，同时转化率低于低转化边界。",
+      metrics: [
+        {
+          label: "实际近30天浏览量",
+          value: formatNumber(details.page_views_30_days),
+          hint: "需大于或等于高浏览边界",
+          tone: "trigger",
+        },
+        {
+          label: "高浏览边界",
+          value: formatDecimal(details.high_views_threshold),
+          hint: "当日商品分布阈值",
+          tone: "threshold",
+        },
+        {
+          label: "实际近30天转化率",
+          value: formatPercent(details.conversion_percentage_30_days),
+          hint: "需低于低转化边界",
+          tone: "trigger",
+        },
+        {
+          label: "低转化边界",
+          value: formatPercent(details.low_conversion_threshold),
+          hint: "当日商品分布阈值",
+          tone: "threshold",
+        },
+      ],
+    };
+  }
+
+  if (item.anomaly_type === "low_views_high_conversion") {
+    return {
+      title: "低浏览高转化触发证据",
+      conclusion: "浏览量低于低浏览边界，同时转化率达到高转化边界。",
+      metrics: [
+        {
+          label: "实际近30天浏览量",
+          value: formatNumber(details.page_views_30_days),
+          hint: "需低于低浏览边界",
+          tone: "trigger",
+        },
+        {
+          label: "低浏览边界",
+          value: formatDecimal(details.low_views_threshold),
+          hint: "当日商品分布阈值",
+          tone: "threshold",
+        },
+        {
+          label: "实际近30天转化率",
+          value: formatPercent(details.conversion_percentage_30_days),
+          hint: "需大于或等于高转化边界",
+          tone: "trigger",
+        },
+        {
+          label: "高转化边界",
+          value: formatPercent(details.high_conversion_threshold),
+          hint: "当日商品分布阈值",
+          tone: "threshold",
+        },
+      ],
+    };
+  }
+
+  if (item.anomaly_type === "suspected_stockout") {
+    const statusLabels: Record<string, string> = {
+      buyable: "可购买",
+      not_buyable: "不可购买",
+      disabled_by_seller: "卖家已停用",
+      disabled_by_takealot: "平台已停用",
+    };
+    const rawStatus = details.offer_status ?? "";
+    const status = (statusLabels[rawStatus] ?? rawStatus) || "未知";
+    const statusHint =
+      rawStatus === "buyable"
+        ? "异常时仍处于可购买状态"
+        : (details.recent_7_day_units ?? 0) > 0
+          ? "本条由异常日前 7 日有下单触发"
+          : "异常发生时的平台状态";
+    return {
+      title: "疑似断货触发证据",
+      conclusion: "异常发生时平台可售库存为 0，且商品仍可购买或异常日前 7 日有下单。",
+      metrics: [
+        {
+          label: "异常时平台可售库存",
+          value: formatNumber(details.total_stock),
+          hint: "断货触发值为 0 件",
+          tone: "trigger",
+        },
+        {
+          label: "异常日前 7 日下单",
+          value: formatDecimal(details.recent_7_day_units, " 件"),
+          hint: "不包含异常发生日",
+          tone: "context",
+        },
+        {
+          label: "异常时商品状态",
+          value: status,
+          hint: statusHint,
+          tone: "context",
+        },
+      ],
+    };
+  }
+
+  if (item.anomaly_type === "stale_offer_snapshot") {
+    return {
+      title: "数据停止更新触发证据",
+      conclusion: "最近 Offer 快照距异常计算时间已超过允许的小时数。",
+      metrics: [
+        {
+          label: "最近 Offer 采集时间",
+          value: formatChinaDateTime(details.captured_at ?? null),
+          hint: "北京时间",
+          tone: "context",
+        },
+        {
+          label: "采集距今",
+          value: formatDecimal(details.stale_age_hours, " 小时"),
+          hint: "异常计算时的实际时长",
+          tone: "trigger",
+        },
+        {
+          label: "停止更新阈值",
+          value: formatDecimal(details.stale_hours_threshold, " 小时"),
+          hint: "超过此值即触发",
+          tone: "threshold",
+        },
+      ],
+    };
+  }
+
+  if (item.anomaly_type === "unknown_sale_status") {
+    const statuses = details.sale_statuses?.filter(Boolean) ?? [];
+    return {
+      title: "未知销售状态触发证据",
+      conclusion: "以下平台销售状态尚未配置计入或排除规则，需要先确认业务口径。",
+      metrics: [
+        {
+          label: "未配置的销售状态",
+          value: statuses.length ? statuses.join("、") : "—",
+          hint: `${statuses.length} 种状态`,
+          tone: "trigger",
+        },
+      ],
+    };
+  }
+
+  return null;
 }
 
 function firstListingLabel(item: AnomalyItem) {
@@ -380,6 +600,32 @@ async function load() {
                 <strong>{{ formatCurrency(selectedAnomaly.ordered_revenue) }}</strong>
                 <span>有效销售 {{ formatNumber(selectedAnomaly.effective_units) }} 件</span>
               </article>
+            </section>
+
+            <section
+              v-if="selectedEvidence"
+              class="risk-evidence-panel"
+              aria-labelledby="risk-evidence-title"
+            >
+              <div class="risk-evidence-heading">
+                <div>
+                  <p class="section-kicker">TRIGGER EVIDENCE</p>
+                  <h3 id="risk-evidence-title">{{ selectedEvidence.title }}</h3>
+                </div>
+                <span>异常发生时的判定数据</span>
+              </div>
+              <p class="risk-evidence-conclusion">{{ selectedEvidence.conclusion }}</p>
+              <div class="risk-evidence-metrics">
+                <article
+                  v-for="metric in selectedEvidence.metrics"
+                  :key="metric.label"
+                  :class="metric.tone || 'context'"
+                >
+                  <small>{{ metric.label }}</small>
+                  <strong>{{ metric.value }}</strong>
+                  <span>{{ metric.hint }}</span>
+                </article>
+              </div>
             </section>
 
             <div class="risk-modal-sections">

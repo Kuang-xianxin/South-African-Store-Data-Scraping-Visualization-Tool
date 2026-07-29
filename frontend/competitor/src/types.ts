@@ -246,6 +246,25 @@ export interface AnomalyItem {
   first_listed_source?: "platform" | "first_observed" | null;
   latest_restock_date?: string | null;
   latest_restock_increase?: number | null;
+  details?: {
+    short_window_days?: number;
+    long_window_days?: number;
+    short_window_average_units?: number;
+    long_window_average_units?: number;
+    page_views_30_days?: number;
+    high_views_threshold?: number;
+    low_views_threshold?: number;
+    conversion_percentage_30_days?: number;
+    low_conversion_threshold?: number;
+    high_conversion_threshold?: number;
+    total_stock?: number;
+    offer_status?: string | null;
+    recent_7_day_units?: number;
+    captured_at?: string;
+    stale_age_hours?: number;
+    stale_hours_threshold?: number;
+    sale_statuses?: string[];
+  } | null;
 }
 
 export interface QualityItem {

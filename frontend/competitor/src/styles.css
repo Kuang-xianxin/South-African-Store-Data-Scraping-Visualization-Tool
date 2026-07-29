@@ -3216,6 +3216,94 @@ button {
   font-size: 0.59rem;
 }
 
+.risk-evidence-panel {
+  padding: 17px;
+  border: 1px solid #e4aaa0;
+  border-radius: 14px;
+  background:
+    linear-gradient(135deg, rgba(255, 245, 241, 0.96), rgba(255, 251, 248, 0.98));
+}
+
+.risk-evidence-heading {
+  display: flex;
+  gap: 16px;
+  align-items: flex-start;
+  justify-content: space-between;
+}
+
+.risk-evidence-heading h3 {
+  margin: 0;
+  color: #6f2e24;
+  font-size: 0.88rem;
+}
+
+.risk-evidence-heading > span {
+  padding: 5px 8px;
+  border-radius: 999px;
+  background: #f6d9d2;
+  color: #8b3e31;
+  font-size: 0.57rem;
+  font-weight: 800;
+  white-space: nowrap;
+}
+
+.risk-evidence-conclusion {
+  margin: 10px 0 13px;
+  color: #71534d;
+  font-size: 0.68rem;
+  line-height: 1.6;
+}
+
+.risk-evidence-metrics {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 9px;
+}
+
+.risk-evidence-metrics article {
+  min-width: 0;
+  padding: 12px;
+  border: 1px solid #eadbd6;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.88);
+}
+
+.risk-evidence-metrics article.trigger {
+  border-color: #d98778;
+  box-shadow: inset 3px 0 0 #c44936;
+}
+
+.risk-evidence-metrics article.threshold {
+  border-color: #d8c6a0;
+  box-shadow: inset 3px 0 0 #aa7b20;
+}
+
+.risk-evidence-metrics small,
+.risk-evidence-metrics strong,
+.risk-evidence-metrics span {
+  display: block;
+}
+
+.risk-evidence-metrics small {
+  color: #756761;
+  font-size: 0.59rem;
+}
+
+.risk-evidence-metrics strong {
+  margin-top: 7px;
+  color: #4f2d27;
+  font-size: 0.9rem;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+.risk-evidence-metrics span {
+  margin-top: 5px;
+  color: #8a7c76;
+  font-size: 0.56rem;
+  line-height: 1.45;
+}
+
 .risk-modal-sections {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -3523,6 +3611,10 @@ button {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
+  .risk-evidence-metrics {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
   .risk-modal-sections {
     grid-template-columns: 1fr;
   }
@@ -3666,8 +3758,14 @@ button {
   }
 
   .risk-identity-grid,
-  .risk-modal-metrics {
+  .risk-modal-metrics,
+  .risk-evidence-metrics {
     grid-template-columns: 1fr;
+  }
+
+  .risk-evidence-heading {
+    align-items: flex-start;
+    flex-direction: column;
   }
 
   .risk-detail-panel dl > div {

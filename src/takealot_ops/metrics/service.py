@@ -400,7 +400,11 @@ class MetricService:
                             offer_id,
                             "suspected_stockout",
                             "Visible stock is zero while the offer is sellable or recently sold.",
-                            {"recent_7_day_units": recent_sales},
+                            {
+                                "total_stock": total_stock,
+                                "offer_status": offer_status,
+                                "recent_7_day_units": recent_sales,
+                            },
                             created_at,
                         )
                     )
@@ -430,14 +434,19 @@ class MetricService:
                 )
         for offer_id, current in current_by_offer.items():
             captured_at = _aware_utc(current.captured_at)
-            if created_at - captured_at > timedelta(hours=self._rules.stale_hours):
+            stale_age_hours = (created_at - captured_at).total_seconds() / 3600
+            if stale_age_hours > self._rules.stale_hours:
                 anomalies.append(
                     _anomaly(
                         end,
                         offer_id,
                         "stale_offer_snapshot",
                         "The latest offer snapshot is older than the configured threshold.",
-                        {"stale_hours_threshold": self._rules.stale_hours},
+                        {
+                            "captured_at": captured_at.isoformat(),
+                            "stale_age_hours": stale_age_hours,
+                            "stale_hours_threshold": self._rules.stale_hours,
+                        },
                         created_at,
                     )
                 )
@@ -613,7 +622,12 @@ def _append_traffic_anomalies(
                 offer_id,
                 "high_views_low_conversion",
                 "30-day views are high while conversion is below the lower quartile.",
-                {},
+                {
+                    "page_views_30_days": float(page_views),
+                    "high_views_threshold": high_views,
+                    "conversion_percentage_30_days": float(conversion),
+                    "low_conversion_threshold": low_conversion,
+                },
                 created_at,
             )
         )
@@ -629,7 +643,12 @@ def _append_traffic_anomalies(
                 offer_id,
                 "low_views_high_conversion",
                 "30-day views are low while conversion is in the upper quartile.",
-                {},
+                {
+                    "page_views_30_days": float(page_views),
+                    "low_views_threshold": low_views,
+                    "conversion_percentage_30_days": float(conversion),
+                    "high_conversion_threshold": high_conversion,
+                },
                 created_at,
             )
         )

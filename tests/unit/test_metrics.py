@@ -323,6 +323,10 @@ def test_unknown_status_is_excluded_from_effective_units_and_flagged(tmp_path: P
     assert dataset.quality_events["event_type"].tolist() == ["unknown_sale_status"]
     assert rebuilt.quality_events.iloc[0]["event_id"] == first_event_id
     assert "unknown_sale_status" in dataset.anomalies["anomaly_type"].tolist()
+    anomaly = dataset.anomalies.loc[
+        dataset.anomalies["anomaly_type"] == "unknown_sale_status"
+    ].iloc[0]
+    assert anomaly["details"]["sale_statuses"] == ["new-status"]
 
 
 def test_traffic_daily_average_is_page_views_divided_by_30(tmp_path: Path) -> None:
@@ -603,6 +607,37 @@ def test_anomaly_rules_cover_spike_traffic_stock_status_and_staleness(tmp_path: 
     assert ("stock-sold", "suspected_stockout") in pairs
     assert ("non-buyable", "non_buyable") in pairs
     assert ("stale", "stale_offer_snapshot") in pairs
+    details = {
+        (row.offer_id, row.anomaly_type): row.details
+        for row in anomalies.itertuples(index=False)
+    }
+    assert details[("high-low", "high_views_low_conversion")] == {
+        "page_views_30_days": 100,
+        "high_views_threshold": pytest.approx(20.0),
+        "conversion_percentage_30_days": pytest.approx(1.0),
+        "low_conversion_threshold": pytest.approx(3.0),
+    }
+    assert details[("low-high", "low_views_high_conversion")] == {
+        "page_views_30_days": 1,
+        "low_views_threshold": pytest.approx(10.5),
+        "conversion_percentage_30_days": pytest.approx(10.0),
+        "high_conversion_threshold": pytest.approx(7.5),
+    }
+    assert details[("stock-buyable", "suspected_stockout")] == {
+        "total_stock": 0,
+        "offer_status": "buyable",
+        "recent_7_day_units": 0,
+    }
+    assert details[("stock-sold", "suspected_stockout")] == {
+        "total_stock": 0,
+        "offer_status": "paused",
+        "recent_7_day_units": 1,
+    }
+    assert details[("stale", "stale_offer_snapshot")] == {
+        "captured_at": "2026-07-19T08:00:00+00:00",
+        "stale_age_hours": pytest.approx(28.0),
+        "stale_hours_threshold": 26,
+    }
 
 
 def test_dashboard_dataset_has_stable_product_schema_when_empty(tmp_path: Path) -> None:

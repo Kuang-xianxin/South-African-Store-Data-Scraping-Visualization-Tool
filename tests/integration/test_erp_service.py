@@ -130,6 +130,12 @@ def test_erp_risks_include_quadrant_and_extended_product_detail(
                 "anomaly_type": "sales_drop",
                 "severity": "critical",
                 "explanation": "当日下单件数低于历史基准。",
+                "details": {
+                    "short_window_days": 3,
+                    "long_window_days": 15,
+                    "short_window_average_units": 1.0,
+                    "long_window_average_units": 2.5,
+                },
             }
         ]
     )
@@ -155,3 +161,5 @@ def test_erp_risks_include_quadrant_and_extended_product_detail(
     assert anomaly["first_listed_at"] == "2026-01-15 12:34"
     assert anomaly["first_listed_source"] == "platform"
     assert anomaly["latest_restock_date"] is None
+    assert anomaly["details"]["short_window_average_units"] == 1.0
+    assert anomaly["details"]["long_window_average_units"] == 2.5
