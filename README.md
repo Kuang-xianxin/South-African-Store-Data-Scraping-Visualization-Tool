@@ -296,6 +296,31 @@ powershell -ExecutionPolicy Bypass -File .\scripts\install_scheduled_task.ps1 `
 
 本机备份可以防止误删、错误发布和数据库逻辑损坏，但无法防止整台电脑、同一块物理硬盘或勒索软件同时破坏数据库与 `backups\`。如果以后接入另一块本地物理硬盘，应把备份目录整体定期复制过去；当前方案按用户要求不做异地备份。
 
+### 8.1 D盘 binlog 连续归档
+
+所有备份产物统一保存在 `D:\南非店铺数据抓取\backups\`：完整备份位于根目录，binlog 原始归档、状态文件、校验文件和归档进程日志位于 `backups\binlog\`。MySQL 在 C 盘数据目录中的活动 binlog 是数据库运行源文件，不属于备份副本；程序通过本机 TCP 持续读取并把独立副本写到 D 盘，不会在 C 盘另外创建备份文件。
+
+首次配置需要在服务器电脑上运行一次：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\configure_binlog_backup.ps1
+```
+
+脚本会隐藏询问 MySQL 管理员密码，创建 `takealot_backup@localhost` 专用账号，随机生成独立密码并只写入 Git 忽略的 `.env`。该账号只获得读取业务库、取得完整备份坐标和连续读取 binlog 所需的权限；密码不进入命令行、日志或代码。随后优先安装两个 Windows 任务：
+
+- `Takealot MySQL Binlog Local Archive`：开机后持续运行 `mysqlbinlog --raw --stop-never`，断开后每分钟自动重启，从 D 盘已有的最新同名文件继续追赶；
+- `Takealot MySQL Binlog Local Archive Maintenance`：每天02:30校验已经关闭的 binlog，生成 SHA-256，并删除超过35天的归档。当前正在写入的文件不会被校验任务删除。
+
+如果当前 Windows 账号没有“任务计划程序”注册权限，安装脚本会自动降级为当前用户的登录启动项，并立即启动两个带互斥保护的隐藏守护循环：归档断开后每分钟重启，维护每天02:30执行。该模式不需要管理员权限，但电脑重启后必须至少登录一次 Windows，binlog 归档才会继续。
+
+检查状态：
+
+```powershell
+.\.venv\Scripts\python.exe -m takealot_ops.cli binlog-archive-status
+```
+
+归档目标是覆盖最近30天；实际保留35天，为完整备份轮换、任务短暂停止和恢复操作预留5天重叠。启用专用账号后，新生成的 `.sql.gz.json` 清单会同时记录一致性快照对应的 binlog 文件名和位置。时间点恢复顺序为：校验并导入最近完整备份到隔离恢复库 → 从清单记录的位置开始重放 D 盘 binlog → 在误操作前的目标时间停止 → 核对表数、行数和关键业务数据。只有完成隔离库导入与重放演练后，才能称为时间点恢复已经验证。
+
 ## 9. 流量指标口径
 
 `page_views_30_days` 只能称为“近30天浏览量”；不得将其或每日快照差值标注为精确日流量或访客数。

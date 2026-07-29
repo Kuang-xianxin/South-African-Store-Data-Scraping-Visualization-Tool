@@ -6,6 +6,7 @@ import gzip
 import hashlib
 import json
 import os
+import re
 import shutil
 import sqlite3
 import subprocess
@@ -65,6 +66,11 @@ class BackupVerificationResult:
 
 
 LOCAL_BACKUP_RETENTION = LocalBackupRetention()
+_BINLOG_COORDINATES_PATTERN = re.compile(
+    rb"-- CHANGE (?:MASTER|REPLICATION SOURCE) TO .*?"
+    rb"(?:MASTER|SOURCE)_LOG_FILE='([^']+)'.*?"
+    rb"(?:MASTER|SOURCE)_LOG_POS=(\d+);"
+)
 
 
 @dataclass(frozen=True)
@@ -234,7 +240,7 @@ def backup_database(
     source_path = _sqlite_database_path(settings)
     if not source_path.is_file():
         raise FileNotFoundError(f"database does not exist: {source_path}")
-    backup_dir = settings.project_root / "backups"
+    backup_dir = _backup_root(settings)
     backup_dir.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S-%f")
     destination = backup_dir / f"takealot-{timestamp}.db"
@@ -269,11 +275,12 @@ def _backup_mysql_database(
     settings: LocalDatabaseSettings,
     keep: int | None,
 ) -> Path:
-    url = make_url(settings.database_url)
+    dedicated_url = getattr(settings, "backup_database_url", None)
+    url = make_url(dedicated_url or settings.database_url)
     if not url.database or not url.username:
         raise ValueError("MySQL backup requires a database and username")
     executable = _find_mysql_program("mysqldump.exe")
-    backup_dir = settings.project_root / "backups"
+    backup_dir = _backup_root(settings)
     backup_dir.mkdir(parents=True, exist_ok=True)
     created_at = datetime.now(UTC)
     timestamp = created_at.strftime("%Y%m%d-%H%M%S-%f")
@@ -295,6 +302,8 @@ def _backup_mysql_database(
         "--default-character-set=utf8mb4",
         url.database,
     ]
+    if dedicated_url:
+        command.insert(-1, "--source-data=2")
     environment = os.environ.copy()
     if url.password is not None:
         environment["MYSQL_PWD"] = url.password
@@ -311,6 +320,9 @@ def _backup_mysql_database(
         if completed.returncode != 0:
             raise RuntimeError("MySQL backup failed")
         _validate_mysql_dump(raw_dump)
+        binlog_coordinates = (
+            _mysql_dump_binlog_coordinates(raw_dump) if dedicated_url else None
+        )
         with raw_dump.open("rb") as source, gzip.open(
             archive_part,
             "wb",
@@ -336,6 +348,11 @@ def _backup_mysql_database(
                 "monthly_days": LOCAL_BACKUP_RETENTION.monthly_days,
             },
         }
+        if binlog_coordinates is not None:
+            manifest["binlog"] = {
+                "file": binlog_coordinates[0],
+                "position": binlog_coordinates[1],
+            }
         manifest_path.write_text(
             json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
             encoding="utf-8",
@@ -440,6 +457,15 @@ def _validate_mysql_dump_markers(head: bytes, tail: bytes) -> None:
         raise RuntimeError("MySQL backup completion marker is missing")
 
 
+def _mysql_dump_binlog_coordinates(path: Path) -> tuple[str, int]:
+    with path.open("rb") as source:
+        for line in source:
+            match = _BINLOG_COORDINATES_PATTERN.search(line)
+            if match is not None:
+                return match.group(1).decode("ascii"), int(match.group(2))
+    raise RuntimeError("MySQL backup binlog coordinates are missing")
+
+
 def _sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as source:
@@ -490,6 +516,11 @@ def _remove_backup_group(archive: Path) -> None:
     archive.unlink(missing_ok=True)
     Path(f"{archive}.json").unlink(missing_ok=True)
     Path(f"{archive}.sha256").unlink(missing_ok=True)
+
+
+def _backup_root(settings: LocalDatabaseSettings) -> Path:
+    configured = getattr(settings, "backup_root", None)
+    return Path(configured) if configured is not None else settings.project_root / "backups"
 
 
 def _verify_mysql_integrity(settings: LocalDatabaseSettings) -> None:

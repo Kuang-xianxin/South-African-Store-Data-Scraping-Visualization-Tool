@@ -16,6 +16,14 @@ from typing import Sequence
 from sqlalchemy.orm import Session
 
 from takealot_ops.api.client import TakealotClient
+from takealot_ops.binlog_archive import (
+    BinlogArchiveSettings,
+    build_binlog_archive_plan,
+    inspect_binlog_archive,
+    list_remote_binlogs,
+    maintain_binlog_archive,
+    run_continuous_binlog_archive,
+)
 from takealot_ops.collectors import collect_offers, collect_sales
 from takealot_ops.competitors.service import CompetitorCollector, parse_competitor_urls
 from takealot_ops.dashboard.launcher import launch_dashboard, launch_legacy_dashboard
@@ -84,6 +92,23 @@ def build_parser() -> argparse.ArgumentParser:
         help="校验本地 .sql.gz 备份、清单和 SHA-256",
     )
     backup_verify.add_argument("archive", type=Path, help="备份压缩包路径")
+    commands.add_parser(
+        "binlog-archive",
+        help="连续把 MySQL binlog 归档到 D 盘备份目录",
+    )
+    commands.add_parser(
+        "binlog-archive-maintain",
+        help="校验并清理 D 盘上的历史 binlog 归档",
+    )
+    binlog_status = commands.add_parser(
+        "binlog-archive-status",
+        help="检查 binlog 归档权限、文件覆盖和同步差距",
+    )
+    binlog_status.add_argument(
+        "--preflight",
+        action="store_true",
+        help="只验证配置、权限和起始文件，不要求归档已经运行",
+    )
     daily_report_run = commands.add_parser(
         "daily-report-run",
         help="执行完整采集并冻结运营日报早间、晚间或周期末版本",
@@ -160,6 +185,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             exit_code = _backup_local_command(project_root)
         elif args.command == "backup-verify":
             exit_code = _backup_verify_command(project_root, args.archive)
+        elif args.command == "binlog-archive":
+            exit_code = _binlog_archive_command(project_root)
+        elif args.command == "binlog-archive-maintain":
+            exit_code = _binlog_archive_maintain_command(project_root)
+        elif args.command == "binlog-archive-status":
+            exit_code = _binlog_archive_status_command(project_root, args.preflight)
         elif args.command == "daily-report-run":
             exit_code = _daily_report_run_command(project_root, args.slot)
         elif args.command == "daily-report-capture":
@@ -291,6 +322,47 @@ def _print_backup_verification(result: BackupVerificationResult) -> None:
         f"校验通过：SHA-256 {result.sha256}；"
         f"原始 {result.raw_bytes} 字节，压缩后 {result.compressed_bytes} 字节。"
     )
+
+
+def _binlog_archive_command(project_root: Path) -> int:
+    settings = BinlogArchiveSettings.from_settings(Settings.from_env(project_root))
+    return run_continuous_binlog_archive(settings)
+
+
+def _binlog_archive_maintain_command(project_root: Path) -> int:
+    settings = BinlogArchiveSettings.from_settings(Settings.from_env(project_root))
+    result = maintain_binlog_archive(settings)
+    print(
+        f"binlog维护完成：校验 {result['verified']} 份，"
+        f"删除过期 {result['deleted']} 份；目录：{settings.archive_dir}"
+    )
+    return 0
+
+
+def _binlog_archive_status_command(project_root: Path, preflight: bool) -> int:
+    settings = BinlogArchiveSettings.from_settings(Settings.from_env(project_root))
+    if preflight:
+        remote_logs = list_remote_binlogs(settings)
+        plan = build_binlog_archive_plan(settings, remote_logs)
+        print(
+            f"binlog归档预检通过：远端 {len(remote_logs)} 份，"
+            f"从 {plan.start_file} 开始；目录：{settings.archive_dir}"
+        )
+        return 0
+    status = inspect_binlog_archive(settings)
+    print(
+        f"binlog归档：{'正常' if status.healthy else '未就绪'}；"
+        f"文件 {status.archive_files} 份，"
+        f"占用 {status.archive_bytes} 字节，"
+        f"当前差距 {status.lag_bytes if status.lag_bytes is not None else '未知'} 字节；"
+        f"目录：{status.archive_dir}"
+    )
+    if status.missing_remote_files:
+        print(
+            f"尚缺远端文件：{len(status.missing_remote_files)} 份",
+            file=sys.stderr,
+        )
+    return 0 if status.healthy else EXIT_OPERATION
 
 
 def _daily_report_run_command(project_root: Path, slot: str) -> int:

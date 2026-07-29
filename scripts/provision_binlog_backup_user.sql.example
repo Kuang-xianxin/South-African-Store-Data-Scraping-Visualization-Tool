@@ -1,0 +1,16 @@
+-- Run this once in MySQL Workbench as a MySQL administrator.
+-- Replace CHANGE_ME_WITH_A_LONG_RANDOM_PASSWORD before execution.
+-- Keep the real password only in the Git-ignored project .env file.
+
+CREATE USER 'takealot_backup'@'localhost'
+IDENTIFIED BY 'CHANGE_ME_WITH_A_LONG_RANDOM_PASSWORD';
+
+GRANT SELECT, SHOW VIEW, TRIGGER
+ON `takealot_ops`.*
+TO 'takealot_backup'@'localhost';
+
+GRANT RELOAD, REPLICATION CLIENT, REPLICATION SLAVE
+ON *.*
+TO 'takealot_backup'@'localhost';
+
+SHOW GRANTS FOR 'takealot_backup'@'localhost';

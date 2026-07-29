@@ -33,6 +33,8 @@ class Settings:
     request_timeout_seconds: float
     dashboard_host: str
     dashboard_port: int
+    backup_root: Path | None = None
+    backup_database_url: str | None = None
 
     @classmethod
     def from_env(cls, project_root: Path) -> Settings:
@@ -47,6 +49,16 @@ class Settings:
             os.environ.get("TAKEALOT_DATABASE_URL", DEFAULT_DATABASE_URL), resolved_root
         )
         _validate_database_url(database_url)
+        primary_backend = make_url(database_url).get_backend_name()
+        backup_database_url = (
+            os.environ.get("TAKEALOT_BACKUP_DATABASE_URL", "").strip()
+            if primary_backend == "mysql"
+            else ""
+        )
+        if backup_database_url:
+            _validate_database_url(backup_database_url)
+            if make_url(backup_database_url).database != make_url(database_url).database:
+                raise SettingsError("备份账号必须指向与正式库相同的 MySQL 数据库")
         return cls(
             project_root=resolved_root,
             api_key=api_key,
@@ -57,6 +69,8 @@ class Settings:
             ),
             dashboard_host=os.environ.get("TAKEALOT_DASHBOARD_HOST", DEFAULT_DASHBOARD_HOST),
             dashboard_port=int(os.environ.get("TAKEALOT_DASHBOARD_PORT", DEFAULT_DASHBOARD_PORT)),
+            backup_root=_backup_root_from_env(resolved_root),
+            backup_database_url=backup_database_url or None,
         )
 
 
@@ -102,6 +116,14 @@ def _dashboard_port_from_env() -> int:
     if not 1 <= port <= 65535:
         raise SettingsError("看板端口必须是1到65535之间的整数")
     return port
+
+
+def _backup_root_from_env(project_root: Path) -> Path:
+    raw_path = os.environ.get("TAKEALOT_BACKUP_ROOT", "").strip()
+    path = Path(raw_path) if raw_path else project_root / "backups"
+    if not path.is_absolute():
+        path = project_root / path
+    return path.resolve()
 
 
 def _validate_database_url(database_url: str) -> None:

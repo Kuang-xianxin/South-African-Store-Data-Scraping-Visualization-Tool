@@ -34,6 +34,8 @@ def test_settings_uses_mysql_defaults(
         "TAKEALOT_REQUEST_TIMEOUT_SECONDS",
         "TAKEALOT_DASHBOARD_HOST",
         "TAKEALOT_DASHBOARD_PORT",
+        "TAKEALOT_BACKUP_ROOT",
+        "TAKEALOT_BACKUP_DATABASE_URL",
     ):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("TAKEALOT_API_KEY", "test-api-key")
@@ -50,6 +52,25 @@ def test_settings_uses_mysql_defaults(
     assert settings.request_timeout_seconds == 30.0
     assert settings.dashboard_host == "0.0.0.0"
     assert settings.dashboard_port == 8501
+    assert settings.backup_root == tmp_path / "backups"
+    assert settings.backup_database_url is None
+
+
+def test_settings_loads_dedicated_backup_location_and_account(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("TAKEALOT_API_KEY", "test-api-key")
+    monkeypatch.setenv("TAKEALOT_BACKUP_ROOT", "D:/takealot-backups")
+    monkeypatch.setenv(
+        "TAKEALOT_BACKUP_DATABASE_URL",
+        "mysql+pymysql://takealot_backup:secret@127.0.0.1:3306/"
+        "takealot_ops?charset=utf8mb4",
+    )
+
+    settings = Settings.from_env(tmp_path)
+
+    assert settings.backup_root == Path("D:/takealot-backups")
+    assert settings.backup_database_url is not None
 
 
 def test_settings_retains_relative_sqlite_resolution_for_migration_tests(
