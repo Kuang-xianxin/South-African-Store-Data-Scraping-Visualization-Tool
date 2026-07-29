@@ -53,6 +53,11 @@ class CompetitorPageValidationError(RuntimeError):
 ProductPageState = Literal["product", "not-found", "uncertain"]
 
 
+def _is_retryable_takealot_status(status: int) -> bool:
+    """Classify temporary edge/network responses that may recover with the VPN."""
+    return status in {403, 429} or status >= 500
+
+
 def extract_plid(value: str) -> str:
     """Extract the numeric PLID from a Takealot product URL."""
     match = PLID_PATTERN.search(value)
@@ -377,7 +382,7 @@ class CompetitorPublicClient:
             raise CompetitorNetworkError(
                 "Takealot 商品页暂时无法访问；本次按网络问题保留重试"
             ) from exc
-        if response is None or response.status == 429 or response.status >= 500:
+        if response is None or _is_retryable_takealot_status(response.status):
             raise CompetitorNetworkError(
                 "Takealot 商品页暂时无法访问；本次按网络问题保留重试"
             )
@@ -430,7 +435,7 @@ class CompetitorPublicClient:
                         raise CompetitorNotFoundError(
                             "Takealot 商品数据返回 404"
                         )
-                    retryable = status == 429 or status >= 500
+                    retryable = _is_retryable_takealot_status(status)
                     if not retryable or attempt == retries:
                         error_type = CompetitorNetworkError if retryable else RuntimeError
                         raise error_type(f"Takealot API returned {status}")

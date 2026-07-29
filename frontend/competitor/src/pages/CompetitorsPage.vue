@@ -921,9 +921,38 @@ async function resumeCollection(
   }
   batchUrls.value = urls;
   if (!batchId.value) batchId.value = collectionId("batch");
+  if (
+    mode === "auto_resume"
+    && sharedBatchMatchesCheckpoint.value
+    && typeof sharedBatchStatus.value.current_index === "number"
+    && typeof sharedBatchStatus.value.current_request_id === "string"
+  ) {
+    activeIndex.value = sharedBatchStatus.value.current_index;
+    activeRequestId.value = sharedBatchStatus.value.current_request_id;
+  }
+  const queue = [...resumeQueue.value];
+  if (
+    mode === "auto_resume"
+    && activeIndex.value !== null
+    && activeRequestId.value
+  ) {
+    const interruptedQueueIndex = queue.findIndex(
+      (item) => item.index === activeIndex.value,
+    );
+    if (interruptedQueueIndex > 0) {
+      const [interruptedItem] = queue.splice(interruptedQueueIndex, 1);
+      if (interruptedItem) queue.unshift(interruptedItem);
+    } else if (interruptedQueueIndex < 0) {
+      const interruptedUrl = batchUrls.value[activeIndex.value];
+      if (interruptedUrl) {
+        queue.unshift({ index: activeIndex.value, url: interruptedUrl });
+      }
+    }
+  }
   collectionStopReason.value = "";
   manualStopRequested.value = false;
-  await runCollection(resumeQueue.value, mode);
+  persistCollectionCheckpoint();
+  await runCollection(queue, mode);
 }
 
 async function resumeInterruptedCollection() {

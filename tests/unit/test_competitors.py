@@ -144,6 +144,63 @@ async def test_public_client_keeps_api_404_separate_from_network_failure() -> No
     page.goto.assert_awaited_once()
 
 
+async def test_public_client_retries_api_403_and_recovers() -> None:
+    blocked = MagicMock()
+    blocked.status = 403
+    recovered = MagicMock()
+    recovered.status = 200
+    recovered.json = AsyncMock(return_value={"core": {"title": "Recovered"}})
+    page = MagicMock()
+    page.goto = AsyncMock(side_effect=[blocked, recovered])
+    client = CompetitorPublicClient()
+    client._page = page
+
+    with patch.object(client, "_human_delay", AsyncMock()) as delay:
+        payload = await client._get_json(
+            "https://api.takealot.com/rest/v-1-10-0/product-details/PLID123",
+        )
+
+    assert payload == {"core": {"title": "Recovered"}}
+    assert page.goto.await_count == 2
+    delay.assert_awaited_once()
+
+
+async def test_public_client_marks_persistent_api_403_as_network_failure() -> None:
+    blocked = MagicMock()
+    blocked.status = 403
+    page = MagicMock()
+    page.goto = AsyncMock(return_value=blocked)
+    client = CompetitorPublicClient()
+    client._page = page
+
+    with (
+        patch.object(client, "_human_delay", AsyncMock()),
+        pytest.raises(CompetitorNetworkError, match="403"),
+    ):
+        await client._get_json(
+            "https://api.takealot.com/rest/v-1-10-0/product-details/PLID123",
+            retries=1,
+        )
+
+    assert page.goto.await_count == 2
+
+
+async def test_public_client_marks_product_page_403_as_network_failure() -> None:
+    blocked = MagicMock()
+    blocked.status = 403
+    page = MagicMock()
+    page.goto = AsyncMock(return_value=blocked)
+    client = CompetitorPublicClient()
+    client._page = page
+
+    with pytest.raises(CompetitorNetworkError, match="网络问题"):
+        await client._product_page_state(  # type: ignore[attr-defined]
+            "https://www.takealot.com/example/PLID123"
+        )
+
+    page.goto.assert_awaited_once()
+
+
 async def test_public_client_cross_checks_target_against_known_good_page() -> None:
     client = CompetitorPublicClient()
     client._product_page_state = AsyncMock(  # type: ignore[method-assign]
