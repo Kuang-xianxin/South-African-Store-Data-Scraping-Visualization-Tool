@@ -267,6 +267,18 @@ const confirmedInvalidCount = computed(
   () =>
     linkHealth.value.filter((item) => item.status === "confirmed_invalid").length,
 );
+const retainedConfirmedInvalidCount = computed(() => {
+  const confirmedPlids = new Set(
+    linkHealth.value
+      .filter((item) => item.status === "confirmed_invalid")
+      .map((item) => item.plid),
+  );
+  for (const index of terminalIndexes.value) {
+    const plid = plidFromUrl(batchUrls.value[index] ?? "");
+    if (plid) confirmedPlids.add(plid);
+  }
+  return Math.max(confirmedPlids.size, sharedBatchStatus.value.terminal);
+});
 const suspectedInvalidCount = computed(
   () =>
     linkHealth.value.filter((item) => item.status === "suspected_invalid").length,
@@ -1186,7 +1198,7 @@ async function runCollection(
       await recordBatchEvent(
         "completed",
         pendingResumeCount.value
-          ? `本轮结束，仍有 ${pendingResumeCount.value} 个失败或未完成链接`
+          ? `本轮结束，仍有 ${pendingResumeCount.value} 个待重试或未完成链接`
           : "本批全部链接已检查",
       );
     }
@@ -1262,7 +1274,8 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
           <span>
             已检查 {{ sharedBatchStatus.completed }}/{{ sharedBatchStatus.total }}
             · 成功 {{ sharedBatchStatus.succeeded }}
-            · 失败 {{ sharedBatchStatus.failed }}
+            · 待重试 {{ sharedBatchStatus.failed }}
+            · 确认失效 {{ retainedConfirmedInvalidCount }}
             · 待续爬 {{ sharedBatchStatus.pending }}
           </span>
         </div>
@@ -1396,11 +1409,11 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
         <span v-if="collectionResults.length" class="result-good">
           成功 {{ collectionResults.length }} 个
         </span>
-        <span v-if="collectionErrors.length" class="result-bad">
-          失败 {{ collectionErrors.length }} 个
+        <span v-if="failedIndexes.length" class="result-bad">
+          待重试 {{ failedIndexes.length }} 个
         </span>
-        <span v-if="terminalIndexes.length" class="result-terminal">
-          已确认失效 {{ terminalIndexes.length }} 个，本批后续自动跳过
+        <span v-if="retainedConfirmedInvalidCount" class="result-terminal">
+          确认失效 {{ retainedConfirmedInvalidCount }} 个，长期保留
         </span>
         <span v-if="batchUrls.length">
           本批已检查 {{ completed }}/{{ total }}，待续爬 {{ pendingResumeCount }} 个
