@@ -317,6 +317,19 @@ powershell -ExecutionPolicy Bypass -File .\scripts\install_scheduled_task.ps1 `
 
 每次会同时生成 `.核对报告.txt`（供运营查看）和 `.核对报告.json`（供程序审计）。
 
+## 12. AI 代码图谱
+
+项目已使用 CodeGraph 建立本地代码图谱，并为 Codex 配置 MCP。后续 AI 可先查询函数调用、FastAPI 路由、Vue/TypeScript 组件关系、改动影响和相关测试，再进入精确文件阅读。
+
+```powershell
+codegraph status
+codegraph explore "fetchDailyReport /api/erp/daily-report daily_report_payload"
+codegraph impact confirm_entry
+git diff --name-only | codegraph affected --stdin
+```
+
+索引位于 `.codegraph/`，数据库和运行日志不会提交；`codegraph.json` 排除了可重建的 `frontend/competitor/dist/` 构建产物。完整的 AI 使用顺序、核心链路查询和验证边界见 `docs\CODEGRAPH_AI_GUIDE.md`。如果当前 Codex 会话尚未显示 CodeGraph 工具，重启 Codex 后生效。
+
 ## 常用命令
 
 ```powershell
