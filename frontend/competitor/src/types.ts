@@ -282,6 +282,16 @@ export interface AnomalyItem {
     stale_age_hours?: number;
     stale_hours_threshold?: number;
     sale_statuses?: string[];
+    sales_daily_series?: Array<{
+      date: string;
+      ordered_units: number | null;
+    }>;
+    sales_series_covered_days?: number;
+    sales_window_days?: number;
+    sales_window_total_units?: number | null;
+    sales_window_start?: string | null;
+    sales_window_end?: string | null;
+    sales_window_complete?: boolean;
   } | null;
 }
 

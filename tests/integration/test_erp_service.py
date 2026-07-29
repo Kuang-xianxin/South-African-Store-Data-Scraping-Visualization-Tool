@@ -163,3 +163,47 @@ def test_erp_risks_include_quadrant_and_extended_product_detail(
     assert anomaly["latest_restock_date"] is None
     assert anomaly["details"]["short_window_average_units"] == 1.0
     assert anomaly["details"]["long_window_average_units"] == 2.5
+    assert anomaly["details"]["sales_series_covered_days"] == 15
+    assert len(anomaly["details"]["sales_daily_series"]) == 15
+    assert anomaly["details"]["sales_daily_series"][0] == {
+        "date": "2026-07-06",
+        "ordered_units": 0,
+    }
+    assert anomaly["details"]["sales_daily_series"][-2:] == [
+        {"date": "2026-07-19", "ordered_units": 3},
+        {"date": "2026-07-20", "ordered_units": 5},
+    ]
+
+
+def test_erp_risk_traffic_evidence_uses_recorded_sales_days_only(
+    dashboard_dataset: DashboardDataset,
+) -> None:
+    anomalies = pd.DataFrame(
+        [
+            {
+                "event_date": date(2026, 7, 20),
+                "offer_id": "offer-a",
+                "anomaly_type": "high_views_low_conversion",
+                "severity": "warning",
+                "explanation": "流量高但转化率低。",
+                "details": {
+                    "page_views_30_days": 960,
+                    "high_views_threshold": 800,
+                    "conversion_percentage_30_days": 4.0,
+                    "low_conversion_threshold": 5.0,
+                },
+            }
+        ]
+    )
+
+    payload = build_risk_payload(
+        replace(dashboard_dataset, anomalies=anomalies),
+        AS_OF,
+    )
+
+    details = payload["latest_anomalies"][0]["details"]
+    assert details["sales_window_days"] == 2
+    assert details["sales_window_total_units"] == 8
+    assert details["sales_window_start"] == "2026-07-19"
+    assert details["sales_window_end"] == "2026-07-20"
+    assert details["sales_window_complete"] is False

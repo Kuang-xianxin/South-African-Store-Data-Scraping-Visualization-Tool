@@ -59,6 +59,12 @@ const selectedImageUrl = computed(() => {
     : "";
 });
 const selectedEvidence = computed(() => buildAnomalyEvidence(selectedAnomaly.value));
+const selectedSalesChartMaximum = computed(() => {
+  const values = selectedEvidence.value?.salesSeries
+    ?.map((point) => point.ordered_units)
+    .filter((value): value is number => value !== null);
+  return Math.max(1, ...(values ?? [0]));
+});
 
 interface EvidenceMetric {
   label: string;
@@ -71,6 +77,11 @@ interface AnomalyEvidence {
   title: string;
   conclusion: string;
   metrics: EvidenceMetric[];
+  salesSeries?: Array<{
+    date: string;
+    ordered_units: number | null;
+  }>;
+  salesSeriesCoveredDays?: number;
 }
 
 watch(() => props.asOf, load, { immediate: true });
@@ -160,6 +171,34 @@ function numericDifference(left: number | undefined, right: number | undefined) 
   return left === undefined || right === undefined ? null : left - right;
 }
 
+function shortDate(value: string) {
+  return value.length >= 10 ? value.slice(5) : value;
+}
+
+function salesBarHeight(value: number | null) {
+  if (value === null) return "0%";
+  return `${(Math.max(0, value) / selectedSalesChartMaximum.value) * 100}%`;
+}
+
+function trafficSalesMetric(details: NonNullable<AnomalyItem["details"]>): EvidenceMetric {
+  const days = details.sales_window_days ?? 0;
+  const complete = details.sales_window_complete === true && days === 30;
+  const dateRange =
+    details.sales_window_start && details.sales_window_end
+      ? `${details.sales_window_start} 至 ${details.sales_window_end}`
+      : "暂无可汇总的逐日销量";
+  return {
+    label: complete ? "近30天销量" : `当前记录${days}天销量`,
+    value:
+      details.sales_window_total_units === null ||
+      details.sales_window_total_units === undefined
+        ? "—"
+        : formatDecimal(details.sales_window_total_units, " 件"),
+    hint: complete ? "截至异常发生日的30个自然日" : `暂未覆盖30天；${dateRange}`,
+    tone: "context",
+  };
+}
+
 function buildAnomalyEvidence(item: AnomalyItem | null): AnomalyEvidence | null {
   if (!item || item.anomaly_type === "non_buyable") return null;
   const details = item.details ?? {};
@@ -173,6 +212,8 @@ function buildAnomalyEvidence(item: AnomalyItem | null): AnomalyEvidence | null 
     return {
       title: "销量趋势触发证据",
       conclusion: `近${shortDays}日平均${comparison}近${longDays}日平均，因此触发“${item.anomaly_label}”。`,
+      salesSeries: details.sales_daily_series ?? [],
+      salesSeriesCoveredDays: details.sales_series_covered_days ?? 0,
       metrics: [
         {
           label: `近${shortDays}日平均`,
@@ -207,17 +248,18 @@ function buildAnomalyEvidence(item: AnomalyItem | null): AnomalyEvidence | null 
           hint: "需大于或等于高浏览边界",
           tone: "trigger",
         },
-        {
-          label: "高浏览边界",
-          value: formatDecimal(details.high_views_threshold),
-          hint: "当日商品分布阈值",
-          tone: "threshold",
-        },
+        trafficSalesMetric(details),
         {
           label: "实际近30天转化率",
           value: formatPercent(details.conversion_percentage_30_days),
           hint: "需低于低转化边界",
           tone: "trigger",
+        },
+        {
+          label: "高浏览边界",
+          value: formatDecimal(details.high_views_threshold),
+          hint: "当日商品分布阈值",
+          tone: "threshold",
         },
         {
           label: "低转化边界",
@@ -240,17 +282,18 @@ function buildAnomalyEvidence(item: AnomalyItem | null): AnomalyEvidence | null 
           hint: "需低于低浏览边界",
           tone: "trigger",
         },
-        {
-          label: "低浏览边界",
-          value: formatDecimal(details.low_views_threshold),
-          hint: "当日商品分布阈值",
-          tone: "threshold",
-        },
+        trafficSalesMetric(details),
         {
           label: "实际近30天转化率",
           value: formatPercent(details.conversion_percentage_30_days),
           hint: "需大于或等于高转化边界",
           tone: "trigger",
+        },
+        {
+          label: "低浏览边界",
+          value: formatDecimal(details.low_views_threshold),
+          hint: "当日商品分布阈值",
+          tone: "threshold",
         },
         {
           label: "高转化边界",
@@ -615,6 +658,40 @@ async function load() {
                 <span>异常发生时的判定数据</span>
               </div>
               <p class="risk-evidence-conclusion">{{ selectedEvidence.conclusion }}</p>
+              <div
+                v-if="selectedEvidence.salesSeries?.length"
+                class="risk-sales-chart"
+                role="img"
+                :aria-label="`异常发生日前15天每日销量柱状图，已记录 ${selectedEvidence.salesSeriesCoveredDays ?? 0} 天`"
+              >
+                <div class="risk-sales-chart-summary">
+                  <strong>15天每日销量</strong>
+                  <span>
+                    已记录 {{ selectedEvidence.salesSeriesCoveredDays ?? 0 }} / 15 天；
+                    柱顶为当天销量件数
+                  </span>
+                </div>
+                <div class="risk-sales-bars">
+                  <div
+                    v-for="point in selectedEvidence.salesSeries"
+                    :key="point.date"
+                    class="risk-sales-bar-column"
+                    :title="`${point.date}：${point.ordered_units == null ? '缺少记录' : `${point.ordered_units} 件`}`"
+                  >
+                    <span>{{ point.ordered_units ?? "缺" }}</span>
+                    <div class="risk-sales-bar-track">
+                      <i
+                        :class="{
+                          zero: point.ordered_units === 0,
+                          missing: point.ordered_units === null,
+                        }"
+                        :style="{ height: salesBarHeight(point.ordered_units) }"
+                      ></i>
+                    </div>
+                    <small>{{ shortDate(point.date) }}</small>
+                  </div>
+                </div>
+              </div>
               <div class="risk-evidence-metrics">
                 <article
                   v-for="metric in selectedEvidence.metrics"

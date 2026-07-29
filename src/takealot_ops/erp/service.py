@@ -241,6 +241,11 @@ def build_risk_payload(dataset: DashboardDataset, as_of: date) -> dict[str, Any]
     """Return localized anomaly and quality-event records."""
     anomalies = filter_as_of(dataset.anomalies, as_of, "event_date").copy()
     quality = filter_as_of(dataset.quality_events, as_of, "event_date").copy()
+    anomalies = _enrich_anomaly_sales_evidence(
+        anomalies,
+        dataset.product_daily,
+        as_of,
+    )
     latest_source = DashboardDataset(
         store_daily=dataset.store_daily,
         product_daily=filter_as_of(dataset.product_daily, as_of, "metric_date"),
@@ -302,6 +307,119 @@ def build_risk_payload(dataset: DashboardDataset, as_of: date) -> dict[str, Any]
             ),
         },
     }
+
+
+def _enrich_anomaly_sales_evidence(
+    anomalies: pd.DataFrame,
+    product_daily: pd.DataFrame,
+    as_of: date,
+) -> pd.DataFrame:
+    """Attach event-date sales history without substituting current product data."""
+    required = {"metric_date", "offer_id", "ordered_units"}
+    if (
+        anomalies.empty
+        or "details" not in anomalies.columns
+        or product_daily.empty
+        or not required.issubset(product_daily.columns)
+    ):
+        return anomalies
+
+    history = filter_as_of(product_daily, as_of, "metric_date").loc[
+        :, ["metric_date", "offer_id", "ordered_units"]
+    ].copy()
+    history["metric_day"] = pd.to_datetime(
+        history["metric_date"], errors="coerce"
+    ).dt.date
+    history["daily_units"] = pd.to_numeric(
+        history["ordered_units"], errors="coerce"
+    )
+    history = history.loc[
+        history["offer_id"].notna()
+        & history["metric_day"].notna()
+        & history["daily_units"].notna()
+    ].copy()
+    history = history.sort_values(["offer_id", "metric_day"]).drop_duplicates(
+        ["offer_id", "metric_day"],
+        keep="last",
+    )
+    sales_by_day: dict[tuple[str, date], int] = {}
+    for record in history.to_dict(orient="records"):
+        metric_day = record.get("metric_day")
+        if not isinstance(metric_day, date):
+            continue
+        sales_by_day[(str(record.get("offer_id") or ""), metric_day)] = int(
+            float(str(record.get("daily_units")))
+        )
+
+    def enrich(row: dict[str, Any]) -> object:
+        existing = row.get("details")
+        details = dict(existing) if isinstance(existing, dict) else {}
+        anomaly_type = str(row.get("anomaly_type") or "")
+        if anomaly_type not in {
+            "sales_drop",
+            "sales_spike",
+            "high_views_low_conversion",
+            "low_views_high_conversion",
+        }:
+            return existing
+        event_timestamp = pd.to_datetime(str(row.get("event_date") or ""), errors="coerce")
+        if pd.isna(event_timestamp):
+            return existing
+        event_date = event_timestamp.date()
+        offer_id = str(row.get("offer_id") or "")
+
+        if anomaly_type in {"sales_drop", "sales_spike"}:
+            window_days = 15
+            window_start = event_date - timedelta(days=window_days - 1)
+            dates = [
+                window_start + timedelta(days=offset)
+                for offset in range(window_days)
+            ]
+            series = [
+                {
+                    "date": metric_date.isoformat(),
+                    # A sales-trend anomaly is only created after the global
+                    # 15-day Sales window is complete. An absent product row
+                    # within that covered window therefore represents zero
+                    # ordered units, matching the anomaly calculation.
+                    "ordered_units": sales_by_day.get((offer_id, metric_date), 0),
+                }
+                for metric_date in dates
+            ]
+            details["sales_daily_series"] = series
+            details["sales_series_covered_days"] = window_days
+            return details
+
+        window_days = 30
+        window_start = event_date - timedelta(days=window_days - 1)
+        recorded = [
+            (metric_date, sales_by_day[(offer_id, metric_date)])
+            for metric_date in (
+                window_start + timedelta(days=offset)
+                for offset in range(window_days)
+            )
+            if (offer_id, metric_date) in sales_by_day
+        ]
+        details["sales_window_days"] = len(recorded)
+        details["sales_window_total_units"] = (
+            sum(units for _, units in recorded) if recorded else None
+        )
+        details["sales_window_start"] = (
+            recorded[0][0].isoformat() if recorded else None
+        )
+        details["sales_window_end"] = (
+            recorded[-1][0].isoformat() if recorded else None
+        )
+        details["sales_window_complete"] = len(recorded) == window_days
+        return details
+
+    result = anomalies.copy()
+    enriched_details = [
+        enrich({str(key): value for key, value in record.items()})
+        for record in result.to_dict(orient="records")
+    ]
+    result["details"] = pd.Series(enriched_details, index=result.index, dtype="object")
+    return result
 
 
 def frame_records(frame: pd.DataFrame) -> list[dict[str, Any]]:
