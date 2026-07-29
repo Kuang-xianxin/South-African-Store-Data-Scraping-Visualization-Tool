@@ -1522,40 +1522,46 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
               </option>
             </select>
           </label>
-          <label class="competitor-filter-field">
-            <span>观察开始日期（北京时间）</span>
-            <input
-              v-model="rangeStartDate"
-              type="date"
-              :min="competitorDateRange.available_start || undefined"
-              :max="rangeEndDate || competitorDateRange.available_end || undefined"
-            />
-          </label>
-          <label class="competitor-filter-field">
-            <span>观察结束日期（北京时间）</span>
-            <input
-              v-model="rangeEndDate"
-              type="date"
-              :min="rangeStartDate || competitorDateRange.available_start || undefined"
-              :max="competitorDateRange.available_end || undefined"
-            />
-          </label>
-          <div class="competitor-filter-summary">
-            <span>
-              {{ activeRangeLabel }} · 显示
-              {{ filteredCompetitors.length }} / {{ competitors.length }} 个商品
-            </span>
-            <button type="button" class="quiet-button" @click="applyDateRange">
-              按区间重算
-            </button>
-            <button
-              v-if="competitorFiltersActive"
-              type="button"
-              class="quiet-button"
-              @click="clearCompetitorFilters"
-            >
-              清除筛选
-            </button>
+          <div class="competitor-date-range">
+            <div class="competitor-date-range-copy">
+              <strong>观察区间（北京时间）</strong>
+              <span>
+                {{ activeRangeLabel }} · 显示
+                {{ filteredCompetitors.length }} / {{ competitors.length }} 个商品
+              </span>
+            </div>
+            <div class="competitor-date-range-controls">
+              <label class="competitor-filter-field">
+                <span>开始日期</span>
+                <input
+                  v-model="rangeStartDate"
+                  type="date"
+                  :min="competitorDateRange.available_start || undefined"
+                  :max="rangeEndDate || competitorDateRange.available_end || undefined"
+                />
+              </label>
+              <span class="competitor-date-range-separator" aria-hidden="true">至</span>
+              <label class="competitor-filter-field">
+                <span>结束日期</span>
+                <input
+                  v-model="rangeEndDate"
+                  type="date"
+                  :min="rangeStartDate || competitorDateRange.available_start || undefined"
+                  :max="competitorDateRange.available_end || undefined"
+                />
+              </label>
+              <button type="button" class="primary-button" @click="applyDateRange">
+                按区间重算
+              </button>
+              <button
+                v-if="competitorFiltersActive"
+                type="button"
+                class="quiet-button"
+                @click="clearCompetitorFilters"
+              >
+                清除筛选
+              </button>
+            </div>
           </div>
         </div>
         <p class="method-note">

@@ -570,7 +570,7 @@ textarea.link-input-error-pulse {
 
 .competitor-list-filters {
   display: grid;
-  grid-template-columns: minmax(240px, 1.5fr) minmax(150px, 0.65fr) minmax(180px, 0.85fr) auto;
+  grid-template-columns: minmax(240px, 1.5fr) minmax(150px, 0.65fr) minmax(180px, 0.85fr);
   align-items: end;
   gap: 12px;
   margin-bottom: 16px;
@@ -612,19 +612,52 @@ textarea.link-input-error-pulse {
   box-shadow: 0 0 0 3px rgba(42, 112, 83, 0.11);
 }
 
-.competitor-filter-summary {
-  display: flex;
-  align-items: center;
-  justify-content: flex-end;
-  gap: 10px;
+.competitor-date-range {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: minmax(190px, 1fr) auto;
+  align-items: end;
+  gap: 18px;
+  padding-top: 12px;
+  border-top: 1px solid #dfe6e0;
+}
+
+.competitor-date-range-copy {
+  display: grid;
+  gap: 5px;
+  align-self: center;
+}
+
+.competitor-date-range-copy strong {
+  color: var(--ink);
+  font-size: 0.72rem;
+}
+
+.competitor-date-range-copy span {
+  color: var(--muted);
+  font-size: 0.66rem;
+  font-weight: 700;
+}
+
+.competitor-date-range-controls {
+  display: grid;
+  grid-template-columns: minmax(150px, 178px) auto minmax(150px, 178px) auto auto;
+  align-items: end;
+  gap: 9px;
+}
+
+.competitor-date-range-controls > button {
   min-height: 39px;
   white-space: nowrap;
 }
 
-.competitor-filter-summary > span {
+.competitor-date-range-separator {
+  display: grid;
+  place-items: center;
+  min-height: 39px;
   color: var(--muted);
   font-size: 0.68rem;
-  font-weight: 700;
+  font-weight: 800;
 }
 
 .competitor-filter-empty {
@@ -3768,8 +3801,22 @@ button {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
-  .competitor-filter-summary {
-    justify-content: space-between;
+  .competitor-date-range {
+    grid-template-columns: 1fr;
+    align-items: stretch;
+  }
+
+  .competitor-date-range-controls {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .competitor-date-range-separator {
+    display: none;
+  }
+
+  .competitor-date-range-controls > button {
+    grid-column: 1 / -1;
+    width: 100%;
   }
 }
 
@@ -3866,9 +3913,8 @@ button {
     grid-template-columns: 1fr;
   }
 
-  .competitor-filter-summary {
-    align-items: stretch;
-    flex-direction: column;
+  .competitor-date-range-controls {
+    grid-template-columns: 1fr;
   }
 
   .shared-collection-status {
@@ -3876,7 +3922,4 @@ button {
     flex-direction: column;
   }
 
-  .competitor-filter-summary .quiet-button {
-    width: 100%;
-  }
 }
