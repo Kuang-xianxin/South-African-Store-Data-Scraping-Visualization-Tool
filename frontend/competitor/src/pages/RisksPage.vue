@@ -274,32 +274,20 @@ function buildAnomalyEvidence(item: AnomalyItem | null): AnomalyEvidence | null 
   if (item.anomaly_type === "low_views_high_conversion") {
     return {
       title: "低浏览高转化触发证据",
-      conclusion: "浏览量低于低浏览边界，同时转化率达到高转化边界。",
+      conclusion: "集中展示该商品的近30天浏览量、当前已记录销量和近30天转化率。",
       metrics: [
         {
           label: "实际近30天浏览量",
           value: formatNumber(details.page_views_30_days),
-          hint: "需低于低浏览边界",
+          hint: "平台近30天浏览量",
           tone: "trigger",
         },
         trafficSalesMetric(details),
         {
           label: "实际近30天转化率",
           value: formatPercent(details.conversion_percentage_30_days),
-          hint: "需大于或等于高转化边界",
+          hint: "平台近30天转化率",
           tone: "trigger",
-        },
-        {
-          label: "低浏览边界",
-          value: formatDecimal(details.low_views_threshold),
-          hint: "当日商品分布阈值",
-          tone: "threshold",
-        },
-        {
-          label: "高转化边界",
-          value: formatPercent(details.high_conversion_threshold),
-          hint: "当日商品分布阈值",
-          tone: "threshold",
         },
       ],
     };
