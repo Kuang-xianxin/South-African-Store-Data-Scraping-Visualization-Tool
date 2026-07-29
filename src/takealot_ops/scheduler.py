@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
-import sqlite3
+import gzip
+import hashlib
+import json
 import os
+import shutil
+import sqlite3
 import subprocess
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
-from typing import Protocol
+from typing import Any, Protocol
 
 from sqlalchemy import inspect, text
 from sqlalchemy.engine import make_url
@@ -40,6 +44,27 @@ class LocalDatabaseSettings(Protocol):
 class SystemClock:
     def now(self) -> datetime:
         return datetime.now(UTC)
+
+
+@dataclass(frozen=True)
+class LocalBackupRetention:
+    """Retention windows for verified local MySQL backup archives."""
+
+    all_days: int = 14
+    daily_days: int = 90
+    weekly_days: int = 365
+    monthly_days: int = 365 * 7
+
+
+@dataclass(frozen=True)
+class BackupVerificationResult:
+    archive: Path
+    sha256: str
+    raw_bytes: int
+    compressed_bytes: int
+
+
+LOCAL_BACKUP_RETENTION = LocalBackupRetention()
 
 
 @dataclass(frozen=True)
@@ -194,9 +219,12 @@ def run_daily(
         engine.dispose()
 
 
-def backup_database(settings: LocalDatabaseSettings, keep: int = 8) -> Path:
-    """Create a consistent backup and retain only the newest files."""
-    if keep < 1:
+def backup_database(
+    settings: LocalDatabaseSettings,
+    keep: int | None = None,
+) -> Path:
+    """Create a consistent local backup and apply backend-specific retention."""
+    if keep is not None and keep < 1:
         raise ValueError("keep must be at least 1")
     backend = make_url(settings.database_url).get_backend_name()
     if backend == "mysql":
@@ -215,7 +243,7 @@ def backup_database(settings: LocalDatabaseSettings, keep: int = 8) -> Path:
         source.backup(target)
 
     backups = sorted(backup_dir.glob("takealot-*.db"), reverse=True)
-    for obsolete in backups[keep:]:
+    for obsolete in backups[(keep or 8) :]:
         obsolete.unlink()
     return destination
 
@@ -239,7 +267,7 @@ def verify_database_integrity(settings: LocalDatabaseSettings) -> None:
 
 def _backup_mysql_database(
     settings: LocalDatabaseSettings,
-    keep: int,
+    keep: int | None,
 ) -> Path:
     url = make_url(settings.database_url)
     if not url.database or not url.username:
@@ -247,8 +275,13 @@ def _backup_mysql_database(
     executable = _find_mysql_program("mysqldump.exe")
     backup_dir = settings.project_root / "backups"
     backup_dir.mkdir(parents=True, exist_ok=True)
-    timestamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S-%f")
-    destination = backup_dir / f"takealot-{timestamp}.sql"
+    created_at = datetime.now(UTC)
+    timestamp = created_at.strftime("%Y%m%d-%H%M%S-%f")
+    raw_dump = backup_dir / f"takealot-{timestamp}.sql.part"
+    destination = backup_dir / f"takealot-{timestamp}.sql.gz"
+    archive_part = Path(f"{destination}.part")
+    manifest_path = Path(f"{destination}.json")
+    checksum_path = Path(f"{destination}.sha256")
     command = [
         str(executable),
         "--protocol=TCP",
@@ -266,7 +299,7 @@ def _backup_mysql_database(
     if url.password is not None:
         environment["MYSQL_PWD"] = url.password
     try:
-        with destination.open("wb") as output:
+        with raw_dump.open("wb") as output:
             completed = subprocess.run(
                 command,
                 stdout=output,
@@ -276,15 +309,187 @@ def _backup_mysql_database(
                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             )
         if completed.returncode != 0:
-            destination.unlink(missing_ok=True)
             raise RuntimeError("MySQL backup failed")
+        _validate_mysql_dump(raw_dump)
+        with raw_dump.open("rb") as source, gzip.open(
+            archive_part,
+            "wb",
+            compresslevel=6,
+        ) as compressed:
+            shutil.copyfileobj(source, compressed, length=1024 * 1024)
+        archive_part.replace(destination)
+
+        digest = _sha256_file(destination)
+        manifest: dict[str, Any] = {
+            "format_version": 1,
+            "backend": "mysql",
+            "database": url.database,
+            "created_at": created_at.isoformat(),
+            "archive": destination.name,
+            "sha256": digest,
+            "raw_bytes": raw_dump.stat().st_size,
+            "compressed_bytes": destination.stat().st_size,
+            "retention": {
+                "all_days": LOCAL_BACKUP_RETENTION.all_days,
+                "daily_days": LOCAL_BACKUP_RETENTION.daily_days,
+                "weekly_days": LOCAL_BACKUP_RETENTION.weekly_days,
+                "monthly_days": LOCAL_BACKUP_RETENTION.monthly_days,
+            },
+        }
+        manifest_path.write_text(
+            json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        checksum_path.write_text(
+            f"{digest}  {destination.name}\n",
+            encoding="ascii",
+        )
+        verify_local_backup(destination)
+    except Exception:
+        destination.unlink(missing_ok=True)
+        manifest_path.unlink(missing_ok=True)
+        checksum_path.unlink(missing_ok=True)
+        raise
     finally:
         environment.pop("MYSQL_PWD", None)
+        raw_dump.unlink(missing_ok=True)
+        archive_part.unlink(missing_ok=True)
 
-    backups = sorted(backup_dir.glob("takealot-*.sql"), reverse=True)
-    for obsolete in backups[keep:]:
-        obsolete.unlink()
+    if keep is None:
+        _apply_local_backup_retention(backup_dir, now=created_at)
+    else:
+        backups = sorted(backup_dir.glob("takealot-*.sql.gz"), reverse=True)
+        for obsolete in backups[keep:]:
+            _remove_backup_group(obsolete)
     return destination
+
+
+def verify_local_backup(archive: Path) -> BackupVerificationResult:
+    """Verify a compressed local backup against its manifest and checksum."""
+    archive = archive.resolve()
+    if not archive.is_file() or not archive.name.endswith(".sql.gz"):
+        raise ValueError("backup archive must be an existing .sql.gz file")
+    manifest_path = Path(f"{archive}.json")
+    checksum_path = Path(f"{archive}.sha256")
+    if not manifest_path.is_file() or not checksum_path.is_file():
+        raise RuntimeError("backup manifest or checksum file is missing")
+
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise RuntimeError("backup manifest is invalid") from exc
+    if not isinstance(manifest, dict) or manifest.get("format_version") != 1:
+        raise RuntimeError("unsupported backup manifest")
+    if manifest.get("archive") != archive.name:
+        raise RuntimeError("backup manifest archive name does not match")
+
+    digest = _sha256_file(archive)
+    expected_digest = manifest.get("sha256")
+    checksum_parts = checksum_path.read_text(encoding="ascii").strip().split()
+    if (
+        not isinstance(expected_digest, str)
+        or digest != expected_digest
+        or len(checksum_parts) != 2
+        or checksum_parts[0] != digest
+        or checksum_parts[1] != archive.name
+    ):
+        raise RuntimeError("backup checksum verification failed")
+
+    raw_bytes = 0
+    head = b""
+    tail = b""
+    try:
+        with gzip.open(archive, "rb") as source:
+            while chunk := source.read(1024 * 1024):
+                raw_bytes += len(chunk)
+                if len(head) < 512:
+                    head = (head + chunk)[:512]
+                tail = (tail + chunk)[-8192:]
+    except (OSError, EOFError) as exc:
+        raise RuntimeError("backup gzip verification failed") from exc
+    _validate_mysql_dump_markers(head, tail)
+
+    compressed_bytes = archive.stat().st_size
+    if manifest.get("raw_bytes") != raw_bytes:
+        raise RuntimeError("backup uncompressed size does not match manifest")
+    if manifest.get("compressed_bytes") != compressed_bytes:
+        raise RuntimeError("backup compressed size does not match manifest")
+    return BackupVerificationResult(
+        archive=archive,
+        sha256=digest,
+        raw_bytes=raw_bytes,
+        compressed_bytes=compressed_bytes,
+    )
+
+
+def _validate_mysql_dump(path: Path) -> None:
+    size = path.stat().st_size
+    if size == 0:
+        raise RuntimeError("MySQL backup is empty")
+    with path.open("rb") as dump:
+        head = dump.read(512)
+        dump.seek(max(0, size - 8192))
+        tail = dump.read()
+    _validate_mysql_dump_markers(head, tail)
+
+
+def _validate_mysql_dump_markers(head: bytes, tail: bytes) -> None:
+    if b"MySQL dump" not in head:
+        raise RuntimeError("MySQL backup header is missing")
+    if b"Dump completed on" not in tail:
+        raise RuntimeError("MySQL backup completion marker is missing")
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        while chunk := source.read(1024 * 1024):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _apply_local_backup_retention(
+    backup_dir: Path,
+    *,
+    now: datetime,
+    policy: LocalBackupRetention = LOCAL_BACKUP_RETENTION,
+) -> None:
+    retained_buckets: set[tuple[object, ...]] = set()
+    for archive in sorted(backup_dir.glob("takealot-*.sql.gz"), reverse=True):
+        captured_at = _backup_timestamp(archive)
+        if captured_at is None:
+            continue
+        age = now - captured_at
+        bucket: tuple[object, ...] | None
+        if age <= timedelta(days=policy.all_days):
+            continue
+        if age <= timedelta(days=policy.daily_days):
+            bucket = ("day", captured_at.date())
+        elif age <= timedelta(days=policy.weekly_days):
+            iso_year, iso_week, _ = captured_at.isocalendar()
+            bucket = ("week", iso_year, iso_week)
+        elif age <= timedelta(days=policy.monthly_days):
+            bucket = ("month", captured_at.year, captured_at.month)
+        else:
+            bucket = None
+        if bucket is not None and bucket not in retained_buckets:
+            retained_buckets.add(bucket)
+            continue
+        _remove_backup_group(archive)
+
+
+def _backup_timestamp(archive: Path) -> datetime | None:
+    try:
+        timestamp = archive.name.removeprefix("takealot-").removesuffix(".sql.gz")
+        return datetime.strptime(timestamp, "%Y%m%d-%H%M%S-%f").replace(tzinfo=UTC)
+    except ValueError:
+        return None
+
+
+def _remove_backup_group(archive: Path) -> None:
+    archive.unlink(missing_ok=True)
+    Path(f"{archive}.json").unlink(missing_ok=True)
+    Path(f"{archive}.sha256").unlink(missing_ok=True)
 
 
 def _verify_mysql_integrity(settings: LocalDatabaseSettings) -> None:

@@ -34,11 +34,14 @@ from takealot_ops.metrics.service import MetricService
 from takealot_ops.quality import verify_quality
 from takealot_ops.reporting import generate_daily_reports
 from takealot_ops.scheduler import (
+    BackupVerificationResult,
     Clock,
     DailyRunResult,
     SystemClock,
+    backup_database,
     run_daily,
     verify_database_integrity,
+    verify_local_backup,
 )
 from takealot_ops.settings import DashboardSettings, Settings, SettingsError
 from takealot_ops.storage.migrations import create_engine_for_settings, create_schema
@@ -72,6 +75,15 @@ def build_parser() -> argparse.ArgumentParser:
     export.add_argument("--date", type=_parse_date, help="报告截止日期 YYYY-MM-DD")
 
     commands.add_parser("daily-run", help="执行每日采集、校验、导出和备份")
+    commands.add_parser(
+        "backup-local",
+        help="立即生成、压缩并校验本地 MySQL 备份",
+    )
+    backup_verify = commands.add_parser(
+        "backup-verify",
+        help="校验本地 .sql.gz 备份、清单和 SHA-256",
+    )
+    backup_verify.add_argument("archive", type=Path, help="备份压缩包路径")
     daily_report_run = commands.add_parser(
         "daily-report-run",
         help="执行完整采集并冻结运营日报早间、晚间或周期末版本",
@@ -144,6 +156,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             exit_code = _export_command(project_root, args.date)
         elif args.command == "daily-run":
             exit_code = _daily_command(project_root)
+        elif args.command == "backup-local":
+            exit_code = _backup_local_command(project_root)
+        elif args.command == "backup-verify":
+            exit_code = _backup_verify_command(project_root, args.archive)
         elif args.command == "daily-report-run":
             exit_code = _daily_report_run_command(project_root, args.slot)
         elif args.command == "daily-report-capture":
@@ -252,6 +268,29 @@ def _daily_command(project_root: Path) -> int:
     if result.error:
         print(result.error, file=sys.stderr)
     return result.exit_code
+
+
+def _backup_local_command(project_root: Path) -> int:
+    settings = Settings.from_env(project_root)
+    verify_database_integrity(settings)
+    result = verify_local_backup(backup_database(settings))
+    _print_backup_verification(result)
+    return 0
+
+
+def _backup_verify_command(project_root: Path, archive: Path) -> int:
+    candidate = archive if archive.is_absolute() else project_root / archive
+    result = verify_local_backup(candidate)
+    _print_backup_verification(result)
+    return 0
+
+
+def _print_backup_verification(result: BackupVerificationResult) -> None:
+    print(f"本地备份：{result.archive}")
+    print(
+        f"校验通过：SHA-256 {result.sha256}；"
+        f"原始 {result.raw_bytes} 字节，压缩后 {result.compressed_bytes} 字节。"
+    )
 
 
 def _daily_report_run_command(project_root: Path, slot: str) -> int:

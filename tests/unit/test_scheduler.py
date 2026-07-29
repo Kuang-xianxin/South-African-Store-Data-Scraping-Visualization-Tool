@@ -1,11 +1,19 @@
 from __future__ import annotations
 
+import gzip
+import json
 import subprocess
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
 
-from takealot_ops.scheduler import backup_database
+from takealot_ops.scheduler import (
+    LocalBackupRetention,
+    _apply_local_backup_retention,
+    backup_database,
+    verify_local_backup,
+)
 from takealot_ops.settings import Settings
 
 
@@ -66,17 +74,100 @@ def test_mysql_backup_uses_password_environment_not_command_line(
     def fake_run(command, **kwargs):
         captured["command"] = command
         captured["password"] = kwargs["env"].get("MYSQL_PWD")
-        kwargs["stdout"].write(b"mysql dump")
+        kwargs["stdout"].write(
+            b"-- MySQL dump 10.13\nCREATE TABLE example (id int);\n"
+            b"-- Dump completed on 2026-07-29 10:00:00\n"
+        )
         return subprocess.CompletedProcess(command, 0)
 
     monkeypatch.setattr("takealot_ops.scheduler.subprocess.run", fake_run)
 
     backup = backup_database(settings)
 
-    assert backup.suffix == ".sql"
-    assert backup.read_bytes() == b"mysql dump"
+    assert backup.name.endswith(".sql.gz")
+    assert gzip.decompress(backup.read_bytes()).startswith(b"-- MySQL dump")
     assert captured["password"] == "fixture-secret"
     assert "fixture-secret" not in " ".join(captured["command"])
+    result = verify_local_backup(backup)
+    manifest = json.loads(Path(f"{backup}.json").read_text(encoding="utf-8"))
+    assert result.raw_bytes == manifest["raw_bytes"]
+    assert result.compressed_bytes == manifest["compressed_bytes"]
+    assert result.sha256 == manifest["sha256"]
+    assert Path(f"{backup}.sha256").read_text(encoding="ascii").startswith(
+        result.sha256
+    )
+
+
+def test_mysql_backup_removes_partial_files_after_dump_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = Settings(
+        project_root=tmp_path,
+        api_key="fixture-key",
+        base_url="https://example.invalid/v1",
+        database_url=(
+            "mysql+pymysql://takealot_app:fixture-secret@127.0.0.1:3306/"
+            "takealot_ops?charset=utf8mb4"
+        ),
+        request_timeout_seconds=1.0,
+        dashboard_host="127.0.0.1",
+        dashboard_port=8501,
+    )
+    monkeypatch.setattr(
+        "takealot_ops.scheduler._find_mysql_program",
+        lambda _: Path("C:/mysql/bin/mysqldump.exe"),
+    )
+
+    def fake_run(command, **kwargs):
+        kwargs["stdout"].write(b"incomplete")
+        return subprocess.CompletedProcess(command, 1)
+
+    monkeypatch.setattr("takealot_ops.scheduler.subprocess.run", fake_run)
+
+    with pytest.raises(RuntimeError, match="MySQL backup failed"):
+        backup_database(settings)
+
+    assert not list((tmp_path / "backups").glob("takealot-*"))
+
+
+def test_local_backup_retention_keeps_tiered_restore_points(tmp_path: Path) -> None:
+    backup_dir = tmp_path / "backups"
+    backup_dir.mkdir()
+    names = (
+        "takealot-20260728-120000-000000.sql.gz",
+        "takealot-20260728-100000-000000.sql.gz",
+        "takealot-20260620-120000-000000.sql.gz",
+        "takealot-20260620-100000-000000.sql.gz",
+        "takealot-20260310-120000-000000.sql.gz",
+        "takealot-20260309-100000-000000.sql.gz",
+        "takealot-20250310-120000-000000.sql.gz",
+        "takealot-20250309-100000-000000.sql.gz",
+        "takealot-20180101-100000-000000.sql.gz",
+    )
+    for name in names:
+        archive = backup_dir / name
+        archive.write_bytes(b"archive")
+        Path(f"{archive}.json").write_text("{}", encoding="utf-8")
+        Path(f"{archive}.sha256").write_text("checksum", encoding="ascii")
+
+    _apply_local_backup_retention(
+        backup_dir,
+        now=datetime(2026, 7, 29, tzinfo=UTC),
+        policy=LocalBackupRetention(),
+    )
+
+    retained = {path.name for path in backup_dir.glob("*.sql.gz")}
+    assert "takealot-20260728-120000-000000.sql.gz" in retained
+    assert "takealot-20260728-100000-000000.sql.gz" in retained
+    assert "takealot-20260620-120000-000000.sql.gz" in retained
+    assert "takealot-20260620-100000-000000.sql.gz" not in retained
+    assert "takealot-20260310-120000-000000.sql.gz" in retained
+    assert "takealot-20260309-100000-000000.sql.gz" not in retained
+    assert "takealot-20250310-120000-000000.sql.gz" in retained
+    assert "takealot-20250309-100000-000000.sql.gz" not in retained
+    assert "takealot-20180101-100000-000000.sql.gz" not in retained
+    assert not (backup_dir / f"{names[-1]}.json").exists()
 
 
 def test_scheduler_script_installs_three_captures_and_one_deadline() -> None:

@@ -18,6 +18,8 @@ def test_help_lists_all_commands(capsys) -> None:
         "collect-competitors",
         "export",
         "daily-run",
+        "backup-local",
+        "backup-verify",
         "daily-report-run",
         "daily-report-capture",
         "daily-report-deadline",

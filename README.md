@@ -209,7 +209,7 @@ npm.cmd run build
 .\.venv\Scripts\python.exe -m takealot_ops.cli daily-run
 ```
 
-执行顺序为：完整分页采集 → 七个 SAST 自然日指标重建 → 数据质量检查 → 报表导出 → MySQL 表完整性检查 → `mysqldump` 一致性备份。任何分页失败都不会发布不完整快照或报表。日志写入 `logs\takealot-ops.log`，不会记录 API Key 或数据库密码。
+执行顺序为：完整分页采集 → 七个 SAST 自然日指标重建 → 数据质量检查 → 报表导出 → MySQL 表完整性检查 → `mysqldump` 一致性备份、压缩和校验。任何分页失败都不会发布不完整快照或报表。日志写入 `logs\takealot-ops.log`，不会记录 API Key 或数据库密码。
 
 ### 运营日报的周期版本
 
@@ -269,15 +269,32 @@ powershell -ExecutionPolicy Bypass -File .\scripts\install_scheduled_task.ps1 `
 
 ## 8. 备份与恢复
 
-每次 `daily-run` 会通过 `mysqldump --single-transaction` 在 `backups\` 中生成一致性 `.sql` 备份，只保留最新 8 份。
+本项目只制作本机备份，不上传云端或异地。每次 `daily-run` 会先执行 MySQL 表完整性检查，再通过 `mysqldump --single-transaction` 生成一致性转储；成功后压缩为 `backups\takealot-时间.sql.gz`，并生成同名 `.json` 清单和 `.sha256` 校验文件。程序会重新读取整个压缩包，核对 SHA-256、压缩前后大小、MySQL 转储头和完成标记；任何一步失败都会删除本次不完整文件并让任务失败。
+
+需要立即手动生成一份经过校验的本地备份时运行：
+
+```powershell
+.\.venv\Scripts\python.exe -m takealot_ops.cli backup-local
+```
+
+需要复核已有备份时运行：
+
+```powershell
+.\.venv\Scripts\python.exe -m takealot_ops.cli backup-verify `
+  .\backups\takealot-YYYYMMDD-HHMMSS-ffffff.sql.gz
+```
+
+新格式备份按 UTC 时间分层保留：最近14天保留每一次，15至90天每天保留最新1份，91至365天每周保留最新1份，366天至7年每月保留最新1份，超过7年自动删除。升级前已有的明文 `.sql` 不会被新规则自动删除。
 
 恢复步骤：
 
 1. 停止正在运行的看板和每日任务。
-2. 在 MySQL Workbench 中备份或清空目标 `takealot_ops` 数据库。
-3. 使用 Workbench 的 Data Import 导入选定的 `backups\takealot-*.sql`。
-4. 运行 `.\.venv\Scripts\python.exe -m takealot_ops.cli verify`。
-5. 验证通过后再启动看板和每日任务。
+2. 对选定的 `.sql.gz` 先运行 `backup-verify`，确认清单、SHA-256 和压缩内容全部通过。
+3. 用 7-Zip 等本机工具解压出 `.sql`；在 MySQL Workbench 中先导入独立的空恢复库并抽查表和行数，禁止直接覆盖正在运行的正式库。
+4. 确认恢复副本可用后，再在维护窗口备份或重建目标 `takealot_ops`，使用 Workbench 的 Data Import 导入同一 `.sql`。
+5. 运行 `.\.venv\Scripts\python.exe -m takealot_ops.cli verify`，通过后再启动看板和每日任务。
+
+本机备份可以防止误删、错误发布和数据库逻辑损坏，但无法防止整台电脑、同一块物理硬盘或勒索软件同时破坏数据库与 `backups\`。如果以后接入另一块本地物理硬盘，应把备份目录整体定期复制过去；当前方案按用户要求不做异地备份。
 
 ## 9. 流量指标口径
 
@@ -290,7 +307,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\install_scheduled_task.ps1 `
 - 正式运行只使用本机 MySQL 8.0、`mysql+pymysql` 同步驱动和 `utf8mb4` 字符集。
 - ERP 查询连接执行数据库级只读事务；采集、指标重建和竞品刷新使用单独的可写连接。
 - 应用账号只授予 `takealot_ops` 数据库所需权限，不使用 root 启动 ERP。
-- 每日运行执行 MySQL `CHECK TABLE` 并生成 `mysqldump` 备份。
+- 每日运行执行 MySQL `CHECK TABLE`，并生成经过 gzip、SHA-256 和完整内容校验的 `mysqldump` 本地备份。
 - `data\takealot.db` 仅保留为迁移完成前的数据留档，不再是运行数据源，也不会自动回退。
 
 ## 11. 一键更新 NFT102 访客表
