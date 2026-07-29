@@ -100,6 +100,44 @@ const form = ref({
 });
 let liveRefreshPending = false;
 
+function handleMatrixWheel(event: WheelEvent) {
+  const container = matrixScroll.value;
+  if (!container || container.scrollWidth <= container.clientWidth) return;
+
+  const bounds = container.getBoundingClientRect();
+  const styles = window.getComputedStyle(container);
+  const borderTop = Number.parseFloat(styles.borderTopWidth) || 0;
+  const borderBottom = Number.parseFloat(styles.borderBottomWidth) || 0;
+  const nativeScrollbarHeight =
+    container.offsetHeight - container.clientHeight - borderTop - borderBottom;
+  const configuredScrollbarHeight =
+    Number.parseFloat(
+      styles.getPropertyValue("--daily-horizontal-scrollbar-height"),
+    ) || 15;
+  const scrollbarHeight =
+    nativeScrollbarHeight > 0
+      ? nativeScrollbarHeight
+      : configuredScrollbarHeight;
+  const scrollbarBottom = bounds.bottom - borderBottom;
+  const isOverHorizontalScrollbar =
+    event.clientX >= bounds.left &&
+    event.clientX <= bounds.right &&
+    event.clientY >= scrollbarBottom - scrollbarHeight &&
+    event.clientY <= scrollbarBottom;
+  if (!isOverHorizontalScrollbar) return;
+
+  const wheelDelta = event.deltaY !== 0 ? event.deltaY : event.deltaX;
+  if (wheelDelta === 0) return;
+  const deltaScale =
+    event.deltaMode === WheelEvent.DOM_DELTA_LINE
+      ? 16
+      : event.deltaMode === WheelEvent.DOM_DELTA_PAGE
+        ? container.clientWidth
+        : 1;
+  event.preventDefault();
+  container.scrollLeft += wheelDelta * deltaScale;
+}
+
 watch(() => props.asOf, () => void load(), { immediate: true });
 onMounted(() => {
   window.addEventListener("erp-daily-report-updated", handleLiveUpdate);
@@ -1115,10 +1153,14 @@ function parseInput(value: string | number): number | null {
           </div>
         </div>
         <div class="matrix-product-count">
-          <span>共 {{ filteredItems.length }} 个商品；使用下方横向滚动条左右查看</span>
+          <span>共 {{ filteredItems.length }} 个商品；鼠标放在下方横向滚动条上可直接滚轮左右查看</span>
         </div>
       </div>
-      <div ref="matrixScroll" class="daily-matrix-wrap">
+      <div
+        ref="matrixScroll"
+        class="daily-matrix-wrap"
+        @wheel="handleMatrixWheel"
+      >
         <table class="daily-matrix">
           <thead class="matrix-sticky-head">
             <tr>
