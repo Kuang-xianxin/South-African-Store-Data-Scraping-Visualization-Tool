@@ -398,7 +398,7 @@ export interface DailyReportItem {
   evening: DailyReportValues | null;
   capture_versions: Array<{
     run_id: string;
-    slot: "morning" | "evening" | "manual";
+    slot: "morning" | "evening" | "pre_close" | "manual";
     label: string;
     captured_at: string;
     values: DailyReportValues;
@@ -420,7 +420,7 @@ export interface DailyReportItem {
   review_versions: Array<{
     kind: "confirmed" | "capture" | "manual";
     run_id: string | null;
-    slot: "morning" | "evening" | "manual" | null;
+    slot: "morning" | "evening" | "pre_close" | "manual" | null;
     label: string;
     captured_at: string | null;
     values: DailyReportValues;
@@ -567,15 +567,15 @@ export interface DailyReportPayload {
   business_date: string;
   runs: Array<{
     run_id: string;
-    slot: "morning" | "evening" | "manual";
+    slot: "morning" | "evening" | "pre_close" | "manual";
     captured_at: string;
     status: string;
     counts: Record<string, unknown>;
   }>;
   capture_status: Record<
-    "morning" | "evening",
+    "morning" | "evening" | "pre_close",
     {
-      status: "success" | "failed" | "missing" | "pending";
+      status: "success" | "failed" | "missing" | "pending" | "not_applicable";
       captured_at: string | null;
       product_count: number;
       reason: string | null;
@@ -598,7 +598,7 @@ export interface DailyReportPayload {
   >;
   capture_issues: Array<{
     kind: "slot" | "product";
-    slot: "morning" | "evening" | "manual" | null;
+    slot: "morning" | "evening" | "pre_close" | "manual" | null;
     offer_id: string | null;
     sku: string | null;
     title: string | null;

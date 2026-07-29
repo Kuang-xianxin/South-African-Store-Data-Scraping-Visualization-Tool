@@ -36,8 +36,21 @@ from takealot_ops.storage.models import (
 )
 
 
-SCHEDULED_SLOTS = frozenset({"morning", "evening"})
-CAPTURE_SLOTS = frozenset({"morning", "evening", "manual"})
+SCHEDULED_SLOT_ORDER = ("morning", "evening", "pre_close")
+PRE_CLOSE_FIRST_BUSINESS_DATE = date(2026, 7, 28)
+SCHEDULED_SLOT_PLANS = {
+    "morning": ("早间任务（计划10:05）", 1, time(10, 5)),
+    "evening": ("晚间任务（计划18:00）", 1, time(18, 0)),
+    "pre_close": ("周期末任务（计划次日09:00）", 2, time(9, 0)),
+}
+CAPTURE_SLOT_LABELS = {
+    "morning": "早间采集",
+    "evening": "晚间采集",
+    "pre_close": "周期末采集",
+    "manual": "手动刷新",
+}
+SCHEDULED_SLOTS = frozenset(SCHEDULED_SLOT_ORDER)
+CAPTURE_SLOTS = frozenset((*SCHEDULED_SLOT_ORDER, "manual"))
 SOURCES = frozenset({"morning", "evening", "latest", "manual"})
 MANUAL_REASONS = frozenset({"platform_delay", "stock_adjustment", "other"})
 NOTE_ISSUE_TYPES = frozenset({"general", "capture_difference", "stock_continuity"})
@@ -98,7 +111,9 @@ def record_daily_report_failure(
 ) -> str:
     """Persist a failed scheduled capture so operators can see why data is missing."""
     if slot not in CAPTURE_SLOTS:
-        raise DailyReportInputError("采集时段只能是 morning、evening 或 manual")
+        raise DailyReportInputError(
+            "采集时段只能是 morning、evening、pre_close 或 manual"
+        )
     now = _naive_utc(captured_at)
     run_id = str(uuid4())
     clean_reason = reason.strip() or "采集任务失败，但没有返回具体错误"
@@ -121,7 +136,9 @@ def record_daily_report_failure(
                 created_at=now,
             )
         )
-        if slot == "evening":
+        if slot == "pre_close" or (
+            slot == "evening" and business_date < PRE_CLOSE_FIRST_BUSINESS_DATE
+        ):
             rows = list(
                 session.scalars(
                     select(DailyReportResolution).where(
@@ -171,7 +188,9 @@ def capture_daily_report(
 ) -> ReportCaptureResult:
     """Freeze one sales version and attach the next morning capture's stock."""
     if slot not in CAPTURE_SLOTS:
-        raise DailyReportInputError("采集时段只能是 morning、evening 或 manual")
+        raise DailyReportInputError(
+            "采集时段只能是 morning、evening、pre_close 或 manual"
+        )
     now = _naive_utc(captured_at)
     run_id = str(uuid4())
     reopened = 0
@@ -1800,6 +1819,7 @@ def _latest_observations(
     result: dict[str, dict[str, DailyReportObservation]] = {
         "morning": {},
         "evening": {},
+        "pre_close": {},
     }
     for slot in SCHEDULED_SLOTS:
         run = session.scalar(
@@ -1911,15 +1931,13 @@ def _coalesced_capture_values(
 
 
 def _capture_run_label(run: DailyReportRun) -> str:
-    labels = {
-        "morning": "早间采集",
-        "evening": "晚间采集",
-        "manual": "手动刷新",
-    }
     captured_at = run.captured_at.replace(tzinfo=UTC).astimezone(
         ZoneInfo("Asia/Shanghai")
     )
-    return f"{labels.get(run.slot, run.slot)}（实际 {captured_at:%m-%d %H:%M}）"
+    return (
+        f"{CAPTURE_SLOT_LABELS.get(run.slot, run.slot)}"
+        f"（实际 {captured_at:%m-%d %H:%M}）"
+    )
 
 
 def _manual_values(
@@ -3789,7 +3807,7 @@ def _capture_status(
     business_date: date,
 ) -> dict[str, dict[str, Any]]:
     result: dict[str, dict[str, Any]] = {}
-    for slot in ("morning", "evening"):
+    for slot in SCHEDULED_SLOT_ORDER:
         slot_runs = [run for run in runs if run.slot == slot]
         successful = [run for run in slot_runs if run.status == "success"]
         selected = (
@@ -3797,10 +3815,27 @@ def _capture_status(
             if successful
             else max(slot_runs, key=lambda run: run.captured_at, default=None)
         )
+        if (
+            slot == "pre_close"
+            and selected is None
+            and business_date < PRE_CLOSE_FIRST_BUSINESS_DATE
+        ):
+            result[slot] = {
+                "status": "not_applicable",
+                "captured_at": None,
+                "product_count": 0,
+                "reason": "次日09:00周期末任务自北京时间2026-07-30起启用",
+                "attempts": [],
+                "attempt_count": 0,
+                "recovered": False,
+                "capture_method": None,
+            }
+            continue
         if selected is None:
+            label, day_offset, scheduled_time = SCHEDULED_SLOT_PLANS[slot]
             scheduled_at = datetime.combine(
-                business_date + timedelta(days=1),
-                time(10, 5) if slot == "morning" else time(18, 0),
+                business_date + timedelta(days=day_offset),
+                scheduled_time,
                 tzinfo=ZoneInfo("Asia/Shanghai"),
             )
             now = datetime.now(ZoneInfo("Asia/Shanghai"))
@@ -3821,7 +3856,7 @@ def _capture_status(
                 "captured_at": None,
                 "product_count": 0,
                 "reason": (
-                    f"{'早间任务（计划10:05）' if slot == 'morning' else '晚间任务（计划18:00）'}"
+                    f"{label}"
                     "未生成采集记录，可能是定时任务未执行、服务未启动或日志缺失"
                 ),
                 "attempts": [],
@@ -3862,9 +3897,9 @@ def _capture_issues(
     runs: list[DailyReportRun],
 ) -> list[dict[str, Any]]:
     issues: list[dict[str, Any]] = []
-    for slot in ("morning", "evening"):
+    for slot in SCHEDULED_SLOT_ORDER:
         state = capture_status[slot]
-        if state["status"] not in {"success", "pending"}:
+        if state["status"] not in {"success", "pending", "not_applicable"}:
             issues.append(
                 {
                     "kind": "slot",
@@ -3922,7 +3957,7 @@ def _capture_issues(
 
 
 def _missing_slot_reason(slot: str, state: dict[str, Any]) -> str:
-    label = "早间任务（计划10:05）" if slot == "morning" else "晚间任务（计划18:00）"
+    label = SCHEDULED_SLOT_PLANS[slot][0]
     if state["status"] == "success":
         return (
             f"{label}整次采集成功，但该商品未出现在接口返回结果中；"
@@ -3990,6 +4025,7 @@ def _export_missing_rows(
             slot_label = {
                 "morning": "早间",
                 "evening": "晚间",
+                "pre_close": "周期末",
                 "manual": "手动刷新",
             }.get(slot, "字段")
             result.append(

@@ -380,7 +380,7 @@ class ErpRefreshState(Base):
 
 
 class DailyReportRun(Base):
-    """One immutable morning/evening capture used by the operations daily report."""
+    """One immutable scheduled or manual capture used by the operations daily report."""
 
     __tablename__ = "daily_report_runs"
 

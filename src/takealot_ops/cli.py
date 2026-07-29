@@ -74,11 +74,11 @@ def build_parser() -> argparse.ArgumentParser:
     commands.add_parser("daily-run", help="执行每日采集、校验、导出和备份")
     daily_report_run = commands.add_parser(
         "daily-report-run",
-        help="执行完整采集并冻结运营日报早间或晚间版本",
+        help="执行完整采集并冻结运营日报早间、晚间或周期末版本",
     )
     daily_report_run.add_argument(
         "--slot",
-        choices=("morning", "evening", "manual"),
+        choices=("morning", "evening", "pre_close", "manual"),
         required=True,
     )
     daily_report_capture = commands.add_parser(
@@ -87,7 +87,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     daily_report_capture.add_argument(
         "--slot",
-        choices=("morning", "evening", "manual"),
+        choices=("morning", "evening", "pre_close", "manual"),
         required=True,
     )
     daily_report_capture.add_argument("--date", type=_parse_date)

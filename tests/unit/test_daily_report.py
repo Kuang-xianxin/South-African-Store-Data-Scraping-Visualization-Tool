@@ -219,6 +219,53 @@ def test_capture_keeps_morning_and_evening_versions_and_requires_review() -> Non
     assert unchanged["status"] == "ready"
 
 
+def test_pre_close_capture_updates_sales_without_replacing_morning_inventory() -> None:
+    engine = _engine()
+    capture_daily_report(
+        engine,
+        business_date=REPORT_DATE,
+        slot="morning",
+        captured_at=_report_capture_time(REPORT_DATE, 2, 5),
+    )
+    capture_daily_report(
+        engine,
+        business_date=REPORT_DATE,
+        slot="evening",
+        captured_at=_report_capture_time(REPORT_DATE, 10),
+    )
+    with Session(engine) as session, session.begin():
+        session.get(OfferCurrent, "offer-a").takealot_available_stock = 1
+        session.get(SaleItem, "sale-a").quantity = 3
+    capture_daily_report(
+        engine,
+        business_date=REPORT_DATE,
+        slot="pre_close",
+        captured_at=datetime(2026, 7, 26, 1, tzinfo=UTC),
+    )
+
+    payload = daily_report_payload(engine, REPORT_DATE)
+    product = next(row for row in payload["items"] if row["offer_id"] == "offer-a")
+
+    assert payload["capture_status"]["pre_close"]["status"] == "success"
+    assert product["capture_versions"][-1]["slot"] == "pre_close"
+    assert product["capture_versions"][-1]["label"] == (
+        "周期末采集（实际 07-26 09:00）"
+    )
+    assert product["capture_versions"][-1]["values"]["ordered_units"] == 3
+    assert product["capture_versions"][-1]["values"]["platform_stock"] == 9
+    assert product["status"] == "needs_review"
+    assert product["differences"] == ["ordered_units"]
+
+
+def test_reports_before_pre_close_activation_are_not_marked_missing() -> None:
+    payload = daily_report_payload(_engine(), REPORT_DATE)
+
+    assert payload["capture_status"]["pre_close"]["status"] == "not_applicable"
+    assert all(
+        issue["slot"] != "pre_close" for issue in payload["capture_issues"]
+    )
+
+
 def test_every_manual_refresh_in_the_ten_to_ten_cycle_is_compared() -> None:
     engine = _engine()
     capture_daily_report(
@@ -2333,5 +2380,6 @@ def test_future_capture_slots_are_pending_not_missing() -> None:
 
     assert payload["capture_status"]["morning"]["status"] == "pending"
     assert payload["capture_status"]["evening"]["status"] == "pending"
+    assert payload["capture_status"]["pre_close"]["status"] == "pending"
     assert payload["capture_issues"] == []
     assert payload["counts"]["missing_capture"] == 0

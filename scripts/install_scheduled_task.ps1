@@ -12,6 +12,10 @@ param(
 
     [Parameter(Mandatory = $false)]
     [ValidatePattern('^(?:[01]\d|2[0-3]):[0-5]\d$')]
+    [string]$PreCloseAt = '09:00',
+
+    [Parameter(Mandatory = $false)]
+    [ValidatePattern('^(?:[01]\d|2[0-3]):[0-5]\d$')]
     [string]$DeadlineAt = '18:30'
 )
 
@@ -46,6 +50,9 @@ $ChineseDailyUpdate = -join [char[]](
 $ChineseEveningReview = -join [char[]](
     0x8FD0, 0x8425, 0x65E5, 0x62A5, 0x665A, 0x95F4, 0x590D, 0x6838
 )
+$ChinesePreCloseUpdate = -join [char[]](
+    0x8FD0, 0x8425, 0x65E5, 0x62A5, 0x5468, 0x671F, 0x672B, 0x66F4, 0x65B0
+)
 $ChineseDeadline = -join [char[]](
     0x8FD0, 0x8425, 0x65E5, 0x62A5, 0x5F85, 0x529E, 0x5FEB, 0x7167
 )
@@ -62,6 +69,12 @@ $TaskDefinitions = @(
         At = $EveningAt
         Arguments = 'daily-report-run --slot evening'
         Description = 'Evening collection and immutable operations report capture.'
+    },
+    @{
+        Name = "Takealot $ChinesePreCloseUpdate"
+        At = $PreCloseAt
+        Arguments = 'daily-report-run --slot pre_close'
+        Description = 'Pre-close collection near the end of the operations report cycle.'
     },
     @{
         Name = "Takealot $ChineseDeadline"

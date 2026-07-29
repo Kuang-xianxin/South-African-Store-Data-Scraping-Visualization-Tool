@@ -57,7 +57,7 @@ const editorError = ref("");
 const editorStatus = ref("");
 const search = ref("");
 const filter = ref<"review" | "all" | "sales" | "stock" | "missing">("all");
-const slots = ["morning", "evening"] as const;
+const slots = ["morning", "evening", "pre_close"] as const;
 const matrixScroll = ref<HTMLElement | null>(null);
 const searchInput = ref<HTMLInputElement | null>(null);
 const locatedBusinessDate = ref("");
@@ -772,7 +772,7 @@ function reviewStatusClass(item: DailyReportItem) {
   return hasRevert || hasRevertImpact ? "revert-review" : "version-review";
 }
 
-function captureStatusLabel(slot: "morning" | "evening") {
+function captureStatusLabel(slot: "morning" | "evening" | "pre_close") {
   const state = report.value?.capture_status[slot];
   if (!state) return "未记录";
   return {
@@ -780,11 +780,26 @@ function captureStatusLabel(slot: "morning" | "evening") {
     failed: "采集失败",
     missing: "未生成记录",
     pending: "等待计划时间",
+    not_applicable: "尚未启用",
   }[state.status];
 }
 
-function slotLabel(slot: "morning" | "evening") {
-  return slot === "morning" ? "早间任务（计划 10:05）" : "晚间任务（计划 18:00）";
+function slotLabel(slot: "morning" | "evening" | "pre_close") {
+  return {
+    morning: "早间任务（计划 10:05）",
+    evening: "晚间任务（计划 18:00）",
+    pre_close: "周期末任务（计划次日 09:00）",
+  }[slot];
+}
+
+function captureIssueSlotLabel(
+  slot: DailyReportPayload["capture_issues"][number]["slot"],
+) {
+  if (slot === "morning") return "早间";
+  if (slot === "evening") return "晚间";
+  if (slot === "pre_close") return "周期末";
+  if (slot === "manual") return "手动";
+  return "字段";
 }
 
 function productLabel(item: { sku: string | null; offer_id: string }) {
@@ -1040,7 +1055,7 @@ function parseInput(value: string | number): number | null {
         <summary>查看具体漏爬原因</summary>
         <ul>
           <li v-for="(issue, index) in report.capture_issues.slice(0, 8)" :key="`${issue.offer_id || issue.slot}-${index}`">
-            <b>{{ issue.slot === "morning" ? "早间" : issue.slot === "evening" ? "晚间" : issue.slot === "manual" ? "手动" : "字段" }}</b>
+            <b>{{ captureIssueSlotLabel(issue.slot) }}</b>
             <span v-if="issue.sku">{{ issue.sku }}：</span>
             {{ issue.reason }}
           </li>
@@ -2243,6 +2258,7 @@ function parseInput(value: string | number): number | null {
 .daily-run-state span { padding: 6px 9px; border-radius: 7px; background: #edf2ee; color: #52635a; font-size: 11px; }
 .daily-run-state span.morning { border-left: 3px solid #3c8abb; }
 .daily-run-state span.evening { border-left: 3px solid #d46b32; }
+.daily-run-state span.pre_close { border-left: 3px solid #2a7c57; }
 .daily-run-state span.manual { border-left: 3px solid #7457a8; }
 .daily-run-state span.failed, .daily-run-state span.missing { background: #fff3d8; color: #835d0f; }
 .daily-run-state span.pending { background: #eef3f7; color: #597081; }
