@@ -11,6 +11,7 @@ import {
   logCompetitorBatchEvent,
   type CompetitorBatchStatus,
 } from "../api";
+import { PRODUCT_IMAGE_SIZE, productThumbnailUrl } from "../productImages";
 import type {
   CollectResult,
   CompetitorDetail,
@@ -20,7 +21,10 @@ import type {
 import { formatChinaDateTime } from "../time";
 
 defineOptions({ name: "CompetitorsPage" });
-const props = defineProps<{ canOperate?: boolean }>();
+const props = defineProps<{
+  canOperate?: boolean;
+  onPermissionDenied?: () => void;
+}>();
 
 const sampleUrls = [
   "https://www.takealot.com/laser-lipo-slimming-machine/PLID72189176",
@@ -43,7 +47,7 @@ interface CollectionQueueItem {
 }
 
 interface CollectionCheckpoint {
-  version: 1 | 2 | 3 | 4;
+  version: 1 | 2 | 3 | 4 | 5;
   rawUrls: string;
   batchUrls: string[];
   attemptedIndexes: number[];
@@ -59,12 +63,18 @@ interface CollectionCheckpoint {
   running?: boolean;
   activeIndex?: number | null;
   activeRequestId?: string | null;
+  autoResumeAt?: string | null;
 }
 
-type CollectionRunMode = "start" | "resume" | "auto_resume";
+type CollectionRunMode =
+  | "start"
+  | "resume"
+  | "auto_resume"
+  | "scheduled_resume";
 
 const collectionCheckpointKey = "takealot-competitor-collection-v1";
 const collectionClientKey = "takealot-competitor-client-v1";
+const automaticResumeDelayMs = 10 * 60 * 1_000;
 const collectionClientId = restoreCollectionClientId();
 const rawUrls = ref(sampleUrls.join("\n"));
 const urlInput = ref<HTMLTextAreaElement | null>(null);
@@ -80,12 +90,15 @@ const detailLoading = ref(false);
 const detailError = ref("");
 const loading = ref(true);
 const collecting = ref(false);
+const collectionClock = ref(Date.now());
+const activeStartedAt = ref<number | null>(null);
 const abortController = ref<AbortController | null>(null);
 const completed = ref(0);
 const total = ref(0);
 const collectionResults = ref<CollectResult[]>([]);
 const collectionErrors = ref<string[]>([]);
 const collectionStopReason = ref("");
+const collectionNoticeVersion = ref(0);
 const batchUrls = ref<string[]>([]);
 const attemptedIndexes = ref<number[]>([]);
 const failedIndexes = ref<number[]>([]);
@@ -93,6 +106,8 @@ const terminalIndexes = ref<number[]>([]);
 const batchId = ref("");
 const activeIndex = ref<number | null>(null);
 const activeRequestId = ref<string | null>(null);
+const autoResumeAt = ref<number | null>(null);
+const autoResumeAttempting = ref(false);
 const restoredRunWasActive = ref(false);
 const manualStopRequested = ref(false);
 const sharedBatchStatus = ref<CompetitorBatchStatus>({
@@ -125,14 +140,22 @@ const reviewSort = ref<
 const competitorQuery = ref("");
 const competitorStockFilter = ref<"全部" | "有货" | "没货" | "未探测">("全部");
 const competitorSignalFilter = ref("全部");
+const failedCompetitorImages = ref<Set<string>>(new Set());
 
 const selected = computed(
   () => competitors.value.find((item) => item.plid === selectedPlid.value) ?? null,
 );
+const sharedBatchMatchesCheckpoint = computed(
+  () =>
+    sharedBatchStatus.value.active
+    && Boolean(batchId.value)
+    && sharedBatchStatus.value.batch_id === batchId.value,
+);
 const anotherBatchIsActive = computed(
   () =>
     sharedBatchStatus.value.active
-    && sharedBatchStatus.value.batch_id !== batchId.value,
+    && !collecting.value
+    && !sharedBatchMatchesCheckpoint.value,
 );
 const sharedBatchOwner = computed(
   () =>
@@ -261,6 +284,41 @@ const pendingResumeCount = computed(() => resumeQueue.value.length);
 const collectionNotices = computed(() =>
   collectionResults.value.filter((result) => result.message !== "采集成功"),
 );
+const activeCollectionStatus = computed(() => {
+  void collectionClock.value;
+  if (!collecting.value) return "";
+  if (activeIndex.value === null) {
+    return "正在登记采集任务或准备下一条商品，请稍候。";
+  }
+  const url = batchUrls.value[activeIndex.value] ?? "";
+  const plid = plidFromUrl(url) || "未知";
+  const elapsed = activeStartedAt.value === null
+    ? 0
+    : Math.max(0, Math.floor((Date.now() - activeStartedAt.value) / 1_000));
+  return `正在检测第 ${activeIndex.value + 1}/${total.value} 条 · PLID${plid} · 已等待 ${elapsed} 秒`;
+});
+const activeCollectionHint = computed(() => {
+  if (activeStartedAt.value === null) {
+    return "正在建立任务状态，完成后会自动显示结果。";
+  }
+  const elapsed = Math.max(
+    0,
+    Math.floor((collectionClock.value - activeStartedAt.value) / 1_000),
+  );
+  return elapsed >= 90
+    ? "当前商品耗时较长，系统可能正在枚举变体、探测库存或执行网络重试；可以继续等待，也可以点击“停止采集”保留断点。"
+    : "单个商品的变体与库存探测通常需要几十秒，复杂商品可能需要1至3分钟。";
+});
+const autoResumeCountdown = computed(() => {
+  if (autoResumeAt.value === null) return "";
+  const remainingSeconds = Math.max(
+    0,
+    Math.ceil((autoResumeAt.value - collectionClock.value) / 1_000),
+  );
+  const minutes = Math.floor(remainingSeconds / 60);
+  const seconds = remainingSeconds % 60;
+  return `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
+});
 
 onMounted(async () => {
   window.addEventListener("keydown", handleWindowKeydown);
@@ -273,8 +331,14 @@ onMounted(async () => {
   batchHeartbeatTimer = window.setInterval(() => {
     if (collecting.value) void recordBatchEvent("heartbeat");
   }, 10_000);
+  collectionClockTimer = window.setInterval(() => {
+    collectionClock.value = Date.now();
+    void maybeAutoResumeScheduledCollection();
+  }, 1_000);
   if (restoredRunWasActive.value) {
     void resumeInterruptedCollection();
+  } else {
+    void maybeAutoResumeScheduledCollection();
   }
 });
 
@@ -282,11 +346,13 @@ onBeforeUnmount(() => {
   window.removeEventListener("keydown", handleWindowKeydown);
   if (sharedBatchTimer !== null) window.clearInterval(sharedBatchTimer);
   if (batchHeartbeatTimer !== null) window.clearInterval(batchHeartbeatTimer);
+  if (collectionClockTimer !== null) window.clearInterval(collectionClockTimer);
   document.body.style.overflow = "";
 });
 
 let sharedBatchTimer: number | null = null;
 let batchHeartbeatTimer: number | null = null;
+let collectionClockTimer: number | null = null;
 
 let detailRequestId = 0;
 watch(selectedPlid, async (plid) => {
@@ -407,6 +473,24 @@ function competitorStockState(
   if (label.includes("没货") || label.includes("售罄")) return "没货";
   if (/\d/.test(label)) return "有货";
   return "未探测";
+}
+
+function canShowCompetitorImage(url: string | null | undefined): url is string {
+  return Boolean(url && !failedCompetitorImages.value.has(url));
+}
+
+function competitorImageUrl(url: string | null | undefined): string {
+  return canShowCompetitorImage(url)
+    ? productThumbnailUrl(url, PRODUCT_IMAGE_SIZE.list)
+    : "";
+}
+
+function markCompetitorImageFailed(url: string | null | undefined): void {
+  if (!url || failedCompetitorImages.value.has(url)) return;
+  failedCompetitorImages.value = new Set([
+    ...failedCompetitorImages.value,
+    url,
+  ]);
 }
 
 function clearCompetitorFilters(): void {
@@ -603,7 +687,7 @@ function removeCollectionError(plid: string) {
 function persistCollectionCheckpoint() {
   if (!batchUrls.value.length) return;
   const checkpoint: CollectionCheckpoint = {
-    version: 4,
+    version: 5,
     rawUrls: rawUrls.value,
     batchUrls: batchUrls.value,
     attemptedIndexes: attemptedIndexes.value,
@@ -619,6 +703,10 @@ function persistCollectionCheckpoint() {
     running: collecting.value && !manualStopRequested.value,
     activeIndex: activeIndex.value,
     activeRequestId: activeRequestId.value,
+    autoResumeAt:
+      autoResumeAt.value === null
+        ? null
+        : new Date(autoResumeAt.value).toISOString(),
   };
   try {
     localStorage.setItem(collectionCheckpointKey, JSON.stringify(checkpoint));
@@ -642,7 +730,7 @@ function restoreCollectionCheckpoint() {
     return;
   }
   if (
-    ![1, 2, 3, 4].includes(checkpoint.version)
+    ![1, 2, 3, 4, 5].includes(checkpoint.version)
     || !Array.isArray(checkpoint.batchUrls)
     || !Array.isArray(checkpoint.attemptedIndexes)
     || !Array.isArray(checkpoint.failedIndexes)
@@ -681,18 +769,43 @@ function restoreCollectionCheckpoint() {
     typeof checkpoint.activeRequestId === "string"
       ? checkpoint.activeRequestId
       : null;
+  const restoredAutoResumeAt =
+    typeof checkpoint.autoResumeAt === "string"
+      ? Date.parse(checkpoint.autoResumeAt)
+      : Number.NaN;
+  autoResumeAt.value = Number.isFinite(restoredAutoResumeAt)
+    ? restoredAutoResumeAt
+    : null;
+  if (
+    autoResumeAt.value === null
+    && isAutomaticResumeReason(collectionStopReason.value)
+    && resumeQueue.value.length > 0
+  ) {
+    autoResumeAt.value = Date.now() + automaticResumeDelayMs;
+  }
   restoredRunWasActive.value =
-    checkpoint.version === 4
+    checkpoint.version >= 4
     && checkpoint.running === true
     && !checkpoint.stopReason
     && resumeQueue.value.length > 0;
+  if (checkpoint.version < 5 && autoResumeAt.value !== null) {
+    persistCollectionCheckpoint();
+  }
 }
 
 async function startCollection() {
-  if (!props.canOperate) return;
-  if (anotherBatchIsActive.value) {
-    collectionStopReason.value =
-      `${sharedBatchOwner.value} 正在采集竞品，请等待当前批次结束或暂停。`;
+  if (!props.canOperate) {
+    props.onPermissionDenied?.();
+    return;
+  }
+  if (sharedBatchStatus.value.active && !collecting.value) {
+    if (sharedBatchMatchesCheckpoint.value && pendingResumeCount.value) {
+      collectionStopReason.value =
+        "检测到这是本页面刷新前启动的同一批次，正在自动接回断点……";
+      await resumeCollection("auto_resume");
+      return;
+    }
+    showCollectionNotice(activeBatchBlockedMessage());
     return;
   }
   try {
@@ -709,6 +822,7 @@ async function startCollection() {
     collectionResults.value = [];
     collectionErrors.value = [];
     collectionStopReason.value = "";
+    autoResumeAt.value = null;
     completed.value = 0;
     batchUrls.value = urls;
     attemptedIndexes.value = [];
@@ -732,11 +846,20 @@ async function startCollection() {
   }
 }
 
-async function resumeCollection(mode: "resume" | "auto_resume" = "resume") {
-  if (!props.canOperate || collecting.value || !pendingResumeCount.value) return;
-  if (anotherBatchIsActive.value) {
-    collectionStopReason.value =
-      `${sharedBatchOwner.value} 正在采集竞品，请等待当前批次结束或暂停。`;
+async function resumeCollection(
+  mode: "resume" | "auto_resume" | "scheduled_resume" = "resume",
+) {
+  if (!props.canOperate) {
+    props.onPermissionDenied?.();
+    return;
+  }
+  if (collecting.value || !pendingResumeCount.value) return;
+  if (
+    sharedBatchStatus.value.active
+    && !collecting.value
+    && !sharedBatchMatchesCheckpoint.value
+  ) {
+    showCollectionNotice(activeBatchBlockedMessage());
     return;
   }
   clearLinkValidation();
@@ -779,6 +902,75 @@ async function resumeInterruptedCollection() {
     "检测到页面刷新或会话中断，正在自动从断点恢复采集……";
   await delay(1_200);
   await resumeCollection("auto_resume");
+}
+
+function activeBatchBlockedMessage() {
+  const status = sharedBatchStatus.value;
+  const current = status.current_plid
+    ? `，当前第 ${(status.current_index ?? 0) + 1} 条 PLID${status.current_plid}`
+    : "，正在准备下一条商品";
+  return `${sharedBatchOwner.value} 的竞品批次正在运行：已检查 ${status.completed}/${status.total}，待续爬 ${status.pending}${current}。请等待当前批次结束，或由发起人点击“停止采集”后再开始。`;
+}
+
+function showCollectionNotice(message: string) {
+  collectionStopReason.value = message;
+  collectionNoticeVersion.value += 1;
+}
+
+function isAutomaticResumeReason(reason: string) {
+  return (
+    reason.includes("连续 2 次发生真实连接失败")
+    || reason.includes("网络或 Takealot 临时服务异常")
+  );
+}
+
+function scheduleAutomaticResume(reason: string) {
+  autoResumeAt.value = Date.now() + automaticResumeDelayMs;
+  showCollectionNotice(
+    `${reason} 系统将在10分钟后自动继续；如果仍然失败，会再间隔10分钟重试。`,
+  );
+  persistCollectionCheckpoint();
+}
+
+function clearAutomaticResumeSchedule() {
+  autoResumeAt.value = null;
+}
+
+async function maybeAutoResumeScheduledCollection() {
+  if (
+    autoResumeAttempting.value
+    || collecting.value
+    || autoResumeAt.value === null
+    || Date.now() < autoResumeAt.value
+  ) {
+    return;
+  }
+  if (!pendingResumeCount.value) {
+    clearAutomaticResumeSchedule();
+    persistCollectionCheckpoint();
+    return;
+  }
+  if (!props.canOperate) {
+    clearAutomaticResumeSchedule();
+    persistCollectionCheckpoint();
+    return;
+  }
+  if (anotherBatchIsActive.value) {
+    scheduleAutomaticResume(
+      `${sharedBatchOwner.value} 的另一批竞品采集正在占用服务，本轮自动续爬暂缓。`,
+    );
+    return;
+  }
+
+  autoResumeAttempting.value = true;
+  clearAutomaticResumeSchedule();
+  collectionStopReason.value = "网络恢复重试时间已到，正在自动继续失败和未完成链接……";
+  persistCollectionCheckpoint();
+  try {
+    await resumeCollection("scheduled_resume");
+  } finally {
+    autoResumeAttempting.value = false;
+  }
 }
 
 async function recordBatchEvent(
@@ -829,10 +1021,21 @@ async function runCollection(
   let consecutiveConnectionFailures = 0;
   persistCollectionCheckpoint();
   try {
-    await recordBatchEvent(mode, "", true);
+    await recordBatchEvent(
+      mode === "scheduled_resume" ? "resume" : mode,
+      "",
+      true,
+    );
+    clearAutomaticResumeSchedule();
+    persistCollectionCheckpoint();
   } catch (error) {
-    collectionStopReason.value =
-      error instanceof Error ? error.message : "其他用户正在采集竞品";
+    const message =
+      error instanceof Error ? error.message : "暂时无法取得竞品采集权";
+    if (mode === "scheduled_resume") {
+      scheduleAutomaticResume(`${message}，本轮自动续爬未能启动。`);
+    } else {
+      collectionStopReason.value = message;
+    }
     collecting.value = false;
     abortController.value = null;
     persistCollectionCheckpoint();
@@ -850,6 +1053,8 @@ async function runCollection(
           : collectionId("request");
       activeIndex.value = index;
       activeRequestId.value = requestId;
+      activeStartedAt.value = Date.now();
+      collectionClock.value = Date.now();
       persistCollectionCheckpoint();
       let settled = false;
       try {
@@ -889,14 +1094,16 @@ async function runCollection(
           ? consecutiveConnectionFailures + 1
           : 0;
         if (consecutiveConnectionFailures >= 2) {
-          collectionStopReason.value =
-            "连续 2 次发生真实连接失败或 Takealot 临时服务错误，已暂停剩余链接。请确认网络和平台恢复后点击“继续失败/未完成”。";
+          scheduleAutomaticResume(
+            "连续 2 次发生真实连接失败或 Takealot 临时服务错误，已暂停剩余链接。",
+          );
         }
         settled = true;
       } finally {
         if (settled) markAttempted(index);
         activeIndex.value = null;
         activeRequestId.value = null;
+        activeStartedAt.value = null;
         persistCollectionCheckpoint();
       }
       await recordBatchEvent("progress");
@@ -908,6 +1115,7 @@ async function runCollection(
     if (!manualStopRequested.value && collectionStopReason.value) {
       await recordBatchEvent("paused", collectionStopReason.value);
     } else if (!manualStopRequested.value && !controller.signal.aborted) {
+      clearAutomaticResumeSchedule();
       await recordBatchEvent(
         "completed",
         pendingResumeCount.value
@@ -923,6 +1131,7 @@ async function runCollection(
 
 function stopCollection() {
   manualStopRequested.value = true;
+  clearAutomaticResumeSchedule();
   collectionStopReason.value =
     "已手动暂停；可以点击“继续失败/未完成”从断点恢复。";
   persistCollectionCheckpoint();
@@ -1054,7 +1263,6 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
         </label>
         <button
           class="primary-button"
-          :disabled="!props.canOperate || anotherBatchIsActive"
           @click="startCollection"
           v-if="!collecting"
         >
@@ -1063,7 +1271,6 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
         <button
           v-if="!collecting && pendingResumeCount"
           class="primary-button resume-button"
-          :disabled="!props.canOperate || anotherBatchIsActive"
           @click="resumeCollection()"
         >
           继续失败/未完成（{{ pendingResumeCount }}）
@@ -1076,14 +1283,47 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
           停止采集
         </button>
       </div>
+      <div
+        v-if="collectionStopReason"
+        :key="collectionNoticeVersion"
+        class="collection-action-alert"
+        role="alert"
+        aria-live="assertive"
+      >
+        <span class="collection-action-alert-icon" aria-hidden="true">!</span>
+        <span>
+          <strong>
+            {{ sharedBatchStatus.active && !collecting
+              ? sharedBatchMatchesCheckpoint
+                ? "正在恢复刷新前的采集任务"
+                : "当前已有竞品采集正在运行"
+              : autoResumeAt
+                ? "网络异常，已安排自动续爬"
+              : "本次采集已暂停" }}
+          </strong>
+          <small>{{ collectionStopReason }}</small>
+          <small v-if="autoResumeAt" class="collection-auto-resume-countdown">
+            距离下次自动尝试：{{ autoResumeCountdown }}
+          </small>
+        </span>
+      </div>
       <div v-if="collecting || completed" class="progress-track" aria-live="polite">
         <span :style="{ width: `${progress}%` }"></span>
+      </div>
+      <div
+        v-if="collecting"
+        class="collection-active-status"
+        role="status"
+        aria-live="polite"
+      >
+        <strong>{{ activeCollectionStatus }}</strong>
+        <span>{{ activeCollectionHint }}</span>
       </div>
       <p v-if="collecting" class="method-note collection-persistence-note">
         采集正在后台继续；切换到其他页面后再返回，进度和结果仍会保留。
       </p>
       <div
-        v-if="collectionResults.length || collectionErrors.length || collectionStopReason"
+        v-if="collectionResults.length || collectionErrors.length || batchUrls.length"
         class="result-strip"
       >
         <span v-if="collectionResults.length" class="result-good">
@@ -1097,9 +1337,6 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
         </span>
         <span v-if="batchUrls.length">
           本批已检查 {{ completed }}/{{ total }}，待续爬 {{ pendingResumeCount }} 个
-        </span>
-        <span v-if="collectionStopReason" class="result-bad">
-          {{ collectionStopReason }}
         </span>
         <span v-for="notice in collectionNotices" :key="notice.plid">
           PLID{{ notice.plid }}：{{ notice.message }}
@@ -1153,11 +1390,33 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
             </tr>
           </thead>
           <tbody>
-            <tr v-for="item in linkHealth" :key="item.plid">
+            <tr
+              v-for="item in linkHealth"
+              :key="item.plid"
+              v-memo="[item, failedCompetitorImages.has(item.图片 || '')]"
+            >
               <td>
-                <a :href="item.url" target="_blank" rel="noreferrer">
-                  PLID{{ item.plid }}
-                </a>
+                <div class="competitor-product-cell">
+                  <div class="competitor-product-image compact">
+                    <img
+                      v-if="canShowCompetitorImage(item.图片)"
+                      :src="competitorImageUrl(item.图片)"
+                      :alt="item.商品 ? `${item.商品} 商品图片` : `PLID${item.plid} 商品图片`"
+                      width="192"
+                      height="192"
+                      loading="lazy"
+                      decoding="async"
+                      @error="markCompetitorImageFailed(item.图片)"
+                    />
+                    <span v-else>暂无图片</span>
+                  </div>
+                  <div>
+                    <strong>{{ item.商品 || `PLID${item.plid}` }}</strong>
+                    <a :href="item.url" target="_blank" rel="noreferrer">
+                      PLID{{ item.plid }}
+                    </a>
+                  </div>
+                </div>
               </td>
               <td>
                 <span class="link-health-pill" :class="item.status">
@@ -1256,6 +1515,7 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
               <tr
                 v-for="item in filteredCompetitors"
                 :key="item.plid"
+                v-memo="[item, selectedPlid === item.plid, failedCompetitorImages.has(item.图片 || '')]"
                 :class="{ selected: selectedPlid === item.plid }"
                 tabindex="0"
                 role="button"
@@ -1265,8 +1525,27 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
                 @keydown.space.prevent="openProductModal(item)"
               >
                 <td>
-                  <strong>{{ item.商品 }}</strong>
-                  <span>PLID{{ item.plid }} · {{ item.当前卖家 || "未知卖家" }}</span>
+                  <div class="competitor-product-cell">
+                    <div class="competitor-product-image">
+                      <img
+                        v-if="canShowCompetitorImage(item.图片)"
+                        :src="competitorImageUrl(item.图片)"
+                        :alt="`${item.商品} 商品图片`"
+                        width="192"
+                        height="192"
+                        loading="lazy"
+                        decoding="async"
+                        @error="markCompetitorImageFailed(item.图片)"
+                      />
+                      <span v-else>暂无图片</span>
+                    </div>
+                    <div>
+                      <strong>{{ item.商品 }}</strong>
+                      <span>
+                        PLID{{ item.plid }} · {{ item.当前卖家 || "未知卖家" }}
+                      </span>
+                    </div>
+                  </div>
                 </td>
                 <td>{{ formatCurrency(item.价格) }}</td>
                 <td>
@@ -1309,10 +1588,27 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
           :aria-label="`${selected.商品} 竞品详情`"
         >
           <header class="competitor-modal-header">
-            <div>
-              <p class="section-kicker">COMPETITOR DETAIL</p>
-              <h2>{{ selected.商品 }}</h2>
-              <span>PLID{{ selected.plid }} · {{ selected.当前卖家 || "未知卖家" }}</span>
+            <div class="competitor-modal-identity">
+              <div class="competitor-product-image hero-image">
+                <img
+                  v-if="canShowCompetitorImage(selected.图片)"
+                  :src="competitorImageUrl(selected.图片)"
+                  :alt="`${selected.商品} 商品图片`"
+                  width="192"
+                  height="192"
+                  decoding="async"
+                  fetchpriority="high"
+                  @error="markCompetitorImageFailed(selected.图片)"
+                />
+                <span v-else>暂无图片</span>
+              </div>
+              <div>
+                <p class="section-kicker">COMPETITOR DETAIL</p>
+                <h2>{{ selected.商品 }}</h2>
+                <span>
+                  PLID{{ selected.plid }} · {{ selected.当前卖家 || "未知卖家" }}
+                </span>
+              </div>
             </div>
             <button
               type="button"
@@ -1435,9 +1731,24 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
                     <tbody>
                       <tr v-for="variant in detail.variants" :key="variant.变体键">
                         <td>
-                          <a :href="variant.链接" target="_blank" rel="noreferrer">
-                            {{ variant.变体 }}
-                          </a>
+                          <div class="competitor-product-cell compact-row">
+                            <div class="competitor-product-image compact">
+                              <img
+                                v-if="canShowCompetitorImage(variant.图片)"
+                                :src="competitorImageUrl(variant.图片)"
+                                :alt="`${variant.变体} 商品图片`"
+                                width="192"
+                                height="192"
+                                loading="lazy"
+                                decoding="async"
+                                @error="markCompetitorImageFailed(variant.图片)"
+                              />
+                              <span v-else>暂无图片</span>
+                            </div>
+                            <a :href="variant.链接" target="_blank" rel="noreferrer">
+                              {{ variant.变体 }}
+                            </a>
+                          </div>
                         </td>
                         <td>{{ variant.SKU || "—" }}</td>
                         <td>{{ variant.卖家 || "未知卖家" }}</td>
@@ -1478,9 +1789,30 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
                   再次采集后，这里会显示库存净流出、新增评论和观察期销量信号。
                 </div>
                 <div v-else class="timeline">
-                  <article v-for="item in detail.history" :key="item.采集时间">
-                    <time>{{ formatChinaDateTime(item.采集时间) }}</time>
-                    <strong>{{ item.趋势判断 }}</strong>
+                  <article
+                    v-for="item in detail.history"
+                    :key="item.采集时间"
+                    v-memo="[item, failedCompetitorImages.has(item.图片 || '')]"
+                  >
+                    <div class="timeline-product-head">
+                      <div class="competitor-product-image compact">
+                        <img
+                          v-if="canShowCompetitorImage(item.图片)"
+                          :src="competitorImageUrl(item.图片)"
+                          :alt="`${item.商品} 商品图片`"
+                          width="192"
+                          height="192"
+                          loading="lazy"
+                          decoding="async"
+                          @error="markCompetitorImageFailed(item.图片)"
+                        />
+                        <span v-else>暂无图片</span>
+                      </div>
+                      <div>
+                        <time>{{ formatChinaDateTime(item.采集时间) }}</time>
+                        <strong>{{ item.趋势判断 }}</strong>
+                      </div>
+                    </div>
                     <span>库存 {{ item.库存上限 }} · 评论 {{ item.评论数 }}</span>
                     <small>
                       净流出 {{ item.库存净流出 ?? "—" }}

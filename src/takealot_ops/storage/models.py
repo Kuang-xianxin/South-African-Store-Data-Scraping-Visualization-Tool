@@ -334,7 +334,7 @@ class CompetitorVariantSnapshot(Base):
 
 
 class ErpUser(Base):
-    """A local ERP user with a server-enforced role."""
+    """A local ERP user with a permission template and optional overrides."""
 
     __tablename__ = "erp_users"
 
@@ -343,6 +343,7 @@ class ErpUser(Base):
     display_name: Mapped[str] = mapped_column(String(100), nullable=False)
     password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
     role: Mapped[str] = mapped_column(String(20), nullable=False)
+    permissions_json: Mapped[str | None] = mapped_column(Text)
     active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)

@@ -136,7 +136,7 @@ function day(value: string) {
               <strong>{{ percent(data.kpis.median_conversion) }}</strong>
             </div>
             <div>
-              <span>有销量商品</span>
+              <span>今日售出商品</span>
               <strong>{{ data.kpis.selling_products }}</strong>
             </div>
             <div>

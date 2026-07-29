@@ -2,6 +2,7 @@
 import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 
 import {
+  ApiRequestError,
   fetchAuthSession,
   fetchAuthStatus,
   fetchFreshness,
@@ -21,6 +22,10 @@ import QuadrantsPage from "./pages/QuadrantsPage.vue";
 import ReportsPage from "./pages/ReportsPage.vue";
 import RisksPage from "./pages/RisksPage.vue";
 import UsersPage from "./pages/UsersPage.vue";
+import {
+  templateLabels,
+  userHasPermission,
+} from "./permissions";
 import { formatChinaDateTime } from "./time";
 import type {
   AuthSession,
@@ -28,6 +33,7 @@ import type {
   DailyReportReminders,
   FreshnessPayload,
 } from "./types";
+import type { PermissionKey } from "./types";
 
 type PageKey =
   | "overview"
@@ -43,19 +49,20 @@ const pageStorageKey = "takealot-erp-active-page-v1";
 const competitorCheckpointKey = "takealot-competitor-collection-v1";
 
 const basePages = [
-  { key: "overview", label: "经营总览", hint: "今日经营脉搏", mark: "01" },
-  { key: "products", label: "商品中心", hint: "单品销售与流量", mark: "02" },
-  { key: "quadrants", label: "经营四象限", hint: "商品组合定位", mark: "03" },
-  { key: "risks", label: "风险与质量", hint: "异常和数据质量", mark: "04" },
-  { key: "competitors", label: "竞品雷达", hint: "库存评论与销量", mark: "05" },
-  { key: "daily-report", label: "运营日报", hint: "全周期核对与合并", mark: "06" },
-  { key: "reports", label: "报表工作台", hint: "导出与 NFT102", mark: "07" },
+  { key: "overview", label: "经营总览", hint: "今日经营脉搏", mark: "01", permission: "store.view" },
+  { key: "products", label: "商品中心", hint: "单品销售与流量", mark: "02", permission: "store.view" },
+  { key: "quadrants", label: "经营坐标", hint: "流量与下单分布", mark: "03", permission: "store.view" },
+  { key: "risks", label: "风险与质量", hint: "异常和数据质量", mark: "04", permission: "store.view" },
+  { key: "competitors", label: "竞品雷达", hint: "库存评论与销量", mark: "05", permission: "competitors.view" },
+  { key: "daily-report", label: "运营日报", hint: "全周期核对与合并", mark: "06", permission: "daily_report.view" },
+  { key: "reports", label: "报表工作台", hint: "NFT102 续写", mark: "07", permission: "nft102.manage" },
 ] as const;
 const adminPage = {
   key: "users",
   label: "用户权限",
-  hint: "账号与角色管理",
+  hint: "账号与权限管理",
   mark: "08",
+  permission: "users.manage",
 } as const;
 
 const authReady = ref(false);
@@ -87,13 +94,19 @@ const refreshClock = ref(Date.now());
 const refreshKey = ref(0);
 const refreshing = ref(false);
 const refreshMessage = ref("");
+const permissionNotice = ref("");
 const mobileNavOpen = ref(false);
+const authError = ref("");
 let dailyReportEvents: EventSource | null = null;
 
-const isAdmin = computed(() => session.value?.user.role === "admin");
-const canOperate = computed(() =>
-  ["operator", "admin"].includes(session.value?.user.role ?? ""),
-);
+const hasPermission = (permission: PermissionKey) =>
+  userHasPermission(session.value?.user, permission);
+const canManageUsers = computed(() => hasPermission("users.manage"));
+const canRefresh = computed(() => hasPermission("refresh.run"));
+const canCollectCompetitors = computed(() => hasPermission("competitors.collect"));
+const canManageDailyReport = computed(() => hasPermission("daily_report.manage"));
+const canGenerateDailyReport = computed(() => hasPermission("daily_report.export"));
+const canUseNft102 = computed(() => hasPermission("nft102.manage"));
 const refreshCooldownRemaining = computed(() => {
   void refreshClock.value;
   if (!refreshStatus.value.cooldown_until) return 0;
@@ -113,7 +126,7 @@ const refreshButtonLabel = computed(() => {
       || "其他用户";
     return `${owner} 正在刷新`;
   }
-  if (!isAdmin.value && refreshCooldownRemaining.value > 0) {
+  if (!refreshStatus.value.admin_exempt && refreshCooldownRemaining.value > 0) {
     return `刷新冷却 ${formatCooldown(refreshCooldownRemaining.value)}`;
   }
   return "刷新全部数据";
@@ -134,16 +147,24 @@ const refreshStatusNotice = computed(() => {
       refreshStatus.value.last_success_display_name
       || refreshStatus.value.last_success_by
       || "其他用户";
-    const suffix = isAdmin.value
+    const suffix = refreshStatus.value.admin_exempt
       ? "；管理员可在必要时再次刷新"
       : `；普通账号还需等待 ${formatCooldown(refreshCooldownRemaining.value)}`;
     return `${owner} 已刷新全部数据${suffix}。`;
   }
   return "";
 });
-const pages = computed(() => (isAdmin.value ? [...basePages, adminPage] : basePages));
+const pages = computed(() =>
+  [...basePages, adminPage].filter((page) =>
+    hasPermission(page.permission as PermissionKey),
+  ),
+);
+const allPages = [...basePages, adminPage];
 const activePage = computed(
-  () => pages.value.find((page) => page.key === currentPage.value) ?? pages.value[0],
+  () =>
+    pages.value.find((page) => page.key === currentPage.value)
+    ?? pages.value[0]
+    ?? { key: "overview", label: "暂无可用模块", hint: "", mark: "--" },
 );
 const pageComponent = computed(() => {
   const components = {
@@ -156,18 +177,42 @@ const pageComponent = computed(() => {
     reports: ReportsPage,
     users: UsersPage,
   };
-  return components[currentPage.value];
+  return components[activePage.value.key as PageKey];
 });
 const roleLabel = computed(() => {
-  const labels = { viewer: "查看员", operator: "运营员", admin: "管理员" };
-  return labels[session.value?.user.role ?? "viewer"];
+  const user = session.value?.user;
+  if (!user) return "";
+  const customized = user.permissions_customized ? " · 自定义权限" : "";
+  return `${templateLabels[user.role]}模板${customized}`;
 });
-const activePageProps = computed(() => ({
-  asOf: currentPage.value === "daily-report" ? dailyReportAsOf.value : asOf.value,
-  ...(["competitors", "daily-report", "reports"].includes(currentPage.value)
-    ? { canOperate: canOperate.value }
-    : {}),
-}));
+const activePageProps = computed(() => {
+  const key = activePage.value.key;
+  const common = {
+    asOf: key === "daily-report" ? dailyReportAsOf.value : asOf.value,
+  };
+  if (key === "competitors") {
+    return {
+      ...common,
+      canOperate: canCollectCompetitors.value,
+      onPermissionDenied: showPermissionDenied,
+    };
+  }
+  if (key === "daily-report") {
+    return {
+      ...common,
+      canOperate: canManageDailyReport.value,
+      canExport: canGenerateDailyReport.value,
+      onPermissionDenied: showPermissionDenied,
+    };
+  }
+  if (key === "reports") {
+    return {
+      canUseNft102: canUseNft102.value,
+      onPermissionDenied: showPermissionDenied,
+    };
+  }
+  return common;
+});
 
 onMounted(async () => {
   window.addEventListener("erp-auth-expired", handleExpired);
@@ -182,17 +227,43 @@ onBeforeUnmount(() => {
   disconnectDailyReportEvents();
   if (refreshStatusTimer !== null) window.clearInterval(refreshStatusTimer);
   if (refreshClockTimer !== null) window.clearInterval(refreshClockTimer);
+  if (permissionNoticeTimer !== null) window.clearTimeout(permissionNoticeTimer);
 });
 
 let refreshStatusTimer: number | null = null;
 let refreshClockTimer: number | null = null;
+let permissionNoticeTimer: number | null = null;
+
+function showPermissionDenied() {
+  permissionNotice.value = "当前账号该功能权限未开放";
+  if (permissionNoticeTimer !== null) window.clearTimeout(permissionNoticeTimer);
+  permissionNoticeTimer = window.setTimeout(() => {
+    permissionNotice.value = "";
+    permissionNoticeTimer = null;
+  }, 4_000);
+}
+
+function openPage(page: (typeof allPages)[number]) {
+  if (!hasPermission(page.permission as PermissionKey)) {
+    showPermissionDenied();
+    return;
+  }
+  switchPage(page.key);
+}
 
 async function restoreSession() {
+  authError.value = "";
   try {
     acceptSession(await fetchAuthSession());
-  } catch {
+  } catch (error) {
     setAuthSession(null);
     session.value = null;
+    if (!(error instanceof ApiRequestError) || error.status !== 401) {
+      authError.value =
+        error instanceof Error
+          ? error.message
+          : "登录信息加载失败，请重新连接经营系统";
+    }
     authStatus.value = await fetchAuthStatus().catch(() => ({
       setup_required: false,
       bootstrap_allowed: false,
@@ -202,11 +273,17 @@ async function restoreSession() {
   }
 }
 
+async function retryAuthentication() {
+  authReady.value = false;
+  await restoreSession();
+}
+
 function acceptSession(next: AuthSession) {
   session.value = next;
   setAuthSession(next);
-  if (currentPage.value === "users" && next.user.role !== "admin") {
-    switchPage("overview");
+  const allowedPage = pages.value.find((page) => page.key === currentPage.value);
+  if (!allowedPage && pages.value[0]) {
+    switchPage(pages.value[0].key);
   }
   authReady.value = true;
   void loadFreshness();
@@ -242,6 +319,10 @@ async function loadFreshness() {
 }
 
 async function loadDailyReportReminders() {
+  if (!hasPermission("daily_report.view")) {
+    dailyReportReminders.value = { count: 0, dates: [] };
+    return;
+  }
   dailyReportReminders.value = await fetchDailyReportReminders().catch(() => ({
     count: 0,
     dates: [],
@@ -250,7 +331,7 @@ async function loadDailyReportReminders() {
 
 function connectDailyReportEvents() {
   disconnectDailyReportEvents();
-  if (!session.value) return;
+  if (!session.value || !hasPermission("daily_report.view")) return;
   const source = new EventSource("/api/erp/daily-report/events");
   const publishUpdate = (event: Event) => {
     const payload = JSON.parse((event as MessageEvent<string>).data) as {
@@ -282,7 +363,11 @@ async function loadRefreshStatus() {
 }
 
 async function runRefresh() {
-  if (!canOperate.value || !refreshStatus.value.can_refresh) return;
+  if (!canRefresh.value) {
+    showPermissionDenied();
+    return;
+  }
+  if (!refreshStatus.value.can_refresh) return;
   refreshing.value = true;
   refreshMessage.value = "";
   try {
@@ -377,6 +462,15 @@ function currentOperationsBusinessDate() {
 
 <template>
   <div v-if="!authReady" class="auth-loading">正在连接经营系统…</div>
+  <section v-else-if="authError" class="auth-recovery" role="alert">
+    <div class="auth-recovery-card">
+      <p>CONNECTION ERROR</p>
+      <h1>页面暂时无法加载</h1>
+      <span>{{ authError }}</span>
+      <small>后台采集和已有数据不会因此中断。</small>
+      <button type="button" @click="retryAuthentication">重新连接</button>
+    </div>
+  </section>
   <LoginPage
     v-else-if="!session"
     :status="authStatus"
@@ -394,15 +488,21 @@ function currentOperationsBusinessDate() {
 
       <nav aria-label="ERP 主导航">
         <button
-          v-for="page in pages"
+          v-for="page in allPages"
           :key="page.key"
-          :class="{ active: currentPage === page.key }"
-          @click="switchPage(page.key)"
+          :class="{
+            active: currentPage === page.key,
+            locked: !hasPermission(page.permission as PermissionKey),
+          }"
+          @click="openPage(page)"
         >
           <span>{{ page.mark }}</span>
           <div>
             <strong>{{ page.label }}</strong>
-            <small>{{ page.hint }}</small>
+            <small>
+              {{ page.hint }}
+              <em v-if="!hasPermission(page.permission as PermissionKey)">未开放</em>
+            </small>
           </div>
         </button>
       </nav>
@@ -432,14 +532,14 @@ function currentOperationsBusinessDate() {
           <h1>{{ activePage.label }}</h1>
         </div>
         <div class="topbar-actions">
-          <label v-if="currentPage !== 'daily-report'">
+          <label v-if="!['daily-report', 'reports', 'users'].includes(currentPage)">
             <span>数据截止日期</span>
             <input v-model="asOf" type="date" />
           </label>
           <button
-            v-if="canOperate"
+            v-if="currentPage !== 'users'"
             class="refresh-button"
-            :disabled="refreshing || !refreshStatus.can_refresh"
+            :disabled="refreshing || (canRefresh && !refreshStatus.can_refresh)"
             @click="runRefresh"
           >
             {{ refreshButtonLabel }}
@@ -452,7 +552,15 @@ function currentOperationsBusinessDate() {
         </div>
       </header>
 
-      <p v-if="refreshMessage" class="global-notice">{{ refreshMessage }}</p>
+      <p
+        v-if="permissionNotice"
+        class="global-notice permission-notice"
+        role="alert"
+        aria-live="assertive"
+      >
+        {{ permissionNotice }}
+      </p>
+      <p v-else-if="refreshMessage" class="global-notice">{{ refreshMessage }}</p>
       <p
         v-else-if="refreshStatusNotice"
         class="global-notice refresh-cooldown-notice"
@@ -461,7 +569,11 @@ function currentOperationsBusinessDate() {
         {{ refreshStatusNotice }}
       </p>
       <button
-        v-if="dailyReportReminders.count && currentPage !== 'daily-report'"
+        v-if="
+          canManageDailyReport
+          && dailyReportReminders.count
+          && currentPage !== 'daily-report'
+        "
         class="pending-daily-banner"
         @click="switchPage('daily-report')"
       >
@@ -476,11 +588,15 @@ function currentOperationsBusinessDate() {
       <section class="erp-content">
         <KeepAlive include="CompetitorsPage">
           <component
+            v-if="pages.length"
             :is="pageComponent"
             :key="`${currentPage}-${refreshKey}`"
             v-bind="activePageProps"
           />
         </KeepAlive>
+        <div v-if="!pages.length" class="state-card">
+          当前账号尚未分配任何模块权限，请联系管理员配置。
+        </div>
       </section>
     </div>
     <button
@@ -499,6 +615,83 @@ function currentOperationsBusinessDate() {
   place-items: center;
   color: #315245;
   background: #edf2ec;
+}
+
+.auth-recovery {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: #edf2ec;
+}
+
+.auth-recovery-card {
+  width: min(520px, 100%);
+  padding: 30px;
+  border: 1px solid #d8c9a7;
+  border-radius: 20px;
+  background: #fffdf7;
+  box-shadow: 0 18px 50px rgb(39 64 54 / 10%);
+}
+
+.auth-recovery-card p {
+  margin: 0 0 8px;
+  color: #9b6525;
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: 0.12em;
+}
+
+.auth-recovery-card h1 {
+  margin: 0 0 14px;
+  color: #243c33;
+}
+
+.auth-recovery-card span,
+.auth-recovery-card small {
+  display: block;
+  line-height: 1.7;
+}
+
+.auth-recovery-card span {
+  color: #684d2d;
+}
+
+.auth-recovery-card small {
+  margin-top: 8px;
+  color: #6d7a74;
+}
+
+.auth-recovery-card button {
+  margin-top: 22px;
+  border: 0;
+  border-radius: 12px;
+  padding: 11px 18px;
+  color: white;
+  background: #315f50;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.erp-sidebar nav button.locked {
+  opacity: 0.62;
+}
+
+.erp-sidebar nav button.locked:hover {
+  opacity: 0.82;
+}
+
+.erp-sidebar nav button small em {
+  margin-left: 6px;
+  color: #d9b26f;
+  font-style: normal;
+  font-weight: 700;
+}
+
+.permission-notice {
+  border-color: #d9b26f;
+  color: #6b481c;
+  background: #fff6dc;
 }
 .account-menu {
   display: grid;

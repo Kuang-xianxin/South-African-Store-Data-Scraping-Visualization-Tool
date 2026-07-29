@@ -10,6 +10,7 @@ import type {
   AuthSession,
   AuthStatus,
   ManagedUser,
+  PermissionKey,
   UserRole,
   ProductDetailPayload,
   ProductsPayload,
@@ -20,6 +21,7 @@ import type {
   DailyReportPayload,
   DailyReportReminders,
 } from "./types";
+import { templatePermissions } from "./permissions";
 
 let csrfToken = "";
 
@@ -35,6 +37,29 @@ export class ApiRequestError extends Error {
 
 export function setAuthSession(session: AuthSession | null) {
   csrfToken = session?.csrf_token ?? "";
+}
+
+function normalizeAuthSession(session: AuthSession): AuthSession {
+  const role = session?.user?.role;
+  if (!role || !(role in templatePermissions)) {
+    throw new ApiRequestError(
+      "登录信息与当前页面版本不兼容，请重新加载；若仍失败，请联系管理员重启 ERP 服务",
+      500,
+    );
+  }
+  return {
+    ...session,
+    user: {
+      ...session.user,
+      permissions: Array.isArray(session.user.permissions)
+        ? session.user.permissions
+        : [...templatePermissions[role]],
+      permissions_customized:
+        typeof session.user.permissions_customized === "boolean"
+          ? session.user.permissions_customized
+          : false,
+    },
+  };
 }
 
 async function request<T>(url: string, init?: RequestInit & { signal?: AbortSignal }): Promise<T> {
@@ -79,17 +104,21 @@ export function fetchAuthStatus(): Promise<AuthStatus> {
 }
 
 export async function fetchAuthSession(): Promise<AuthSession> {
-  const session = await request<AuthSession>("/api/auth/session");
+  const session = normalizeAuthSession(
+    await request<AuthSession>("/api/auth/session"),
+  );
   setAuthSession(session);
   return session;
 }
 
 export async function login(username: string, password: string): Promise<AuthSession> {
-  const session = await request<AuthSession>("/api/auth/login", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ username, password }),
-  });
+  const session = normalizeAuthSession(
+    await request<AuthSession>("/api/auth/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ username, password }),
+    }),
+  );
   setAuthSession(session);
   return session;
 }
@@ -99,15 +128,17 @@ export async function bootstrapAdmin(
   displayName: string,
   password: string,
 ): Promise<AuthSession> {
-  const session = await request<AuthSession>("/api/auth/bootstrap", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      username,
-      display_name: displayName,
-      password,
+  const session = normalizeAuthSession(
+    await request<AuthSession>("/api/auth/bootstrap", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        username,
+        display_name: displayName,
+        password,
+      }),
     }),
-  });
+  );
   setAuthSession(session);
   return session;
 }
@@ -127,6 +158,7 @@ export async function createUser(input: {
   display_name: string;
   password: string;
   role: UserRole;
+  permissions?: PermissionKey[];
 }): Promise<ManagedUser> {
   const result = await request<{ user: ManagedUser }>("/api/auth/users", {
     method: "POST",
@@ -142,6 +174,7 @@ export async function updateUser(
     display_name?: string;
     password?: string;
     role?: UserRole;
+    permissions?: PermissionKey[];
     active?: boolean;
   },
 ): Promise<ManagedUser> {
@@ -392,7 +425,7 @@ export function saveDailyReportManual(
     ordered_units?: number | null;
     platform_stock?: number | null;
     reason: string;
-    note: string;
+    note?: string;
   },
 ): Promise<{ ok: boolean }> {
   return request(

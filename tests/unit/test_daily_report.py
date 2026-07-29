@@ -187,6 +187,8 @@ def test_capture_keeps_morning_and_evening_versions_and_requires_review() -> Non
 
     payload = daily_report_payload(engine, REPORT_DATE)
     product = next(row for row in payload["items"] if row["offer_id"] == "offer-a")
+    assert payload["counts"]["current_stock_total"] == 11
+    assert payload["counts"]["current_stock_missing"] == 0
     assert product["image_url"] == "https://example.invalid/product-a.png"
     assert product["morning"]["ordered_units"] == 1
     assert product["morning"]["platform_stock"] == 9
@@ -315,6 +317,8 @@ def test_missing_next_morning_stock_does_not_fall_back_to_other_times() -> None:
 
     payload = daily_report_payload(engine, REPORT_DATE)
     product = next(row for row in payload["items"] if row["offer_id"] == "offer-a")
+    assert payload["counts"]["current_stock_total"] == 13
+    assert payload["counts"]["current_stock_missing"] == 0
     assert product["current"]["platform_stock"] is None
     assert product["status"] == "missing_capture"
     assert (
@@ -325,6 +329,45 @@ def test_missing_next_morning_stock_does_not_fall_back_to_other_times() -> None:
     evening_run = next(run for run in payload["runs"] if run["slot"] == "evening")
     assert evening_run["counts"]["reported_inventory_missing"] == 2
     assert evening_run["counts"]["reported_inventory_date"] == "2026-07-25"
+
+
+def test_current_stock_total_follows_latest_offer_inventory_and_preserves_missing() -> None:
+    engine = _engine()
+    capture_daily_report(
+        engine,
+        business_date=REPORT_DATE,
+        slot="morning",
+        captured_at=_report_capture_time(REPORT_DATE, 2, 5),
+    )
+    with Session(engine) as session, session.begin():
+        offer_a = session.get(OfferCurrent, "offer-a")
+        offer_b = session.get(OfferCurrent, "offer-b")
+        assert offer_a is not None
+        assert offer_b is not None
+        offer_a.takealot_available_stock = 12
+        offer_b.takealot_available_stock = 6
+
+    refreshed_payload = daily_report_payload(engine, REPORT_DATE)
+
+    assert refreshed_payload["counts"]["current_stock_total"] == 18
+    assert refreshed_payload["counts"]["current_stock_missing"] == 0
+    report_item = next(
+        item
+        for item in refreshed_payload["items"]
+        if item["offer_id"] == "offer-a"
+    )
+    assert report_item["current"]["platform_stock"] == 9
+
+    with Session(engine) as session, session.begin():
+        offer_b = session.get(OfferCurrent, "offer-b")
+        assert offer_b is not None
+        offer_b.takealot_available_stock = None
+        offer_b.total_stock = None
+
+    payload = daily_report_payload(engine, REPORT_DATE)
+
+    assert payload["counts"]["current_stock_total"] is None
+    assert payload["counts"]["current_stock_missing"] == 1
 
 
 def test_inventory_backfill_attaches_next_morning_stock_to_report_day() -> None:
@@ -682,6 +725,53 @@ def test_manual_candidate_and_confirm_are_separate_audited_states() -> None:
     assert handled[1]["note"] == "第二次核对后改为订单4、库存8"
     assert handled[1]["detail"]["before_values"]["ordered_units"] == 3
     assert handled[1]["detail"]["after_values"]["ordered_units"] == 4
+
+
+def test_manual_candidate_accepts_no_note_and_keeps_confirmation_note_required() -> None:
+    engine = _engine()
+    for slot, hour in (("morning", 2), ("evening", 10)):
+        capture_daily_report(
+            engine,
+            business_date=REPORT_DATE,
+            slot=slot,
+            captured_at=_report_capture_time(REPORT_DATE, hour),
+        )
+
+    save_manual_candidate(
+        engine,
+        business_date=REPORT_DATE,
+        offer_id="offer-a",
+        values={"ordered_units": 3},
+        reason="platform_delay",
+        note="",
+        user_id=1,
+    )
+
+    payload = daily_report_payload(engine, REPORT_DATE)
+    product = next(row for row in payload["items"] if row["offer_id"] == "offer-a")
+    assert product["manual"]["ordered_units"] == 3
+    assert product["manual_note"] is None
+    with Session(engine) as session:
+        manual_audit = session.scalar(
+            select(DailyReportAudit)
+            .where(
+                DailyReportAudit.offer_id == "offer-a",
+                DailyReportAudit.action == "manual_candidate",
+            )
+            .order_by(DailyReportAudit.id.desc())
+        )
+    assert manual_audit is not None
+    assert manual_audit.note is None
+
+    with pytest.raises(DailyReportInputError, match="确认合并必须填写备注"):
+        confirm_entry(
+            engine,
+            business_date=REPORT_DATE,
+            offer_id="offer-a",
+            source="manual",
+            note="",
+            user_id=1,
+        )
 
 
 def test_matching_manual_fix_closes_version_difference_without_stock_action() -> None:
@@ -1482,6 +1572,54 @@ def test_daily_sales_align_with_the_following_morning_inventory() -> None:
         and pending["offer_id"] == "offer-a"
         for pending in payload["pending_actions"]
     )
+
+
+def test_first_capture_stock_mismatch_is_persisted_and_pushed_as_pending() -> None:
+    engine = _engine()
+    for slot, hour in (("morning", 2), ("evening", 10)):
+        capture_daily_report(
+            engine,
+            business_date=REPORT_DATE,
+            slot=slot,
+            captured_at=_report_capture_time(REPORT_DATE, hour),
+        )
+
+    next_date = REPORT_DATE + timedelta(days=1)
+    with Session(engine) as session, session.begin():
+        session.get(OfferCurrent, "offer-a").takealot_available_stock = 8
+
+    capture_daily_report(
+        engine,
+        business_date=next_date,
+        slot="morning",
+        captured_at=_report_capture_time(next_date, 2),
+    )
+
+    payload = daily_report_payload(engine, next_date)
+    item = next(row for row in payload["items"] if row["offer_id"] == "offer-a")
+    assert item["status"] == "needs_review"
+    assert item["review_issues"] == [
+        {
+            "type": "stock_continuity",
+            "fields": ["ordered_units", "platform_stock"],
+        }
+    ]
+    assert item["stock_check"]["mismatch"] is True
+    assert any(
+        pending["business_date"] == next_date.isoformat()
+        and pending["offer_id"] == "offer-a"
+        for pending in payload["pending_actions"]
+    )
+    with Session(engine) as session:
+        resolution = session.scalar(
+            select(DailyReportResolution).where(
+                DailyReportResolution.business_date == next_date,
+                DailyReportResolution.offer_id == "offer-a",
+            )
+        )
+        assert resolution is not None
+        assert resolution.status == "needs_review"
+    assert reminder_payload(engine, next_date + timedelta(days=1))["count"] == 1
 
 
 def test_stock_continuity_mismatch_is_a_cross_date_pending_action(

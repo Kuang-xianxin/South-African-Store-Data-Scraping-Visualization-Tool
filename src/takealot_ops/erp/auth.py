@@ -17,15 +17,21 @@ from sqlalchemy import Engine, delete, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from takealot_ops.erp.permissions import (
+    ROLE_PERMISSIONS,
+    USERS_MANAGE,
+    permissions_from_storage,
+    permissions_to_storage,
+    validate_role,
+)
 from takealot_ops.settings import DashboardSettings
 from takealot_ops.storage.migrations import create_engine_for_settings, create_schema
 from takealot_ops.storage.models import ErpSession, ErpUser
 
 
-ROLES = frozenset({"viewer", "operator", "admin"})
-OPERATOR_ROLES = frozenset({"operator", "admin"})
 SESSION_COOKIE = "takealot_erp_session"
-SESSION_LIFETIME = timedelta(hours=12)
+SESSION_LIFETIME = timedelta(days=7)
+SESSION_RENEWAL_INTERVAL = timedelta(days=1)
 _USERNAME_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{2,63}$")
 _PASSWORD_PREFIX = "scrypt"
 _SCRYPT_N = 2**14
@@ -47,6 +53,8 @@ class UserIdentity:
     username: str
     display_name: str
     role: str
+    permissions: tuple[str, ...]
+    permissions_customized: bool
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -54,7 +62,12 @@ class UserIdentity:
             "username": self.username,
             "display_name": self.display_name,
             "role": self.role,
+            "permissions": list(self.permissions),
+            "permissions_customized": self.permissions_customized,
         }
+
+    def can(self, permission: str) -> bool:
+        return permission in self.permissions
 
 
 @dataclass(frozen=True)
@@ -62,6 +75,7 @@ class SessionIdentity:
     user: UserIdentity
     csrf_token: str
     expires_at: datetime
+    renewed: bool
 
 
 @dataclass(frozen=True)
@@ -155,12 +169,19 @@ class AuthManager:
             if user is None or not user.active:
                 session.delete(record)
                 return None
-            if now - record.last_seen_at >= timedelta(minutes=5):
+            renewed = (
+                now - record.last_seen_at >= SESSION_RENEWAL_INTERVAL
+                or record.expires_at - now
+                < SESSION_LIFETIME - SESSION_RENEWAL_INTERVAL
+            )
+            if renewed:
                 record.last_seen_at = now
+                record.expires_at = now + SESSION_LIFETIME
             return SessionIdentity(
                 user=_identity(user),
                 csrf_token=record.csrf_token,
                 expires_at=record.expires_at,
+                renewed=renewed,
             )
 
     def logout(self, token: str | None) -> None:
@@ -183,10 +204,15 @@ class AuthManager:
         display_name: str,
         password: str,
         role: str,
+        permissions: list[str] | None = None,
     ) -> dict[str, Any]:
         normalized = _normalize_username(username)
         shown_name = _validate_display_name(display_name, normalized)
         validated_role = _validate_role(role)
+        permissions_json = _validated_permissions_json(
+            validated_role,
+            permissions,
+        )
         password_hash = hash_password(password)
         now = _utc_now()
         try:
@@ -196,6 +222,7 @@ class AuthManager:
                     display_name=shown_name,
                     password_hash=password_hash,
                     role=validated_role,
+                    permissions_json=permissions_json,
                     active=True,
                     created_at=now,
                     updated_at=now,
@@ -214,6 +241,8 @@ class AuthManager:
         display_name: str | None = None,
         password: str | None = None,
         role: str | None = None,
+        permissions: list[str] | None = None,
+        permissions_provided: bool = False,
         active: bool | None = None,
     ) -> dict[str, Any]:
         now = _utc_now()
@@ -223,24 +252,46 @@ class AuthManager:
                 raise AuthInputError("用户不存在")
             new_role = _validate_role(role) if role is not None else user.role
             new_active = active if active is not None else user.active
-            if user.active and user.role == "admin" and (
-                not new_active or new_role != "admin"
+            role_changed = new_role != user.role
+            if permissions_provided:
+                new_permissions_json = _validated_permissions_json(
+                    new_role,
+                    permissions,
+                )
+            elif role_changed:
+                new_permissions_json = None
+            else:
+                new_permissions_json = user.permissions_json
+            current_permissions = _permissions(user)
+            new_permissions = permissions_from_storage(
+                new_role,
+                new_permissions_json,
+            )
+            if (
+                user.active
+                and USERS_MANAGE in current_permissions
+                and (not new_active or USERS_MANAGE not in new_permissions)
             ):
-                other_admins = int(
-                    session.scalar(
-                        select(func.count(ErpUser.id)).where(
+                other_managers = [
+                    other
+                    for other in session.scalars(
+                        select(ErpUser).where(
                             ErpUser.active.is_(True),
-                            ErpUser.role == "admin",
                             ErpUser.id != user.id,
                         )
-                    )
-                    or 0
-                )
-                if other_admins == 0:
-                    raise AuthConflictError("不能停用或降级唯一的管理员")
+                    ).all()
+                    if USERS_MANAGE in _permissions(other)
+                ]
+                if not other_managers:
+                    raise AuthConflictError("必须保留至少一个可管理用户权限的启用账号")
 
-            invalidate_sessions = new_role != user.role or new_active != user.active
+            invalidate_sessions = (
+                role_changed
+                or new_active != user.active
+                or new_permissions_json != user.permissions_json
+            )
             user.role = new_role
+            user.permissions_json = new_permissions_json
             user.active = new_active
             if display_name is not None:
                 user.display_name = _validate_display_name(display_name, user.username)
@@ -360,18 +411,35 @@ def _validate_password(password: str) -> None:
 
 
 def _validate_role(role: str) -> str:
-    value = role.strip().lower()
-    if value not in ROLES:
-        raise AuthInputError("角色只能是 viewer、operator 或 admin")
-    return value
+    try:
+        return validate_role(role)
+    except ValueError as exc:
+        raise AuthInputError(str(exc)) from exc
+
+
+def _validated_permissions_json(
+    role: str,
+    permissions: list[str] | None,
+) -> str | None:
+    try:
+        return permissions_to_storage(role, permissions)
+    except ValueError as exc:
+        raise AuthInputError(str(exc)) from exc
+
+
+def _permissions(user: ErpUser) -> frozenset[str]:
+    return permissions_from_storage(user.role, user.permissions_json)
 
 
 def _identity(user: ErpUser) -> UserIdentity:
+    permissions = _permissions(user)
     return UserIdentity(
         id=user.id,
         username=user.username,
         display_name=user.display_name,
         role=user.role,
+        permissions=tuple(sorted(permissions)),
+        permissions_customized=permissions != ROLE_PERMISSIONS[user.role],
     )
 
 

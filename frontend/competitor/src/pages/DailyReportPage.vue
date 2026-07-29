@@ -15,6 +15,7 @@ import {
   saveDailyReportNote,
   updateDailyReportNote,
 } from "../api";
+import { PRODUCT_IMAGE_SIZE, productThumbnailUrl } from "../productImages";
 import { formatChinaDateTime } from "../time";
 import type {
   DailyReportExport,
@@ -26,6 +27,13 @@ import type {
 
 type MatrixDailyReportItem =
   DailyReportPayload["comparison_history"][number]["items"][number];
+type MatrixHistoryDay = DailyReportPayload["comparison_history"][number];
+type MatrixTotalField = "ordered_units" | "platform_stock";
+type MatrixDayTotal = {
+  total: number | null;
+  missing: number;
+  products: number;
+};
 type EditableDailyReportItem =
   | DailyReportPendingAction
   | (MatrixDailyReportItem & { business_date: string });
@@ -34,7 +42,12 @@ type OperatorActionItem =
   | DailyReportHandledAction;
 type DailyReportNote = DailyReportItem["operator_notes"][number];
 
-const props = defineProps<{ asOf: string; canOperate?: boolean }>();
+const props = defineProps<{
+  asOf: string;
+  canOperate?: boolean;
+  canExport?: boolean;
+  onPermissionDenied?: () => void;
+}>();
 const report = ref<DailyReportPayload | null>(null);
 const exportState = ref<DailyReportExport | null>(null);
 const loading = ref(false);
@@ -44,8 +57,6 @@ const editorError = ref("");
 const editorStatus = ref("");
 const search = ref("");
 const filter = ref<"review" | "all" | "sales" | "stock" | "missing">("all");
-const page = ref(1);
-const pageSize = 24;
 const slots = ["morning", "evening"] as const;
 const matrixScroll = ref<HTMLElement | null>(null);
 const searchInput = ref<HTMLInputElement | null>(null);
@@ -98,6 +109,19 @@ onBeforeUnmount(() => {
 });
 
 const comparisonHistory = computed(() => report.value?.comparison_history ?? []);
+const matrixDayTotals = computed(() => {
+  const totals = new Map<
+    string,
+    Record<MatrixTotalField, MatrixDayTotal>
+  >();
+  for (const day of comparisonHistory.value) {
+    totals.set(day.business_date, {
+      ordered_units: summarizeMatrixDay(day, "ordered_units"),
+      platform_stock: summarizeMatrixDay(day, "platform_stock"),
+    });
+  }
+  return totals;
+});
 const manualRuns = computed(
   () => report.value?.runs.filter((run) => run.slot === "manual") ?? [],
 );
@@ -153,12 +177,7 @@ const filteredItems = computed(() => {
     return true;
   });
 });
-const pageCount = computed(() =>
-  Math.max(1, Math.ceil(filteredItems.value.length / pageSize)),
-);
-const visibleItems = computed(() =>
-  filteredItems.value.slice((page.value - 1) * pageSize, page.value * pageSize),
-);
+const visibleItems = computed(() => filteredItems.value);
 const actionItems = computed(() => report.value?.pending_actions ?? []);
 const currentBusinessDatePendingCount = computed(
   () =>
@@ -198,12 +217,6 @@ const missingPageViewsCount = computed(
     ).length ?? 0,
 );
 
-watch([search, filter], () => {
-  page.value = 1;
-});
-watch(pageCount, (count) => {
-  if (page.value > count) page.value = count;
-});
 watch(handledActions, () => {
   if (
     handledProcessingDate.value &&
@@ -288,19 +301,24 @@ function auditValuesSummary(values: DailyReportHandledAction["current"] | null) 
   return `浏览量 ${value(values.page_views_30_days)} / 订单 ${value(values.ordered_units)} / 库存 ${value(values.platform_stock)}`;
 }
 
-function visibleProductImage(
-  item: object,
-) {
+function productImageSource(item: object) {
   const imageUrl =
     "image_url" in item && typeof item.image_url === "string"
       ? item.image_url.trim()
       : "";
+  return imageUrl;
+}
+
+function visibleProductImage(item: object) {
+  const imageUrl = productImageSource(item);
   return imageUrl && !failedProductImages.value.has(imageUrl)
-    ? imageUrl
+    ? productThumbnailUrl(imageUrl, PRODUCT_IMAGE_SIZE.list)
     : null;
 }
 
-function markProductImageFailed(imageUrl: string) {
+function markProductImageFailed(item: object) {
+  const imageUrl = productImageSource(item);
+  if (!imageUrl) return;
   failedProductImages.value = new Set([
     ...failedProductImages.value,
     imageUrl,
@@ -325,7 +343,6 @@ async function locateReportEntry(
   }
   search.value = sku;
   filter.value = "all";
-  page.value = 1;
   locatedBusinessDate.value = item.business_date;
   await nextTick();
   searchInput.value?.focus({ preventScroll: true });
@@ -381,12 +398,15 @@ async function load(
       message.value = error instanceof Error ? error.message : "运营日报读取失败";
     }
   } finally {
-    if (!options.quiet) loading.value = false;
+    if (!options.quiet) {
+      loading.value = false;
+      queueMicrotask(flushLiveUpdate);
+    }
   }
 }
 
 function handleLiveUpdate() {
-  if (saving.value || editor.value.mode !== null) {
+  if (loading.value || saving.value || editor.value.mode !== null) {
     liveRefreshPending = true;
     return;
   }
@@ -394,7 +414,12 @@ function handleLiveUpdate() {
 }
 
 function flushLiveUpdate() {
-  if (!liveRefreshPending || saving.value || editor.value.mode !== null) return;
+  if (
+    !liveRefreshPending ||
+    loading.value ||
+    saving.value ||
+    editor.value.mode !== null
+  ) return;
   liveRefreshPending = false;
   void load({ quiet: true, preserveScroll: true });
 }
@@ -413,6 +438,10 @@ function openEditor(
   item: OperatorActionItem | null = null,
   note: DailyReportNote | null = null,
 ) {
+  if (!props.canOperate) {
+    props.onPermissionDenied?.();
+    return;
+  }
   editor.value = { mode, item, note };
   editorError.value = "";
   editorStatus.value = "";
@@ -443,7 +472,7 @@ function openEditor(
     reason: mode === "manual" && fullItem?.manual_reason
       ? fullItem.manual_reason
       : "platform_delay",
-    source: pendingItem?.manual_note
+    source: pendingItem?.manual_at
       ? "manual"
       : pendingItem?.capture_versions.length
         ? "latest"
@@ -457,10 +486,12 @@ function openEditor(
           ? "stock_continuity"
           : "general"
     ),
-    note: mode === "delete_note"
+    note: mode === "manual"
+      ? ""
+      : mode === "delete_note"
       ? ""
       : note?.note ?? (
-        mode === "manual" && fullItem?.manual_note ? fullItem.manual_note : ""
+        fullItem?.manual_note ?? ""
       ),
   };
   noteManager.value = null;
@@ -489,7 +520,7 @@ async function submitEditor() {
   const note = String(form.value.note ?? "").trim();
   const generalNoteDeletion =
     mode === "delete_note" && editor.value.note?.issue_type === "general";
-  if (!note && !generalNoteDeletion) {
+  if (!note && mode !== "manual" && !generalNoteDeletion) {
     editorError.value = mode === "revert" || mode === "reopen_stock"
       ? "请先填写撤销原因，再点击“确认撤销”。"
       : mode === "confirm"
@@ -614,6 +645,10 @@ async function submitEditor() {
 }
 
 function openNoteManager(item: EditableDailyReportItem) {
+  if (!props.canOperate) {
+    props.onPermissionDenied?.();
+    return;
+  }
   noteManager.value = item;
 }
 
@@ -622,12 +657,19 @@ function closeNoteManager() {
 }
 
 function removeNote(item: EditableDailyReportItem, note: DailyReportNote) {
-  if (!props.canOperate || saving.value) return;
+  if (!props.canOperate) {
+    props.onPermissionDenied?.();
+    return;
+  }
+  if (saving.value) return;
   openEditor("delete_note", item, note);
 }
 
 async function runExport() {
-  if (!props.canOperate) return;
+  if (!props.canExport) {
+    props.onPermissionDenied?.();
+    return;
+  }
   saving.value = true;
   try {
     exportState.value = await generateDailyReportExport(props.asOf);
@@ -731,6 +773,59 @@ function hasReviewIssue(
 
 function comparisonItem(businessDate: string, offerId: string) {
   return comparisonLookup.value.get(businessDate)?.get(offerId);
+}
+
+function summarizeMatrixDay(
+  day: MatrixHistoryDay,
+  field: MatrixTotalField,
+): MatrixDayTotal {
+  let total = 0;
+  let missing = 0;
+  for (const item of day.items) {
+    const fieldValue = item.current[field];
+    if (fieldValue == null) {
+      missing += 1;
+    } else {
+      total += fieldValue;
+    }
+  }
+  return {
+    total: day.items.length > 0 && missing === 0 ? total : null,
+    missing,
+    products: day.items.length,
+  };
+}
+
+function matrixDayTotal(
+  businessDate: string,
+  field: MatrixTotalField,
+): MatrixDayTotal {
+  return matrixDayTotals.value.get(businessDate)?.[field] ?? {
+    total: null,
+    missing: 0,
+    products: 0,
+  };
+}
+
+function matrixDayTotalTitle(
+  businessDate: string,
+  field: MatrixTotalField,
+) {
+  const summary = matrixDayTotal(businessDate, field);
+  const fieldLabel = field === "ordered_units"
+    ? "当天订单数"
+    : "次日早间首次成功实采库存";
+  if (summary.missing > 0) {
+    return `${businessDate} 有 ${summary.missing} 个商品的${fieldLabel}缺失，不展示不完整合计。`;
+  }
+  if (summary.total == null) {
+    return `${businessDate} 暂无可汇总的${fieldLabel}。`;
+  }
+  const unit = field === "ordered_units" ? "单" : "件";
+  const timing = field === "platform_stock"
+    ? "；10:05 是计划触发时间，重试后以实际完整成功时间为准"
+    : "";
+  return `${businessDate} 全部 ${summary.products} 个商品的${fieldLabel}合计为 ${summary.total} ${unit}${timing}。`;
 }
 
 function editableComparisonItem(
@@ -874,7 +969,20 @@ function parseInput(value: string | number): number | null {
       </div>
 
     <section class="daily-kpis">
-      <article><small>商品</small><strong>{{ report?.counts.products ?? 0 }}</strong></article>
+      <article
+        class="inventory"
+        :title="
+          report?.counts.current_stock_missing
+            ? `${report.counts.current_stock_missing} 个现有商品的平台库存缺失，暂不显示不完整合计`
+            : '跟随数据刷新更新的现有商品平台可售库存合计'
+        "
+      >
+        <small>现有商品库存总数</small>
+        <strong>{{ value(report?.counts.current_stock_total) }}</strong>
+        <span v-if="report?.counts.current_stock_missing">
+          {{ report.counts.current_stock_missing }} 个商品库存缺失
+        </span>
+      </article>
       <article class="sales"><small>日报日有销量</small><strong>{{ report?.counts.with_sales ?? 0 }}</strong></article>
       <article class="review"><small>人工核对待办</small><strong>{{ actionItems.length }}</strong></article>
       <article class="missing">
@@ -941,7 +1049,7 @@ function parseInput(value: string | number): number | null {
         <div class="daily-actions">
           <button
             class="action-button"
-            :disabled="!props.canOperate || saving || !matrixBaseItems.length"
+            :disabled="saving || !matrixBaseItems.length"
             @click="runExport"
           >
             {{ exportState?.blocked ? `尚有 ${exportState.unresolved.length} 处未合并` : "导出 Excel" }}
@@ -995,7 +1103,10 @@ function parseInput(value: string | number): number | null {
       <div class="matrix-meta">
         <div>
           <strong>最近 {{ comparisonHistory.length }} 个有数据业务日</strong>
-          <span>一次完整显示5日；上下滑动查看更多日期，打开时定位到最新日期。</span>
+          <span>
+            一次完整显示4日；上下滑动查看更多日期，商品名和 SKU 表头保持吸顶。
+            日期列合计按当日全部商品计算，不随搜索或横向滚动位置变化。
+          </span>
           <div class="matrix-legend">
             <i class="date"></i>日期起始
             <i class="sales"></i>当天有订单
@@ -1003,15 +1114,13 @@ function parseInput(value: string | number): number | null {
             <i class="missing"></i>接口未提供
           </div>
         </div>
-        <div class="matrix-pages">
-          <button :disabled="page <= 1" @click="page -= 1">上一组</button>
-          <span>{{ page }} / {{ pageCount }}（共 {{ filteredItems.length }} 个商品）</span>
-          <button :disabled="page >= pageCount" @click="page += 1">下一组</button>
+        <div class="matrix-product-count">
+          <span>共 {{ filteredItems.length }} 个商品；使用下方横向滚动条左右查看</span>
         </div>
       </div>
       <div ref="matrixScroll" class="daily-matrix-wrap">
         <table class="daily-matrix">
-          <thead>
+          <thead class="matrix-sticky-head">
             <tr>
               <th class="metric-head">指标</th>
               <th class="date-head">日期</th>
@@ -1026,7 +1135,9 @@ function parseInput(value: string | number): number | null {
                 :title="`${item.title}\n${productLabel(item)}${item.missing_reason ? `\n${item.missing_reason}` : ''}`"
               >
                 <strong>{{ item.title }}</strong>
-                <code>{{ productLabel(item) }}</code>
+                <code>
+                  {{ item.sku || `Offer ID ${item.offer_id}` }}
+                </code>
               </th>
             </tr>
           </thead>
@@ -1053,7 +1164,25 @@ function parseInput(value: string | number): number | null {
               </tr>
               <tr>
                 <th>当天订单数</th>
-                <td></td>
+                <td
+                  class="matrix-date matrix-total-cell order-total"
+                  :class="{
+                    'missing-value':
+                      matrixDayTotal(day.business_date, 'ordered_units').total == null,
+                  }"
+                  :title="matrixDayTotalTitle(day.business_date, 'ordered_units')"
+                >
+                  <span>
+                    {{ value(matrixDayTotal(day.business_date, "ordered_units").total) }}
+                    <span
+                      v-if="
+                        matrixDayTotal(day.business_date, 'ordered_units').missing > 0
+                      "
+                    >
+                      （缺 {{ matrixDayTotal(day.business_date, "ordered_units").missing }} 个）
+                    </span>
+                  </span>
+                </td>
                 <td
                   v-for="item in visibleItems"
                   :key="item.offer_id"
@@ -1064,7 +1193,25 @@ function parseInput(value: string | number): number | null {
               </tr>
               <tr>
                 <th>平台库存数量（次日早间实采）</th>
-                <td></td>
+                <td
+                  class="matrix-date matrix-total-cell stock-total"
+                  :class="{
+                    'missing-value':
+                      matrixDayTotal(day.business_date, 'platform_stock').total == null,
+                  }"
+                  :title="matrixDayTotalTitle(day.business_date, 'platform_stock')"
+                >
+                  <span>
+                    {{ value(matrixDayTotal(day.business_date, "platform_stock").total) }}
+                    <span
+                      v-if="
+                        matrixDayTotal(day.business_date, 'platform_stock').missing > 0
+                      "
+                    >
+                      （缺 {{ matrixDayTotal(day.business_date, "platform_stock").missing }} 个）
+                    </span>
+                  </span>
+                </td>
                 <td
                   v-for="item in visibleItems"
                   :key="item.offer_id"
@@ -1092,10 +1239,7 @@ function parseInput(value: string | number): number | null {
                   :title="matrixNoteText(comparisonItem(day.business_date, item.offer_id))"
                 >
                   <button
-                    v-if="
-                      props.canOperate &&
-                      editableComparisonItem(day.business_date, item.offer_id)
-                    "
+                    v-if="editableComparisonItem(day.business_date, item.offer_id)"
                     type="button"
                     class="matrix-note-manager"
                     :class="{
@@ -1165,7 +1309,11 @@ function parseInput(value: string | number): number | null {
                   v-if="visibleProductImage(item)"
                   :src="visibleProductImage(item)!"
                   :alt="`${item.title} 商品图片`"
-                  @error="markProductImageFailed(visibleProductImage(item)!)"
+                  width="192"
+                  height="192"
+                  loading="lazy"
+                  decoding="async"
+                  @error="markProductImageFailed(item)"
                 />
                 <span v-else>暂无图片</span>
               </span>
@@ -1230,7 +1378,7 @@ function parseInput(value: string | number): number | null {
                     {{ formatChinaDateTime(note.updated_at, "—") }}修改）
                   </small>
                 </span>
-                <span v-if="props.canOperate" class="note-actions">
+                <span class="note-actions">
                   <button type="button" @click="openEditor('edit_note', item, note)">修改</button>
                   <button type="button" class="danger-link" @click="removeNote(item, note)">删除</button>
                 </span>
@@ -1326,7 +1474,7 @@ function parseInput(value: string | number): number | null {
                     {{ formatChinaDateTime(note.updated_at, "—") }}修改）
                   </small>
                 </span>
-                <span v-if="props.canOperate" class="note-actions">
+                <span class="note-actions">
                   <button type="button" @click="openEditor('edit_note', item, note)">修改</button>
                   <button type="button" class="danger-link" @click="removeNote(item, note)">删除</button>
                 </span>
@@ -1437,7 +1585,7 @@ function parseInput(value: string | number): number | null {
                     {{ formatChinaDateTime(note.updated_at, "—") }}修改）
                   </small>
                 </span>
-                <span v-if="props.canOperate" class="note-actions">
+                <span class="note-actions">
                   <button type="button" @click="openEditor('edit_note', item, note)">修改</button>
                   <button type="button" class="danger-link" @click="removeNote(item, note)">删除</button>
                 </span>
@@ -1448,10 +1596,9 @@ function parseInput(value: string | number): number | null {
             </section>
           </div>
           <div class="row-actions">
-            <button v-if="props.canOperate" @click="openEditor('manual', item)">人工修改</button>
+            <button @click="openEditor('manual', item)">人工修改</button>
             <button
               v-if="
-                props.canOperate &&
                 (
                   hasReviewIssue(item, 'capture_difference') ||
                   hasReviewIssue(item, 'confirmation_reverted')
@@ -1461,10 +1608,9 @@ function parseInput(value: string | number): number | null {
             >
               确认合并
             </button>
-            <button v-if="props.canOperate" @click="openEditor('note', item)">单独加备注</button>
+            <button @click="openEditor('note', item)">单独加备注</button>
             <button
               v-if="
-                props.canOperate &&
                 hasReviewIssue(item, 'stock_continuity') &&
                 item.stock_check.resolution_action === 'confirm_difference'
               "
@@ -1475,7 +1621,6 @@ function parseInput(value: string | number): number | null {
             </button>
             <button
               v-if="
-                props.canOperate &&
                 hasReviewIssue(item, 'stock_continuity') &&
                 item.stock_check.resolution_action === 'eliminate'
               "
@@ -1485,7 +1630,7 @@ function parseInput(value: string | number): number | null {
               消除差异
             </button>
             <button
-              v-if="props.canOperate && item.confirmation_baseline"
+              v-if="item.confirmation_baseline"
               class="danger-link"
               @click="openEditor('revert', item)"
             >
@@ -1579,7 +1724,11 @@ function parseInput(value: string | number): number | null {
                   v-if="visibleProductImage(item)"
                   :src="visibleProductImage(item)!"
                   :alt="`${item.title} 商品图片`"
-                  @error="markProductImageFailed(visibleProductImage(item)!)"
+                  width="192"
+                  height="192"
+                  loading="lazy"
+                  decoding="async"
+                  @error="markProductImageFailed(item)"
                 />
                 <span v-else>暂无图片</span>
               </span>
@@ -1678,7 +1827,7 @@ function parseInput(value: string | number): number | null {
             </dl>
           </div>
           <div
-            v-if="props.canOperate && item.active && isHandledDecision(item)"
+            v-if="item.active && isHandledDecision(item)"
             class="handled-action-buttons"
           >
             <button
@@ -1724,7 +1873,11 @@ function parseInput(value: string | number): number | null {
               v-if="visibleProductImage(noteManager)"
               :src="visibleProductImage(noteManager)!"
               :alt="`${noteManager.title} 商品图片`"
-              @error="markProductImageFailed(visibleProductImage(noteManager)!)"
+              width="192"
+              height="192"
+              decoding="async"
+              fetchpriority="high"
+              @error="markProductImageFailed(noteManager)"
             />
             <span v-else>暂无图片</span>
           </span>
@@ -1750,7 +1903,6 @@ function parseInput(value: string | number): number | null {
             </small>
           </div>
           <button
-            v-if="props.canOperate"
             type="button"
             class="danger-link"
             @click="openEditor('revert', noteManager)"
@@ -1786,7 +1938,7 @@ function parseInput(value: string | number): number | null {
                 </template>
               </small>
             </div>
-            <div v-if="props.canOperate" class="note-manager-actions">
+            <div class="note-manager-actions">
               <button type="button" @click="openEditor('edit_note', noteManager, note)">
                 修改
               </button>
@@ -1804,7 +1956,6 @@ function parseInput(value: string | number): number | null {
         <div class="modal-actions">
           <button type="button" @click="closeNoteManager">关闭</button>
           <button
-            v-if="props.canOperate"
             type="button"
             class="action-button"
             @click="openEditor('note', noteManager)"
@@ -1850,7 +2001,11 @@ function parseInput(value: string | number): number | null {
               v-if="visibleProductImage(editor.item)"
               :src="visibleProductImage(editor.item)!"
               :alt="`${editor.item.title} 商品图片`"
-              @error="markProductImageFailed(visibleProductImage(editor.item)!)"
+              width="192"
+              height="192"
+              decoding="async"
+              fetchpriority="high"
+              @error="markProductImageFailed(editor.item)"
             />
             <span v-else>暂无图片</span>
           </span>
@@ -1937,6 +2092,7 @@ function parseInput(value: string | number): number | null {
         </label>
         <label
           v-if="
+            editor.mode !== 'manual' &&
             !(
               editor.mode === 'delete_note' &&
               editor.note?.issue_type === 'general'
@@ -2025,6 +2181,8 @@ function parseInput(value: string | number): number | null {
 .daily-kpis small, .daily-kpis strong { display: block; }
 .daily-kpis small { color: #718077; font-size: 11px; }
 .daily-kpis strong { margin-top: 4px; color: #28473b; font-size: 23px; }
+.daily-kpis .inventory strong { color: #2d6f55; }
+.daily-kpis .inventory > span { display: block; margin-top: 3px; color: #a06613; font-size: 9px; }
 .daily-kpis .sales strong { color: #bb622a; }
 .daily-kpis .review strong, .daily-kpis .danger strong { color: #bf4e3b; }
 .daily-kpis .missing strong { color: #a06613; }
@@ -2063,26 +2221,34 @@ function parseInput(value: string | number): number | null {
 .matrix-legend .sales { background: #fce4d6; }
 .matrix-legend .stock { background: #ffc7ce; }
 .matrix-legend .missing { background: #f5f1e8; }
-.matrix-pages { display: flex; align-items: center; gap: 9px; white-space: nowrap; }
-.matrix-pages button { padding: 6px 9px; border: 1px solid #cfd8d2; border-radius: 6px; background: white; color: #315245; cursor: pointer; }
-.matrix-pages button:disabled { cursor: not-allowed; opacity: .4; }
+.matrix-product-count { white-space: nowrap; }
 .daily-matrix-wrap {
   --daily-data-row-height: 38px;
   --daily-note-row-height: 52px;
-  --daily-header-height: 64px;
+  --daily-header-height: 72px;
+  --daily-horizontal-scrollbar-height: 15px;
+  position: relative;
   overflow: auto;
+  overscroll-behavior: contain;
   max-height: calc(
     var(--daily-header-height) +
-    15 * var(--daily-data-row-height) +
-    5 * var(--daily-note-row-height)
+    12 * var(--daily-data-row-height) +
+    4 * var(--daily-note-row-height) +
+    var(--daily-horizontal-scrollbar-height)
   );
   background: white;
+  scrollbar-gutter: stable;
 }
 .daily-matrix { width: max-content; min-width: 100%; border-collapse: separate; border-spacing: 0; font-family: "SimSun", "宋体", serif; font-size: 13px; table-layout: fixed; }
 .daily-matrix th, .daily-matrix td { box-sizing: border-box; min-width: 158px; max-width: 158px; height: var(--daily-data-row-height); padding: 5px 9px; border-right: 1px solid #d7dad8; border-bottom: 1px solid #d7dad8; text-align: center; vertical-align: middle; }
-.daily-matrix thead th { position: sticky; top: 0; z-index: 5; height: var(--daily-header-height); border-color: #474747; background: #ffff00; color: #202020; font-weight: 400; }
-.daily-matrix .metric-head, .daily-matrix tbody th { position: sticky; left: 0; z-index: 7; min-width: 170px; max-width: 170px; }
-.daily-matrix .date-head, .daily-matrix tbody td:first-of-type { position: sticky; left: 170px; z-index: 6; min-width: 138px; max-width: 138px; }
+.daily-matrix .matrix-sticky-head { position: sticky; top: 0; z-index: 10; }
+.daily-matrix thead th { position: sticky; top: 0; z-index: 11; height: var(--daily-header-height); border-color: #474747; background: #ffff00; color: #202020; font-weight: 400; box-shadow: 0 2px 0 #474747; }
+.daily-matrix .metric-head, .daily-matrix tbody th { position: sticky; left: 0; min-width: 170px; max-width: 170px; }
+.daily-matrix .date-head, .daily-matrix tbody td:first-of-type { position: sticky; left: 170px; min-width: 138px; max-width: 138px; }
+.daily-matrix .metric-head { z-index: 15; }
+.daily-matrix .date-head { z-index: 14; }
+.daily-matrix tbody th { z-index: 8; }
+.daily-matrix tbody td:first-of-type { z-index: 7; }
 .daily-matrix tbody th, .daily-matrix tbody td:first-of-type { background: #fff; font-weight: 400; }
 .daily-matrix .visitor-total th, .daily-matrix .visitor-total td { background: #d9e5f5; }
 .daily-matrix tbody .visitor-total td:first-of-type { background: #d9e5f5; }
@@ -2095,9 +2261,12 @@ function parseInput(value: string | number): number | null {
 .daily-matrix tbody tr:hover td { outline: 1px solid rgba(33, 93, 67, .22); outline-offset: -1px; }
 .matrix-product { font-family: "Microsoft YaHei UI", "微软雅黑", sans-serif; }
 .matrix-product strong { display: -webkit-box; overflow: hidden; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-height: 1.22; font-weight: 500; }
-.matrix-product code { display: block; overflow: hidden; margin-top: 4px; font-family: inherit; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.matrix-product code { display: block; overflow: hidden; margin-top: 4px; color: #102e22; font-family: inherit; font-size: 10px; font-weight: 800; text-overflow: ellipsis; white-space: nowrap; }
 .matrix-product.has-conflict { box-shadow: inset 0 5px #c94d3d; }
 .matrix-product.has-missing:not(.has-conflict) { box-shadow: inset 0 5px #d6a42b; }
+.daily-matrix .matrix-total-cell { padding: 5px 9px; color: inherit; font: inherit; font-weight: 400; line-height: normal; white-space: nowrap; }
+.daily-matrix tbody .order-total { background: #fff4ec; }
+.daily-matrix tbody .stock-total { background: #edf7f0; }
 .daily-matrix td.sales-hit { background: #fce4d6; color: #6a391d; }
 .daily-matrix td.stock-value-mismatch { background: #ffc7ce; color: #8d1f28; font-weight: 700; }
 .daily-matrix td.missing-value { background: #f5f1e8; color: #8b7952; }
@@ -2113,7 +2282,7 @@ function parseInput(value: string | number): number | null {
 .review-title h3 { margin: 0; }
 .review-title > span { color: #7c8981; font-size: 11px; }
 .review-list { display: grid; grid-template-columns: minmax(0, 1fr); gap: 9px; margin-top: 14px; }
-.review-list article { display: grid; grid-template-columns: minmax(0, 1.2fr) minmax(0, 2fr) minmax(160px, 190px); align-items: center; gap: 16px; min-width: 0; padding: 12px 14px; border: 1px solid #dfe5e0; border-radius: 10px; background: #fbfcfa; cursor: pointer; transition: border-color .16s ease, background .16s ease, box-shadow .16s ease; }
+.review-list article { display: grid; grid-template-columns: minmax(0, 1.2fr) minmax(0, 2fr) minmax(160px, 190px); align-items: center; gap: 16px; min-width: 0; padding: 12px 14px; border: 1px solid #dfe5e0; border-radius: 10px; background: #fbfcfa; cursor: pointer; content-visibility: auto; contain-intrinsic-size: auto 118px; transition: border-color .16s ease, background .16s ease, box-shadow .16s ease; }
 .review-list article:hover, .review-list article:focus-visible { border-color: #92b6a3; outline: none; background: #f7fbf8; box-shadow: 0 5px 14px rgba(28, 76, 55, .08), 0 0 0 3px rgba(42, 124, 87, .12); }
 .review-list article button, .review-list article a, .review-list article input, .review-list article select, .review-list article textarea { cursor: auto; }
 .review-list article button, .review-list article a { cursor: pointer; }
@@ -2166,7 +2335,7 @@ function parseInput(value: string | number): number | null {
 .handled-filter-result { display: flex; align-items: center; justify-content: flex-end; gap: 9px; min-height: 34px; color: #68776e; font-size: 10px; }
 .handled-filter-result button { padding: 6px 9px; border: 1px solid #b8cec1; border-radius: 7px; background: #fff; color: #315f49; cursor: pointer; }
 .handled-action-list { display: grid; gap: 9px; margin-top: 14px; }
-.handled-action-list article { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 16px; padding: 12px 14px; border: 1px solid #cddfd4; border-left: 4px solid #438761; border-radius: 10px; background: #f7fbf8; cursor: pointer; transition: border-color .16s ease, background .16s ease, box-shadow .16s ease; }
+.handled-action-list article { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 16px; padding: 12px 14px; border: 1px solid #cddfd4; border-left: 4px solid #438761; border-radius: 10px; background: #f7fbf8; cursor: pointer; content-visibility: auto; contain-intrinsic-size: auto 112px; transition: border-color .16s ease, background .16s ease, box-shadow .16s ease; }
 .handled-action-list article:hover, .handled-action-list article:focus-visible { border-color: #8eb7a0; outline: none; background: #f4faf6; box-shadow: 0 5px 14px rgba(28, 76, 55, .08), 0 0 0 3px rgba(42, 124, 87, .12); }
 .handled-action-list article.inactive { border-color: #d9dedb; border-left-color: #9ca7a0; background: #f7f8f7; opacity: .82; }
 .handled-action-list article.audit-event { border-left-color: #789c88; background: #f9fbfa; }

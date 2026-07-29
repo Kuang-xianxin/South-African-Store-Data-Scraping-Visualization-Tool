@@ -108,5 +108,48 @@ def test_erp_risks_are_localized_and_count_unique_latest_products(
 
     assert payload["latest_metric_date"] == "2026-07-20"
     assert payload["summary"]["latest_anomaly_products"] == 1
-    assert payload["latest_anomalies"][0]["anomaly_label"] == "不可购买"
+    anomaly = payload["latest_anomalies"][0]
+    assert anomaly["anomaly_label"] == "不可购买"
+    assert anomaly["title"] == "示例商品 B"
+    assert anomaly["metric_date"] == "2026-07-20"
+    assert anomaly["ordered_units_7_days"] == 2
+    assert anomaly["selling_price"] == 150.0
+    assert anomaly["first_listed_at"] == "2026-07-20"
+    assert anomaly["first_listed_source"] == "first_observed"
     assert payload["quality_events"][0]["event_label"] == "库存编码缺失"
+
+
+def test_erp_risks_include_quadrant_and_extended_product_detail(
+    dashboard_dataset: DashboardDataset,
+) -> None:
+    anomalies = pd.DataFrame(
+        [
+            {
+                "event_date": date(2026, 7, 20),
+                "offer_id": "offer-a",
+                "anomaly_type": "sales_drop",
+                "severity": "critical",
+                "explanation": "当日下单件数低于历史基准。",
+            }
+        ]
+    )
+
+    payload = build_risk_payload(
+        replace(dashboard_dataset, anomalies=anomalies),
+        AS_OF,
+    )
+
+    anomaly = payload["latest_anomalies"][0]
+    assert anomaly["title"] == "示例商品 A"
+    assert anomaly["sku"] == "SKU-A"
+    assert anomaly["image_url"] == "https://example.invalid/a.png"
+    assert anomaly["total_stock"] == 7
+    assert anomaly["page_views_30_days"] == 960
+    assert anomaly["ordered_units_7_days"] == 8
+    assert anomaly["conversion_percentage_30_days"] == 4.0
+    assert anomaly["effective_units"] == 4
+    assert anomaly["ordered_revenue"] == 999.95
+    assert anomaly["status_label"] == "可购买"
+    assert anomaly["first_listed_at"] == "2026-01-15 12:34"
+    assert anomaly["first_listed_source"] == "platform"
+    assert anomaly["latest_restock_date"] is None

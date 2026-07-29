@@ -336,6 +336,7 @@ def _not_found_message(
 
 def load_competitor_link_health(engine: Engine) -> list[dict[str, object]]:
     """Load suspected/confirmed invalid links for the operator review list."""
+    latest_snapshots: dict[str, CompetitorSnapshot] = {}
     try:
         with Session(engine) as session:
             rows = list(
@@ -348,12 +349,31 @@ def load_competitor_link_health(engine: Engine) -> list[dict[str, object]]:
                     )
                 )
             )
+            if rows:
+                plids = [row.plid for row in rows]
+                snapshots = session.scalars(
+                    select(CompetitorSnapshot)
+                    .where(CompetitorSnapshot.plid.in_(plids))
+                    .order_by(CompetitorSnapshot.collected_at.desc())
+                )
+                for snapshot in snapshots:
+                    latest_snapshots.setdefault(snapshot.plid, snapshot)
     except SQLAlchemyError:
         return []
     return [
         {
             "plid": row.plid,
             "url": row.url,
+            "商品": (
+                latest_snapshots[row.plid].title
+                if row.plid in latest_snapshots
+                else None
+            ),
+            "图片": (
+                latest_snapshots[row.plid].image_url
+                if row.plid in latest_snapshots
+                else None
+            ),
             "status": row.status,
             "confirmed_not_found_count": row.confirmed_not_found_count,
             "first_not_found_at": row.first_not_found_at,
@@ -455,7 +475,13 @@ def load_competitor_dataset(engine: Engine) -> CompetitorDataset:
             for row in reviews
         ]
     )
-    variant_frame = pd.DataFrame([_variant_row(row) for row in variants])
+    snapshot_images = {snapshot.id: snapshot.image_url for snapshot in snapshots}
+    variant_frame = pd.DataFrame(
+        [
+            _variant_row(row, image_url=snapshot_images.get(row.snapshot_id))
+            for row in variants
+        ]
+    )
     return CompetitorDataset(
         current=current,
         history=history,
@@ -493,6 +519,7 @@ def _snapshot_row(
     return {
         "plid": row.plid,
         "商品": row.title,
+        "图片": row.image_url,
         "采集时间": row.collected_at,
         "当前卖家": row.seller_name,
         "价格": float(row.price) if row.price is not None else None,
@@ -527,7 +554,11 @@ def _snapshot_row(
     }
 
 
-def _variant_row(row: CompetitorVariantSnapshot) -> dict[str, object]:
+def _variant_row(
+    row: CompetitorVariantSnapshot,
+    *,
+    image_url: str | None = None,
+) -> dict[str, object]:
     stock_text = "未探测"
     if row.stock_method in {"not-platform-stock", "out-of-stock"}:
         stock_text = "没货"
@@ -540,6 +571,7 @@ def _variant_row(row: CompetitorVariantSnapshot) -> dict[str, object]:
     return {
         "plid": row.plid,
         "快照ID": row.snapshot_id,
+        "图片": image_url,
         "采集时间": row.collected_at,
         "变体键": row.variant_key,
         "变体": row.variant_label,

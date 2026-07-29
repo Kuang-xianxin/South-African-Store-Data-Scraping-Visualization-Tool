@@ -19,7 +19,10 @@ from takealot_ops.competitors.domain import (
     summarize_reviews,
 )
 from takealot_ops.competitors.repository import CompetitorRepository
-from takealot_ops.competitors.service import load_competitor_dataset
+from takealot_ops.competitors.service import (
+    load_competitor_dataset,
+    load_competitor_link_health,
+)
 from takealot_ops.competitors.stock import skipped_stock_probe
 from takealot_ops.competitors.web import create_app
 from takealot_ops.storage.migrations import create_schema
@@ -34,7 +37,7 @@ def test_competitor_observation_persists_snapshot_and_deduplicated_reviews(
         plid="72189176",
         url="https://www.takealot.com/example/PLID72189176",
         title="Laser Lipo",
-        image_url=None,
+        image_url="https://example.invalid/laser-lipo.jpg",
         sku="SKU-1",
         seller_id="seller-1",
         seller_name="Seller One",
@@ -120,7 +123,17 @@ def test_competitor_observation_persists_snapshot_and_deduplicated_reviews(
                 collected_at=collected_at,
             )
 
+    with Session(engine) as session, session.begin():
+        CompetitorRepository(session).record_not_found(
+            plid=product.plid,
+            url=product.url,
+            checked_at=datetime(2026, 7, 24, 8, tzinfo=UTC),
+            control_plid="99999999",
+            control_check_ok=True,
+        )
+
     dataset = load_competitor_dataset(engine)
+    link_health = load_competitor_link_health(engine)
     engine.dispose()
 
     assert len(dataset.current) == 1
@@ -128,6 +141,18 @@ def test_competitor_observation_persists_snapshot_and_deduplicated_reviews(
     assert len(dataset.reviews) == 1
     assert len(dataset.variants) == 2
     assert dataset.variants.iloc[0]["变体"] == "默认款"
+    assert (
+        dataset.current.iloc[0]["图片"]
+        == "https://example.invalid/laser-lipo.jpg"
+    )
+    assert (
+        dataset.history.iloc[0]["图片"]
+        == "https://example.invalid/laser-lipo.jpg"
+    )
+    assert (
+        dataset.variants.iloc[0]["图片"]
+        == "https://example.invalid/laser-lipo.jpg"
+    )
     assert "累计销量估算" not in dataset.current.columns
     assert dataset.current.iloc[0]["趋势判断"] == "暂未观察到净流出"
     assert dataset.current.iloc[0]["库存上限"] == "未探测"
@@ -136,6 +161,8 @@ def test_competitor_observation_persists_snapshot_and_deduplicated_reviews(
     assert dataset.current.iloc[0]["上次成功库存时间"] == datetime(
         2026, 7, 22, 8
     )
+    assert link_health[0]["商品"] == "Laser Lipo"
+    assert link_health[0]["图片"] == "https://example.invalid/laser-lipo.jpg"
 
 
 def test_competitor_api_reads_the_shared_sqlite(

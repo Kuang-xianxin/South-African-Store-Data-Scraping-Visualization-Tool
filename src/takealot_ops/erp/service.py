@@ -274,6 +274,10 @@ def build_risk_payload(dataset: DashboardDataset, as_of: date) -> dict[str, Any]
         latest["severity_label"] = (
             latest["severity"].map(SEVERITY_LABELS).fillna("未知")
         )
+    product_context = _risk_product_context(anomalies, dataset, as_of)
+    if not product_context.empty:
+        anomalies = anomalies.merge(product_context, on="offer_id", how="left")
+        latest = latest.merge(product_context, on="offer_id", how="left")
     if not quality.empty:
         quality["event_label"] = (
             quality["event_type"].map(EVENT_LABELS).fillna("未知质量事件")
@@ -415,6 +419,93 @@ def _enrich_products(
             result["status"]
         )
     return result
+
+
+def _risk_product_context(
+    anomalies: pd.DataFrame,
+    dataset: DashboardDataset,
+    as_of: date,
+) -> pd.DataFrame:
+    """Attach current product detail to anomaly records without changing rules."""
+    columns = [
+        "offer_id",
+        "metric_date",
+        "title",
+        "sku",
+        "tsin_id",
+        "barcode",
+        "image_url",
+        "selling_price",
+        "rrp",
+        "status_label",
+        "total_stock",
+        "page_views_30_days",
+        "ordered_units_7_days",
+        "effective_units",
+        "ordered_revenue",
+        "conversion_percentage_30_days",
+        "first_listed_at",
+        "first_listed_source",
+        "latest_restock_date",
+        "latest_restock_increase",
+    ]
+    if anomalies.empty or "offer_id" not in anomalies.columns:
+        return pd.DataFrame(columns=columns)
+
+    context = anomalies.loc[:, ["offer_id"]].drop_duplicates().copy()
+    window = build_quadrant_window(dataset.product_daily, as_of, days=7)
+    if not window.empty and "offer_id" in window.columns:
+        window = window.rename(columns={"ordered_units": "ordered_units_7_days"})
+        available = [
+            column
+            for column in [
+                "offer_id",
+                "metric_date",
+                "sku",
+                "offer_status",
+                "total_stock",
+                "page_views_30_days",
+                "ordered_units_7_days",
+                "effective_units",
+                "ordered_revenue",
+                "conversion_percentage_30_days",
+            ]
+            if column in window.columns
+        ]
+        context = context.merge(
+            window.loc[:, available].drop_duplicates("offer_id", keep="last"),
+            on="offer_id",
+            how="left",
+        )
+
+    context = _enrich_products(context, dataset.offer_current)
+    offer_status = (
+        context["offer_status"].map(OFFER_STATUS_LABELS).fillna(
+            context["offer_status"]
+        )
+        if "offer_status" in context.columns
+        else pd.Series(index=context.index, dtype="object")
+    )
+    if "status_label" in context.columns:
+        context["status_label"] = context["status_label"].combine_first(
+            offer_status
+        )
+    else:
+        context["status_label"] = offer_status
+
+    operational = _quadrant_operational_context(
+        dataset.product_daily,
+        dataset.offer_current,
+        as_of,
+        dataset.offer_history,
+    )
+    if not operational.empty:
+        context = context.merge(operational, on="offer_id", how="left")
+
+    for column in columns:
+        if column not in context.columns:
+            context[column] = None
+    return context.loc[:, columns]
 
 
 def _quadrant_operational_context(

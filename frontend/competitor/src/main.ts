@@ -1,5 +1,5 @@
 import { createApp } from "vue";
-import App from "./App.vue";
+import AppErrorBoundary from "./AppErrorBoundary.vue";
 import "./styles.css";
 
-createApp(App).mount("#app");
+createApp(AppErrorBoundary).mount("#app");

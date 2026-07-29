@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+import hashlib
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
-from datetime import UTC, date, datetime
 from types import SimpleNamespace
 
 import pytest
@@ -13,10 +14,14 @@ from takealot_ops.competitors.api import CompetitorNetworkError
 from takealot_ops.competitors.service import CompetitorCollectionResult
 from takealot_ops.erp.daily_report import capture_daily_report
 from takealot_ops.erp.web import create_app
-from takealot_ops.storage.models import OfferCurrent
+from takealot_ops.storage.models import ErpSession, OfferCurrent
 
 
 PROJECT_ROOT = Path(__file__).parents[2]
+TRUSTED_PRODUCT_IMAGE_URL = (
+    "https://takealot.s3.amazonaws.com/"
+    "covers_images/37b5fc661b694ed5969280cc0cea2ce4/s.file"
+)
 
 
 def _bootstrap(client: TestClient) -> dict[str, object]:
@@ -49,6 +54,69 @@ def _create_operator(
         },
     )
     assert response.status_code == 200
+
+
+def test_product_thumbnail_is_authenticated_and_rejects_untrusted_hosts(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    database_path = tmp_path / "erp.db"
+    monkeypatch.setenv(
+        "TAKEALOT_DATABASE_URL",
+        f"sqlite:///{database_path.as_posix()}",
+    )
+    app = create_app(PROJECT_ROOT)
+
+    with TestClient(app, client=("127.0.0.1", 50000)) as client:
+        unauthorized = client.get(
+            "/api/erp/product-thumbnail",
+            params={"image_url": TRUSTED_PRODUCT_IMAGE_URL},
+        )
+        assert unauthorized.status_code == 401
+        _bootstrap(client)
+
+        rejected = client.get(
+            "/api/erp/product-thumbnail",
+            params={"image_url": "https://example.com/image.jpg"},
+        )
+        assert rejected.status_code == 422
+        assert rejected.json()["detail"] == "只允许读取 Takealot 官方商品图片"
+
+        invalid_size = client.get(
+            "/api/erp/product-thumbnail",
+            params={"image_url": TRUSTED_PRODUCT_IMAGE_URL, "size": 512},
+        )
+        assert invalid_size.status_code == 422
+        assert invalid_size.json()["detail"] == "缩略图尺寸只支持 192、384、640 像素"
+
+        thumbnail = tmp_path / "thumbnail.jpg"
+        thumbnail.write_bytes(b"\xff\xd8\xff\xd9")
+        requested_urls: list[str] = []
+
+        requested_sizes: list[int] = []
+
+        def fake_thumbnail_path(image_url: str, size: int) -> Path:
+            requested_urls.append(image_url)
+            requested_sizes.append(size)
+            return thumbnail
+
+        monkeypatch.setattr(
+            app.state.product_thumbnail_cache,
+            "thumbnail_path",
+            fake_thumbnail_path,
+        )
+        response = client.get(
+            "/api/erp/product-thumbnail",
+            params={"image_url": TRUSTED_PRODUCT_IMAGE_URL, "size": 640},
+        )
+
+        assert response.status_code == 200
+        assert response.headers["content-type"] == "image/jpeg"
+        assert response.headers["cache-control"] == (
+            "private, max-age=604800, immutable"
+        )
+        assert requested_urls == [TRUSTED_PRODUCT_IMAGE_URL]
+        assert requested_sizes == [640]
 
 
 def test_erp_requires_login_and_bootstraps_only_from_loopback(
@@ -92,10 +160,85 @@ def test_erp_requires_login_and_bootstraps_only_from_loopback(
         assert too_short.json()["detail"] == "密码至少需要 8 个字符"
         session = _bootstrap(local)
         assert session["user"]["role"] == "admin"
+        assert "users.manage" in session["user"]["permissions"]
+        assert session["user"]["permissions_customized"] is False
         summary = local.get("/api/erp/summary?as_of=2026-07-20")
         assert summary.status_code == 200
         assert summary.json()["latest_metric_date"] is None
         assert database_path.exists()
+
+
+def test_session_lasts_seven_days_and_slides_after_activity(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    database_path = tmp_path / "erp.db"
+    database_url = f"sqlite:///{database_path.as_posix()}"
+    monkeypatch.setenv("TAKEALOT_DATABASE_URL", database_url)
+    app = create_app(PROJECT_ROOT)
+
+    with TestClient(app, client=("127.0.0.1", 50000)) as client:
+        issued = client.post(
+            "/api/auth/bootstrap",
+            json={
+                "username": "localadmin",
+                "display_name": "Local Admin",
+                "password": "pass-123",
+            },
+        )
+        assert issued.status_code == 200
+        assert "max-age=604800" in issued.headers["set-cookie"].lower()
+        initial_expiry = datetime.fromisoformat(issued.json()["expires_at"])
+        assert timedelta(days=6, hours=23) < initial_expiry - datetime.utcnow()
+
+        session_token = client.cookies.get("takealot_erp_session")
+        assert session_token
+        token_hash = hashlib.sha256(session_token.encode("utf-8")).hexdigest()
+        previous_expiry = datetime.utcnow() + timedelta(days=1)
+        engine = create_engine(database_url)
+        try:
+            with Session(engine) as session, session.begin():
+                record = session.get(ErpSession, token_hash)
+                assert record is not None
+                record.last_seen_at = datetime.utcnow()
+                record.expires_at = previous_expiry
+
+            restored = client.get("/api/auth/session")
+            assert restored.status_code == 200
+            assert "max-age=604800" in restored.headers["set-cookie"].lower()
+            restored_expiry = datetime.fromisoformat(restored.json()["expires_at"])
+            assert restored_expiry > previous_expiry + timedelta(days=5)
+
+            immediate = client.get("/api/auth/session")
+            assert immediate.status_code == 200
+            assert "set-cookie" not in immediate.headers
+            assert datetime.fromisoformat(immediate.json()["expires_at"]) == (
+                restored_expiry
+            )
+
+            with Session(engine) as session, session.begin():
+                record = session.get(ErpSession, token_hash)
+                assert record is not None
+                record.last_seen_at = datetime.utcnow() - timedelta(hours=23)
+                record.expires_at = datetime.utcnow() + timedelta(days=6, hours=1)
+
+            before_interval = client.get("/api/erp/freshness")
+            assert before_interval.status_code == 200
+            assert "set-cookie" not in before_interval.headers
+
+            with Session(engine) as session, session.begin():
+                record = session.get(ErpSession, token_hash)
+                assert record is not None
+                record.last_seen_at = datetime.utcnow() - timedelta(
+                    days=1, minutes=1
+                )
+                record.expires_at = datetime.utcnow() + timedelta(days=7)
+
+            protected = client.get("/api/erp/freshness")
+            assert protected.status_code == 200
+            assert "max-age=604800" in protected.headers["set-cookie"].lower()
+        finally:
+            engine.dispose()
 
 
 def test_viewer_can_read_but_cannot_run_actions(
@@ -132,14 +275,187 @@ def test_viewer_can_read_but_cannot_run_actions(
         assert login.status_code == 200
         csrf = login.json()["csrf_token"]
         assert viewer.get("/api/erp/freshness").status_code == 200
+        assert (
+            viewer.get(
+                "/api/erp/daily-report?business_date=2026-07-24"
+            ).status_code
+            == 200
+        )
+        assert (
+            viewer.get(
+                "/api/erp/daily-report/export?through=2026-07-24"
+            ).status_code
+            == 200
+        )
         denied = viewer.post(
             "/api/competitors/collect",
             headers={"X-CSRF-Token": csrf},
             json={"url": "https://www.takealot.com/example/PLID12345678"},
         )
         assert denied.status_code == 403
-        assert denied.json()["detail"] == "当前账号只有查看权限"
+        assert denied.json()["detail"] == "当前账号不能采集竞品"
+        denied_daily_action = viewer.post(
+            "/api/erp/daily-report/2026-07-24/offer-a/manual",
+            headers={"X-CSRF-Token": csrf},
+            json={
+                "ordered_units": 1,
+                "reason": "platform_delay",
+                "note": "查看员不应写入",
+            },
+        )
+        assert denied_daily_action.status_code == 403
+        assert (
+            denied_daily_action.json()["detail"]
+            == "当前账号可以查看运营日报，但不能处理待办"
+        )
+        denied_export = viewer.post(
+            "/api/erp/daily-report/export",
+            headers={"X-CSRF-Token": csrf},
+            json={"as_of": "2026-07-24"},
+        )
+        assert denied_export.status_code == 403
+        assert denied_export.json()["detail"] == "当前账号不能生成运营日报 Excel"
         assert viewer.get("/api/auth/users").status_code == 403
+
+
+def test_selection_template_and_account_permission_overrides(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    database_path = tmp_path / "erp.db"
+    monkeypatch.setenv(
+        "TAKEALOT_DATABASE_URL",
+        f"sqlite:///{database_path.as_posix()}",
+    )
+    app = create_app(PROJECT_ROOT)
+
+    with TestClient(app, client=("127.0.0.1", 50000)) as admin:
+        session = _bootstrap(admin)
+        csrf = str(session["csrf_token"])
+        created = admin.post(
+            "/api/auth/users",
+            headers={"X-CSRF-Token": csrf},
+            json={
+                "username": "selection.one",
+                "display_name": "Selection One",
+                "password": "selection-password-123",
+                "role": "selection",
+            },
+        )
+        assert created.status_code == 200
+        selection = created.json()["user"]
+        assert selection["role"] == "selection"
+        assert selection["permissions_customized"] is False
+        assert set(selection["permissions"]) == {
+            "competitors.view",
+            "competitors.collect",
+            "daily_report.view",
+        }
+
+        with TestClient(app, client=("192.168.1.8", 50001)) as default_selection:
+            login = default_selection.post(
+                "/api/auth/login",
+                json={
+                    "username": "selection.one",
+                    "password": "selection-password-123",
+                },
+            )
+            assert login.status_code == 200
+            selection_csrf = login.json()["csrf_token"]
+            allowed_collect = default_selection.post(
+                "/api/competitors/collect",
+                headers={"X-CSRF-Token": selection_csrf},
+                json={"url": "invalid"},
+            )
+            assert allowed_collect.status_code == 422
+            denied_pending = default_selection.post(
+                "/api/erp/daily-report/2026-07-24/not-found/manual",
+                headers={"X-CSRF-Token": selection_csrf},
+                json={
+                    "ordered_units": 1,
+                    "reason": "platform_delay",
+                    "note": "选品模板不能处理待办",
+                },
+            )
+            assert denied_pending.status_code == 403
+            assert (
+                denied_pending.json()["detail"]
+                == "当前账号可以查看运营日报，但不能处理待办"
+            )
+
+        customized = admin.patch(
+            f"/api/auth/users/{selection['id']}",
+            headers={"X-CSRF-Token": csrf},
+            json={
+                "permissions": [
+                    "competitors.view",
+                    "daily_report.manage",
+                ]
+            },
+        )
+        assert customized.status_code == 200
+        customized_user = customized.json()["user"]
+        assert customized_user["permissions_customized"] is True
+        assert set(customized_user["permissions"]) == {
+            "competitors.view",
+            "daily_report.view",
+            "daily_report.manage",
+        }
+
+        with TestClient(app, client=("192.168.1.8", 50001)) as selection_client:
+            login = selection_client.post(
+                "/api/auth/login",
+                json={
+                    "username": "selection.one",
+                    "password": "selection-password-123",
+                },
+            )
+            assert login.status_code == 200
+            selection_csrf = login.json()["csrf_token"]
+            assert selection_client.get("/api/competitors").status_code == 200
+            denied_collect = selection_client.post(
+                "/api/competitors/collect",
+                headers={"X-CSRF-Token": selection_csrf},
+                json={"url": "invalid"},
+            )
+            assert denied_collect.status_code == 403
+            assert (
+                selection_client.get(
+                    "/api/erp/daily-report?business_date=2026-07-24"
+                ).status_code
+                == 200
+            )
+            allowed_daily_write = selection_client.post(
+                "/api/erp/daily-report/2026-07-24/not-found/manual",
+                headers={"X-CSRF-Token": selection_csrf},
+                json={
+                    "ordered_units": 1,
+                    "reason": "platform_delay",
+                    "note": "自定义权限验证",
+                },
+            )
+            assert allowed_daily_write.status_code != 403
+            assert (
+                selection_client.get(
+                    "/api/erp/summary?as_of=2026-07-24"
+                ).status_code
+                == 403
+            )
+
+        reset = admin.patch(
+            f"/api/auth/users/{selection['id']}",
+            headers={"X-CSRF-Token": csrf},
+            json={
+                "role": "selection",
+                "permissions": [
+                    "competitors.view",
+                    "competitors.collect",
+                    "daily_report.view",
+                ],
+            },
+        )
+        assert reset.status_code == 200
+        assert reset.json()["user"]["permissions_customized"] is False
 
 
 def test_competitor_network_failure_returns_retryable_service_error(
@@ -496,7 +812,10 @@ def test_csrf_and_last_admin_protection(
             json={"role": "viewer"},
         )
         assert response.status_code == 409
-        assert response.json()["detail"] == "不能停用或降级唯一的管理员"
+        assert (
+            response.json()["detail"]
+            == "必须保留至少一个可管理用户权限的启用账号"
+        )
 
 
 def test_erp_rejects_unsupported_quadrant_percentile_after_login(
@@ -516,7 +835,7 @@ def test_erp_rejects_unsupported_quadrant_percentile_after_login(
     assert "25" in response.json()["detail"]
 
 
-def test_daily_report_api_reads_versions_and_bulk_confirms_ready_rows(
+def test_operator_can_use_all_daily_report_reconciliation_actions(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -525,40 +844,73 @@ def test_daily_report_api_reads_versions_and_bulk_confirms_ready_rows(
     monkeypatch.setenv("TAKEALOT_DATABASE_URL", database_url)
     app = create_app(tmp_path)
     with TestClient(app, client=("127.0.0.1", 50000)) as client:
-        issued = _bootstrap(client)
+        admin_session = _bootstrap(client)
+        _create_operator(
+            client,
+            str(admin_session["csrf_token"]),
+            username="operator.daily",
+        )
         engine = create_engine(database_url)
         try:
             with Session(engine) as session, session.begin():
-                session.add(
-                    OfferCurrent(
-                        offer_id="offer-a",
-                        sku="9900000000001",
-                        title="Product A",
-                        captured_at=datetime(2026, 7, 24, 2, tzinfo=UTC),
-                        page_views_30_days=10,
-                        takealot_available_stock=5,
-                    )
+                session.add_all(
+                    [
+                        OfferCurrent(
+                            offer_id="offer-a",
+                            sku="9900000000001",
+                            title="Product A",
+                            captured_at=datetime(2026, 7, 24, 2, tzinfo=UTC),
+                            page_views_30_days=10,
+                            takealot_available_stock=5,
+                        ),
+                        OfferCurrent(
+                            offer_id="offer-b",
+                            sku="9900000000002",
+                            title="Product B",
+                            captured_at=datetime(2026, 7, 24, 2, tzinfo=UTC),
+                            page_views_30_days=12,
+                            takealot_available_stock=7,
+                        ),
+                    ]
                 )
             for slot, hour in (("morning", 2), ("evening", 10)):
-                capture_daily_report(
-                    engine,
-                    business_date=date(2026, 7, 24),
-                    slot=slot,
-                    captured_at=datetime(2026, 7, 25, hour, tzinfo=UTC),
+                    capture_daily_report(
+                        engine,
+                        business_date=date(2026, 7, 24),
+                        slot=slot,
+                        captured_at=datetime(2026, 7, 25, hour, tzinfo=UTC),
                 )
         finally:
             engine.dispose()
+
+        login = client.post(
+            "/api/auth/login",
+            json={
+                "username": "operator.daily",
+                "password": "operator-password-123",
+            },
+        )
+        assert login.status_code == 200
+        assert login.json()["user"]["role"] == "operator"
+        csrf = str(login.json()["csrf_token"])
 
         report = client.get(
             "/api/erp/daily-report?business_date=2026-07-24"
         )
         assert report.status_code == 200
-        assert report.json()["counts"]["ready"] == 1
+        assert report.json()["counts"]["ready"] == 2
+        assert client.get("/api/erp/daily-report/reminders").status_code == 200
+        assert (
+            client.get(
+                "/api/erp/daily-report/export?through=2026-07-24"
+            ).status_code
+            == 200
+        )
         noted = client.post(
             "/api/erp/daily-report/2026-07-24/offer-a/note",
-            headers={"X-CSRF-Token": str(issued["csrf_token"])},
+            headers={"X-CSRF-Token": csrf},
             json={
-                "note": "管理员追加一条独立备注",
+                "note": "运营员追加一条独立备注",
                 "issue_type": "general",
             },
         )
@@ -567,29 +919,29 @@ def test_daily_report_api_reads_versions_and_bulk_confirms_ready_rows(
             "/api/erp/daily-report?business_date=2026-07-24"
         ).json()
         assert noted_report["items"][0]["operator_notes"][0]["note"] == (
-            "管理员追加一条独立备注"
+            "运营员追加一条独立备注"
         )
         note_id = noted_report["items"][0]["operator_notes"][0]["id"]
         updated = client.patch(
             f"/api/erp/daily-report/2026-07-24/offer-a/note/{note_id}",
-            headers={"X-CSRF-Token": str(issued["csrf_token"])},
+            headers={"X-CSRF-Token": csrf},
             json={
-                "note": "管理员修改后的库存备注",
-                "issue_type": "stock_continuity",
+                "note": "运营员修改后的通用备注",
+                "issue_type": "general",
             },
         )
         assert updated.status_code == 200
         updated_note = client.get(
             "/api/erp/daily-report?business_date=2026-07-24"
         ).json()["items"][0]["operator_notes"][0]
-        assert updated_note["note"] == "管理员修改后的库存备注"
-        assert updated_note["issue_type"] == "stock_continuity"
-        assert updated_note["updated_by"] == "Local Admin"
+        assert updated_note["note"] == "运营员修改后的通用备注"
+        assert updated_note["issue_type"] == "general"
+        assert updated_note["updated_by"] == "Operator Daily"
         deleted = client.request(
             "DELETE",
             f"/api/erp/daily-report/2026-07-24/offer-a/note/{note_id}",
-            headers={"X-CSRF-Token": str(issued["csrf_token"])},
-            json={"note": "该备注已过期，确认删除"},
+            headers={"X-CSRF-Token": csrf},
+            json={},
         )
         assert deleted.status_code == 200
         after_delete = client.get(
@@ -599,39 +951,86 @@ def test_daily_report_api_reads_versions_and_bulk_confirms_ready_rows(
         assert after_delete["handled_actions"][0]["action_type"] == (
             "operator_note_deleted"
         )
-        assert after_delete["handled_actions"][0]["note"] == (
-            "该备注已过期，确认删除"
-        )
+        assert after_delete["handled_actions"][0]["note"] is None
         assert after_delete["handled_actions"][0]["detail"]["deleted_note"] == (
-            "管理员修改后的库存备注"
+            "运营员修改后的通用备注"
         )
+
+        manual = client.post(
+            "/api/erp/daily-report/2026-07-24/offer-a/manual",
+            headers={"X-CSRF-Token": csrf},
+            json={
+                "ordered_units": 1,
+                "reason": "platform_delay",
+            },
+        )
+        assert manual.status_code == 200
+        manual_report = client.get(
+            "/api/erp/daily-report?business_date=2026-07-24"
+        ).json()
+        assert manual_report["items"][0]["manual_note"] is None
+        missing_confirm_note = client.post(
+            "/api/erp/daily-report/2026-07-24/offer-a/confirm",
+            headers={"X-CSRF-Token": csrf},
+            json={"source": "manual", "note": ""},
+        )
+        assert missing_confirm_note.status_code == 422
+        missing_stock_note = client.post(
+            "/api/erp/daily-report/2026-07-24/offer-a/stock-alert",
+            headers={"X-CSRF-Token": csrf},
+            json={"note": ""},
+        )
+        assert missing_stock_note.status_code == 422
+        confirmed_manual = client.post(
+            "/api/erp/daily-report/2026-07-24/offer-a/confirm",
+            headers={"X-CSRF-Token": csrf},
+            json={"source": "manual", "note": "采用运营员复核后的人工值"},
+        )
+        assert confirmed_manual.status_code == 200
+
         confirmed = client.post(
             "/api/erp/daily-report/2026-07-24/confirm-ready",
-            headers={"X-CSRF-Token": str(issued["csrf_token"])},
-            json={"note": "早晚值一致，批量确认"},
+            headers={"X-CSRF-Token": csrf},
+            json={"note": "运营员确认其余早晚一致商品"},
         )
         assert confirmed.status_code == 200
         assert confirmed.json()["confirmed"] == 1
         assert confirmed.json()["exported"] is True
+        generated = client.post(
+            "/api/erp/daily-report/export",
+            headers={"X-CSRF-Token": csrf},
+            json={"as_of": "2026-07-24"},
+        )
+        assert generated.status_code == 200
+        download = client.get(
+            "/api/erp/daily-report/export/download?through=2026-07-24"
+        )
+        assert download.status_code == 200
+        assert (
+            download.headers["content-type"]
+            == "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
+
         reverted = client.post(
             "/api/erp/daily-report/2026-07-24/offer-a/revert-confirmation",
-            headers={"X-CSRF-Token": str(issued["csrf_token"])},
-            json={"note": "复核后发现需要重新选择版本"},
+            headers={"X-CSRF-Token": csrf},
+            json={"note": "运营员复核后发现需要重新选择版本"},
         )
         assert reverted.status_code == 200
         reopened = client.get(
             "/api/erp/daily-report?business_date=2026-07-24"
         ).json()
         assert reopened["items"][0]["status"] == "needs_review"
-        assert reopened["items"][0]["review_issues"] == [
-            {"type": "confirmation_reverted", "fields": []}
-        ]
+        reopened_issue_types = {
+            issue["type"] for issue in reopened["items"][0]["review_issues"]
+        }
+        assert reopened_issue_types == {"capture_difference"}
         assert reopened["items"][0]["confirmation_revert"]["reverted_by"] == (
-            "Local Admin"
+            "Operator Daily"
         )
         repeated_revert = client.post(
             "/api/erp/daily-report/2026-07-24/offer-a/revert-confirmation",
-            headers={"X-CSRF-Token": str(issued["csrf_token"])},
+            headers={"X-CSRF-Token": csrf},
             json={"note": "重复撤销"},
         )
         assert repeated_revert.status_code == 409
@@ -648,7 +1047,12 @@ def test_daily_report_stock_difference_can_be_confirmed_logged_and_reopened(
     monkeypatch.setenv("TAKEALOT_DATABASE_URL", database_url)
     app = create_app(tmp_path)
     with TestClient(app, client=("127.0.0.1", 50000)) as client:
-        issued = _bootstrap(client)
+        admin_session = _bootstrap(client)
+        _create_operator(
+            client,
+            str(admin_session["csrf_token"]),
+            username="operator.stock",
+        )
         engine = create_engine(database_url)
         try:
             with Session(engine) as session, session.begin():
@@ -663,11 +1067,11 @@ def test_daily_report_stock_difference_can_be_confirmed_logged_and_reopened(
                     )
                 )
             for slot, hour in (("morning", 2), ("evening", 10)):
-                capture_daily_report(
-                    engine,
-                    business_date=date(2026, 7, 24),
-                    slot=slot,
-                    captured_at=datetime(2026, 7, 25, hour, tzinfo=UTC),
+                    capture_daily_report(
+                        engine,
+                        business_date=date(2026, 7, 24),
+                        slot=slot,
+                        captured_at=datetime(2026, 7, 25, hour, tzinfo=UTC),
                 )
             with Session(engine) as session, session.begin():
                 session.get(
@@ -675,14 +1079,25 @@ def test_daily_report_stock_difference_can_be_confirmed_logged_and_reopened(
                     "offer-stock",
                 ).takealot_available_stock = 8
             for slot, hour in (("morning", 2), ("evening", 10)):
-                capture_daily_report(
-                    engine,
-                    business_date=date(2026, 7, 25),
-                    slot=slot,
-                    captured_at=datetime(2026, 7, 26, hour, tzinfo=UTC),
+                    capture_daily_report(
+                        engine,
+                        business_date=date(2026, 7, 25),
+                        slot=slot,
+                        captured_at=datetime(2026, 7, 26, hour, tzinfo=UTC),
                 )
         finally:
             engine.dispose()
+
+        login = client.post(
+            "/api/auth/login",
+            json={
+                "username": "operator.stock",
+                "password": "operator-password-123",
+            },
+        )
+        assert login.status_code == 200
+        assert login.json()["user"]["role"] == "operator"
+        csrf = str(login.json()["csrf_token"])
 
         before = client.get(
             "/api/erp/daily-report?business_date=2026-07-25"
@@ -690,7 +1105,7 @@ def test_daily_report_stock_difference_can_be_confirmed_logged_and_reopened(
         assert before["pending_actions"][0]["offer_id"] == "offer-stock"
         handled = client.post(
             "/api/erp/daily-report/2026-07-25/offer-stock/stock-alert",
-            headers={"X-CSRF-Token": str(issued["csrf_token"])},
+            headers={"X-CSRF-Token": csrf},
             json={"note": "确认属于平台库存调整"},
         )
         assert handled.status_code == 200
@@ -701,11 +1116,11 @@ def test_daily_report_stock_difference_can_be_confirmed_logged_and_reopened(
         assert after["items"][0]["stock_check"]["mismatch"] is True
         assert after["items"][0]["stock_check"]["dismissed"] is True
         assert after["handled_actions"][0]["active"] is True
-        assert after["handled_actions"][0]["handled_by"] == "Local Admin"
+        assert after["handled_actions"][0]["handled_by"] == "Operator Stock"
 
         reopened = client.post(
             "/api/erp/daily-report/2026-07-25/offer-stock/stock-alert/reopen",
-            headers={"X-CSRF-Token": str(issued["csrf_token"])},
+            headers={"X-CSRF-Token": csrf},
             json={"note": "误操作，恢复待办"},
         )
         assert reopened.status_code == 200
@@ -729,7 +1144,7 @@ def test_daily_report_stock_difference_can_be_confirmed_logged_and_reopened(
 
         corrected = client.post(
             "/api/erp/daily-report/2026-07-25/offer-stock/manual",
-            headers={"X-CSRF-Token": str(issued["csrf_token"])},
+            headers={"X-CSRF-Token": csrf},
             json={
                 "platform_stock": 9,
                 "reason": "stock_adjustment",
@@ -751,7 +1166,7 @@ def test_daily_report_stock_difference_can_be_confirmed_logged_and_reopened(
                 "/api/erp/daily-report/2026-07-25/offer-stock/"
                 "stock-alert/eliminate"
             ),
-            headers={"X-CSRF-Token": str(issued["csrf_token"])},
+            headers={"X-CSRF-Token": csrf},
             json={"note": "采用修正库存并消除差异"},
         )
         assert eliminated.status_code == 200

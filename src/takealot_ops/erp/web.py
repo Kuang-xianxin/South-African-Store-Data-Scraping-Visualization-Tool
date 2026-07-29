@@ -47,12 +47,13 @@ from takealot_ops.competitors.service import (
 )
 from takealot_ops.dashboard.refresh import run_dashboard_refresh
 from takealot_ops.erp.auth import (
-    OPERATOR_ROLES,
     SESSION_COOKIE,
+    SESSION_LIFETIME,
     AuthConflictError,
     AuthInputError,
     AuthManager,
     IssuedSession,
+    UserIdentity,
 )
 from takealot_ops.erp.coordination import RefreshBusyError, RefreshCoordinator
 from takealot_ops.erp.daily_report import (
@@ -75,6 +76,25 @@ from takealot_ops.erp.daily_report import (
     update_operator_note,
 )
 from takealot_ops.erp.daily_report_live import daily_report_event_stream
+from takealot_ops.erp.permissions import (
+    COMPETITORS_COLLECT,
+    COMPETITORS_VIEW,
+    DAILY_REPORT_EXPORT,
+    DAILY_REPORT_MANAGE,
+    DAILY_REPORT_VIEW,
+    NFT102_MANAGE,
+    REFRESH_RUN,
+    REPORTS_GENERATE,
+    REPORTS_VIEW,
+    STORE_VIEW,
+    USERS_MANAGE,
+)
+from takealot_ops.erp.product_images import (
+    DEFAULT_MAX_DIMENSION,
+    ProductImageInputError,
+    ProductImageUnavailableError,
+    ProductThumbnailCache,
+)
 from takealot_ops.erp.service import (
     build_product_detail_payload,
     build_products_payload,
@@ -169,7 +189,7 @@ class DailyReportManualRequest(BaseModel):
     ordered_units: int | None = Field(default=None, ge=0)
     platform_stock: int | None = Field(default=None, ge=0)
     reason: str
-    note: str = Field(min_length=1, max_length=2000)
+    note: str = Field(default="", max_length=2000)
 
 
 class DailyReportConfirmRequest(BaseModel):
@@ -201,12 +221,14 @@ class BootstrapRequest(LoginRequest):
 
 class UserCreateRequest(BootstrapRequest):
     role: str
+    permissions: list[str] | None = None
 
 
 class UserUpdateRequest(BaseModel):
     display_name: str | None = Field(default=None, max_length=100)
     password: str | None = Field(default=None, max_length=128)
     role: str | None = None
+    permissions: list[str] | None = None
     active: bool | None = None
 
 
@@ -243,11 +265,13 @@ def create_app(project_root: Path | None = None) -> FastAPI:
     collection_coordinator = CollectionRequestCoordinator[CompetitorCollectionResult]()
     collection_registry = CollectionBatchRegistry()
     refresh_coordinator = RefreshCoordinator(root)
+    product_thumbnails = ProductThumbnailCache(root)
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         yield
         refresh_coordinator.close()
+        product_thumbnails.close()
         auth.close()
 
     app = FastAPI(
@@ -258,6 +282,7 @@ def create_app(project_root: Path | None = None) -> FastAPI:
         lifespan=lifespan,
     )
     app.state.auth_manager = auth
+    app.state.product_thumbnail_cache = product_thumbnails
 
     @app.middleware("http")
     async def enforce_permissions(
@@ -275,9 +300,10 @@ def create_app(project_root: Path | None = None) -> FastAPI:
         if not path.startswith("/api/") or path in public_paths:
             return await call_next(request)
 
+        session_token = request.cookies.get(SESSION_COOKIE)
         session = await run_in_threadpool(
             auth.resolve_session,
-            request.cookies.get(SESSION_COOKIE),
+            session_token,
         )
         if session is None:
             return JSONResponse(status_code=401, content={"detail": "请先登录"})
@@ -287,27 +313,37 @@ def create_app(project_root: Path | None = None) -> FastAPI:
         if request.method not in {"GET", "HEAD", "OPTIONS"}:
             csrf_token = request.headers.get("X-CSRF-Token", "")
             if not csrf_token or csrf_token != session.csrf_token:
-                return JSONResponse(
+                response = JSONResponse(
                     status_code=403,
                     content={"detail": "请求校验失败，请刷新页面后重试"},
                 )
-            if path.startswith("/api/auth/users"):
-                if session.user.role != "admin":
-                    return JSONResponse(
-                        status_code=403,
-                        content={"detail": "只有管理员可以管理用户"},
-                    )
-            elif path != "/api/auth/logout" and session.user.role not in OPERATOR_ROLES:
-                return JSONResponse(
-                    status_code=403,
-                    content={"detail": "当前账号只有查看权限"},
+                return _renew_session_cookie(
+                    response,
+                    request,
+                    session_token,
+                    renewed=session.renewed,
                 )
-        elif path.startswith("/api/auth/users") and session.user.role != "admin":
-            return JSONResponse(
+        required_permission = _required_permission(path, request.method)
+        if required_permission and not session.user.can(required_permission):
+            response = JSONResponse(
                 status_code=403,
-                content={"detail": "只有管理员可以管理用户"},
+                content={
+                    "detail": _permission_denied_message(required_permission),
+                },
             )
-        return await call_next(request)
+            return _renew_session_cookie(
+                response,
+                request,
+                session_token,
+                renewed=session.renewed,
+            )
+        downstream_response = await call_next(request)
+        return _renew_session_cookie(
+            downstream_response,
+            request,
+            session_token,
+            renewed=session.renewed,
+        )
 
     @app.get("/api/health")
     def health() -> dict[str, str]:
@@ -322,15 +358,24 @@ def create_app(project_root: Path | None = None) -> FastAPI:
         }
 
     @app.get("/api/auth/session")
-    def auth_session(request: Request) -> dict[str, Any]:
-        resolved = auth.resolve_session(request.cookies.get(SESSION_COOKIE))
+    def auth_session(request: Request) -> Response:
+        session_token = request.cookies.get(SESSION_COOKIE)
+        resolved = auth.resolve_session(session_token)
         if resolved is None:
             raise HTTPException(status_code=401, detail="请先登录")
-        return {
-            "user": resolved.user.as_dict(),
-            "csrf_token": resolved.csrf_token,
-            "expires_at": resolved.expires_at.isoformat(),
-        }
+        response = JSONResponse(
+            {
+                "user": resolved.user.as_dict(),
+                "csrf_token": resolved.csrf_token,
+                "expires_at": resolved.expires_at.isoformat(),
+            }
+        )
+        return _renew_session_cookie(
+            response,
+            request,
+            session_token,
+            renewed=resolved.renewed,
+        )
 
     @app.post("/api/auth/bootstrap")
     def auth_bootstrap(request: Request, payload: BootstrapRequest) -> Response:
@@ -385,6 +430,7 @@ def create_app(project_root: Path | None = None) -> FastAPI:
                 display_name=payload.display_name,
                 password=payload.password,
                 role=payload.role,
+                permissions=payload.permissions,
             )
         except AuthInputError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -400,6 +446,8 @@ def create_app(project_root: Path | None = None) -> FastAPI:
                 display_name=payload.display_name,
                 password=payload.password,
                 role=payload.role,
+                permissions=payload.permissions,
+                permissions_provided="permissions" in payload.model_fields_set,
                 active=payload.active,
             )
         except AuthInputError as exc:
@@ -475,6 +523,29 @@ def create_app(project_root: Path | None = None) -> FastAPI:
             percentile,
         )
 
+    @app.get("/api/erp/product-thumbnail")
+    def product_thumbnail(
+        image_url: Annotated[str, Query(min_length=1, max_length=2048)],
+        size: int = DEFAULT_MAX_DIMENSION,
+    ) -> FileResponse:
+        try:
+            path = product_thumbnails.thumbnail_path(image_url, size)
+        except ProductImageInputError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except ProductImageUnavailableError as exc:
+            raise HTTPException(
+                status_code=502,
+                detail="商品缩略图暂时不可用",
+            ) from exc
+        return FileResponse(
+            path,
+            media_type="image/jpeg",
+            headers={
+                "Cache-Control": "private, max-age=604800, immutable",
+                "X-Content-Type-Options": "nosniff",
+            },
+        )
+
     @app.get("/api/erp/risks")
     def risks(as_of: date = Query(default_factory=date.today)) -> dict[str, Any]:
         settings = DashboardSettings.from_env(root)
@@ -482,16 +553,19 @@ def create_app(project_root: Path | None = None) -> FastAPI:
 
     @app.get("/api/erp/refresh-status")
     def refresh_status(request: Request) -> dict[str, object]:
-        return refresh_coordinator.status(role=request.state.erp_user.role)
+        return refresh_coordinator.status(
+            role=_refresh_coordination_role(request.state.erp_user)
+        )
 
     @app.post("/api/erp/refresh")
     def refresh(request: Request) -> dict[str, object]:
         user = request.state.erp_user
+        coordination_role = _refresh_coordination_role(user)
         try:
             refresh_coordinator.begin(
                 username=user.username,
                 display_name=user.display_name,
-                role=user.role,
+                role=coordination_role,
             )
         except RefreshBusyError as exc:
             raise HTTPException(status_code=429, detail=str(exc)) from exc
@@ -502,14 +576,14 @@ def create_app(project_root: Path | None = None) -> FastAPI:
                 username=user.username,
                 display_name=user.display_name,
                 succeeded=False,
-                role=user.role,
+                role=coordination_role,
             )
             raise
         status = refresh_coordinator.finish(
             username=user.username,
             display_name=user.display_name,
             succeeded=result.succeeded,
-            role=user.role,
+            role=coordination_role,
         )
         return {
             "succeeded": result.succeeded,
@@ -608,7 +682,10 @@ def create_app(project_root: Path | None = None) -> FastAPI:
         )
         return {
             "ok": True,
-            "exported": _auto_export_operations_if_ready(root, business_date),
+            "exported": (
+                request.state.erp_user.can(DAILY_REPORT_EXPORT)
+                and _auto_export_operations_if_ready(root, business_date)
+            ),
         }
 
     @app.post(
@@ -653,7 +730,10 @@ def create_app(project_root: Path | None = None) -> FastAPI:
         return {
             "ok": True,
             "confirmed": confirmed,
-            "exported": _auto_export_operations_if_ready(root, business_date),
+            "exported": (
+                request.state.erp_user.can(DAILY_REPORT_EXPORT)
+                and _auto_export_operations_if_ready(root, business_date)
+            ),
         }
 
     @app.post("/api/erp/daily-report/{business_date}/{offer_id}/stock-alert")
@@ -1143,6 +1223,61 @@ def create_app(project_root: Path | None = None) -> FastAPI:
     return app
 
 
+def _required_permission(path: str, method: str) -> str | None:
+    """Map every authenticated API route to its server-enforced permission."""
+    safe_method = method in {"GET", "HEAD", "OPTIONS"}
+    if path == "/api/auth/logout":
+        return None
+    if path.startswith("/api/auth/users"):
+        return USERS_MANAGE
+    if path in {"/api/erp/freshness", "/api/erp/refresh-status"}:
+        return None
+    if path == "/api/erp/refresh":
+        return REFRESH_RUN
+    if path.startswith("/api/erp/daily-report/export"):
+        return DAILY_REPORT_VIEW if safe_method else DAILY_REPORT_EXPORT
+    if path.startswith("/api/erp/daily-report"):
+        return DAILY_REPORT_VIEW if safe_method else DAILY_REPORT_MANAGE
+    if path.startswith("/api/erp/exports"):
+        return REPORTS_VIEW if safe_method else REPORTS_GENERATE
+    if path.startswith("/api/erp/nft102"):
+        return NFT102_MANAGE
+    if path.startswith("/api/competitors"):
+        return COMPETITORS_VIEW if safe_method else COMPETITORS_COLLECT
+    if path.startswith(
+        (
+            "/api/erp/summary",
+            "/api/erp/products",
+            "/api/erp/quadrants",
+            "/api/erp/risks",
+        )
+    ):
+        return STORE_VIEW
+    return STORE_VIEW if safe_method else "__unsupported_write__"
+
+
+def _permission_denied_message(permission: str) -> str:
+    if permission == USERS_MANAGE:
+        return "当前账号没有用户权限管理权限"
+    if permission == DAILY_REPORT_MANAGE:
+        return "当前账号可以查看运营日报，但不能处理待办"
+    if permission == DAILY_REPORT_EXPORT:
+        return "当前账号不能生成运营日报 Excel"
+    if permission == COMPETITORS_COLLECT:
+        return "当前账号不能采集竞品"
+    if permission == REFRESH_RUN:
+        return "当前账号不能刷新全部数据"
+    if permission in {REPORTS_GENERATE, NFT102_MANAGE}:
+        return "当前账号不能执行报表生成或续写"
+    return "当前账号没有访问此模块的权限"
+
+
+def _refresh_coordination_role(user: UserIdentity) -> str:
+    if not user.can(REFRESH_RUN):
+        return "viewer"
+    return "admin" if user.role == "admin" else "operator"
+
+
 def _collection_failure_status(
     failure_kind: str | None,
     *,
@@ -1274,15 +1409,35 @@ def _session_response(request: Request, issued: IssuedSession) -> Response:
             "expires_at": issued.expires_at.isoformat(),
         }
     )
+    _set_session_cookie(response, request, issued.token)
+    return response
+
+
+def _set_session_cookie(
+    response: Response,
+    request: Request,
+    token: str,
+) -> None:
     response.set_cookie(
         SESSION_COOKIE,
-        issued.token,
-        max_age=12 * 60 * 60,
+        token,
+        max_age=int(SESSION_LIFETIME.total_seconds()),
         httponly=True,
         secure=request.url.scheme == "https",
         samesite="strict",
         path="/",
     )
+
+
+def _renew_session_cookie(
+    response: Response,
+    request: Request,
+    token: str | None,
+    *,
+    renewed: bool,
+) -> Response:
+    if renewed and token:
+        _set_session_cookie(response, request, token)
     return response
 
 

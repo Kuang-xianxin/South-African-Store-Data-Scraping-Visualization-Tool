@@ -67,6 +67,7 @@ def create_schema(engine: Engine) -> None:
     """Create the current schema and apply retained SQLite upgrades."""
     Base.metadata.create_all(engine)
     _add_offer_created_at_columns(engine)
+    _add_erp_user_permissions_column(engine)
     if engine.dialect.name == "sqlite":
         _add_sqlite_offer_stock_columns(engine)
 
@@ -86,6 +87,25 @@ def _add_offer_created_at_columns(engine: Engine) -> None:
                 connection.exec_driver_sql(
                     f"ALTER TABLE {table} ADD COLUMN {column} DATETIME NULL"
                 )
+
+
+def _add_erp_user_permissions_column(engine: Engine) -> None:
+    """Add account-level permissions without changing legacy role defaults."""
+    with engine.begin() as connection:
+        if not inspect(connection).has_table("erp_users"):
+            return
+        existing = {
+            str(column["name"])
+            for column in inspect(connection).get_columns("erp_users")
+        }
+        if "permissions_json" in existing:
+            return
+        preparer = connection.dialect.identifier_preparer
+        table = preparer.quote("erp_users")
+        column = preparer.quote("permissions_json")
+        connection.exec_driver_sql(
+            f"ALTER TABLE {table} ADD COLUMN {column} TEXT NULL"
+        )
 
 
 def _add_sqlite_offer_stock_columns(engine: Engine) -> None:

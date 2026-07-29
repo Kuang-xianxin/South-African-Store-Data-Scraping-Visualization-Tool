@@ -1,6 +1,7 @@
 export interface CompetitorItem {
   plid: string;
   商品: string;
+  图片: string | null;
   采集时间: string;
   当前卖家: string | null;
   价格: number | null;
@@ -40,6 +41,7 @@ export interface ReviewItem {
 export interface CompetitorVariantItem {
   plid: string;
   快照ID: number;
+  图片: string | null;
   采集时间: string;
   变体键: string;
   变体: string;
@@ -70,6 +72,8 @@ export interface CollectResult {
 export interface CompetitorLinkHealthItem {
   plid: string;
   url: string;
+  商品: string | null;
+  图片: string | null;
   status: "suspected_invalid" | "confirmed_invalid";
   confirmed_not_found_count: number;
   first_not_found_at: string | null;
@@ -159,13 +163,28 @@ export interface QuadrantItem extends ProductItem {
   quadrant: QuadrantKey;
 }
 
-export type UserRole = "viewer" | "operator" | "admin";
+export type UserRole = "viewer" | "operator" | "selection" | "admin";
+
+export type PermissionKey =
+  | "store.view"
+  | "competitors.view"
+  | "competitors.collect"
+  | "daily_report.view"
+  | "daily_report.manage"
+  | "daily_report.export"
+  | "reports.view"
+  | "reports.generate"
+  | "nft102.manage"
+  | "refresh.run"
+  | "users.manage";
 
 export interface AuthUser {
   id: number;
   username: string;
   display_name: string;
   role: UserRole;
+  permissions: PermissionKey[];
+  permissions_customized: boolean;
 }
 
 export interface AuthSession {
@@ -208,6 +227,25 @@ export interface AnomalyItem {
   severity: string | null;
   severity_label: string;
   explanation: string;
+  metric_date?: string | null;
+  title?: string | null;
+  sku?: string | null;
+  tsin_id?: string | null;
+  barcode?: string | null;
+  image_url?: string | null;
+  selling_price?: number | null;
+  rrp?: number | null;
+  status_label?: string | null;
+  total_stock?: number | null;
+  page_views_30_days?: number | null;
+  ordered_units_7_days?: number | null;
+  effective_units?: number | null;
+  ordered_revenue?: number | null;
+  conversion_percentage_30_days?: number | null;
+  first_listed_at?: string | null;
+  first_listed_source?: "platform" | "first_observed" | null;
+  latest_restock_date?: string | null;
+  latest_restock_increase?: number | null;
 }
 
 export interface QualityItem {
@@ -544,6 +582,8 @@ export interface DailyReportPayload {
   handled_actions: DailyReportHandledAction[];
   counts: {
     products: number;
+    current_stock_total: number | null;
+    current_stock_missing: number;
     with_sales: number;
     awaiting_evening: number;
     ready: number;

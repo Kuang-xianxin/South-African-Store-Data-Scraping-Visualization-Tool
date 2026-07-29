@@ -1,22 +1,13 @@
 <script setup lang="ts">
-import { ref, watch } from "vue";
+import { ref } from "vue";
 
-import {
-  fetchExports,
-  generateExports,
-  generateNft102,
-  inspectNft102,
-} from "../api";
-import type {
-  ExportPayload,
-  NftGeneration,
-  NftInspection,
-} from "../types";
+import { generateNft102, inspectNft102 } from "../api";
+import type { NftGeneration, NftInspection } from "../types";
 
-const props = defineProps<{ asOf: string; canOperate?: boolean }>();
-const tab = ref<"exports" | "nft102">("exports");
-const exports = ref<ExportPayload | null>(null);
-const exporting = ref(false);
+const props = defineProps<{
+  canUseNft102?: boolean;
+  onPermissionDenied?: () => void;
+}>();
 const message = ref("");
 const nftFile = ref<File | null>(null);
 const inspection = ref<NftInspection | null>(null);
@@ -25,30 +16,12 @@ const inspecting = ref(false);
 const generating = ref(false);
 const generation = ref<NftGeneration | null>(null);
 
-watch(() => props.asOf, loadExports, { immediate: true });
-
-async function loadExports() {
-  exports.value = await fetchExports(props.asOf);
-}
-
-async function runExport() {
-  if (!props.canOperate) return;
-  exporting.value = true;
-  message.value = "";
-  try {
-    exports.value = await generateExports(props.asOf);
-    message.value = exports.value.png_error
-      ? "网页和电子表格已生成，图片暂未生成。"
-      : "三种日报均已生成。";
-  } catch (error) {
-    message.value = error instanceof Error ? error.message : "报表生成失败";
-  } finally {
-    exporting.value = false;
-  }
-}
-
 async function chooseFile(event: Event) {
-  if (!props.canOperate) return;
+  if (!props.canUseNft102) {
+    props.onPermissionDenied?.();
+    (event.target as HTMLInputElement).value = "";
+    return;
+  }
   const input = event.target as HTMLInputElement;
   nftFile.value = input.files?.[0] ?? null;
   inspection.value = null;
@@ -66,7 +39,10 @@ async function chooseFile(event: Event) {
 }
 
 async function runNftGeneration() {
-  if (!props.canOperate) return;
+  if (!props.canUseNft102) {
+    props.onPermissionDenied?.();
+    return;
+  }
   if (!nftFile.value || !reportDate.value) return;
   generating.value = true;
   message.value = "";
@@ -83,6 +59,12 @@ async function runNftGeneration() {
 function megabytes(value: number) {
   return `${(value / 1024 / 1024).toFixed(2)} MB`;
 }
+
+function guardFilePicker(event: MouseEvent) {
+  if (props.canUseNft102) return;
+  event.preventDefault();
+  props.onPermissionDenied?.();
+}
 </script>
 
 <template>
@@ -90,42 +72,12 @@ function megabytes(value: number) {
     <div class="page-intro">
       <div>
         <p class="section-kicker">REPORT WORKSPACE</p>
-        <h2>导出与日报续写集中处理</h2>
-      </div>
-      <div class="page-tabs">
-        <button :class="{ active: tab === 'exports' }" @click="tab = 'exports'">运营日报</button>
-        <button :class="{ active: tab === 'nft102' }" @click="tab = 'nft102'">NFT102 续写</button>
+        <h2>NFT102 日报续写</h2>
       </div>
     </div>
     <p v-if="message" class="global-notice">{{ message }}</p>
 
-    <section v-if="tab === 'exports'" class="erp-panel export-panel">
-      <div class="panel-heading">
-        <div>
-          <p class="section-kicker">DAILY REPORTS</p>
-          <h3>{{ asOf }} 运营日报</h3>
-        </div>
-        <button
-          class="action-button"
-          :disabled="exporting || !props.canOperate"
-          @click="runExport"
-        >
-          {{ exporting ? "正在生成…" : "生成全部报表" }}
-        </button>
-      </div>
-      <p class="method-note">只读取当前 MySQL，不调用平台接口；同时尝试 HTML、Excel 和 PNG。</p>
-      <div class="export-cards">
-        <article v-for="file in exports?.files ?? []" :key="file.kind">
-          <span>{{ file.label }}</span>
-          <strong>{{ file.exists ? "已生成" : "未生成" }}</strong>
-          <small>{{ file.name }}</small>
-          <a v-if="file.download_url" :href="file.download_url">下载{{ file.label }}</a>
-          <button v-else disabled>等待生成</button>
-        </article>
-      </div>
-    </section>
-
-    <section v-else class="nft-workspace">
+    <section class="nft-workspace">
       <article class="erp-panel upload-panel">
         <p class="section-kicker">OPERATOR BASELINE</p>
         <h3>上传运营最终版</h3>
@@ -134,7 +86,7 @@ function megabytes(value: number) {
           <input
             type="file"
             accept=".xlsx"
-            :disabled="!props.canOperate"
+            @click="guardFilePicker"
             @change="chooseFile"
           />
           <strong>{{ nftFile?.name || "选择电子表格" }}</strong>
@@ -154,7 +106,7 @@ function megabytes(value: number) {
         <div v-else class="state-card slim">先上传并通过校验，才能生成下一日表格。</div>
         <button
           class="action-button full"
-          :disabled="!inspection || generating || !props.canOperate"
+          :disabled="Boolean(props.canUseNft102) && (!inspection || generating)"
           @click="runNftGeneration"
         >
           {{ generating ? "正在生成，请勿关闭…" : "保存基准并生成下一日表格" }}

@@ -393,8 +393,21 @@ def daily_report_payload(engine: Engine, business_date: date) -> dict[str, Any]:
             current_items=items,
         )
         handled_actions = _handled_actions(session, through=business_date)
+        current_stock_values = [
+            _platform_stock(offer)[0]
+            for offer in session.scalars(
+                select(OfferCurrent).order_by(OfferCurrent.offer_id)
+            )
+        ]
+    current_stock_missing = sum(stock is None for stock in current_stock_values)
     counts = {
         "products": len(items),
+        "current_stock_total": (
+            sum(int(stock) for stock in current_stock_values if stock is not None)
+            if current_stock_missing == 0
+            else None
+        ),
+        "current_stock_missing": current_stock_missing,
         "with_sales": sum(
             1
             for item in items
@@ -483,7 +496,7 @@ def save_manual_candidate(
 ) -> None:
     if reason not in MANUAL_REASONS:
         raise DailyReportInputError("人工修改原因无效")
-    clean_note = _required_note(note, "人工修改必须填写备注")
+    clean_note = _optional_note(note)
     supplied = {key: values.get(key) for key in _VALUE_KEYS if key in values}
     if not supplied:
         raise DailyReportInputError("至少填写一个人工修改值")
@@ -1760,13 +1773,13 @@ def _status_after_capture(
     selected = _coalesced_capture_values(candidates[: len(captured)])
     if any(selected.get(key) is None for key in _MISSING_CAPTURE_KEYS):
         return "missing_capture"
-    if len(captured) < 2:
-        return "awaiting_evening"
     if (
         not resolution.stock_alert_dismissed
         and _stock_continuity_mismatch(previous_stock, selected)
     ):
         return "needs_review"
+    if len(captured) < 2:
+        return "awaiting_evening"
     return "ready"
 
 
@@ -2076,7 +2089,7 @@ def _propagate_confirmation_stock_conflict(
     previous_effective_stock: int | None,
     confirmed_values: Mapping[str, int | None],
     source: str,
-    note: str,
+    note: str | None,
     user_id: int,
     confirmed_at: datetime,
     resolved_version_difference: bool = False,
@@ -2431,7 +2444,7 @@ def _apply_final(
     resolution: DailyReportResolution,
     values: Mapping[str, int | None],
     source: str,
-    note: str,
+    note: str | None,
     user_id: int,
     now: datetime,
 ) -> None:
@@ -3679,6 +3692,13 @@ def _required_note(note: str, message: str) -> str:
     if len(clean) > 2000:
         raise DailyReportInputError("备注不能超过 2000 个字符")
     return clean
+
+
+def _optional_note(note: str | None) -> str | None:
+    clean = str(note or "").strip()
+    if len(clean) > 2000:
+        raise DailyReportInputError("备注不能超过 2000 个字符")
+    return clean or None
 
 
 def _identity_map(

@@ -2,33 +2,65 @@
 import { computed, onBeforeUnmount, ref, watch } from "vue";
 
 import { fetchQuadrants } from "../api";
-import type { QuadrantItem, QuadrantKey, QuadrantPayload } from "../types";
+import { PRODUCT_IMAGE_SIZE, productThumbnailUrl } from "../productImages";
+import type { QuadrantItem, QuadrantPayload } from "../types";
 
 const props = defineProps<{ asOf: string }>();
-const percentile = ref(50);
 const data = ref<QuadrantPayload | null>(null);
 const loading = ref(true);
-const selectedQuadrant = ref<QuadrantKey | "all">("all");
 const copiedOfferId = ref("");
 const copyFeedback = ref("");
 const copyFeedbackKind = ref<"success" | "error">("success");
 const hoveredItem = ref<QuadrantItem | null>(null);
+const failedImageUrls = ref<Set<string>>(new Set());
+const skuQuery = ref("");
+const productSort = ref<"views_desc" | "orders_desc" | "stock_desc" | "name_asc">(
+  "views_desc",
+);
 let feedbackTimer: ReturnType<typeof setTimeout> | undefined;
 
-const labels: Record<QuadrantKey, string> = {
-  star: "明星商品",
-  conversion_issue: "转化问题",
-  potential: "潜力商品",
-  optimize: "待优化",
-  unclassified: "未分类",
-};
 const rankTicks = [0, 25, 50, 75, 100];
-const filtered = computed(() =>
-  selectedQuadrant.value === "all"
-    ? data.value?.items ?? []
-    : (data.value?.items ?? []).filter(
-        (item) => item.quadrant === selectedQuadrant.value,
-      ),
+const gridTicks = rankTicks.filter((tick) => tick > 0 && tick < 100);
+const allItems = computed(() => data.value?.items ?? []);
+const filteredItems = computed(() => {
+  const query = skuQuery.value.trim().toLocaleLowerCase();
+  if (!query) return allItems.value;
+  return allItems.value.filter((item) =>
+    String(item.sku ?? "").toLocaleLowerCase().includes(query),
+  );
+});
+const sortedItems = computed(() => {
+  const items = [...filteredItems.value];
+  return items.sort((left, right) => {
+    if (productSort.value === "name_asc") {
+      return productName(left).localeCompare(productName(right), "zh-CN", {
+        numeric: true,
+      });
+    }
+
+    const key =
+      productSort.value === "orders_desc"
+        ? "ordered_units"
+        : productSort.value === "stock_desc"
+          ? "total_stock"
+          : "page_views_30_days";
+    return (
+      compareNullableDesc(left[key], right[key]) ||
+      productName(left).localeCompare(productName(right), "zh-CN", {
+        numeric: true,
+      })
+    );
+  });
+});
+const plottableItems = computed(() =>
+  allItems.value.filter(
+    (item) =>
+      item.page_views_rank !== null &&
+      item.ordered_units_rank !== null,
+  ),
+);
+const missingCoordinateCount = computed(
+  () => allItems.value.length - plottableItems.value.length,
 );
 const tooltipStyle = computed(() => {
   if (!hoveredItem.value) return {};
@@ -49,23 +81,22 @@ const tooltipClasses = computed(() => {
     below: y >= 50,
   };
 });
+const hoveredImageUrl = computed(() => {
+  return hoveredItem.value ? imageUrl(hoveredItem.value) : "";
+});
 
-watch([() => props.asOf, percentile], load, { immediate: true });
+watch(() => props.asOf, load, { immediate: true });
 
 async function load() {
   loading.value = true;
   try {
-    data.value = await fetchQuadrants(props.asOf, percentile.value);
+    data.value = await fetchQuadrants(props.asOf, 50);
   } finally {
     loading.value = false;
   }
 }
 
 function position(value: number | null) {
-  return `${rankValue(value)}%`;
-}
-
-function boundaryPosition(value: number | null) {
   return `${rankValue(value)}%`;
 }
 
@@ -79,8 +110,29 @@ function number(value: number | null | undefined) {
     : new Intl.NumberFormat("zh-CN").format(value);
 }
 
+function productName(item: QuadrantItem) {
+  return item.title || item.sku || item.offer_id;
+}
+
+function compareNullableDesc(
+  left: number | null | undefined,
+  right: number | null | undefined,
+) {
+  if (left === null || left === undefined) {
+    return right === null || right === undefined ? 0 : 1;
+  }
+  if (right === null || right === undefined) return -1;
+  return right - left;
+}
+
 function firstListingLabel(item: QuadrantItem) {
   return item.first_listed_at || "暂无记录";
+}
+
+function firstListingTitle(item: QuadrantItem) {
+  return item.first_listed_source === "platform"
+    ? "首次上架"
+    : "首次上架 · 本库最早记录";
 }
 
 function restockLabel(item: QuadrantItem) {
@@ -90,6 +142,29 @@ function restockLabel(item: QuadrantItem) {
       ? ""
       : ` · 较前次 +${number(item.latest_restock_increase)}`;
   return `${item.latest_restock_date}${increase}`;
+}
+
+function sourceImageUrl(item: QuadrantItem) {
+  return String(item.image_url ?? "").trim();
+}
+
+function imageUrl(item: QuadrantItem) {
+  const source = sourceImageUrl(item);
+  return source && !failedImageUrls.value.has(source)
+    ? productThumbnailUrl(source, PRODUCT_IMAGE_SIZE.list)
+    : "";
+}
+
+function imageFailed(item: QuadrantItem) {
+  const source = sourceImageUrl(item);
+  return !source || failedImageUrls.value.has(source);
+}
+
+function markImageUnavailable(url: string) {
+  if (!url) return;
+  const failed = new Set(failedImageUrls.value);
+  failed.add(url);
+  failedImageUrls.value = failed;
 }
 
 async function copyPlatformSku(item: QuadrantItem) {
@@ -150,42 +225,22 @@ onBeforeUnmount(() => {
   <div class="erp-page quadrant-page">
     <div class="page-intro">
       <div>
-        <p class="section-kicker">PORTFOLIO MATRIX</p>
-        <h2>用近7日销量与30天浏览量管理商品组合</h2>
+        <p class="section-kicker">PRODUCT POSITION</p>
+        <h2>用近7日下单与30天浏览量查看商品分布</h2>
       </div>
-      <label class="compact-field">
-        <span>分组严格程度</span>
-        <select v-model="percentile">
-          <option :value="25">宽松 · 25分位</option>
-          <option :value="50">标准 · 50分位</option>
-          <option :value="75">严格 · 75分位</option>
-        </select>
-      </label>
     </div>
 
-    <div v-if="loading" class="state-card">正在计算经营四象限……</div>
+    <div v-if="loading" class="state-card">正在计算商品经营坐标……</div>
     <template v-else-if="data">
-      <section class="quadrant-kpis">
-        <button
-          v-for="key in (Object.keys(labels) as QuadrantKey[])"
-          :key="key"
-          :class="[key, { active: selectedQuadrant === key }]"
-          @click="selectedQuadrant = selectedQuadrant === key ? 'all' : key"
-        >
-          <span>{{ labels[key] }}</span>
-          <strong>{{ data.counts[key] }}</strong>
-        </button>
-      </section>
-
       <section class="erp-panel quadrant-visual">
         <div class="panel-heading">
           <div>
-            <p class="section-kicker">RELATIVE POSITION</p>
-            <h3>商品经营位置</h3>
+            <p class="section-kicker">TWO-DIMENSIONAL POSITION</p>
+            <h3>商品经营坐标</h3>
           </div>
           <span>
-            浏览量分界 {{ number(data.boundaries.page_views) }} ·
-            近7日下单分界 {{ number(data.boundaries.ordered_units) }}
+            已定位 {{ plottableItems.length }} 个 ·
+            缺少坐标 {{ missingCoordinateCount }} 个保留在下表
           </span>
         </div>
         <div class="matrix-shell">
@@ -196,64 +251,23 @@ onBeforeUnmount(() => {
             近7日下单件数相对排名
           </span>
           <div class="matrix">
-          <div class="matrix-zone top-left">潜力商品</div>
-          <div class="matrix-zone top-right">明星商品</div>
-          <div class="matrix-zone bottom-left">待优化</div>
-          <div class="matrix-zone bottom-right">转化问题</div>
-          <span
-            class="matrix-boundary-label vertical"
-            :style="{ left: boundaryPosition(data.boundaries.page_views_rank) }"
-          >
-            浏览量分界 {{ number(data.boundaries.page_views) }}
-          </span>
-          <span
-            class="matrix-boundary-label horizontal"
-            :style="{ bottom: boundaryPosition(data.boundaries.ordered_units_rank) }"
-          >
-            下单分界 {{ number(data.boundaries.ordered_units) }}
-          </span>
-          <span
-            v-for="tick in rankTicks"
-            :key="`x-${tick}`"
-            class="matrix-rank-tick x"
-            :class="{ start: tick === 0, end: tick === 100 }"
-            :style="{ left: `${tick}%` }"
-            aria-hidden="true"
-          >
-            {{ tick }}
-          </span>
-          <span
-            v-for="tick in rankTicks"
-            :key="`y-${tick}`"
-            class="matrix-rank-tick y"
-            :class="{ start: tick === 0, end: tick === 100 }"
-            :style="{ bottom: `${tick}%` }"
-            aria-hidden="true"
-          >
-            {{ tick }}
-          </span>
-          <span
-            class="matrix-divider vertical"
-            :style="{ left: boundaryPosition(data.boundaries.page_views_rank) }"
-          ></span>
-          <span
-            class="matrix-divider horizontal"
-            :style="{ bottom: boundaryPosition(data.boundaries.ordered_units_rank) }"
-          ></span>
-          <span
-            class="matrix-center"
-            :style="{
-              left: boundaryPosition(data.boundaries.page_views_rank),
-              bottom: boundaryPosition(data.boundaries.ordered_units_rank),
-            }"
-            aria-hidden="true"
-          ></span>
+          <template v-for="tick in gridTicks" :key="`grid-${tick}`">
+            <span
+              class="matrix-grid-line vertical"
+              :style="{ left: `${tick}%` }"
+              aria-hidden="true"
+            ></span>
+            <span
+              class="matrix-grid-line horizontal"
+              :style="{ bottom: `${tick}%` }"
+              aria-hidden="true"
+            ></span>
+          </template>
           <button
-            v-for="item in data.items.filter((row) => row.quadrant !== 'unclassified')"
+            v-for="item in plottableItems"
             :key="item.offer_id"
-            class="matrix-dot"
+            class="matrix-dot coordinate"
             :class="[
-              item.quadrant,
               {
                 copied: copiedOfferId === item.offer_id,
                 'missing-sku': !item.sku,
@@ -272,6 +286,28 @@ onBeforeUnmount(() => {
             @click="copyPlatformSku(item)"
           ></button>
           </div>
+          <div class="matrix-rank-axis x" aria-hidden="true">
+            <span
+              v-for="tick in rankTicks"
+              :key="`x-${tick}`"
+              class="matrix-rank-tick"
+              :class="{ start: tick === 0, end: tick === 100 }"
+              :style="{ left: `${tick}%` }"
+            >
+              {{ tick }}
+            </span>
+          </div>
+          <div class="matrix-rank-axis y" aria-hidden="true">
+            <span
+              v-for="tick in rankTicks"
+              :key="`y-${tick}`"
+              class="matrix-rank-tick"
+              :class="{ start: tick === 0, end: tick === 100 }"
+              :style="{ bottom: `${tick}%` }"
+            >
+              {{ tick }}
+            </span>
+          </div>
           <div class="matrix-tooltip-layer">
           <aside
             v-if="hoveredItem"
@@ -282,15 +318,31 @@ onBeforeUnmount(() => {
             role="tooltip"
           >
             <div class="tooltip-heading">
-              <span class="quadrant-tag" :class="hoveredItem.quadrant">
-                {{ labels[hoveredItem.quadrant] }}
-              </span>
+              <span class="coordinate-tag">商品坐标</span>
               <small>点击小点复制 SKU</small>
             </div>
-            <strong>{{ hoveredItem.title || hoveredItem.sku || hoveredItem.offer_id }}</strong>
-            <div class="tooltip-sku">
-              <span>平台 SKU</span>
-              <b>{{ hoveredItem.sku || "缺失" }}</b>
+            <div class="tooltip-product-summary">
+              <div class="tooltip-product-image">
+                <img
+                  v-if="hoveredImageUrl"
+                  :src="hoveredImageUrl"
+                  :alt="`${hoveredItem.title || hoveredItem.sku || hoveredItem.offer_id} 商品图片`"
+                  width="192"
+                  height="192"
+                  decoding="async"
+                  fetchpriority="high"
+                  referrerpolicy="no-referrer"
+                  @error="markImageUnavailable(sourceImageUrl(hoveredItem))"
+                />
+                <span v-else>暂无图片</span>
+              </div>
+              <div class="tooltip-product-copy">
+                <strong>{{ hoveredItem.title || hoveredItem.sku || hoveredItem.offer_id }}</strong>
+                <div class="tooltip-sku">
+                  <span>平台 SKU</span>
+                  <b>{{ hoveredItem.sku || "缺失" }}</b>
+                </div>
+              </div>
             </div>
             <div class="tooltip-stats">
               <span>
@@ -308,13 +360,7 @@ onBeforeUnmount(() => {
             </div>
             <div class="tooltip-timeline">
               <span>
-                <small>
-                  {{
-                    hoveredItem.first_listed_source === "platform"
-                      ? "首次上架"
-                      : "首次上架 · 本库最早记录"
-                  }}
-                </small>
+                <small>{{ firstListingTitle(hoveredItem) }}</small>
                 <b>{{ firstListingLabel(hoveredItem) }}</b>
               </span>
               <span>
@@ -332,8 +378,8 @@ onBeforeUnmount(() => {
           </span>
         </div>
         <p class="method-note">
-          图中位置使用店铺内相对排名拉开差异；十字中心跟随分组严格程度移动。
-          悬停可查看首次上架、补货时间、库存及近30天浏览量时效信息，点击小点直接复制平台 SKU。
+          图中只表达两个维度的店铺内相对位置，不再划分四象限或使用分位边界。
+          缺少任一坐标的数据不会按0处理，仍完整保留在下方商品卡片；悬停可查看完整经营信息，点击小点直接复制平台 SKU。
         </p>
         <p
           v-if="copyFeedback"
@@ -350,31 +396,93 @@ onBeforeUnmount(() => {
         <div class="panel-heading">
           <div>
             <p class="section-kicker">PRODUCT ACTION LIST</p>
-            <h3>{{ selectedQuadrant === "all" ? "全部商品" : labels[selectedQuadrant] }}</h3>
+            <h3>全部商品</h3>
           </div>
-          <button
-            v-if="selectedQuadrant !== 'all'"
-            class="quiet-button"
-            @click="selectedQuadrant = 'all'"
-          >
-            清除筛选
-          </button>
+          <div class="coordinate-list-actions">
+            <span>
+              {{ sortedItems.length }} / {{ allItems.length }} 个商品 ·
+              完整展示，无需左右滑动
+            </span>
+            <label class="compact-field coordinate-search-field">
+              <span>搜索平台 SKU</span>
+              <input
+                v-model="skuQuery"
+                type="search"
+                placeholder="输入完整或部分 SKU"
+                aria-label="搜索平台 SKU"
+                autocomplete="off"
+              />
+            </label>
+            <label class="compact-field coordinate-sort-field">
+              <span>排序方式</span>
+              <select v-model="productSort" aria-label="全部商品排序方式">
+                <option value="views_desc">近30天浏览量从高到低</option>
+                <option value="orders_desc">近7日下单从高到低</option>
+                <option value="stock_desc">平台库存从高到低</option>
+                <option value="name_asc">商品名称 A–Z</option>
+              </select>
+            </label>
+          </div>
         </div>
-        <div class="erp-table-wrap">
-          <table class="erp-table">
-            <thead>
-              <tr><th>商品</th><th>分类</th><th>近30天浏览量</th><th>近7日下单</th><th>库存</th></tr>
-            </thead>
-            <tbody>
-              <tr v-for="item in filtered" :key="item.offer_id">
-                <td><strong>{{ item.title || item.sku || item.offer_id }}</strong><small>{{ item.sku || "—" }}</small></td>
-                <td><span class="quadrant-tag" :class="item.quadrant">{{ labels[item.quadrant] }}</span></td>
-                <td>{{ number(item.page_views_30_days) }}</td>
-                <td>{{ number(item.ordered_units) }}</td>
-                <td>{{ number(item.total_stock) }}</td>
-              </tr>
-            </tbody>
-          </table>
+        <div v-if="sortedItems.length" class="coordinate-product-grid">
+          <article
+            v-for="item in sortedItems"
+            :key="item.offer_id"
+            v-memo="[item, imageFailed(item)]"
+            class="coordinate-product-card"
+          >
+            <div class="coordinate-product-card-head">
+              <div class="coordinate-product-image">
+                <img
+                  v-if="imageUrl(item)"
+                  :src="imageUrl(item)"
+                  :alt="`${productName(item)} 商品图片`"
+                  width="192"
+                  height="192"
+                  loading="lazy"
+                  decoding="async"
+                  fetchpriority="low"
+                  referrerpolicy="no-referrer"
+                  @error="markImageUnavailable(sourceImageUrl(item))"
+                />
+                <span v-else>暂无图片</span>
+              </div>
+              <div class="coordinate-product-card-title">
+                <strong>{{ productName(item) }}</strong>
+                <span>平台 SKU</span>
+                <b class="mono-value">{{ item.sku || "—" }}</b>
+              </div>
+            </div>
+            <dl class="coordinate-product-metrics">
+              <div>
+                <dt>近30天浏览量</dt>
+                <dd>{{ number(item.page_views_30_days) }}</dd>
+              </div>
+              <div>
+                <dt>近7日下单</dt>
+                <dd>{{ number(item.ordered_units) }}</dd>
+              </div>
+              <div>
+                <dt>平台可售库存</dt>
+                <dd>{{ number(item.total_stock) }}</dd>
+              </div>
+              <div class="wide">
+                <dt>{{ firstListingTitle(item) }}</dt>
+                <dd>{{ firstListingLabel(item) }}</dd>
+              </div>
+              <div class="wide">
+                <dt>最近补货时间 · 平台库存增加记录</dt>
+                <dd>{{ restockLabel(item) }}</dd>
+              </div>
+              <div class="wide">
+                <dt>数据截止日期</dt>
+                <dd>{{ item.metric_date || "—" }}</dd>
+              </div>
+            </dl>
+          </article>
+        </div>
+        <div v-else class="state-card coordinate-empty-state">
+          未找到匹配“{{ skuQuery.trim() }}”的平台 SKU
         </div>
       </section>
     </template>
