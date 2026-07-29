@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from dataclasses import replace
+from datetime import UTC, date, datetime
 from pathlib import Path
 
 from fastapi.testclient import TestClient
@@ -154,7 +155,7 @@ def test_competitor_observation_persists_snapshot_and_deduplicated_reviews(
         == "https://example.invalid/laser-lipo.jpg"
     )
     assert "累计销量估算" not in dataset.current.columns
-    assert dataset.current.iloc[0]["趋势判断"] == "暂未观察到净流出"
+    assert dataset.current.iloc[0]["趋势判断"] == "库存不可比，评论无新增"
     assert dataset.current.iloc[0]["库存上限"] == "未探测"
     assert bool(dataset.current.iloc[0]["库存参考过期"])
     assert dataset.current.iloc[0]["上次成功库存"] == "9"
@@ -163,6 +164,109 @@ def test_competitor_observation_persists_snapshot_and_deduplicated_reviews(
     )
     assert link_health[0]["商品"] == "Laser Lipo"
     assert link_health[0]["图片"] == "https://example.invalid/laser-lipo.jpg"
+
+
+def test_competitor_signals_recompute_from_oldest_and_latest_in_date_range(
+    tmp_path: Path,
+) -> None:
+    engine = create_engine(f"sqlite:///{(tmp_path / 'range.db').as_posix()}")
+    create_schema(engine)
+    base_product = CompetitorProduct(
+        plid="12345678",
+        url="https://www.takealot.com/example/PLID12345678",
+        title="Range Product",
+        image_url=None,
+        sku="SKU-RANGE",
+        seller_id="seller-range",
+        seller_name="Range Seller",
+        price=199.0,
+        stock_status="In stock",
+        is_leadtime=False,
+        review_count=10,
+        rating=4.5,
+        offers=(),
+        variants=(
+            CompetitorVariant(
+                key="default",
+                label="默认款",
+                url="https://www.takealot.com/example/PLID12345678",
+                title="Range Product",
+                sku="SKU-RANGE",
+                seller_id="seller-range",
+                seller_name="Range Seller",
+                price=199.0,
+                stock_status="In stock",
+                is_leadtime=False,
+                is_add_to_cart_available=True,
+            ),
+        ),
+    )
+    observations = (
+        (datetime(2026, 7, 22, 8, tzinfo=UTC), 10, 10),
+        (datetime(2026, 7, 23, 8, tzinfo=UTC), 8, 11),
+        (datetime(2026, 7, 24, 8, tzinfo=UTC), 4, 13),
+    )
+    for collected_at, quantity, review_count in observations:
+        product = replace(base_product, review_count=review_count)
+        stock = StockProbeResult(
+            quantity=quantity,
+            exact=True,
+            method="anonymous-cart-limit",
+            note="精确库存",
+        )
+        with Session(engine) as session, session.begin():
+            repository = CompetitorRepository(session)
+            previous = repository.latest_compatible_snapshot(product)
+            repository.save_observation(
+                product=product,
+                reviews=[],
+                review_summary=summarize_reviews([]),
+                stock=stock,
+                variant_stocks=[
+                    VariantStockObservation(
+                        variant=product.variants[0],
+                        stock=stock,
+                    )
+                ],
+                lifetime_sales=estimate_lifetime_sales(product.review_count),
+                signal=analyze_sales_signal(
+                    previous,
+                    current_stock_quantity=stock.quantity,
+                    current_stock_exact=stock.exact,
+                    current_review_count=product.review_count,
+                ),
+                collected_at=collected_at,
+            )
+
+    all_range = load_competitor_dataset(engine)
+    recent_range = load_competitor_dataset(
+        engine,
+        start_date=date(2026, 7, 23),
+        end_date=date(2026, 7, 24),
+    )
+    engine.dispose()
+
+    all_signal = all_range.current.iloc[0]
+    assert all_signal["库存净变化"] == -6
+    assert all_signal["库存净流出"] == 6
+    assert all_signal["新增评论"] == 3
+    assert all_signal["趋势判断"] == "两个独立正向信号"
+    assert all_signal["观察期销量信号"] == "60–150"
+    assert all_signal["区间快照数"] == 3
+    assert bool(all_signal["库存可比"])
+    assert all_range.available_start_date == date(2026, 7, 22)
+    assert all_range.available_end_date == date(2026, 7, 24)
+    assert set(all_range.history["趋势判断"]) == {"原始快照"}
+    assert all_range.history["库存净流出"].isna().all()
+
+    recent_signal = recent_range.current.iloc[0]
+    assert recent_signal["库存净变化"] == -4
+    assert recent_signal["库存净流出"] == 4
+    assert recent_signal["新增评论"] == 2
+    assert recent_signal["观察期销量信号"] == "40–100"
+    assert recent_signal["区间快照数"] == 2
+    assert recent_range.selected_start_date == date(2026, 7, 23)
+    assert recent_range.selected_end_date == date(2026, 7, 24)
 
 
 def test_competitor_api_reads_the_shared_sqlite(
@@ -175,7 +279,20 @@ def test_competitor_api_reads_the_shared_sqlite(
 
     with TestClient(app) as client:
         assert client.get("/api/health").json() == {"status": "ok"}
-        assert client.get("/api/competitors").json() == {"items": []}
+        assert client.get("/api/competitors").json() == {
+            "items": [],
+            "date_range": {
+                "available_start": None,
+                "available_end": None,
+                "selected_start": None,
+                "selected_end": None,
+            },
+        }
+        invalid_range = client.get(
+            "/api/competitors?start_date=2026-07-24&end_date=2026-07-23"
+        )
+        assert invalid_range.status_code == 422
+        assert invalid_range.json()["detail"] == "开始日期不能晚于结束日期"
         invalid = client.post(
             "/api/competitors/collect",
             json={"url": "https://www.takealot.com/not-a-product"},

@@ -1,8 +1,8 @@
 import type {
   CollectResult,
   CompetitorDetail,
-  CompetitorItem,
   CompetitorLinkHealthItem,
+  CompetitorOverview,
   ExportPayload,
   FreshnessPayload,
   NftGeneration,
@@ -186,9 +186,15 @@ export async function updateUser(
   return result.user;
 }
 
-export async function fetchCompetitors(): Promise<CompetitorItem[]> {
-  const result = await request<{ items: CompetitorItem[] }>("/api/competitors");
-  return result.items;
+export function fetchCompetitors(
+  startDate?: string,
+  endDate?: string,
+): Promise<CompetitorOverview> {
+  const query = new URLSearchParams();
+  if (startDate) query.set("start_date", startDate);
+  if (endDate) query.set("end_date", endDate);
+  const suffix = query.size ? `?${query.toString()}` : "";
+  return request<CompetitorOverview>(`/api/competitors${suffix}`);
 }
 
 export async function fetchCompetitorLinkHealth(): Promise<
@@ -202,8 +208,14 @@ export async function fetchCompetitorLinkHealth(): Promise<
 
 export async function fetchCompetitorDetail(
   plid: string,
+  startDate?: string,
+  endDate?: string,
 ): Promise<CompetitorDetail> {
-  return request<CompetitorDetail>(`/api/competitors/${plid}`);
+  const query = new URLSearchParams();
+  if (startDate) query.set("start_date", startDate);
+  if (endDate) query.set("end_date", endDate);
+  const suffix = query.size ? `?${query.toString()}` : "";
+  return request<CompetitorDetail>(`/api/competitors/${plid}${suffix}`);
 }
 
 export interface CompetitorCollectionContext {

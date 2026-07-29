@@ -1002,9 +1002,19 @@ def create_app(project_root: Path | None = None) -> FastAPI:
         return FileResponse(path, filename=path.name)
 
     @app.get("/api/competitors")
-    def competitors() -> dict[str, list[dict[str, Any]]]:
-        dataset = _load_competitor_dataset(root)
-        return {"items": frame_records(dataset.current)}
+    def competitors(
+        start_date: date | None = Query(default=None),
+        end_date: date | None = Query(default=None),
+    ) -> dict[str, object]:
+        dataset = _load_competitor_dataset(
+            root,
+            start_date=start_date,
+            end_date=end_date,
+        )
+        return {
+            "items": frame_records(dataset.current),
+            "date_range": dataset.date_range_payload(),
+        }
 
     @app.get("/api/competitors/link-health")
     def competitor_link_health() -> dict[str, list[dict[str, Any]]]:
@@ -1020,8 +1030,16 @@ def create_app(project_root: Path | None = None) -> FastAPI:
         return collection_registry.status()
 
     @app.get("/api/competitors/{plid}")
-    def competitor_detail(plid: str) -> dict[str, list[dict[str, Any]]]:
-        dataset = _load_competitor_dataset(root)
+    def competitor_detail(
+        plid: str,
+        start_date: date | None = Query(default=None),
+        end_date: date | None = Query(default=None),
+    ) -> dict[str, list[dict[str, Any]]]:
+        dataset = _load_competitor_dataset(
+            root,
+            start_date=start_date,
+            end_date=end_date,
+        )
         history = dataset.history
         reviews = dataset.reviews
         variants = dataset.variants
@@ -1302,16 +1320,35 @@ def _single_line(value: str) -> str:
     return " ".join(value.split())[:500]
 
 
-def _load_competitor_dataset(project_root: Path) -> CompetitorDataset:
+def _load_competitor_dataset(
+    project_root: Path,
+    *,
+    start_date: date | None = None,
+    end_date: date | None = None,
+) -> CompetitorDataset:
+    if start_date is not None and end_date is not None and start_date > end_date:
+        raise HTTPException(status_code=422, detail="开始日期不能晚于结束日期")
     settings = DashboardSettings.from_env(project_root)
     path = sqlite_database_path(settings.database_url)
     if path is not None and not path.exists():
         return CompetitorDataset(
-            pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+            current=pd.DataFrame(),
+            history=pd.DataFrame(),
+            reviews=pd.DataFrame(),
+            variants=pd.DataFrame(),
+            selected_start_date=start_date,
+            selected_end_date=end_date,
         )
     engine = create_read_only_erp_engine(settings.database_url)
     try:
-        return load_competitor_dataset(engine)
+        try:
+            return load_competitor_dataset(
+                engine,
+                start_date=start_date,
+                end_date=end_date,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
     finally:
         engine.dispose()
 

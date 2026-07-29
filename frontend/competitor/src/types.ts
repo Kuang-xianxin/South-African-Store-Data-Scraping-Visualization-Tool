@@ -22,11 +22,29 @@ export interface CompetitorItem {
   观察期销量信号: string;
   观察期估算下限: number | null;
   观察期估算上限: number | null;
+  库存净变化: number | null;
+  库存净流入: number | null;
   库存净流出: number | null;
   新增评论: number | null;
   趋势判断: string;
   判断说明: string;
+  信号区间开始: string | null;
+  信号区间结束: string | null;
+  区间快照数: number | null;
+  库存可比: boolean | null;
   链接: string;
+}
+
+export interface CompetitorDateRange {
+  available_start: string | null;
+  available_end: string | null;
+  selected_start: string | null;
+  selected_end: string | null;
+}
+
+export interface CompetitorOverview {
+  items: CompetitorItem[];
+  date_range: CompetitorDateRange;
 }
 
 export interface ReviewItem {

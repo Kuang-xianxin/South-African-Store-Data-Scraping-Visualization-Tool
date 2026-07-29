@@ -14,6 +14,7 @@ import {
 import { PRODUCT_IMAGE_SIZE, productThumbnailUrl } from "../productImages";
 import type {
   CollectResult,
+  CompetitorDateRange,
   CompetitorDetail,
   CompetitorItem,
   CompetitorLinkHealthItem,
@@ -140,6 +141,16 @@ const reviewSort = ref<
 const competitorQuery = ref("");
 const competitorStockFilter = ref<"全部" | "有货" | "没货" | "未探测">("全部");
 const competitorSignalFilter = ref("全部");
+const rangeStartDate = ref("");
+const rangeEndDate = ref("");
+const appliedStartDate = ref("");
+const appliedEndDate = ref("");
+const competitorDateRange = ref<CompetitorDateRange>({
+  available_start: null,
+  available_end: null,
+  selected_start: null,
+  selected_end: null,
+});
 const failedCompetitorImages = ref<Set<string>>(new Set());
 
 const selected = computed(
@@ -214,6 +225,10 @@ const averageRating = computed(() => {
 const latestCollection = computed(() => {
   if (!competitors.value.length) return "尚未采集";
   return formatChinaDateTime(competitors.value[0].采集时间);
+});
+const activeRangeLabel = computed(() => {
+  if (!appliedStartDate.value || !appliedEndDate.value) return "全部可用快照";
+  return `${appliedStartDate.value} 至 ${appliedEndDate.value}`;
 });
 const reviewDates = computed(() =>
   detail.value.reviews
@@ -355,7 +370,7 @@ let batchHeartbeatTimer: number | null = null;
 let collectionClockTimer: number | null = null;
 
 let detailRequestId = 0;
-watch(selectedPlid, async (plid) => {
+watch([selectedPlid, appliedStartDate, appliedEndDate], async ([plid, start, end]) => {
   const requestId = ++detailRequestId;
   if (!plid) {
     detail.value = { history: [], reviews: [], variants: [] };
@@ -366,7 +381,7 @@ watch(selectedPlid, async (plid) => {
   detailLoading.value = true;
   detailError.value = "";
   try {
-    const result = await fetchCompetitorDetail(plid);
+    const result = await fetchCompetitorDetail(plid, start, end);
     if (requestId === detailRequestId) detail.value = result;
   } catch (error) {
     if (requestId === detailRequestId) {
@@ -499,6 +514,20 @@ function clearCompetitorFilters(): void {
   competitorSignalFilter.value = "全部";
 }
 
+async function applyDateRange(): Promise<void> {
+  if (!rangeStartDate.value || !rangeEndDate.value) {
+    pageError.value = "请选择完整的开始日期和结束日期";
+    return;
+  }
+  if (rangeStartDate.value > rangeEndDate.value) {
+    pageError.value = "开始日期不能晚于结束日期";
+    return;
+  }
+  appliedStartDate.value = rangeStartDate.value;
+  appliedEndDate.value = rangeEndDate.value;
+  await loadOverview();
+}
+
 function openProductModal(item: CompetitorItem) {
   selectedPlid.value = item.plid;
   detailModalOpen.value = true;
@@ -516,14 +545,23 @@ async function loadOverview() {
   loading.value = true;
   pageError.value = "";
   try {
-    const [competitorItems, healthItems] = await Promise.all([
-      fetchCompetitors(),
+    const [overview, healthItems] = await Promise.all([
+      fetchCompetitors(appliedStartDate.value, appliedEndDate.value),
       fetchCompetitorLinkHealth(),
     ]);
-    competitors.value = competitorItems;
+    competitors.value = overview.items;
+    competitorDateRange.value = overview.date_range;
+    if (!appliedStartDate.value && overview.date_range.selected_start) {
+      appliedStartDate.value = overview.date_range.selected_start;
+    }
+    if (!appliedEndDate.value && overview.date_range.selected_end) {
+      appliedEndDate.value = overview.date_range.selected_end;
+    }
+    if (!rangeStartDate.value) rangeStartDate.value = appliedStartDate.value;
+    if (!rangeEndDate.value) rangeEndDate.value = appliedEndDate.value;
     linkHealth.value = healthItems;
-    if (!selectedPlid.value && competitors.value.length) {
-      selectedPlid.value = competitors.value[0].plid;
+    if (!competitors.value.some((item) => item.plid === selectedPlid.value)) {
+      selectedPlid.value = competitors.value[0]?.plid ?? "";
     }
   } catch (error) {
     pageError.value = error instanceof Error ? error.message : "读取竞品数据失败";
@@ -1484,8 +1522,32 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
               </option>
             </select>
           </label>
+          <label class="competitor-filter-field">
+            <span>观察开始日期（北京时间）</span>
+            <input
+              v-model="rangeStartDate"
+              type="date"
+              :min="competitorDateRange.available_start || undefined"
+              :max="rangeEndDate || competitorDateRange.available_end || undefined"
+            />
+          </label>
+          <label class="competitor-filter-field">
+            <span>观察结束日期（北京时间）</span>
+            <input
+              v-model="rangeEndDate"
+              type="date"
+              :min="rangeStartDate || competitorDateRange.available_start || undefined"
+              :max="competitorDateRange.available_end || undefined"
+            />
+          </label>
           <div class="competitor-filter-summary">
-            <span>显示 {{ filteredCompetitors.length }} / {{ competitors.length }} 个商品</span>
+            <span>
+              {{ activeRangeLabel }} · 显示
+              {{ filteredCompetitors.length }} / {{ competitors.length }} 个商品
+            </span>
+            <button type="button" class="quiet-button" @click="applyDateRange">
+              按区间重算
+            </button>
             <button
               v-if="competitorFiltersActive"
               type="button"
@@ -1496,6 +1558,10 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
             </button>
           </div>
         </div>
+        <p class="method-note">
+          日期按北京时间自然日筛选。每个商品使用区间内最旧快照和最新快照重算库存净变化、
+          新增评论与经营信号；只有首尾变体键、SKU、卖家集合一致且库存均为精确值时才比较库存。
+        </p>
         <div v-if="!filteredCompetitors.length" class="empty-state competitor-filter-empty">
           <strong>没有符合条件的竞品</strong>
           <span>可以调整关键词、库存状态或经营信号。</span>
@@ -1652,6 +1718,12 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
                   <p class="section-kicker">OPERATING SIGNAL</p>
                   <h2>{{ selected.趋势判断 }}</h2>
                   <p>{{ selected.判断说明 }}</p>
+                  <p class="method-note">
+                    实际比较：
+                    {{ formatChinaDateTime(selected.信号区间开始) }}
+                    至 {{ formatChinaDateTime(selected.信号区间结束) }}
+                    · {{ selected.区间快照数 ?? 0 }} 个快照
+                  </p>
                   <div class="decision-stats">
                     <span>
                       <small>库存上限</small>
@@ -1665,6 +1737,20 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
                       </em>
                     </span>
                     <span><small>累计评论</small><strong>{{ selected.评论数 }}</strong></span>
+                    <span>
+                      <small>区间库存净变化</small>
+                      <strong>
+                        {{
+                          selected.库存可比 && selected.库存净变化 !== null
+                            ? `${selected.库存净变化 > 0 ? "+" : ""}${selected.库存净变化}`
+                            : "不可比"
+                        }}
+                      </strong>
+                    </span>
+                    <span>
+                      <small>区间新增评论</small>
+                      <strong>{{ selected.新增评论 ?? "—" }}</strong>
+                    </span>
                     <span>
                       <small>观察期估算</small>
                       <strong>{{ selected.观察期销量信号 }}</strong>
@@ -1781,12 +1867,12 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
                 <div class="section-heading">
                   <div>
                     <p class="section-kicker">OBSERVATION HISTORY</p>
-                    <h2>历史快照</h2>
+                    <h2>区间原始快照</h2>
                   </div>
                   <span>{{ detail.history.length }} 个时间点</span>
                 </div>
                 <div v-if="detail.history.length < 2" class="empty-state slim">
-                  再次采集后，这里会显示库存净流出、新增评论和观察期销量信号。
+                  本区间不足两个快照，只能建立基线，不能计算首尾变化。
                 </div>
                 <div v-else class="timeline">
                   <article
@@ -1810,14 +1896,11 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
                       </div>
                       <div>
                         <time>{{ formatChinaDateTime(item.采集时间) }}</time>
-                        <strong>{{ item.趋势判断 }}</strong>
+                        <strong>原始观测值</strong>
                       </div>
                     </div>
                     <span>库存 {{ item.库存上限 }} · 评论 {{ item.评论数 }}</span>
-                    <small>
-                      净流出 {{ item.库存净流出 ?? "—" }}
-                      · 新增评论 {{ item.新增评论 ?? "—" }}
-                    </small>
+                    <small>价格 {{ formatCurrency(item.价格) }} · 不在单个快照上重复判定区间信号</small>
                   </article>
                 </div>
               </section>

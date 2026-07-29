@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from datetime import UTC, datetime
+from dataclasses import dataclass, replace
+from datetime import UTC, date, datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
+
 import pandas as pd
 from sqlalchemy import Engine, select
 from sqlalchemy.exc import SQLAlchemyError
@@ -19,6 +21,8 @@ from takealot_ops.competitors.api import (
 )
 from takealot_ops.competitors.domain import (
     CompetitorProduct,
+    PreviousObservation,
+    SalesSignal,
     StockProbeResult,
     VariantStockObservation,
     analyze_sales_signal,
@@ -62,6 +66,35 @@ class CompetitorDataset:
     history: pd.DataFrame
     reviews: pd.DataFrame
     variants: pd.DataFrame
+    available_start_date: date | None = None
+    available_end_date: date | None = None
+    selected_start_date: date | None = None
+    selected_end_date: date | None = None
+
+    def date_range_payload(self) -> dict[str, str | None]:
+        """Return API-safe observation range metadata."""
+        return {
+            "available_start": (
+                self.available_start_date.isoformat()
+                if self.available_start_date is not None
+                else None
+            ),
+            "available_end": (
+                self.available_end_date.isoformat()
+                if self.available_end_date is not None
+                else None
+            ),
+            "selected_start": (
+                self.selected_start_date.isoformat()
+                if self.selected_start_date is not None
+                else None
+            ),
+            "selected_end": (
+                self.selected_end_date.isoformat()
+                if self.selected_end_date is not None
+                else None
+            ),
+        }
 
 
 class CompetitorCollector:
@@ -386,8 +419,18 @@ def load_competitor_link_health(engine: Engine) -> list[dict[str, object]]:
     ]
 
 
-def load_competitor_dataset(engine: Engine) -> CompetitorDataset:
-    """Load all competitor views without changing database state."""
+COMPETITOR_DISPLAY_TIMEZONE = ZoneInfo("Asia/Shanghai")
+
+
+def load_competitor_dataset(
+    engine: Engine,
+    *,
+    start_date: date | None = None,
+    end_date: date | None = None,
+) -> CompetitorDataset:
+    """Load competitor views and recompute signals across the selected interval."""
+    if start_date is not None and end_date is not None and start_date > end_date:
+        raise ValueError("开始日期不能晚于结束日期")
     try:
         with Session(engine) as session:
             targets = list(
@@ -421,12 +464,41 @@ def load_competitor_dataset(engine: Engine) -> CompetitorDataset:
             )
     except SQLAlchemyError:
         return CompetitorDataset(
-            pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+            current=pd.DataFrame(),
+            history=pd.DataFrame(),
+            reviews=pd.DataFrame(),
+            variants=pd.DataFrame(),
+            selected_start_date=start_date,
+            selected_end_date=end_date,
         )
 
+    active_plids = {target.plid for target in targets}
+    active_snapshots = [row for row in snapshots if row.plid in active_plids]
+    snapshot_dates = [
+        _competitor_display_date(row.collected_at) for row in active_snapshots
+    ]
+    available_start_date = min(snapshot_dates, default=None)
+    available_end_date = max(snapshot_dates, default=None)
+    selected_start_date = start_date or available_start_date
+    selected_end_date = end_date or available_end_date
+    interval_snapshots = [
+        row
+        for row in active_snapshots
+        if (
+            selected_start_date is None
+            or _competitor_display_date(row.collected_at) >= selected_start_date
+        )
+        and (
+            selected_end_date is None
+            or _competitor_display_date(row.collected_at) <= selected_end_date
+        )
+    ]
+
     latest_by_plid: dict[str, CompetitorSnapshot] = {}
-    for snapshot in snapshots:
+    snapshots_by_plid: dict[str, list[CompetitorSnapshot]] = {}
+    for snapshot in interval_snapshots:
         latest_by_plid.setdefault(snapshot.plid, snapshot)
+        snapshots_by_plid.setdefault(snapshot.plid, []).append(snapshot)
     variant_signatures: dict[int, frozenset[tuple[str, str, str]]] = {}
     for variant in variants:
         signature = variant_signatures.setdefault(variant.snapshot_id, frozenset())
@@ -442,7 +514,7 @@ def load_competitor_dataset(engine: Engine) -> CompetitorDataset:
         if latest.stock_quantity is not None:
             continue
         latest_signature = variant_signatures.get(latest.id, frozenset())
-        for candidate in snapshots:
+        for candidate in interval_snapshots:
             if candidate.plid != plid or candidate.id == latest.id:
                 continue
             if candidate.stock_quantity is None:
@@ -453,15 +525,33 @@ def load_competitor_dataset(engine: Engine) -> CompetitorDataset:
                 continue
             stale_stock_by_plid[plid] = candidate
             break
-    active_plids = {target.plid for target in targets}
-    current = pd.DataFrame(
-        [
-            _snapshot_row(row, stale_stock=stale_stock_by_plid.get(plid))
-            for plid, row in latest_by_plid.items()
-            if plid in active_plids
-        ]
+    current_rows: list[dict[str, object]] = []
+    for plid, latest in latest_by_plid.items():
+        if plid not in active_plids:
+            continue
+        interval = snapshots_by_plid[plid]
+        oldest = interval[-1]
+        signal, stock_change, stock_comparable = _interval_sales_signal(
+            oldest,
+            latest,
+            variant_signatures=variant_signatures,
+        )
+        current_rows.append(
+            _snapshot_row(
+                latest,
+                stale_stock=stale_stock_by_plid.get(plid),
+                signal=signal,
+                signal_start=oldest.collected_at,
+                signal_end=latest.collected_at,
+                interval_snapshot_count=len(interval),
+                stock_change=stock_change,
+                stock_comparable=stock_comparable,
+            )
+        )
+    current = pd.DataFrame(current_rows)
+    history = pd.DataFrame(
+        [_snapshot_row(row, raw_history=True) for row in interval_snapshots]
     )
-    history = pd.DataFrame([_snapshot_row(row) for row in snapshots])
     review_frame = pd.DataFrame(
         [
             {
@@ -475,11 +565,15 @@ def load_competitor_dataset(engine: Engine) -> CompetitorDataset:
             for row in reviews
         ]
     )
-    snapshot_images = {snapshot.id: snapshot.image_url for snapshot in snapshots}
+    interval_snapshot_ids = {snapshot.id for snapshot in interval_snapshots}
+    snapshot_images = {
+        snapshot.id: snapshot.image_url for snapshot in interval_snapshots
+    }
     variant_frame = pd.DataFrame(
         [
             _variant_row(row, image_url=snapshot_images.get(row.snapshot_id))
             for row in variants
+            if row.snapshot_id in interval_snapshot_ids
         ]
     )
     return CompetitorDataset(
@@ -487,7 +581,91 @@ def load_competitor_dataset(engine: Engine) -> CompetitorDataset:
         history=history,
         reviews=review_frame,
         variants=variant_frame,
+        available_start_date=available_start_date,
+        available_end_date=available_end_date,
+        selected_start_date=selected_start_date,
+        selected_end_date=selected_end_date,
     )
+
+
+def _competitor_display_date(value: datetime) -> date:
+    captured_at = value.replace(tzinfo=UTC) if value.tzinfo is None else value
+    return captured_at.astimezone(COMPETITOR_DISPLAY_TIMEZONE).date()
+
+
+def _interval_sales_signal(
+    oldest: CompetitorSnapshot,
+    latest: CompetitorSnapshot,
+    *,
+    variant_signatures: dict[int, frozenset[tuple[str, str, str]]],
+) -> tuple[SalesSignal, int | None, bool]:
+    if oldest.id == latest.id:
+        return (
+            analyze_sales_signal(
+                None,
+                current_stock_quantity=latest.stock_quantity,
+                current_stock_exact=latest.stock_exact,
+                current_review_count=latest.review_count,
+            ),
+            None,
+            False,
+        )
+
+    same_inventory_scope = (
+        oldest.sku == latest.sku
+        and oldest.seller_id == latest.seller_id
+        and variant_signatures.get(oldest.id, frozenset())
+        == variant_signatures.get(latest.id, frozenset())
+    )
+    stock_comparable = (
+        same_inventory_scope
+        and oldest.stock_exact
+        and latest.stock_exact
+        and oldest.stock_quantity is not None
+        and latest.stock_quantity is not None
+    )
+    previous = PreviousObservation(
+        snapshot_id=oldest.id,
+        collected_at=oldest.collected_at,
+        stock_quantity=oldest.stock_quantity if same_inventory_scope else None,
+        stock_exact=oldest.stock_exact if same_inventory_scope else False,
+        review_count=oldest.review_count,
+    )
+    signal = analyze_sales_signal(
+        previous,
+        current_stock_quantity=latest.stock_quantity if same_inventory_scope else None,
+        current_stock_exact=latest.stock_exact if same_inventory_scope else False,
+        current_review_count=latest.review_count,
+    )
+    stock_change = (
+        latest.stock_quantity - oldest.stock_quantity
+        if stock_comparable
+        and latest.stock_quantity is not None
+        and oldest.stock_quantity is not None
+        else None
+    )
+    if not stock_comparable and signal.review_delta == 0:
+        reason = (
+            "区间首尾变体键、SKU或卖家集合不同"
+            if not same_inventory_scope
+            else "区间首尾库存缺失或不是精确值"
+        )
+        signal = replace(
+            signal,
+            trend_label="库存不可比，评论无新增",
+            trend_note=f"{reason}，因此不计算库存净变化；区间首尾评论数没有增加。",
+        )
+    elif not stock_comparable:
+        reason = (
+            "区间首尾变体键、SKU或卖家集合不同"
+            if not same_inventory_scope
+            else "区间首尾库存缺失或不是精确值"
+        )
+        signal = replace(
+            signal,
+            trend_note=f"{reason}，库存不参与本区间信号；{signal.trend_note}",
+        )
+    return signal, stock_change, stock_comparable
 
 
 def _stock_text(row: CompetitorSnapshot) -> str:
@@ -507,14 +685,42 @@ def _snapshot_row(
     row: CompetitorSnapshot,
     *,
     stale_stock: CompetitorSnapshot | None = None,
+    signal: SalesSignal | None = None,
+    signal_start: datetime | None = None,
+    signal_end: datetime | None = None,
+    interval_snapshot_count: int | None = None,
+    stock_change: int | None = None,
+    stock_comparable: bool | None = None,
+    raw_history: bool = False,
 ) -> dict[str, object]:
     stock_text = _stock_text(row)
+    if raw_history:
+        observed_stock_outflow = None
+        review_delta = None
+        period_sales_min = None
+        period_sales_max = None
+        trend_label = "原始快照"
+        trend_note = "历史快照只展示当时原始值；经营信号按所选区间首尾统一重算。"
+    elif signal is not None:
+        observed_stock_outflow = signal.observed_stock_outflow
+        review_delta = signal.review_delta
+        period_sales_min = signal.period_sales_min
+        period_sales_max = signal.period_sales_max
+        trend_label = signal.trend_label
+        trend_note = signal.trend_note
+    else:
+        observed_stock_outflow = row.observed_stock_outflow
+        review_delta = row.review_delta
+        period_sales_min = row.period_sales_min
+        period_sales_max = row.period_sales_max
+        trend_label = row.trend_label
+        trend_note = row.trend_note
     period_range = "待积累"
-    if row.period_sales_min is not None and row.period_sales_max is not None:
+    if period_sales_min is not None and period_sales_max is not None:
         period_range = (
-            str(row.period_sales_min)
-            if row.period_sales_min == row.period_sales_max
-            else f"{row.period_sales_min}–{row.period_sales_max}"
+            str(period_sales_min)
+            if period_sales_min == period_sales_max
+            else f"{period_sales_min}–{period_sales_max}"
         )
     return {
         "plid": row.plid,
@@ -544,12 +750,18 @@ def _snapshot_row(
         "中评": row.neutral_reviews,
         "差评": row.negative_reviews,
         "观察期销量信号": period_range,
-        "观察期估算下限": row.period_sales_min,
-        "观察期估算上限": row.period_sales_max,
-        "库存净流出": row.observed_stock_outflow,
-        "新增评论": row.review_delta,
-        "趋势判断": row.trend_label,
-        "判断说明": row.trend_note,
+        "观察期估算下限": period_sales_min,
+        "观察期估算上限": period_sales_max,
+        "库存净变化": stock_change,
+        "库存净流入": max(0, stock_change) if stock_change is not None else None,
+        "库存净流出": observed_stock_outflow,
+        "新增评论": review_delta,
+        "趋势判断": trend_label,
+        "判断说明": trend_note,
+        "信号区间开始": signal_start,
+        "信号区间结束": signal_end,
+        "区间快照数": interval_snapshot_count,
+        "库存可比": stock_comparable,
         "链接": row.url,
     }
 
