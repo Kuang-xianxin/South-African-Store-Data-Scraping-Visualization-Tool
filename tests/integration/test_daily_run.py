@@ -61,14 +61,9 @@ def _settings(tmp_path: Path) -> Settings:
     config_dir = tmp_path / "config"
     config_dir.mkdir()
     (config_dir / "anomaly_rules.yaml").write_text(
-        """sales_drop:
-  baseline_days: 7
-  minimum_baseline_daily_quantity: 2
-  drop_percentage: 50
-sales_spike:
-  baseline_days: 7
-  minimum_daily_quantity: 4
-  increase_percentage: 50
+        """sales_trend:
+  short_window_days: 3
+  long_window_days: 15
 traffic_conversion:
   high_page_views_percentile: 75
   low_conversion_percentile: 25

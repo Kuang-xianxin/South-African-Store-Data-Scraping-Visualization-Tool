@@ -148,12 +148,8 @@ def latest_metric_anomalies(
 
 @dataclass(frozen=True)
 class _AnomalyRules:
-    drop_baseline_days: int
-    drop_minimum_baseline: float
-    drop_fraction: float
-    spike_baseline_days: int
-    spike_minimum_quantity: int
-    spike_fraction: float
+    sales_short_window_days: int
+    sales_long_window_days: int
     high_views_percentile: int
     low_conversion_percentile: int
     low_views_percentile: int
@@ -188,7 +184,7 @@ class MetricService:
         """Atomically replace daily metrics and events for an inclusive range."""
         if start > end:
             raise ValueError("start must be on or before end")
-        lookback_days = max(self._rules.drop_baseline_days, self._rules.spike_baseline_days)
+        lookback_days = self._rules.sales_long_window_days - 1
         with self._repository.transaction():
             sales = self._repository.list_sales(start - timedelta(days=lookback_days), end)
             snapshots = self._repository.list_offer_snapshots_through(end)
@@ -314,6 +310,7 @@ class MetricService:
             metric_date = row["metric_date"]
             if isinstance(metric_date, date):
                 rows_by_date.setdefault(metric_date, []).append(row)
+        first_sales_date = min((sales_day for sales_day, _ in aggregates), default=None)
 
         for metric_date in _date_range(start, end):
             dated_rows = rows_by_date.get(metric_date, [])
@@ -333,49 +330,50 @@ class MetricService:
             high_conversion = _quantile(conversions, self._rules.high_conversion_percentile)
             for row in dated_rows:
                 offer_id = str(row["offer_id"])
-                today_units = aggregates.get(
-                    (metric_date, offer_id), _SaleAggregate()
-                ).ordered_units
-                drop_baseline = _average_units(
-                    aggregates,
-                    offer_id,
-                    metric_date,
-                    self._rules.drop_baseline_days,
+                long_window_start = metric_date - timedelta(
+                    days=self._rules.sales_long_window_days - 1
                 )
-                if (
-                    drop_baseline >= self._rules.drop_minimum_baseline
-                    and today_units <= drop_baseline * (1 - self._rules.drop_fraction)
-                ):
-                    anomalies.append(
-                        _anomaly(
-                            metric_date,
-                            offer_id,
-                            "sales_drop",
-                            "Ordered units dropped against the previous baseline.",
-                            {"baseline_daily_units": drop_baseline, "ordered_units": today_units},
-                            created_at,
-                        )
+                if first_sales_date is not None and first_sales_date <= long_window_start:
+                    short_average = _average_units(
+                        aggregates,
+                        offer_id,
+                        metric_date,
+                        self._rules.sales_short_window_days,
                     )
-                spike_baseline = _average_units(
-                    aggregates,
-                    offer_id,
-                    metric_date,
-                    self._rules.spike_baseline_days,
-                )
-                if (
-                    today_units >= self._rules.spike_minimum_quantity
-                    and today_units >= spike_baseline * (1 + self._rules.spike_fraction)
-                ):
-                    anomalies.append(
-                        _anomaly(
-                            metric_date,
-                            offer_id,
-                            "sales_spike",
-                            "Ordered units increased against the previous baseline.",
-                            {"baseline_daily_units": spike_baseline, "ordered_units": today_units},
-                            created_at,
-                        )
+                    long_average = _average_units(
+                        aggregates,
+                        offer_id,
+                        metric_date,
+                        self._rules.sales_long_window_days,
                     )
+                    trend_details = {
+                        "short_window_days": self._rules.sales_short_window_days,
+                        "long_window_days": self._rules.sales_long_window_days,
+                        "short_window_average_units": short_average,
+                        "long_window_average_units": long_average,
+                    }
+                    if short_average < long_average:
+                        anomalies.append(
+                            _anomaly(
+                                metric_date,
+                                offer_id,
+                                "sales_drop",
+                                "The recent short-window sales average is below the long-window average.",
+                                trend_details,
+                                created_at,
+                            )
+                        )
+                    elif short_average > long_average:
+                        anomalies.append(
+                            _anomaly(
+                                metric_date,
+                                offer_id,
+                                "sales_spike",
+                                "The recent short-window sales average is above the long-window average.",
+                                trend_details,
+                                created_at,
+                            )
+                        )
                 _append_traffic_anomalies(
                     anomalies,
                     row,
@@ -698,7 +696,7 @@ def _average_units(
         aggregates.get(
             (metric_date - timedelta(days=offset), offer_id), _SaleAggregate()
         ).ordered_units
-        for offset in range(1, days + 1)
+        for offset in range(days)
     )
     return total / days
 
@@ -721,16 +719,17 @@ def _aware_utc(value: datetime) -> datetime:
 
 def _load_anomaly_rules(path: Path) -> _AnomalyRules:
     config = _load_yaml_mapping(path)
-    drop = _mapping_value(config, "sales_drop")
-    spike = _mapping_value(config, "sales_spike")
+    sales_trend = _mapping_value(config, "sales_trend")
     traffic = _mapping_value(config, "traffic_conversion")
+    short_window_days = _integer_value(sales_trend, "short_window_days")
+    long_window_days = _integer_value(sales_trend, "long_window_days")
+    if short_window_days <= 0 or long_window_days <= short_window_days:
+        raise ValueError(
+            "sales trend windows must be positive and the long window must exceed the short window"
+        )
     return _AnomalyRules(
-        drop_baseline_days=_integer_value(drop, "baseline_days"),
-        drop_minimum_baseline=float(_integer_value(drop, "minimum_baseline_daily_quantity")),
-        drop_fraction=_integer_value(drop, "drop_percentage") / 100,
-        spike_baseline_days=_integer_value(spike, "baseline_days"),
-        spike_minimum_quantity=_integer_value(spike, "minimum_daily_quantity"),
-        spike_fraction=_integer_value(spike, "increase_percentage") / 100,
+        sales_short_window_days=short_window_days,
+        sales_long_window_days=long_window_days,
         high_views_percentile=_integer_value(traffic, "high_page_views_percentile"),
         low_conversion_percentile=_integer_value(traffic, "low_conversion_percentile"),
         low_views_percentile=_integer_value(traffic, "low_page_views_percentile"),

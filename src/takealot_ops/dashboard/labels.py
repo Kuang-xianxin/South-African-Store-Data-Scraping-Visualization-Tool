@@ -85,8 +85,8 @@ SALE_STATUS_LABELS = {
 }
 
 ANOMALY_LABELS = {
-    "sales_drop": "销量突降",
-    "sales_spike": "销量突增",
+    "sales_drop": "销量下降",
+    "sales_spike": "销量上升",
     "high_views_low_conversion": "高浏览低转化",
     "low_views_high_conversion": "低浏览高转化",
     "suspected_stockout": "疑似断货",
@@ -96,8 +96,8 @@ ANOMALY_LABELS = {
 }
 
 ANOMALY_EXPLANATIONS = {
-    "sales_drop": "当日下单件数低于历史基准。",
-    "sales_spike": "当日下单件数高于历史基准。",
+    "sales_drop": "近3天下单件数日均值低于近15天下单件数日均值。",
+    "sales_spike": "近3天下单件数日均值高于近15天下单件数日均值。",
     "high_views_low_conversion": "近30天浏览量较高但转化率较低，建议检查商品页、价格和转化环节。",
     "low_views_high_conversion": "浏览量较低但转化率较高，建议检查曝光机会。",
     "suspected_stockout": "显示库存为零，但商品仍可购买或最近7天有销量。",

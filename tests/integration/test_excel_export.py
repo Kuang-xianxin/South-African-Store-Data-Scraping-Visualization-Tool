@@ -234,6 +234,43 @@ def test_excel_anomalies_default_to_latest_metric_date_and_count_unique_products
         workbook.close()
 
 
+def test_excel_sales_trend_uses_window_average_columns_and_labels(
+    tmp_path: Path, dashboard_dataset: DashboardDataset
+) -> None:
+    source = dashboard_dataset.anomalies.iloc[0].to_dict()
+    anomalies = pd.DataFrame(
+        [
+            {
+                **source,
+                "anomaly_type": "sales_spike",
+                "details": {
+                    "short_window_days": 3,
+                    "long_window_days": 15,
+                    "short_window_average_units": 2.5,
+                    "long_window_average_units": 1.25,
+                },
+            }
+        ]
+    )
+
+    destination = export_excel(
+        replace(dashboard_dataset, anomalies=anomalies),
+        tmp_path / "sales-trend-anomaly.xlsx",
+    )
+
+    workbook = load_workbook(destination, data_only=False)
+    try:
+        anomaly = workbook["异常商品"]
+        headers = [cell.value for cell in anomaly[3]]
+        assert anomaly["D4"].value == "销量上升"
+        assert anomaly["F4"].value == "近3日订购件数均值高于近15日订购件数均值。"
+        assert headers[6:8] == ["近3日平均件数", "近15日平均件数"]
+        assert anomaly["G4"].value == 2.5
+        assert anomaly["H4"].value == 1.25
+    finally:
+        workbook.close()
+
+
 def test_excel_translates_all_supported_anomaly_types(
     tmp_path: Path, dashboard_dataset: DashboardDataset
 ) -> None:

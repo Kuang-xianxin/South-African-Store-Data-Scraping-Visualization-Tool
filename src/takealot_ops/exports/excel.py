@@ -114,8 +114,8 @@ _ANOMALY_COLUMNS = [
     ("anomaly_label", "异常类型"),
     ("severity_label", "级别"),
     ("explanation_label", "异常说明"),
-    ("baseline_daily_units", "基准日均件数"),
-    ("detail_ordered_units", "当日订购件数"),
+    ("short_window_average_units", "近3日平均件数"),
+    ("long_window_average_units", "近15日平均件数"),
     ("detail_offer_status", "异常记录中的状态"),
     ("sale_statuses", "涉及销售状态"),
     ("created_at", "创建时间"),
@@ -145,7 +145,7 @@ _ANOMALY_LABELS = {
     "low_views_high_conversion": "低浏览、高转化",
     "non_buyable": "商品不可购买",
     "sales_drop": "销量下降",
-    "sales_spike": "销量突增",
+    "sales_spike": "销量上升",
     "stale_offer_snapshot": "商品数据停止更新",
     "suspected_stockout": "疑似断货",
     "unknown_sale_status": "销售状态未配置",
@@ -155,8 +155,8 @@ _ANOMALY_EXPLANATIONS = {
     "high_views_low_conversion": "近30天浏览量较高但转化率较低，建议检查商品页、价格和转化环节。",
     "low_views_high_conversion": "浏览量较低但转化率较高，建议检查曝光机会。",
     "non_buyable": "商品状态不是可购买状态。",
-    "sales_drop": "当日订购件数低于历史基准。",
-    "sales_spike": "当日订购件数高于历史基准。",
+    "sales_drop": "近3日订购件数均值低于近15日订购件数均值。",
+    "sales_spike": "近3日订购件数均值高于近15日订购件数均值。",
     "stale_offer_snapshot": "最新商品快照早于配置的时效阈值，建议检查数据采集。",
     "suspected_stockout": "显示库存为 0，但商品仍可购买或最近 7 天有销量。",
     "unknown_sale_status": "销售状态尚未配置，有效件数暂不计算。",
@@ -170,8 +170,8 @@ _EVENT_LABELS = {
 _SEVERITY_LABELS = {"warning": "提醒", "critical": "严重"}
 
 _DETAIL_LABELS = {
-    "baseline_daily_units": "基准日均件数",
-    "ordered_units": "当日订购件数",
+    "short_window_average_units": "近3日平均件数",
+    "long_window_average_units": "近15日平均件数",
     "offer_status": "商品状态",
     "sale_statuses": "销售状态",
 }
@@ -834,11 +834,11 @@ def _anomalies_for_excel(dataset: DashboardDataset) -> pd.DataFrame:
         index=frame.index,
         dtype="object",
     )
-    frame["baseline_daily_units"] = frame["details"].map(
-        lambda value: _mapping_item(value, "baseline_daily_units")
+    frame["short_window_average_units"] = frame["details"].map(
+        lambda value: _mapping_item(value, "short_window_average_units")
     )
-    frame["detail_ordered_units"] = frame["details"].map(
-        lambda value: _mapping_item(value, "ordered_units")
+    frame["long_window_average_units"] = frame["details"].map(
+        lambda value: _mapping_item(value, "long_window_average_units")
     )
     frame["detail_offer_status"] = frame["details"].map(
         lambda value: _offer_status_label(_mapping_item(value, "offer_status"))
@@ -1027,8 +1027,8 @@ def _horizontal_alignment(key: str) -> str:
         "discount_percentage",
         "total_stock",
         "total_stock_current",
-        "baseline_daily_units",
-        "detail_ordered_units",
+        "short_window_average_units",
+        "long_window_average_units",
     }:
         return "right"
     return "left"
@@ -1059,10 +1059,9 @@ def _number_format(key: str) -> str:
         "quantity_returned_30_days",
         "total_wishlist",
         "wishlist_30_days",
-        "detail_ordered_units",
     }:
         return "#,##0"
-    if key == "baseline_daily_units":
+    if key in {"short_window_average_units", "long_window_average_units"}:
         return "#,##0.0"
     if key in {
         "page_views_30_day_average",

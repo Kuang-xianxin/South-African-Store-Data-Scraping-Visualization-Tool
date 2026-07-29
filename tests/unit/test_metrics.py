@@ -350,41 +350,88 @@ def test_window_net_change_is_not_named_daily_traffic() -> None:
     assert "访客" not in exported_text
 
 
-def test_sales_drop_rule_requires_baseline_of_two_units(tmp_path: Path) -> None:
+def test_sales_trend_compares_recent_three_days_with_recent_fifteen_days(
+    tmp_path: Path,
+) -> None:
     as_of = date(2026, 7, 20)
     sales: list[SaleRecord] = []
-    for offset in range(1, 8):
+    for offset in range(15):
         day = as_of - timedelta(days=offset)
         ordered_at = datetime(day.year, day.month, day.day, 8, tzinfo=UTC)
-        sales.extend(
-            [
-                _sale(f"below-{offset}", ordered_at, offer_id="below", quantity=1),
-                _sale(f"eligible-{offset}", ordered_at, offer_id="eligible", quantity=2),
-            ]
+        if offset < 3:
+            sales.append(
+                _sale(f"rising-{offset}", ordered_at, offer_id="rising", quantity=3)
+            )
+        else:
+            sales.append(
+                _sale(f"falling-{offset}", ordered_at, offer_id="falling", quantity=3)
+            )
+        sales.append(
+            _sale(f"equal-{offset}", ordered_at, offer_id="equal", quantity=1)
         )
-    sales.append(
-        _sale(
-            "eligible-today",
-            datetime(2026, 7, 20, 8, tzinfo=UTC),
-            offer_id="eligible",
-            quantity=1,
-        )
-    )
     engine = create_engine("sqlite://")
     create_schema(engine)
     with Session(engine) as session:
+        history_start = as_of - timedelta(days=14)
         _seed(
             session,
             sales=sales,
-            offers=[(_offer("below"), as_of), (_offer("eligible"), as_of)],
+            offers=[
+                (_offer("rising"), history_start),
+                (_offer("falling"), history_start),
+                (_offer("equal"), history_start),
+                (_offer("rising"), as_of),
+                (_offer("falling"), as_of),
+                (_offer("equal"), as_of),
+            ],
         )
         service = _service(session, tmp_path, included=("included",))
 
         service.rebuild(as_of, as_of)
         anomalies = service.dashboard_dataset(as_of).anomalies
 
-    drops = anomalies.loc[anomalies["anomaly_type"] == "sales_drop", "offer_id"].tolist()
-    assert drops == ["eligible"]
+    trend_rows = anomalies.loc[
+        anomalies["anomaly_type"].isin(["sales_drop", "sales_spike"]),
+        ["offer_id", "anomaly_type", "details"],
+    ]
+    pairs = set(trend_rows[["offer_id", "anomaly_type"]].itertuples(index=False, name=None))
+    assert pairs == {("falling", "sales_drop"), ("rising", "sales_spike")}
+    details_by_offer = dict(
+        trend_rows[["offer_id", "details"]].itertuples(index=False, name=None)
+    )
+    assert details_by_offer["falling"]["short_window_average_units"] == 0
+    assert details_by_offer["falling"]["long_window_average_units"] == pytest.approx(2.4)
+    assert details_by_offer["rising"]["short_window_average_units"] == 3
+    assert details_by_offer["rising"]["long_window_average_units"] == pytest.approx(0.6)
+
+
+def test_sales_trend_requires_complete_fifteen_day_history(tmp_path: Path) -> None:
+    as_of = date(2026, 7, 20)
+    engine = create_engine("sqlite://")
+    create_schema(engine)
+    with Session(engine) as session:
+        _seed(
+            session,
+            sales=[
+                _sale(
+                    "recent-sale",
+                    datetime(2026, 7, 20, 8, tzinfo=UTC),
+                    offer_id="new-offer",
+                    quantity=5,
+                )
+            ],
+            offers=[(_offer("new-offer"), as_of)],
+        )
+        service = _service(session, tmp_path, included=("included",))
+
+        service.rebuild(as_of, as_of)
+        anomalies = service.dashboard_dataset(as_of).anomalies
+
+    trend_types = anomalies.loc[
+        anomalies["offer_id"] == "new-offer", "anomaly_type"
+    ].tolist()
+    assert "sales_drop" not in trend_types
+    assert "sales_spike" not in trend_types
 
 
 def test_four_quadrants_use_configured_quantiles() -> None:
@@ -493,6 +540,12 @@ def test_anomaly_rules_cover_spike_traffic_stock_status_and_staleness(tmp_path: 
     sales = [
         _sale("spike-today", yesterday, offer_id="spike", quantity=4),
         _sale(
+            "history-coverage",
+            datetime(2026, 7, 6, 8, tzinfo=UTC),
+            offer_id="history-marker",
+            quantity=1,
+        ),
+        _sale(
             "stock-sale",
             datetime(2026, 7, 19, 8, tzinfo=UTC),
             offer_id="stock-sold",
@@ -510,6 +563,7 @@ def test_anomaly_rules_cover_spike_traffic_stock_status_and_staleness(tmp_path: 
             )
         )
     offers = [
+        (_offer("history-marker"), as_of),
         (_offer("spike", page_views=20, conversion="5"), as_of),
         (_offer("high-low", page_views=100, conversion="1"), as_of),
         (_offer("low-high", page_views=1, conversion="10"), as_of),
@@ -525,6 +579,8 @@ def test_anomaly_rules_cover_spike_traffic_stock_status_and_staleness(tmp_path: 
             as_of,
         ),
     ]
+    history_start = as_of - timedelta(days=14)
+    offers.extend((offer, history_start) for offer, _ in list(offers))
     engine = create_engine("sqlite://")
     create_schema(engine)
     with Session(engine) as session:

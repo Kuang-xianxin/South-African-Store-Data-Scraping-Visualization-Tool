@@ -311,7 +311,7 @@ Required cases:
 - `test_unknown_status_is_excluded_from_effective_units_and_flagged`: assert zero effective units and one quality event.
 - `test_traffic_daily_average_is_page_views_divided_by_30`: assert `1500` becomes `50.0`.
 - `test_window_net_change_is_not_named_daily_traffic`: inspect exported metric metadata and approved labels.
-- `test_sales_drop_rule_requires_baseline_of_two_units`: cover baselines below and above two units.
+- `test_sales_trend_compares_recent_three_days_with_recent_fifteen_days`: cover下降、上升和均值相等不触发三条路径。
 - `test_four_quadrants_use_configured_quantiles`: use deterministic values with known 25th, 50th, and 75th percentiles.
 
 - [ ] **Step 2: Run metric and collector tests and observe missing imports**

@@ -279,14 +279,9 @@ def _write_rules(root: Path) -> None:
     config = root / "config"
     config.mkdir(parents=True, exist_ok=True)
     (config / "anomaly_rules.yaml").write_text(
-        """sales_drop:
-  baseline_days: 7
-  minimum_baseline_daily_quantity: 2
-  drop_percentage: 50
-sales_spike:
-  baseline_days: 7
-  minimum_daily_quantity: 3
-  increase_percentage: 100
+        """sales_trend:
+  short_window_days: 3
+  long_window_days: 15
 traffic_conversion:
   high_page_views_percentile: 50
   low_conversion_percentile: 25

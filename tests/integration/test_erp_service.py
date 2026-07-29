@@ -140,6 +140,8 @@ def test_erp_risks_include_quadrant_and_extended_product_detail(
     )
 
     anomaly = payload["latest_anomalies"][0]
+    assert anomaly["anomaly_label"] == "销量下降"
+    assert anomaly["explanation"] == "近3天下单件数日均值低于近15天下单件数日均值。"
     assert anomaly["title"] == "示例商品 A"
     assert anomaly["sku"] == "SKU-A"
     assert anomaly["image_url"] == "https://example.invalid/a.png"
