@@ -185,6 +185,12 @@ const roleLabel = computed(() => {
   const customized = user.permissions_customized ? " · 自定义权限" : "";
   return `${templateLabels[user.role]}模板${customized}`;
 });
+const storeScopeLabel = computed(() => {
+  const user = session.value?.user;
+  if (!user) return "";
+  const prefix = user.all_stores ? "全部店铺" : "已分配店铺";
+  return `${prefix} · ${user.accessible_stores.length} 个`;
+});
 const activePageProps = computed(() => {
   const key = activePage.value.key;
   const common = {
@@ -547,6 +553,7 @@ function currentOperationsBusinessDate() {
           <div class="account-menu">
             <span>{{ session.user.display_name }}</span>
             <small>{{ roleLabel }}</small>
+            <small>{{ storeScopeLabel }}</small>
             <button type="button" @click="signOut">退出</button>
           </div>
         </div>

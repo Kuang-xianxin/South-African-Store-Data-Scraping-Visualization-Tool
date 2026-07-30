@@ -168,6 +168,194 @@ def test_erp_requires_login_and_bootstraps_only_from_loopback(
         assert database_path.exists()
 
 
+def test_store_assignments_scale_and_all_store_accounts_include_future_stores(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    database_path = tmp_path / "erp-store-access.db"
+    monkeypatch.setenv(
+        "TAKEALOT_DATABASE_URL",
+        f"sqlite:///{database_path.as_posix()}",
+    )
+    app = create_app(PROJECT_ROOT)
+
+    with TestClient(app, client=("127.0.0.1", 50000)) as admin:
+        session = _bootstrap(admin)
+        csrf = str(session["csrf_token"])
+        assert session["user"]["all_stores"] is True
+        assert len(session["user"]["accessible_stores"]) == 1
+
+        initial_stores = admin.get("/api/auth/stores")
+        assert initial_stores.status_code == 200
+        current_store = initial_stores.json()["items"][0]
+        assert current_store["code"] == "current"
+        assert current_store["data_connected"] is True
+
+        planned_stores: list[dict[str, object]] = []
+        for number in range(2, 7):
+            created = admin.post(
+                "/api/auth/stores",
+                headers={"X-CSRF-Token": csrf},
+                json={
+                    "code": f"shop-{number:02d}",
+                    "display_name": f"店铺 {number}",
+                },
+            )
+            assert created.status_code == 200
+            planned_stores.append(created.json()["store"])
+
+        duplicate = admin.post(
+            "/api/auth/stores",
+            headers={"X-CSRF-Token": csrf},
+            json={"code": "shop-02", "display_name": "重复店铺"},
+        )
+        assert duplicate.status_code == 409
+        assert duplicate.json()["detail"] == "该店铺代码已存在"
+
+        admin_session = admin.get("/api/auth/session")
+        assert admin_session.status_code == 200
+        assert len(admin_session.json()["user"]["accessible_stores"]) == 6
+
+        current_store_id = int(current_store["id"])
+        planned_ids = [int(store["id"]) for store in planned_stores]
+        operator_one = admin.post(
+            "/api/auth/users",
+            headers={"X-CSRF-Token": csrf},
+            json={
+                "username": "operator.one",
+                "display_name": "运营一",
+                "password": "operator-password-123",
+                "role": "operator",
+                "all_stores": False,
+                "store_ids": [current_store_id, planned_ids[0]],
+            },
+        )
+        assert operator_one.status_code == 200
+        operator_one_user = operator_one.json()["user"]
+        assert operator_one_user["all_stores"] is False
+        assert operator_one_user["assigned_store_ids"] == [
+            current_store_id,
+            planned_ids[0],
+        ]
+
+        operator_two = admin.post(
+            "/api/auth/users",
+            headers={"X-CSRF-Token": csrf},
+            json={
+                "username": "operator.two",
+                "display_name": "运营二",
+                "password": "operator-password-123",
+                "role": "operator",
+                "all_stores": False,
+                "store_ids": planned_ids[1:3],
+            },
+        )
+        assert operator_two.status_code == 200
+
+        owner = admin.post(
+            "/api/auth/users",
+            headers={"X-CSRF-Token": csrf},
+            json={
+                "username": "owner.master",
+                "display_name": "大师（老板）",
+                "password": "owner-password-123",
+                "role": "viewer",
+                "all_stores": True,
+                "store_ids": [],
+            },
+        )
+        assert owner.status_code == 200
+        assert len(owner.json()["user"]["accessible_stores"]) == 6
+
+        unknown_store = admin.post(
+            "/api/auth/users",
+            headers={"X-CSRF-Token": csrf},
+            json={
+                "username": "invalid.store",
+                "display_name": "无效店铺",
+                "password": "invalid-password-123",
+                "role": "viewer",
+                "all_stores": False,
+                "store_ids": [999999],
+            },
+        )
+        assert unknown_store.status_code == 422
+        assert unknown_store.json()["detail"] == "店铺不存在：999999"
+
+        protected_current = admin.patch(
+            f"/api/auth/stores/{current_store_id}",
+            headers={"X-CSRF-Token": csrf},
+            json={"active": False},
+        )
+        assert protected_current.status_code == 409
+        assert protected_current.json()["detail"] == "当前已接入数据的店铺不能停用"
+
+        with TestClient(app, client=("192.168.1.8", 50001)) as first_operator:
+            login = first_operator.post(
+                "/api/auth/login",
+                json={
+                    "username": "operator.one",
+                    "password": "operator-password-123",
+                },
+            )
+            assert login.status_code == 200
+            accessible_ids = {
+                store["id"]
+                for store in login.json()["user"]["accessible_stores"]
+            }
+            assert accessible_ids == {current_store_id, planned_ids[0]}
+            assert first_operator.get("/api/erp/freshness").status_code == 200
+
+            reassigned = admin.patch(
+                f"/api/auth/users/{operator_one_user['id']}",
+                headers={"X-CSRF-Token": csrf},
+                json={
+                    "all_stores": False,
+                    "store_ids": planned_ids[3:5],
+                },
+            )
+            assert reassigned.status_code == 200
+            assert first_operator.get("/api/auth/session").status_code == 401
+
+        with TestClient(app, client=("192.168.1.8", 50002)) as second_operator:
+            login = second_operator.post(
+                "/api/auth/login",
+                json={
+                    "username": "operator.two",
+                    "password": "operator-password-123",
+                },
+            )
+            assert login.status_code == 200
+            denied = second_operator.get("/api/erp/freshness")
+            assert denied.status_code == 403
+            assert (
+                denied.json()["detail"]
+                == "当前账号未获授权访问已接入数据的店铺"
+            )
+
+        with TestClient(app, client=("192.168.1.8", 50003)) as owner_client:
+            login = owner_client.post(
+                "/api/auth/login",
+                json={
+                    "username": "owner.master",
+                    "password": "owner-password-123",
+                },
+            )
+            assert login.status_code == 200
+            assert len(login.json()["user"]["accessible_stores"]) == 6
+            assert owner_client.get("/api/erp/freshness").status_code == 200
+
+            future = admin.post(
+                "/api/auth/stores",
+                headers={"X-CSRF-Token": csrf},
+                json={"code": "shop-07", "display_name": "店铺 7"},
+            )
+            assert future.status_code == 200
+            refreshed_scope = owner_client.get("/api/auth/session")
+            assert refreshed_scope.status_code == 200
+            assert len(refreshed_scope.json()["user"]["accessible_stores"]) == 7
+
+
 def test_session_lasts_seven_days_and_slides_after_activity(
     tmp_path: Path,
     monkeypatch,

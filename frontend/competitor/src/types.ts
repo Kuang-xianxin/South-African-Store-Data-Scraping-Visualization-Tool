@@ -196,6 +196,19 @@ export type PermissionKey =
   | "refresh.run"
   | "users.manage";
 
+export interface StoreAccessItem {
+  id: number;
+  code: string;
+  display_name: string;
+  active: boolean;
+  data_connected: boolean;
+}
+
+export interface ManagedStore extends StoreAccessItem {
+  created_at: string;
+  updated_at: string;
+}
+
 export interface AuthUser {
   id: number;
   username: string;
@@ -203,6 +216,9 @@ export interface AuthUser {
   role: UserRole;
   permissions: PermissionKey[];
   permissions_customized: boolean;
+  all_stores: boolean;
+  assigned_store_ids: number[];
+  accessible_stores: StoreAccessItem[];
 }
 
 export interface AuthSession {

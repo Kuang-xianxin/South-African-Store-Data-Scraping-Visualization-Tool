@@ -219,9 +219,21 @@ class BootstrapRequest(LoginRequest):
     display_name: str = Field(default="", max_length=100)
 
 
+class StoreCreateRequest(BaseModel):
+    code: str = Field(min_length=1, max_length=64)
+    display_name: str = Field(min_length=1, max_length=100)
+
+
+class StoreUpdateRequest(BaseModel):
+    display_name: str | None = Field(default=None, max_length=100)
+    active: bool | None = None
+
+
 class UserCreateRequest(BootstrapRequest):
     role: str
     permissions: list[str] | None = None
+    all_stores: bool | None = None
+    store_ids: list[int] | None = None
 
 
 class UserUpdateRequest(BaseModel):
@@ -229,6 +241,8 @@ class UserUpdateRequest(BaseModel):
     password: str | None = Field(default=None, max_length=128)
     role: str | None = None
     permissions: list[str] | None = None
+    all_stores: bool | None = None
+    store_ids: list[int] | None = None
     active: bool | None = None
 
 
@@ -337,6 +351,22 @@ def create_app(project_root: Path | None = None) -> FastAPI:
                 session_token,
                 renewed=session.renewed,
             )
+        if (
+            _requires_connected_store_access(path)
+            and not session.user.can_access_connected_store()
+        ):
+            response = JSONResponse(
+                status_code=403,
+                content={
+                    "detail": "当前账号未获授权访问已接入数据的店铺",
+                },
+            )
+            return _renew_session_cookie(
+                response,
+                request,
+                session_token,
+                renewed=session.renewed,
+            )
         downstream_response = await call_next(request)
         return _renew_session_cookie(
             downstream_response,
@@ -422,6 +452,40 @@ def create_app(project_root: Path | None = None) -> FastAPI:
     def auth_users() -> dict[str, Any]:
         return {"items": auth.list_users()}
 
+    @app.get("/api/auth/stores")
+    def auth_stores() -> dict[str, Any]:
+        return {"items": auth.list_stores()}
+
+    @app.post("/api/auth/stores")
+    def auth_create_store(payload: StoreCreateRequest) -> dict[str, Any]:
+        try:
+            store = auth.create_store(
+                code=payload.code,
+                display_name=payload.display_name,
+            )
+        except AuthInputError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except AuthConflictError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return {"store": store}
+
+    @app.patch("/api/auth/stores/{store_id}")
+    def auth_update_store(
+        store_id: int,
+        payload: StoreUpdateRequest,
+    ) -> dict[str, Any]:
+        try:
+            store = auth.update_store(
+                store_id,
+                display_name=payload.display_name,
+                active=payload.active,
+            )
+        except AuthInputError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except AuthConflictError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return {"store": store}
+
     @app.post("/api/auth/users")
     def auth_create_user(payload: UserCreateRequest) -> dict[str, Any]:
         try:
@@ -431,6 +495,8 @@ def create_app(project_root: Path | None = None) -> FastAPI:
                 password=payload.password,
                 role=payload.role,
                 permissions=payload.permissions,
+                all_stores=payload.all_stores,
+                store_ids=payload.store_ids,
             )
         except AuthInputError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -448,6 +514,9 @@ def create_app(project_root: Path | None = None) -> FastAPI:
                 role=payload.role,
                 permissions=payload.permissions,
                 permissions_provided="permissions" in payload.model_fields_set,
+                all_stores=payload.all_stores,
+                store_ids=payload.store_ids,
+                store_ids_provided="store_ids" in payload.model_fields_set,
                 active=payload.active,
             )
         except AuthInputError as exc:
@@ -1246,7 +1315,7 @@ def _required_permission(path: str, method: str) -> str | None:
     safe_method = method in {"GET", "HEAD", "OPTIONS"}
     if path == "/api/auth/logout":
         return None
-    if path.startswith("/api/auth/users"):
+    if path.startswith(("/api/auth/users", "/api/auth/stores")):
         return USERS_MANAGE
     if path in {"/api/erp/freshness", "/api/erp/refresh-status"}:
         return None
@@ -1272,6 +1341,11 @@ def _required_permission(path: str, method: str) -> str | None:
     ):
         return STORE_VIEW
     return STORE_VIEW if safe_method else "__unsupported_write__"
+
+
+def _requires_connected_store_access(path: str) -> bool:
+    """Gate the current single-store dataset behind an assigned connected store."""
+    return path.startswith(("/api/erp", "/api/competitors"))
 
 
 def _permission_denied_message(permission: str) -> str:

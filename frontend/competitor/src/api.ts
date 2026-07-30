@@ -9,6 +9,7 @@ import type {
   NftInspection,
   AuthSession,
   AuthStatus,
+  ManagedStore,
   ManagedUser,
   PermissionKey,
   UserRole,
@@ -58,6 +59,16 @@ function normalizeAuthSession(session: AuthSession): AuthSession {
         typeof session.user.permissions_customized === "boolean"
           ? session.user.permissions_customized
           : false,
+      all_stores:
+        typeof session.user.all_stores === "boolean"
+          ? session.user.all_stores
+          : true,
+      assigned_store_ids: Array.isArray(session.user.assigned_store_ids)
+        ? session.user.assigned_store_ids
+        : [],
+      accessible_stores: Array.isArray(session.user.accessible_stores)
+        ? session.user.accessible_stores
+        : [],
     },
   };
 }
@@ -153,12 +164,46 @@ export async function fetchUsers(): Promise<ManagedUser[]> {
   return result.items;
 }
 
+export async function fetchStores(): Promise<ManagedStore[]> {
+  const result = await request<{ items: ManagedStore[] }>("/api/auth/stores");
+  return result.items;
+}
+
+export async function createStore(input: {
+  code: string;
+  display_name: string;
+}): Promise<ManagedStore> {
+  const result = await request<{ store: ManagedStore }>("/api/auth/stores", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(input),
+  });
+  return result.store;
+}
+
+export async function updateStore(
+  id: number,
+  input: {
+    display_name?: string;
+    active?: boolean;
+  },
+): Promise<ManagedStore> {
+  const result = await request<{ store: ManagedStore }>(`/api/auth/stores/${id}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(input),
+  });
+  return result.store;
+}
+
 export async function createUser(input: {
   username: string;
   display_name: string;
   password: string;
   role: UserRole;
   permissions?: PermissionKey[];
+  all_stores?: boolean;
+  store_ids?: number[];
 }): Promise<ManagedUser> {
   const result = await request<{ user: ManagedUser }>("/api/auth/users", {
     method: "POST",
@@ -175,6 +220,8 @@ export async function updateUser(
     password?: string;
     role?: UserRole;
     permissions?: PermissionKey[];
+    all_stores?: boolean;
+    store_ids?: number[];
     active?: boolean;
   },
 ): Promise<ManagedUser> {

@@ -40,7 +40,9 @@ def test_custom_permissions_add_dependencies_and_only_store_differences() -> Non
     ) is None
 
 
-def test_create_schema_adds_permissions_to_legacy_user_table(tmp_path) -> None:
+def test_create_schema_adds_permissions_and_store_scope_to_legacy_users(
+    tmp_path,
+) -> None:
     database_path = tmp_path / "legacy-permissions.db"
     engine = create_engine_for_database_url(
         f"sqlite:///{database_path.as_posix()}"
@@ -53,6 +55,9 @@ def test_create_schema_adds_permissions_to_legacy_user_table(tmp_path) -> None:
                 "role VARCHAR(20) NOT NULL"
                 ")"
             )
+            connection.exec_driver_sql(
+                "INSERT INTO erp_users (id, role) VALUES (1, 'admin')"
+            )
 
         create_schema(engine)
 
@@ -61,5 +66,18 @@ def test_create_schema_adds_permissions_to_legacy_user_table(tmp_path) -> None:
             for column in inspect(engine).get_columns("erp_users")
         }
         assert "permissions_json" in columns
+        assert "store_access_all" in columns
+        assert inspect(engine).has_table("erp_stores")
+        assert inspect(engine).has_table("erp_user_stores")
+        with engine.connect() as connection:
+            default_store = connection.exec_driver_sql(
+                "SELECT code, display_name, active, data_connected "
+                "FROM erp_stores"
+            ).one()
+            legacy_scope = connection.exec_driver_sql(
+                "SELECT store_access_all FROM erp_users WHERE id = 1"
+            ).scalar_one()
+        assert tuple(default_store) == ("current", "当前店铺", 1, 1)
+        assert legacy_scope == 1
     finally:
         engine.dispose()

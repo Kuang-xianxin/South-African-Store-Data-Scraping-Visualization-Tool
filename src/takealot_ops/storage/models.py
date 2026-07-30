@@ -333,6 +333,29 @@ class CompetitorVariantSnapshot(Base):
     stock_note: Mapped[str | None] = mapped_column(Text)
 
 
+class ErpStore(Base):
+    """One store identity available for account-level access assignment."""
+
+    __tablename__ = "erp_stores"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    code: Mapped[str] = mapped_column(
+        String(64),
+        nullable=False,
+        unique=True,
+        index=True,
+    )
+    display_name: Mapped[str] = mapped_column(String(100), nullable=False)
+    active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    data_connected: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+
+
 class ErpUser(Base):
     """A local ERP user with a permission template and optional overrides."""
 
@@ -344,10 +367,30 @@ class ErpUser(Base):
     password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
     role: Mapped[str] = mapped_column(String(20), nullable=False)
     permissions_json: Mapped[str | None] = mapped_column(Text)
+    store_access_all: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=True,
+    )
     active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
     last_login_at: Mapped[datetime | None] = mapped_column(DateTime)
+
+
+class ErpUserStore(Base):
+    """One explicit store assignment for an account with limited scope."""
+
+    __tablename__ = "erp_user_stores"
+
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("erp_users.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    store_id: Mapped[int] = mapped_column(
+        ForeignKey("erp_stores.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
 
 
 class ErpSession(Base):

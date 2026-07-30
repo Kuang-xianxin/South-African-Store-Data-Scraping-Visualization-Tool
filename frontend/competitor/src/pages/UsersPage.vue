@@ -1,7 +1,14 @@
 <script setup lang="ts">
 import { computed, ref } from "vue";
 
-import { createUser, fetchUsers, updateUser } from "../api";
+import {
+  createStore,
+  createUser,
+  fetchStores,
+  fetchUsers,
+  updateStore,
+  updateUser,
+} from "../api";
 import {
   permissionGroups,
   permissionLabels,
@@ -10,21 +17,29 @@ import {
   togglePermission,
 } from "../permissions";
 import type {
+  ManagedStore,
   ManagedUser,
   PermissionKey,
   UserRole,
 } from "../types";
 
 const users = ref<ManagedUser[]>([]);
+const stores = ref<ManagedStore[]>([]);
 const loading = ref(true);
 const saving = ref(false);
+const savingStore = ref(false);
 const busyUserId = ref<number | null>(null);
+const busyStoreId = ref<number | null>(null);
 const notice = ref("");
 const error = ref("");
 const username = ref("");
 const displayName = ref("");
 const password = ref("");
 const role = ref<UserRole>("viewer");
+const createAllStores = ref(false);
+const createStoreIds = ref<number[]>([]);
+const storeCode = ref("");
+const storeDisplayName = ref("");
 
 const roleDescriptions: Record<UserRole, string> = {
   viewer: "查看店铺、竞品、运营日报和已有报表，不执行采集、刷新或人工处理。",
@@ -41,6 +56,7 @@ const templateCards = (Object.keys(templateLabels) as UserRole[]).map((key) => (
 }));
 
 const selectedRoleDescription = computed(() => roleDescriptions[role.value]);
+const activeStores = computed(() => stores.value.filter((store) => store.active));
 
 void load();
 
@@ -48,7 +64,18 @@ async function load() {
   loading.value = true;
   error.value = "";
   try {
-    users.value = await fetchUsers();
+    const [loadedUsers, loadedStores] = await Promise.all([
+      fetchUsers(),
+      fetchStores(),
+    ]);
+    users.value = loadedUsers;
+    stores.value = loadedStores;
+    if (!createStoreIds.value.length) {
+      const current = loadedStores.find(
+        (store) => store.active && store.data_connected,
+      );
+      if (current) createStoreIds.value = [current.id];
+    }
   } catch (reason) {
     error.value = reason instanceof Error ? reason.message : "用户列表读取失败";
   } finally {
@@ -67,18 +94,103 @@ async function submit() {
       display_name: displayName.value,
       password: password.value,
       role: role.value,
+      all_stores: createAllStores.value,
+      store_ids: createStoreIds.value,
     });
     users.value = [...users.value, created];
     username.value = "";
     displayName.value = "";
     password.value = "";
     role.value = "viewer";
-    notice.value = "账号已创建，并已套用所选权限模板。";
+    createAllStores.value = false;
+    const current = stores.value.find(
+      (store) => store.active && store.data_connected,
+    );
+    createStoreIds.value = current ? [current.id] : [];
+    notice.value = "账号已创建，权限模板和店铺范围已保存。";
   } catch (reason) {
     error.value = reason instanceof Error ? reason.message : "账号创建失败";
   } finally {
     saving.value = false;
   }
+}
+
+function handleCreateRoleChange() {
+  if (role.value === "admin") createAllStores.value = true;
+}
+
+async function submitStore() {
+  if (savingStore.value) return;
+  savingStore.value = true;
+  notice.value = "";
+  error.value = "";
+  try {
+    const created = await createStore({
+      code: storeCode.value,
+      display_name: storeDisplayName.value,
+    });
+    stores.value = [...stores.value, created];
+    storeCode.value = "";
+    storeDisplayName.value = "";
+    notice.value = `已预留店铺“${created.display_name}”；接入数据后即可按账号范围使用。`;
+  } catch (reason) {
+    error.value = reason instanceof Error ? reason.message : "店铺预留失败";
+  } finally {
+    savingStore.value = false;
+  }
+}
+
+async function renameStore(store: ManagedStore) {
+  const next = window.prompt("输入新的店铺显示名称", store.display_name);
+  if (!next || next.trim() === store.display_name) return;
+  await saveStore(
+    store,
+    { display_name: next },
+    `店铺名称已更新为“${next.trim()}”。`,
+  );
+}
+
+async function toggleStoreActive(store: ManagedStore) {
+  await saveStore(
+    store,
+    { active: !store.active },
+    `店铺“${store.display_name}”已${store.active ? "停用" : "启用"}。`,
+  );
+}
+
+async function saveStore(
+  store: ManagedStore,
+  change: { display_name?: string; active?: boolean },
+  successMessage: string,
+) {
+  if (busyStoreId.value !== null) return;
+  busyStoreId.value = store.id;
+  notice.value = "";
+  error.value = "";
+  try {
+    const updated = await updateStore(store.id, change);
+    stores.value = stores.value.map((item) =>
+      item.id === updated.id ? updated : item,
+    );
+    notice.value = successMessage;
+  } catch (reason) {
+    error.value = reason instanceof Error ? reason.message : "店铺更新失败";
+  } finally {
+    busyStoreId.value = null;
+  }
+}
+
+function storeAssignmentSummary(store: ManagedStore) {
+  const allStoreAccounts = users.value.filter(
+    (user) => user.active && user.all_stores,
+  ).length;
+  const assignedAccounts = users.value.filter(
+    (user) =>
+      user.active
+      && !user.all_stores
+      && user.assigned_store_ids.includes(store.id),
+  ).length;
+  return `${allStoreAccounts} 个全店账号自动可见 · ${assignedAccounts} 个限定账号已分配`;
 }
 
 async function applyTemplate(user: ManagedUser, nextRole: UserRole) {
@@ -89,6 +201,34 @@ async function applyTemplate(user: ManagedUser, nextRole: UserRole) {
       permissions: [...templatePermissions[nextRole]],
     },
     `已为 ${user.display_name} 套用“${templateLabels[nextRole]}”模板。`,
+  );
+}
+
+async function changeAllStores(user: ManagedUser, enabled: boolean) {
+  await saveUser(
+    user,
+    {
+      all_stores: enabled,
+      store_ids: [...user.assigned_store_ids],
+    },
+    enabled
+      ? `已为 ${user.display_name} 开启全部店铺；未来新增店铺也会自动可见。`
+      : `已把 ${user.display_name} 改为仅访问勾选店铺。`,
+  );
+}
+
+async function changeUserStore(
+  user: ManagedUser,
+  storeId: number,
+  enabled: boolean,
+) {
+  const next = enabled
+    ? [...new Set([...user.assigned_store_ids, storeId])]
+    : user.assigned_store_ids.filter((id) => id !== storeId);
+  await saveUser(
+    user,
+    { all_stores: false, store_ids: next },
+    `已更新 ${user.display_name} 的店铺范围；该账号需重新登录后生效。`,
   );
 }
 
@@ -128,6 +268,8 @@ async function saveUser(
   change: {
     role?: UserRole;
     permissions?: PermissionKey[];
+    all_stores?: boolean;
+    store_ids?: number[];
     active?: boolean;
     password?: string;
   },
@@ -188,6 +330,98 @@ function formatDate(value: string | null) {
       </div>
     </section>
 
+    <section class="erp-panel store-panel">
+      <div class="section-title">
+        <div>
+          <p class="section-kicker">STORE ACCESS DIRECTORY</p>
+          <h2>店铺权限目录</h2>
+        </div>
+        <span>
+          店铺数量不设上限；这里先建立授权对象，新增店铺的数据接入仍需单独配置
+        </span>
+      </div>
+
+      <div class="store-scope-guidance">
+        <strong>建议授权方式</strong>
+        <span>
+          管理员、老板等跨店账号使用“全部店铺（含未来新增）”；普通运营按实际负责店铺逐个勾选，常见为2个，但系统不限制数量。
+        </span>
+      </div>
+
+      <form class="store-create-form" @submit.prevent="submitStore">
+        <label>
+          店铺代码
+          <input
+            v-model="storeCode"
+            required
+            maxlength="64"
+            placeholder="例如 shop-02"
+          />
+        </label>
+        <label>
+          店铺名称
+          <input
+            v-model="storeDisplayName"
+            required
+            maxlength="100"
+            placeholder="运营可识别的名称"
+          />
+        </label>
+        <button class="action-button" :disabled="savingStore">
+          {{ savingStore ? "正在添加…" : "预留店铺" }}
+        </button>
+      </form>
+
+      <div class="store-registry-grid">
+        <article
+          v-for="store in stores"
+          :key="store.id"
+          class="store-registry-card"
+          :class="{ inactive: !store.active }"
+        >
+          <header>
+            <div>
+              <strong>{{ store.display_name }}</strong>
+              <code>{{ store.code }}</code>
+            </div>
+            <span
+              :class="{
+                connected: store.data_connected,
+                inactive: !store.active,
+              }"
+            >
+              {{
+                !store.active
+                  ? "已停用"
+                  : store.data_connected
+                    ? "已接入当前数据"
+                    : "已预留 · 待接入"
+              }}
+            </span>
+          </header>
+          <p>{{ storeAssignmentSummary(store) }}</p>
+          <div class="store-card-actions">
+            <button
+              type="button"
+              :disabled="busyStoreId !== null"
+              @click="renameStore(store)"
+            >
+              修改名称
+            </button>
+            <button
+              v-if="!store.data_connected"
+              type="button"
+              :class="{ danger: store.active }"
+              :disabled="busyStoreId !== null"
+              @click="toggleStoreActive(store)"
+            >
+              {{ store.active ? "停用预留" : "重新启用" }}
+            </button>
+          </div>
+        </article>
+      </div>
+    </section>
+
     <section class="erp-panel create-panel">
       <div class="section-title">
         <div>
@@ -196,7 +430,7 @@ function formatDate(value: string | null) {
         </div>
         <span>新账号先套用模板，创建后可在下方逐项调整权限</span>
       </div>
-      <form @submit.prevent="submit">
+      <form class="create-account-form" @submit.prevent="submit">
         <label>
           用户名
           <input v-model="username" required minlength="3" maxlength="64" />
@@ -211,7 +445,11 @@ function formatDate(value: string | null) {
         </label>
         <label>
           权限模板
-          <select v-model="role" aria-label="新账号权限模板">
+          <select
+            v-model="role"
+            aria-label="新账号权限模板"
+            @change="handleCreateRoleChange"
+          >
             <option
               v-for="(label, key) in templateLabels"
               :key="key"
@@ -224,6 +462,34 @@ function formatDate(value: string | null) {
         <button class="action-button" :disabled="saving">
           {{ saving ? "正在创建…" : "创建账号" }}
         </button>
+        <fieldset class="create-store-scope">
+          <legend>店铺范围</legend>
+          <label class="store-all-option">
+            <input v-model="createAllStores" type="checkbox" />
+            <span>
+              <strong>全部店铺（含未来新增）</strong>
+              <small>适用于管理员、老板等跨店账号</small>
+            </span>
+          </label>
+          <div v-if="!createAllStores" class="store-checkbox-grid">
+            <label
+              v-for="store in activeStores"
+              :key="store.id"
+              class="store-option"
+            >
+              <input
+                v-model="createStoreIds"
+                type="checkbox"
+                :value="store.id"
+              />
+              <span>
+                {{ store.display_name }}
+                <small>{{ store.data_connected ? "已接入" : "待接入" }}</small>
+              </span>
+            </label>
+            <p v-if="!activeStores.length">尚无可分配店铺，请先在上方预留。</p>
+          </div>
+        </fieldset>
         <p class="selected-template-help" aria-live="polite">
           <strong>{{ templateLabels[role] }}：</strong>{{ selectedRoleDescription }}
         </p>
@@ -309,6 +575,79 @@ function formatDate(value: string | null) {
               >
                 {{ user.active ? "停用账号" : "启用账号" }}
               </button>
+            </div>
+          </div>
+
+          <div class="account-store-access">
+            <div class="permission-heading">
+              <div>
+                <strong>账号店铺范围</strong>
+                <span>
+                  全部店铺会自动包含以后新增店铺；限定账号只访问下方勾选店铺
+                </span>
+              </div>
+              <small>
+                {{
+                  user.all_stores
+                    ? `全部 ${user.accessible_stores.length} 个启用店铺`
+                    : `已分配 ${user.assigned_store_ids.length} 个店铺`
+                }}
+              </small>
+            </div>
+            <label class="store-all-option">
+              <input
+                type="checkbox"
+                :checked="user.all_stores"
+                :disabled="busyUserId !== null || !user.active"
+                @change="
+                  changeAllStores(
+                    user,
+                    ($event.target as HTMLInputElement).checked,
+                  )
+                "
+              />
+              <span>
+                <strong>全部店铺（含未来新增）</strong>
+                <small>管理员和老板账号建议保持开启</small>
+              </span>
+            </label>
+            <div v-if="!user.all_stores" class="store-checkbox-grid">
+              <label
+                v-for="store in stores"
+                :key="store.id"
+                class="store-option"
+                :class="{ inactive: !store.active }"
+              >
+                <input
+                  type="checkbox"
+                  :checked="user.assigned_store_ids.includes(store.id)"
+                  :disabled="
+                    busyUserId !== null
+                    || !user.active
+                    || !store.active
+                  "
+                  @change="
+                    changeUserStore(
+                      user,
+                      store.id,
+                      ($event.target as HTMLInputElement).checked,
+                    )
+                  "
+                />
+                <span>
+                  {{ store.display_name }}
+                  <small>
+                    {{
+                      !store.active
+                        ? "已停用"
+                        : store.data_connected
+                          ? "已接入"
+                          : "待接入"
+                    }}
+                  </small>
+                </span>
+              </label>
+              <p v-if="!stores.length">尚无店铺；该账号暂时不能访问店铺数据。</p>
             </div>
           </div>
 
@@ -433,13 +772,111 @@ function formatDate(value: string | null) {
   background: #eef3f0;
   font-size: 9px;
 }
-form {
+.store-scope-guidance {
+  display: grid;
+  gap: 4px;
+  margin-bottom: 16px;
+  padding: 12px 14px;
+  border-left: 3px solid #2c7654;
+  border-radius: 8px;
+  color: #567067;
+  background: #f1f6f3;
+  font-size: 11px;
+  line-height: 1.55;
+}
+.store-scope-guidance strong {
+  color: #245740;
+  font-size: 12px;
+}
+.store-create-form {
+  display: grid;
+  grid-template-columns: minmax(160px, 0.7fr) minmax(240px, 1.3fr) auto;
+  gap: 14px;
+  align-items: end;
+}
+.store-registry-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 280px), 1fr));
+  gap: 12px;
+  margin-top: 18px;
+}
+.store-registry-card {
+  padding: 15px;
+  border: 1px solid #dbe5df;
+  border-radius: 11px;
+  background: #fbfcfb;
+}
+.store-registry-card.inactive {
+  opacity: 0.68;
+}
+.store-registry-card header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+.store-registry-card header > div {
+  min-width: 0;
+  display: grid;
+  gap: 3px;
+}
+.store-registry-card strong {
+  color: #214d39;
+  font-size: 13px;
+}
+.store-registry-card code {
+  overflow-wrap: anywhere;
+  color: #788980;
+  font-size: 9px;
+}
+.store-registry-card header > span {
+  flex: 0 0 auto;
+  padding: 4px 7px;
+  border-radius: 999px;
+  color: #765f32;
+  background: #f4eddc;
+  font-size: 9px;
+  font-weight: 700;
+}
+.store-registry-card header > span.connected {
+  color: #256744;
+  background: #e4f2e9;
+}
+.store-registry-card header > span.inactive {
+  color: #87564e;
+  background: #f3e7e4;
+}
+.store-registry-card > p {
+  margin: 12px 0;
+  color: #75867d;
+  font-size: 9px;
+  line-height: 1.5;
+}
+.store-card-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+.store-card-actions button {
+  padding: 6px 9px;
+  border: 1px solid #ccd9d2;
+  border-radius: 7px;
+  color: #365b49;
+  background: white;
+  font-size: 10px;
+}
+.store-card-actions button.danger {
+  color: #a8483f;
+  border-color: #e6bbb6;
+}
+.create-account-form {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr)) auto;
   gap: 14px;
   align-items: end;
 }
-form label,
+.create-account-form > label,
+.store-create-form > label,
 .account-toolbar > label {
   min-width: 0;
   display: grid;
@@ -447,6 +884,70 @@ form label,
   color: #53655d;
   font-size: 11px;
   font-weight: 700;
+}
+.create-store-scope {
+  grid-column: 1 / -1;
+}
+.store-all-option {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  color: #405f51;
+  cursor: pointer;
+}
+.store-all-option input,
+.store-option input {
+  flex: 0 0 auto;
+  width: 16px;
+  min-height: 16px;
+  margin: 1px 0 0;
+  padding: 0;
+  accent-color: #24704e;
+}
+.store-all-option > span,
+.store-option > span {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+.store-all-option strong {
+  color: #285640;
+  font-size: 11px;
+}
+.store-all-option small,
+.store-option small {
+  color: #849189;
+  font-size: 9px;
+  font-weight: 400;
+}
+.store-checkbox-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 8px;
+  margin-top: 12px;
+}
+.store-option {
+  min-width: 0;
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 9px 10px;
+  border: 1px solid #dee7e2;
+  border-radius: 8px;
+  color: #486457;
+  background: #fbfcfb;
+  font-size: 10px;
+  line-height: 1.4;
+  cursor: pointer;
+}
+.store-option.inactive {
+  opacity: 0.55;
+}
+.store-checkbox-grid > p {
+  grid-column: 1 / -1;
+  margin: 0;
+  color: #8b6c5f;
+  font-size: 10px;
 }
 input,
 select {
@@ -586,6 +1087,11 @@ button:disabled {
 .account-permissions {
   padding: 18px 20px 20px;
 }
+.account-store-access {
+  padding: 18px 20px;
+  border-bottom: 1px solid #e2e8e4;
+  background: #f8fbf9;
+}
 .permission-heading {
   display: flex;
   align-items: flex-start;
@@ -661,10 +1167,10 @@ fieldset > p {
   }
 }
 @media (max-width: 1000px) {
-  form {
+  .create-account-form {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
-  form > button {
+  .create-account-form > button {
     grid-column: 1 / -1;
   }
   .account-toolbar {
@@ -687,7 +1193,8 @@ fieldset > p {
     text-align: left;
   }
   .template-grid,
-  form,
+  .create-account-form,
+  .store-create-form,
   .account-toolbar,
   .permission-group-grid {
     grid-template-columns: 1fr;
@@ -701,6 +1208,7 @@ fieldset > p {
   }
   .account-toolbar,
   .account-header,
+  .account-store-access,
   .account-permissions {
     padding-right: 16px;
     padding-left: 16px;
