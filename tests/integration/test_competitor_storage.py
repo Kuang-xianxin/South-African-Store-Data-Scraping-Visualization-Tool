@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import replace
 from datetime import UTC, date, datetime
 from pathlib import Path
+from types import SimpleNamespace
 
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
@@ -21,6 +22,7 @@ from takealot_ops.competitors.domain import (
 )
 from takealot_ops.competitors.repository import CompetitorRepository
 from takealot_ops.competitors.service import (
+    _variant_row,
     load_competitor_dataset,
     load_competitor_link_health,
 )
@@ -29,10 +31,57 @@ from takealot_ops.competitors.web import create_app
 from takealot_ops.storage.migrations import create_schema
 
 
+def test_only_default_variant_falls_back_to_snapshot_product_image() -> None:
+    base = {
+        "plid": "12345678",
+        "snapshot_id": 1,
+        "image_url": None,
+        "collected_at": datetime(2026, 7, 29, 8),
+        "sku": "SKU-1",
+        "seller_name": "Seller",
+        "price": None,
+        "stock_quantity": 5,
+        "stock_exact": True,
+        "stock_method": "anonymous-cart-limit",
+        "stock_note": None,
+        "customer_purchase_limit": None,
+        "is_leadtime": False,
+        "url": "https://www.takealot.com/example/PLID12345678",
+    }
+    default_variant = SimpleNamespace(
+        **base,
+        variant_key="default",
+        variant_label="默认款",
+    )
+    colour_variant = SimpleNamespace(
+        **base,
+        variant_key="colour=black",
+        variant_label="Colour：Black",
+    )
+
+    assert (
+        _variant_row(
+            default_variant,
+            default_image_url="https://example.invalid/product.jpg",
+        )["图片"]
+        == "https://example.invalid/product.jpg"
+    )
+    assert (
+        _variant_row(
+            colour_variant,
+            default_image_url="https://example.invalid/product.jpg",
+        )["图片"]
+        is None
+    )
+
+
 def test_competitor_observation_persists_snapshot_and_deduplicated_reviews(
     tmp_path: Path,
+    monkeypatch,
 ) -> None:
-    engine = create_engine(f"sqlite:///{(tmp_path / 'competitors.db').as_posix()}")
+    database_path = tmp_path / "competitors.db"
+    database_url = f"sqlite:///{database_path.as_posix()}"
+    engine = create_engine(database_url)
     create_schema(engine)
     product = CompetitorProduct(
         plid="72189176",
@@ -60,7 +109,7 @@ def test_competitor_observation_persists_snapshot_and_deduplicated_reviews(
         variants=(
             CompetitorVariant(
                 key="default",
-                label="默认款",
+                label=("Colour: {'name': 'Black', 'value': 'Black', 'type': 'colour_variant'}"),
                 url="https://www.takealot.com/example/PLID72189176",
                 title="Laser Lipo",
                 sku="SKU-1",
@@ -70,6 +119,7 @@ def test_competitor_observation_persists_snapshot_and_deduplicated_reviews(
                 stock_status="In stock",
                 is_leadtime=False,
                 is_add_to_cart_available=True,
+                image_url="https://example.invalid/laser-lipo-black.jpg",
             ),
         ),
     )
@@ -111,7 +161,11 @@ def test_competitor_observation_persists_snapshot_and_deduplicated_reviews(
                 variant_stocks=[
                     VariantStockObservation(
                         variant=product.variants[0],
-                        stock=stock_probe,
+                        stock=(
+                            replace(stock_probe, customer_purchase_limit=10)
+                            if stock_probe.quantity is not None
+                            else stock_probe
+                        ),
                     )
                 ],
                 lifetime_sales=estimate_lifetime_sales(product.review_count),
@@ -141,29 +195,30 @@ def test_competitor_observation_persists_snapshot_and_deduplicated_reviews(
     assert len(dataset.history) == 2
     assert len(dataset.reviews) == 1
     assert len(dataset.variants) == 2
-    assert dataset.variants.iloc[0]["变体"] == "默认款"
-    assert (
-        dataset.current.iloc[0]["图片"]
-        == "https://example.invalid/laser-lipo.jpg"
-    )
-    assert (
-        dataset.history.iloc[0]["图片"]
-        == "https://example.invalid/laser-lipo.jpg"
-    )
-    assert (
-        dataset.variants.iloc[0]["图片"]
-        == "https://example.invalid/laser-lipo.jpg"
-    )
+    assert set(dataset.history["快照ID"]) == set(dataset.variants["快照ID"])
+    assert set(dataset.variants["变体"]) == {"Colour：Black"}
+    assert dataset.current.iloc[0]["图片"] == "https://example.invalid/laser-lipo.jpg"
+    assert dataset.history.iloc[0]["图片"] == "https://example.invalid/laser-lipo.jpg"
+    assert dataset.variants.iloc[0]["图片"] == "https://example.invalid/laser-lipo-black.jpg"
+    limited_variant = dataset.variants.loc[dataset.variants["每位客户限购"].notna()].iloc[0]
+    assert limited_variant["每位客户限购"] == 10
     assert "累计销量估算" not in dataset.current.columns
     assert dataset.current.iloc[0]["趋势判断"] == "库存不可比，评论无新增"
     assert dataset.current.iloc[0]["库存上限"] == "未探测"
     assert bool(dataset.current.iloc[0]["库存参考过期"])
     assert dataset.current.iloc[0]["上次成功库存"] == "9"
-    assert dataset.current.iloc[0]["上次成功库存时间"] == datetime(
-        2026, 7, 22, 8
-    )
+    assert dataset.current.iloc[0]["上次成功库存时间"] == datetime(2026, 7, 22, 8)
     assert link_health[0]["商品"] == "Laser Lipo"
     assert link_health[0]["图片"] == "https://example.invalid/laser-lipo.jpg"
+
+    monkeypatch.setenv("TAKEALOT_DATABASE_URL", database_url)
+    with TestClient(create_app(tmp_path)) as client:
+        detail = client.get("/api/competitors/72189176").json()
+    assert len(detail["history"]) == 2
+    assert len(detail["variants"]) == 2
+    assert {variant["图片"] for variant in detail["variants"]} == {
+        "https://example.invalid/laser-lipo-black.jpg"
+    }
 
 
 def test_competitor_signals_recompute_from_oldest_and_latest_in_date_range(
@@ -288,9 +343,7 @@ def test_competitor_api_reads_the_shared_sqlite(
                 "selected_end": None,
             },
         }
-        invalid_range = client.get(
-            "/api/competitors?start_date=2026-07-24&end_date=2026-07-23"
-        )
+        invalid_range = client.get("/api/competitors?start_date=2026-07-24&end_date=2026-07-23")
         assert invalid_range.status_code == 422
         assert invalid_range.json()["detail"] == "开始日期不能晚于结束日期"
         invalid = client.post(

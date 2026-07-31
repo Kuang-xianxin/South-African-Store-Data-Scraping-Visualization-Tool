@@ -3,10 +3,10 @@ from __future__ import annotations
 import asyncio
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import pytest
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
 from takealot_ops.competitors.api import (
@@ -17,8 +17,13 @@ from takealot_ops.competitors.api import (
     extract_plid,
 )
 from takealot_ops.competitors.domain import (
+    CompetitorOffer,
+    CompetitorProduct,
     CompetitorReviewRecord,
+    CompetitorVariant,
     PreviousObservation,
+    StockProbeResult,
+    VariantStockObservation,
     analyze_sales_signal,
     estimate_lifetime_sales,
     summarize_reviews,
@@ -30,7 +35,7 @@ from takealot_ops.competitors.service import (
     parse_competitor_urls,
 )
 from takealot_ops.competitors.stock import _parse_warehouse_stock_message
-from takealot_ops.storage.models import Base, CompetitorLinkHealth
+from takealot_ops.storage.models import Base, CompetitorLinkHealth, CompetitorSnapshot
 
 
 async def _fake_delay(self: object, a: float, b: float) -> None:
@@ -85,9 +90,7 @@ async def test_public_client_cleans_up_when_proxy_fails_during_warmup() -> None:
 
 
 async def test_public_client_cleans_up_when_start_is_cancelled() -> None:
-    manager, playwright, browser, context, _ = _failing_browser_stack(
-        asyncio.CancelledError()
-    )
+    manager, playwright, browser, context, _ = _failing_browser_stack(asyncio.CancelledError())
     client = CompetitorPublicClient()
 
     with (
@@ -105,13 +108,35 @@ async def test_public_client_cleans_up_when_start_is_cancelled() -> None:
     playwright.stop.assert_awaited_once()
 
 
+async def test_public_client_uses_conservative_warmup_delay() -> None:
+    manager, playwright, browser, context, page = _failing_browser_stack(
+        OSError("unused")
+    )
+    page.goto = AsyncMock()
+    client = CompetitorPublicClient()
+
+    with (
+        patch("takealot_ops.competitors.api.async_playwright", return_value=manager),
+        patch(
+            "takealot_ops.competitors.api._find_browser_executable",
+            return_value=Path("chrome.exe"),
+        ),
+        patch.object(client, "_human_delay", AsyncMock()) as delay,
+    ):
+        await client.start()
+        await client.close()
+
+    delay.assert_awaited_once_with(4.0, 7.0)
+    context.close.assert_awaited_once()
+    browser.close.assert_awaited_once()
+    playwright.stop.assert_awaited_once()
+
+
 async def test_collector_marks_takealot_network_failure_as_retryable(
     tmp_path: Path,
 ) -> None:
     client = MagicMock()
-    client.fetch_product = AsyncMock(
-        side_effect=CompetitorNetworkError("Takealot 暂时不可访问")
-    )
+    client.fetch_product = AsyncMock(side_effect=CompetitorNetworkError("Takealot 暂时不可访问"))
     collector = CompetitorCollector(
         engine=MagicMock(),
         project_root=tmp_path,
@@ -126,6 +151,97 @@ async def test_collector_marks_takealot_network_failure_as_retryable(
     assert result.succeeded is False
     assert result.retryable is True
     assert result.message == "Takealot 暂时不可访问"
+
+
+async def test_collector_retries_after_persisting_failed_stock_probe(
+    tmp_path: Path,
+) -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    url = "https://www.takealot.com/example/PLID12345678"
+    variant = CompetitorVariant(
+        key="default",
+        label="默认款",
+        url=url,
+        title="Example",
+        sku="SKU-1",
+        seller_id="seller-1",
+        seller_name="Seller",
+        price=100.0,
+        stock_status="In stock",
+        is_leadtime=False,
+        is_add_to_cart_available=True,
+        image_url=None,
+    )
+    product = CompetitorProduct(
+        plid="12345678",
+        url=url,
+        title="Example",
+        image_url=None,
+        sku="SKU-1",
+        seller_id="seller-1",
+        seller_name="Seller",
+        price=100.0,
+        stock_status="In stock",
+        is_leadtime=False,
+        review_count=0,
+        rating=0.0,
+        offers=(
+            CompetitorOffer(
+                selected=True,
+                sku="SKU-1",
+                seller_id="seller-1",
+                seller_name="Seller",
+                price=100.0,
+                stock_status="In stock",
+            ),
+        ),
+        variants=(variant,),
+    )
+    failed_stock = StockProbeResult(
+        quantity=None,
+        exact=False,
+        method="failed",
+        note="购物车未完整加载",
+    )
+    client = MagicMock()
+    client.fetch_product = AsyncMock(return_value=product)
+    client.fetch_all_reviews = AsyncMock(return_value=[])
+    stages: list[str] = []
+    collector = CompetitorCollector(
+        engine=engine,
+        project_root=tmp_path,
+        client=client,
+        progress_callback=stages.append,
+    )
+
+    with patch(
+        "takealot_ops.competitors.service.probe_variant_stocks",
+        AsyncMock(
+            return_value=[
+                VariantStockObservation(variant=variant, stock=failed_stock),
+            ]
+        ),
+    ):
+        result = await collector.collect(url, with_stock_probe=True)
+
+    assert result.succeeded is False
+    assert result.retryable is True
+    assert result.failure_kind == "stock-unprobed"
+    assert "失败原因：默认款（SKU SKU-1）：购物车未完整加载" in result.message
+    assert "已加入本轮其他链接结束后的库存复探" in result.message
+    assert stages == [
+        "正在读取商品与变体",
+        "正在读取全部评论",
+        "正在启动库存探测浏览器",
+        "正在保存商品快照",
+    ]
+    with Session(engine) as session:
+        snapshot = session.scalar(select(CompetitorSnapshot))
+        assert snapshot is not None
+        assert snapshot.plid == "12345678"
+        assert snapshot.stock_quantity is None
+    engine.dispose()
 
 
 async def test_public_client_keeps_api_404_separate_from_network_failure() -> None:
@@ -254,9 +370,12 @@ async def test_public_client_classifies_rendered_product_page(
     client = CompetitorPublicClient()
     client._page = page
 
-    assert await client._product_page_state(  # type: ignore[attr-defined]
-        "https://www.takealot.com/example/PLID123"
-    ) == expected
+    assert (
+        await client._product_page_state(  # type: ignore[attr-defined]
+            "https://www.takealot.com/example/PLID123"
+        )
+        == expected
+    )
 
 
 async def test_collector_keeps_uncertain_page_validation_out_of_network_failures(
@@ -275,6 +394,7 @@ async def test_collector_keeps_uncertain_page_validation_out_of_network_failures
     collector._latest_control_product = MagicMock(  # type: ignore[method-assign]
         return_value=("222", "https://www.takealot.com/control/PLID222")
     )
+    collector._is_confirmed_invalid = MagicMock(return_value=False)  # type: ignore[method-assign]
 
     result = await collector.collect(
         "https://www.takealot.com/example/PLID12345678",
@@ -285,6 +405,57 @@ async def test_collector_keeps_uncertain_page_validation_out_of_network_failures
     assert result.retryable is True
     assert result.failure_kind == "validation-uncertain"
     assert result.message == "页面复核结果不确定"
+
+
+async def test_previously_confirmed_link_uses_one_future_404_as_terminal(
+    tmp_path: Path,
+) -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    checked_at = datetime(2026, 7, 30, tzinfo=UTC)
+    url = "https://www.takealot.com/missing/PLID111"
+    with Session(engine) as session, session.begin():
+        session.add(
+            CompetitorLinkHealth(
+                plid="111",
+                url=url,
+                status="confirmed_invalid",
+                confirmed_not_found_count=3,
+                first_not_found_at=checked_at - timedelta(days=1),
+                last_evidence_at=checked_at - timedelta(days=1),
+                last_checked_at=checked_at - timedelta(days=1),
+                last_success_at=None,
+                control_plid="222",
+                control_check_ok=True,
+                last_error="Takealot 商品数据返回 404",
+            )
+        )
+    client = MagicMock()
+    client.fetch_product = AsyncMock(side_effect=CompetitorNotFoundError())
+    client.confirm_product_page_absent = AsyncMock(
+        side_effect=AssertionError("历史确认失效链接不应再次进入三次交叉复核")
+    )
+    collector = CompetitorCollector(
+        engine=engine,
+        project_root=tmp_path,
+        client=client,
+    )
+
+    result = await collector.collect(url, with_stock_probe=False)
+
+    assert result.succeeded is False
+    assert result.retryable is False
+    assert result.failure_kind == "confirmed-invalid"
+    assert "一次复核规则" in result.message
+    client.confirm_product_page_absent.assert_not_awaited()
+    with Session(engine) as session:
+        row = session.get(CompetitorLinkHealth, "111")
+        assert row is not None
+        assert row.status == "confirmed_invalid"
+        assert row.confirmed_not_found_count == 3
+        assert row.control_plid == "222"
+        assert row.control_check_ok is True
+    engine.dispose()
 
 
 def test_link_health_requires_three_spaced_control_verified_404s() -> None:
@@ -510,11 +681,40 @@ async def test_public_client_parses_product_offers_and_all_review_pages() -> Non
     assert [review.rating for review in reviews] == [2, 5]
 
 
+async def test_public_client_uses_conservative_review_page_delay() -> None:
+    client = CompetitorPublicClient()
+    client._get_json = AsyncMock(  # type: ignore[method-assign]
+        side_effect=[
+            {"page_info": {"total_pages": 2}, "reviews": []},
+            {"page_info": {"total_pages": 2}, "reviews": []},
+        ]
+    )
+
+    with (
+        patch(
+            "takealot_ops.competitors.api.random.uniform",
+            return_value=3.5,
+        ) as random_delay,
+        patch(
+            "takealot_ops.competitors.api.asyncio.sleep",
+            AsyncMock(),
+        ) as sleep,
+    ):
+        reviews = await client.fetch_all_reviews("123")
+
+    assert reviews == []
+    random_delay.assert_called_once_with(2.0, 5.0)
+    sleep.assert_awaited_once_with(3.5)
+
+
 async def test_public_client_enumerates_variants_under_one_plid() -> None:
     def variant_detail(size: str, *, available: bool) -> dict[str, object]:
         return {
             "title": f"Brace - {size}",
             "desktop_href": f"https://www.takealot.com/brace/PLID96909926?size={size}",
+            "gallery": {
+                "images": [f"https://img/{size.lower()}-{{size}}.jpg"],
+            },
             "buybox": {
                 "tsin": f"TSIN-{size}",
                 "items": [
@@ -533,7 +733,15 @@ async def test_public_client_enumerates_variants_under_one_plid() -> None:
                         "title": "Size",
                         "options": [
                             {
-                                "value": value,
+                                "value": (
+                                    {
+                                        "name": value,
+                                        "value": value,
+                                        "type": "size_variant",
+                                    }
+                                    if value == size
+                                    else value
+                                ),
                                 "is_selected": value == size,
                                 "href": (
                                     "https://api.takealot.com/rest/v-1-13-0/"
@@ -572,8 +780,12 @@ async def test_public_client_enumerates_variants_under_one_plid() -> None:
                 ]
             },
         },
-        "https://api.takealot.com/rest/v-1-13-0/product-details/PLID96909926?size=Right": variant_detail("Right", available=True),
-        "https://api.takealot.com/rest/v-1-13-0/product-details/PLID96909926?size=Left": variant_detail("Left", available=True),
+        "https://api.takealot.com/rest/v-1-13-0/product-details/PLID96909926?size=Right": variant_detail(
+            "Right", available=True
+        ),
+        "https://api.takealot.com/rest/v-1-13-0/product-details/PLID96909926?size=Left": variant_detail(
+            "Left", available=True
+        ),
     }
 
     async def fake_get_json(self, url: str, **kw: object) -> dict[str, object]:
@@ -583,7 +795,11 @@ async def test_public_client_enumerates_variants_under_one_plid() -> None:
         patch.object(CompetitorPublicClient, "__init__", lambda self, **kw: None),
         patch.object(CompetitorPublicClient, "_get_json", fake_get_json),
         patch.object(CompetitorPublicClient, "close", lambda self: None),
-        patch.object(CompetitorPublicClient, "_human_delay", _fake_delay),
+        patch.object(
+            CompetitorPublicClient,
+            "_human_delay",
+            AsyncMock(),
+        ) as variant_delay,
     ):
         client = CompetitorPublicClient()
         client._page = MagicMock()
@@ -601,7 +817,15 @@ async def test_public_client_enumerates_variants_under_one_plid() -> None:
         "SKU-Right",
         "SKU-Left",
     ]
+    assert [variant.image_url for variant in product.variants] == [
+        "https://img/right-zoom.jpg",
+        "https://img/left-zoom.jpg",
+    ]
     assert product.sku == "SKU-Left"
+    assert variant_delay.await_args_list == [
+        call(3.0, 6.0),
+        call(3.0, 6.0),
+    ]
 
 
 def test_parse_explicit_warehouse_stock_warning() -> None:

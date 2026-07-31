@@ -100,10 +100,26 @@ class CompetitorPublicClient:
         self._context: BrowserContext | None = None
         self._page: Page | None = None
 
+    @property
+    def ready(self) -> bool:
+        """Return whether the current browser session can be reused."""
+        return bool(
+            self._started
+            and self._browser is not None
+            and self._browser.is_connected()
+            and self._page is not None
+            and not self._page.is_closed()
+        )
+
     async def start(self) -> None:
         """Launch browser and warm up Cloudflare.  Called automatically by __aenter__."""
-        if self._started:
+        if self.ready:
             return
+        if self._started or any(
+            item is not None
+            for item in (self._page, self._context, self._browser, self._playwright)
+        ):
+            await self.close()
         executable = _find_browser_executable()
         playwright = await async_playwright().start()
         self._playwright = playwright
@@ -149,7 +165,7 @@ class CompetitorPublicClient:
                     if attempt == 2:
                         raise
                     await self._human_delay(2.0 * (2**attempt), 4.0 * (2**attempt))
-            await self._human_delay(5.0, 12.0)
+            await self._human_delay(4.0, 7.0)
             self._started = True
         except asyncio.CancelledError:
             await self._close_after_failed_start()
@@ -268,9 +284,7 @@ class CompetitorPublicClient:
                 )
         core = _mapping(detail.get("core"))
         reviews = _mapping(detail.get("reviews"))
-        gallery = _mapping(detail.get("gallery"))
-        images = gallery.get("images")
-        image_url = str(images[0]).replace("{size}", "zoom") if isinstance(images, list) and images else None
+        image_url = _product_image_url(selected_detail)
         return CompetitorProduct(
             plid=plid,
             url=str(detail.get("desktop_href") or url),
@@ -319,19 +333,23 @@ class CompetitorPublicClient:
                 if not href or href in visited:
                     continue
                 visited.add(href)
-                await self._human_delay(5.0, 10.0)
+                await self._human_delay(3.0, 6.0)
                 queue.append(await self._get_json(href))
         return list(terminal.values()) or [root]
 
     async def fetch_all_reviews(
-        self, plid: str, *, page_delay_seconds: float = 0.1
+        self, plid: str, *, page_delay_seconds: float | None = None
     ) -> list[CompetitorReviewRecord]:
         first = await self._get_json(f"{PUBLIC_API_BASE}/product-reviews/plid/{plid}?page=0")
         page_info = _mapping(first.get("page_info"))
         total_pages = max(1, int(_number(page_info.get("total_pages"))))
         raw_reviews = list(_mapping_list(first.get("reviews")))
         for page in range(1, total_pages):
-            delay = max(page_delay_seconds, random.uniform(3.0, 8.0))
+            delay = (
+                max(0.0, page_delay_seconds)
+                if page_delay_seconds is not None
+                else random.uniform(2.0, 5.0)
+            )
             await asyncio.sleep(delay)
             result = await self._get_json(
                 f"{PUBLIC_API_BASE}/product-reviews/plid/{plid}?page={page}"
@@ -383,9 +401,7 @@ class CompetitorPublicClient:
                 "Takealot 商品页暂时无法访问；本次按网络问题保留重试"
             ) from exc
         if response is None or _is_retryable_takealot_status(response.status):
-            raise CompetitorNetworkError(
-                "Takealot 商品页暂时无法访问；本次按网络问题保留重试"
-            )
+            raise CompetitorNetworkError("Takealot 商品页暂时无法访问；本次按网络问题保留重试")
         if response.status == 404:
             return "not-found"
 
@@ -432,9 +448,7 @@ class CompetitorPublicClient:
                 status = response.status
                 if status != 200:
                     if status == 404:
-                        raise CompetitorNotFoundError(
-                            "Takealot 商品数据返回 404"
-                        )
+                        raise CompetitorNotFoundError("Takealot 商品数据返回 404")
                     retryable = _is_retryable_takealot_status(status)
                     if not retryable or attempt == retries:
                         error_type = CompetitorNetworkError if retryable else RuntimeError
@@ -445,11 +459,12 @@ class CompetitorPublicClient:
                     payload = await response.json()
                 except Exception:
                     body = await page.content()
-                    if any(kw in body.lower() for kw in ("cloudflare", "cf-challenge", "checking your browser")):
+                    if any(
+                        kw in body.lower()
+                        for kw in ("cloudflare", "cf-challenge", "checking your browser")
+                    ):
                         if attempt == retries:
-                            raise CompetitorNetworkError(
-                                "Cloudflare 验证失败，请稍后重试"
-                            )
+                            raise CompetitorNetworkError("Cloudflare 验证失败，请稍后重试")
                         await self._human_delay(3.0, 6.0)
                         continue
                     raise ValueError("Takealot 公开接口返回了非 JSON 数据")
@@ -528,7 +543,9 @@ def _variant_record(detail: Mapping[str, Any], plid: str) -> CompetitorVariant:
         )
         if selected is not None:
             title = str(selector.get("title") or selector.get("selector_type") or "选项")
-            selected_values.append(f"{title}：{selected.get('value') or ''}")
+            value = _selector_option_display_value(selected)
+            if value:
+                selected_values.append(f"{title}：{value}")
     url = str(detail.get("desktop_href") or f"https://www.takealot.com/PLID{plid}")
     return CompetitorVariant(
         key=_variant_key(url) or "default",
@@ -540,13 +557,38 @@ def _variant_record(detail: Mapping[str, Any], plid: str) -> CompetitorVariant:
         seller_name=str(seller.get("display_name") or "未知卖家"),
         price=_number(offer.get("price")),
         stock_status=(
-            "没货（非平台仓/供应商调货）"
-            if is_leadtime
-            else str(stock.get("status") or "未知")
+            "没货（非平台仓/供应商调货）" if is_leadtime else str(stock.get("status") or "未知")
         ),
         is_leadtime=is_leadtime,
         is_add_to_cart_available=bool(offer.get("is_add_to_cart_available")),
+        image_url=_product_image_url(detail),
     )
+
+
+def _selector_option_display_value(option: Mapping[str, Any]) -> str:
+    """Return a human-readable selector value without serializing API objects."""
+    value: object = option.get("value")
+    if isinstance(value, Mapping):
+        for key in ("name", "label", "value", "title"):
+            candidate = value.get(key)
+            if isinstance(candidate, (str, int, float)) and str(candidate).strip():
+                return str(candidate).strip()
+        value = None
+    if isinstance(value, (str, int, float)) and str(value).strip():
+        return str(value).strip()
+    for key in ("name", "label", "title"):
+        candidate = option.get(key)
+        if isinstance(candidate, (str, int, float)) and str(candidate).strip():
+            return str(candidate).strip()
+    return ""
+
+
+def _product_image_url(detail: Mapping[str, Any]) -> str | None:
+    gallery = _mapping(detail.get("gallery"))
+    images = gallery.get("images")
+    if not isinstance(images, list) or not images:
+        return None
+    return str(images[0]).replace("{size}", "zoom")
 
 
 def _variant_key(url: str) -> str:

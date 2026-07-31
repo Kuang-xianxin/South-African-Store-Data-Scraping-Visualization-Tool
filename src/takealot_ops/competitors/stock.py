@@ -31,9 +31,11 @@ WAREHOUSE_STOCK_PATTERN = re.compile(
     r"current\s+stock\s*=\s*(?P<quantity>[\d,]+)",
     re.IGNORECASE,
 )
-CUSTOM_QUANTITY_INPUT = (
-    'input[name="quantity"]:not([aria-hidden="true"]):visible'
+CUSTOMER_PURCHASE_LIMIT_PATTERN = re.compile(
+    r"limited\s+to\s+(?P<quantity>[\d,]+)\s+per\s+customer",
+    re.IGNORECASE,
 )
+CUSTOM_QUANTITY_INPUT = 'input[name="quantity"]:not([aria-hidden="true"]):visible'
 
 
 def skipped_stock_probe() -> StockProbeResult:
@@ -132,9 +134,7 @@ async def probe_variant_stocks(
                 locale="en-ZA",
                 viewport={"width": 1365, "height": 900},
                 args=[
-                    "--window-position=100,100"
-                    if visible
-                    else "--window-position=-32000,-32000",
+                    "--window-position=100,100" if visible else "--window-position=-32000,-32000",
                     "--disable-background-timer-throttling",
                 ],
             )
@@ -176,19 +176,58 @@ async def _probe_page_stock(
     url: str,
     title: str,
 ) -> StockProbeResult:
-    await _clear_isolated_cart(page)
-    await _goto(page, url)
-    await _wait_for_product(page, plid, title)
-    await _add_main_product_to_cart(page)
+    stage = "清理隔离购物车"
+    try:
+        await _clear_isolated_cart(page)
+        stage = "打开目标商品页"
+        await _goto(page, url)
+        stage = "等待主商品购买区"
+        await _wait_for_product(page, plid, title)
+        stage = "将目标商品加入购物车"
+        await _add_main_product_to_cart(page)
 
-    await _goto(page, "https://www.takealot.com/cart")
-    quantity, exact, note = await _find_exact_quantity(page, plid)
+        stage = "打开购物车"
+        await _goto(page, "https://www.takealot.com/cart")
+        stage = "校验购物车库存上限"
+        quantity, exact, note, customer_purchase_limit = await _find_exact_quantity(
+            page,
+            plid,
+        )
+    except (OSError, RuntimeError, ValueError, PlaywrightError) as exc:
+        raise RuntimeError(_stock_probe_failure_note(stage, exc)) from exc
     return StockProbeResult(
         quantity=quantity,
         exact=exact,
         method="anonymous-cart-limit",
         note=note,
+        customer_purchase_limit=customer_purchase_limit,
     )
+
+
+def _stock_probe_failure_note(stage: str, error: BaseException) -> str:
+    """Return a concise, persistent operator-facing reason for a probe failure."""
+    raw = " ".join(str(error).split())
+    raw = raw.split("Call log:", 1)[0].strip()
+    error_code_match = re.search(r"net::(?P<code>ERR_[A-Z0-9_]+)", raw)
+    error_code = error_code_match.group("code") if error_code_match else ""
+    reason_by_code = {
+        "ERR_CONNECTION_CLOSED": "连接在页面加载时被关闭",
+        "ERR_CONNECTION_RESET": "连接被对端重置",
+        "ERR_CONNECTION_TIMED_OUT": "建立连接超时",
+        "ERR_TIMED_OUT": "页面加载超时",
+        "ERR_NAME_NOT_RESOLVED": "域名解析失败",
+        "ERR_PROXY_CONNECTION_FAILED": "代理连接失败",
+        "ERR_TUNNEL_CONNECTION_FAILED": "代理隧道连接失败",
+        "ERR_NETWORK_CHANGED": "探测期间网络发生变化",
+        "ERR_INTERNET_DISCONNECTED": "本机网络已断开",
+    }
+    if error_code:
+        reason = f"{reason_by_code.get(error_code, '浏览器网络请求失败')}（{error_code}）"
+    elif "timeout" in raw.casefold():
+        reason = "等待页面或控件超时"
+    else:
+        reason = raw or error.__class__.__name__
+    return f"{stage}失败：{reason}"[:500]
 
 
 def _find_browser_executable() -> Path:
@@ -219,17 +258,19 @@ async def _wait_for_product(page: Page, plid: str, title: str) -> None:
         if attempt < 2:
             await page.reload(wait_until="domcontentloaded", timeout=45_000)
     raise RuntimeError(
-        f"目标竞品 PLID{plid} 的主商品购买按钮未完整加载；"
-        "已拒绝点击推荐商品，请稍后重试"
+        f"目标竞品 PLID{plid} 的主商品购买按钮未完整加载；已拒绝点击推荐商品，请稍后重试"
     )
 
 
 def _url_matches_plid(url: str, plid: str) -> bool:
-    return re.search(
-        rf"/PLID{re.escape(plid)}(?:[/?#]|$)",
-        url,
-        re.IGNORECASE,
-    ) is not None
+    return (
+        re.search(
+            rf"/PLID{re.escape(plid)}(?:[/?#]|$)",
+            url,
+            re.IGNORECASE,
+        )
+        is not None
+    )
 
 
 async def _find_main_add_to_cart_button(page: Page) -> Locator:
@@ -313,10 +354,7 @@ async def _choose_quantity(
             raise RuntimeError("Takealot 拒绝了购物车数量更新，请稍后重试")
         if (await combo.inner_text()).strip() == f"Qty: {quantity}":
             accepted_since = accepted_since or time.monotonic()
-            if (
-                time.monotonic() - accepted_since
-                >= WAREHOUSE_WARNING_SETTLE_SECONDS
-            ):
+            if time.monotonic() - accepted_since >= WAREHOUSE_WARNING_SETTLE_SECONDS:
                 return True, None
         else:
             accepted_since = None
@@ -350,9 +388,7 @@ async def _select_quantity_menu_option(
         await page.wait_for_timeout(random.randint(1200, 2500))
         await combo.click()
         for _ in range(8):
-            option = page.locator('[role="option"]:visible').filter(
-                has_text=option_pattern
-            )
+            option = page.locator('[role="option"]:visible').filter(has_text=option_pattern)
             if await option.count() == 1 and await option.is_visible():
                 await _dismiss_marketing_overlay(page)
                 await option.click()
@@ -397,17 +433,13 @@ async def _open_quantity_menu_with_retry(
         if page_attempt == 0:
             await page.reload(wait_until="domcontentloaded", timeout=45_000)
             await page.wait_for_timeout(random.randint(1500, 3000))
-    raise RuntimeError(
-        "购物车数量菜单在3次重开和1次页面刷新后仍没有可识别的数字选项"
-    )
+    raise RuntimeError("购物车数量菜单在3次重开和1次页面刷新后仍没有可识别的数字选项")
 
 
 async def _find_product_quantity_combo(page: Page, plid: str) -> Locator:
     deadline = time.monotonic() + 15
     while time.monotonic() < deadline:
-        product_link = page.locator(
-            f'a[href*="/PLID{plid}"]:visible'
-        )
+        product_link = page.locator(f'a[href*="/PLID{plid}"]:visible')
         if await product_link.count() >= 1:
             product_row = product_link.first.locator(
                 'xpath=ancestor::*[.//button[@role="combobox"]][1]'
@@ -416,10 +448,7 @@ async def _find_product_quantity_combo(page: Page, plid: str) -> Locator:
             if await scoped_combo.count() == 1:
                 return scoped_combo
         await page.wait_for_timeout(random.randint(1200, 2500))
-    raise RuntimeError(
-        f"购物车中未找到目标竞品 PLID{plid}；"
-        "已拒绝把其他商品当作目标库存"
-    )
+    raise RuntimeError(f"购物车中未找到目标竞品 PLID{plid}；已拒绝把其他商品当作目标库存")
 
 
 def _parse_warehouse_stock_message(text: str) -> int | None:
@@ -430,35 +459,57 @@ def _parse_warehouse_stock_message(text: str) -> int | None:
     return int(match.group("quantity").replace(",", ""))
 
 
+def _parse_customer_purchase_limit(text: str) -> int | None:
+    """Parse Takealot's per-customer promotional purchase limit."""
+    match = CUSTOMER_PURCHASE_LIMIT_PATTERN.search(text)
+    if match is None:
+        return None
+    return int(match.group("quantity").replace(",", ""))
+
+
 async def _probe_above_quick_menu(
     page: Page,
     combo: Locator,
-) -> tuple[int, bool] | None:
+) -> tuple[int, bool, int | None] | None:
     """Switch to custom quantity input and parse the explicit warehouse limit."""
     low = 9
-    accepted, explicit_quantity = await _probe_custom_quantity_with_retry(
+    accepted, explicit_quantity, customer_limit = await _probe_custom_quantity_with_retry(
         page,
         combo,
         10,
     )
     if explicit_quantity is not None:
-        return explicit_quantity, True
+        return explicit_quantity, True, customer_limit
+    if customer_limit is not None:
+        return await _resolve_customer_purchase_limit(
+            page,
+            combo,
+            customer_limit=customer_limit,
+            accepted_low=low,
+        )
     if accepted is None:
         return None
     if not accepted:
-        return 9, True
+        return 9, True, None
 
     low = 10
     await page.wait_for_timeout(random.randint(1500, 3000))
     probe = HIGH_QUANTITY_PROBE
     while True:
-        accepted, explicit_quantity = await _probe_custom_quantity_with_retry(
+        accepted, explicit_quantity, customer_limit = await _probe_custom_quantity_with_retry(
             page,
             combo,
             probe,
         )
         if explicit_quantity is not None:
-            return explicit_quantity, True
+            return explicit_quantity, True, customer_limit
+        if customer_limit is not None:
+            return await _resolve_customer_purchase_limit(
+                page,
+                combo,
+                customer_limit=customer_limit,
+                accepted_low=low,
+            )
         if accepted is None:
             return None
         if not accepted:
@@ -466,19 +517,26 @@ async def _probe_above_quick_menu(
             break
         low = probe
         if probe >= MAX_CUSTOM_QUANTITY:
-            return MAX_CUSTOM_QUANTITY, False
+            return MAX_CUSTOM_QUANTITY, False, None
         probe = min(MAX_CUSTOM_QUANTITY, probe * 2)
         await page.wait_for_timeout(random.randint(1500, 3000))
 
     while low < high:
         middle = (low + high + 1) // 2
-        accepted, explicit_quantity = await _probe_custom_quantity_with_retry(
+        accepted, explicit_quantity, customer_limit = await _probe_custom_quantity_with_retry(
             page,
             combo,
             middle,
         )
         if explicit_quantity is not None:
-            return explicit_quantity, True
+            return explicit_quantity, True, customer_limit
+        if customer_limit is not None:
+            return await _resolve_customer_purchase_limit(
+                page,
+                combo,
+                customer_limit=customer_limit,
+                accepted_low=low,
+            )
         if accepted is None:
             return None
         if accepted:
@@ -486,34 +544,84 @@ async def _probe_above_quick_menu(
         else:
             high = middle - 1
         await page.wait_for_timeout(random.randint(1500, 3000))
-    return low, True
+    return low, True, None
+
+
+async def _resolve_customer_purchase_limit(
+    page: Page,
+    combo: Locator,
+    *,
+    customer_limit: int,
+    accepted_low: int,
+) -> tuple[int, bool, int] | None:
+    """Verify the customer limit and never report it as exact warehouse stock."""
+    accepted, explicit_quantity, repeated_limit = await _probe_custom_quantity_with_retry(
+        page,
+        combo,
+        customer_limit,
+    )
+    confirmed_limit = repeated_limit or customer_limit
+    if explicit_quantity is not None:
+        return explicit_quantity, True, confirmed_limit
+    if accepted is None:
+        return None
+    if accepted:
+        return confirmed_limit, False, confirmed_limit
+    if accepted_low >= confirmed_limit:
+        return None
+
+    low = accepted_low
+    high = confirmed_limit - 1
+    while low < high:
+        middle = (low + high + 1) // 2
+        accepted, explicit_quantity, _ = await _probe_custom_quantity_with_retry(
+            page,
+            combo,
+            middle,
+        )
+        if explicit_quantity is not None:
+            return explicit_quantity, True, confirmed_limit
+        if accepted is None:
+            return None
+        if accepted:
+            low = middle
+        else:
+            high = middle - 1
+        await page.wait_for_timeout(random.randint(1500, 3000))
+    return low, True, confirmed_limit
 
 
 async def _probe_custom_quantity_with_retry(
     page: Page,
     combo: Locator,
     quantity: int,
-) -> tuple[bool | None, int | None]:
+) -> tuple[bool | None, int | None, int | None]:
     """Retry transient cart-update errors without changing the target product."""
+    observed_customer_limit: int | None = None
     for attempt in range(3):
         if not await _ensure_custom_quantity_input(page, combo):
             cart_text = await page.locator("body").inner_text()
             explicit_quantity = _parse_warehouse_stock_message(cart_text)
+            customer_limit = _parse_customer_purchase_limit(cart_text)
+            observed_customer_limit = customer_limit or observed_customer_limit
             if explicit_quantity is not None:
-                return False, explicit_quantity
+                return False, explicit_quantity, observed_customer_limit
+            if customer_limit is not None and quantity > customer_limit:
+                return False, None, customer_limit
             if f"We currently do not have {quantity} in stock." in cart_text:
-                return False, None
-            return None, None
-        result = await _submit_custom_quantity(page, combo, quantity)
-        if result[1] is not None:
-            return result
-        if result[0] is not None:
-            await page.wait_for_timeout(random.randint(1200, 3000))
-            return result
+                return False, None, observed_customer_limit
+        else:
+            result = await _submit_custom_quantity(page, combo, quantity)
+            observed_customer_limit = result[2] or observed_customer_limit
+            if result[1] is not None:
+                return result[0], result[1], observed_customer_limit
+            if result[0] is not None:
+                await page.wait_for_timeout(random.randint(1200, 3000))
+                return result[0], None, observed_customer_limit
         if attempt < 2:
             await page.reload(wait_until="domcontentloaded")
             await page.wait_for_timeout(random.randint(1500, 3500))
-    return None, None
+    return None, None, observed_customer_limit
 
 
 async def _ensure_custom_quantity_input(page: Page, combo: Locator) -> bool:
@@ -536,10 +644,10 @@ async def _submit_custom_quantity(
     page: Page,
     combo: Locator,
     quantity: int,
-) -> tuple[bool | None, int | None]:
+) -> tuple[bool | None, int | None, int | None]:
     quantity_input = page.locator(CUSTOM_QUANTITY_INPUT)
     if await quantity_input.count() != 1:
-        return None, None
+        return None, None, None
     # Takealot renders a full-card product link over the custom quantity
     # editor.  The editor is still the unique target-cart input, but normal
     # pointer clicks can be intercepted by that link.
@@ -551,22 +659,26 @@ async def _submit_custom_quantity(
     while time.monotonic() < deadline and await update_button.count() != 1:
         await page.wait_for_timeout(random.randint(1200, 2000))
     if await update_button.count() != 1:
-        return None, None
+        return None, None, None
     await _dismiss_marketing_overlay(page)
     await update_button.click()
 
     await page.wait_for_timeout(random.randint(1200, 3500))
     deadline = time.monotonic() + 10
     accepted_since: float | None = None
+    customer_limit: int | None = None
     while time.monotonic() < deadline:
         cart_text = await page.locator("body").inner_text()
         explicit_quantity = _parse_warehouse_stock_message(cart_text)
+        customer_limit = _parse_customer_purchase_limit(cart_text) or customer_limit
         if explicit_quantity is not None:
-            return False, explicit_quantity
+            return False, explicit_quantity, customer_limit
+        if customer_limit is not None and quantity > customer_limit:
+            return False, None, customer_limit
         if f"We currently do not have {quantity} in stock." in cart_text:
-            return False, None
+            return False, None, customer_limit
         if "An error occurred while trying to update your cart" in cart_text:
-            return None, None
+            return None, None, customer_limit
         accepted_signal = False
         if await combo.is_visible() and (await combo.inner_text()).strip() == f"Qty: {quantity}":
             accepted_signal = True
@@ -575,25 +687,18 @@ async def _submit_custom_quantity(
             if current_value == str(quantity):
                 accepted_signal = True
             if current_value and current_value != str(quantity):
-                return False, None
-        accepted_since = (
-            accepted_since or time.monotonic()
-            if accepted_signal
-            else None
-        )
+                return False, None, customer_limit
+        accepted_since = accepted_since or time.monotonic() if accepted_signal else None
         if (
             accepted_since is not None
-            and time.monotonic() - accepted_since
-            >= WAREHOUSE_WARNING_SETTLE_SECONDS
+            and time.monotonic() - accepted_since >= WAREHOUSE_WARNING_SETTLE_SECONDS
         ):
-            return True, None
+            return True, None, customer_limit
         await page.wait_for_timeout(300)
-    return None, None
+    return None, None, customer_limit
 
 
-async def _find_exact_quantity(
-    page: Page, plid: str
-) -> tuple[int, bool, str]:
+async def _find_exact_quantity(page: Page, plid: str) -> tuple[int, bool, str, int | None]:
     combo, numeric_options = await _open_quantity_menu_with_retry(page, plid)
     if 9 not in numeric_options:
         maximum = max(numeric_options)
@@ -603,32 +708,46 @@ async def _find_exact_quantity(
                 explicit_quantity,
                 True,
                 "购物车明确提示的当前平台仓库存；供应商追加库存未计入。",
+                None,
             )
         if not accepted:
             raise RuntimeError(f"购物车拒绝了菜单显示的最大数量 {maximum}")
-        return maximum, True, "购物车数量菜单显示的当前最大可选数量。"
+        return maximum, True, "购物车数量菜单显示的当前最大可选数量。", None
     accepted, explicit_quantity = await _choose_quantity(page, combo, 9)
     if explicit_quantity is not None:
         return (
             explicit_quantity,
             True,
             "购物车明确提示的当前平台仓库存；供应商追加库存未计入。",
+            None,
         )
     if accepted:
         warehouse_result = await _probe_above_quick_menu(page, combo)
         if warehouse_result is not None:
-            warehouse_quantity, warehouse_exact = warehouse_result
+            warehouse_quantity, warehouse_exact, customer_limit = warehouse_result
+            if customer_limit is not None and not warehouse_exact:
+                note = (
+                    f"购物车确认每位客户限购{customer_limit}件，并已验证该数量可加入；"
+                    f"实际平台仓库存可能更高，因此只记录至少{warehouse_quantity}件。"
+                )
+            elif customer_limit is not None:
+                note = (
+                    f"检测到每位客户限购{customer_limit}件；限购数量未达到时，"
+                    "通过购物车数量校验取得当前平台仓精确库存。"
+                )
+            else:
+                note = (
+                    "通过购物车超量提示和数量二分校验取得当前平台仓精确库存；供应商追加库存未计入。"
+                    if warehouse_exact
+                    else "购物车已接受999件；当前只能保守记录平台仓库存至少999。"
+                )
             return (
                 warehouse_quantity,
                 warehouse_exact,
-                (
-                    "通过购物车超量提示和数量二分校验取得当前平台仓精确库存；"
-                    "供应商追加库存未计入。"
-                    if warehouse_exact
-                    else "购物车已接受999件；当前只能保守记录平台仓库存至少999。"
-                ),
+                note,
+                customer_limit,
             )
-        return 9, False, "购物车已接受9件；快捷数量菜单无法继续给出可靠上限。"
+        return 9, False, "购物车已接受9件；快捷数量菜单无法继续给出可靠上限。", None
     low = 1
     high = 8
     while low < high:
@@ -639,9 +758,10 @@ async def _find_exact_quantity(
                 explicit_quantity,
                 True,
                 "购物车明确提示的当前平台仓库存；供应商追加库存未计入。",
+                None,
             )
         if accepted:
             low = middle
         else:
             high = middle - 1
-    return low, True, "通过隔离匿名购物车数量校验得到的当前可售上限。"
+    return low, True, "通过隔离匿名购物车数量校验得到的当前可售上限。", None

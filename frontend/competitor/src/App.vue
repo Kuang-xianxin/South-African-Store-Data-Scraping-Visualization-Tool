@@ -32,6 +32,7 @@ import type {
   AuthStatus,
   DailyReportReminders,
   FreshnessPayload,
+  StoreAccessItem,
 } from "./types";
 import type { PermissionKey } from "./types";
 
@@ -45,6 +46,13 @@ type PageKey =
   | "reports"
   | "users";
 
+const storeScopedPages = new Set<PageKey>([
+  "overview",
+  "products",
+  "quadrants",
+  "risks",
+  "daily-report",
+]);
 const pageStorageKey = "takealot-erp-active-page-v1";
 const competitorCheckpointKey = "takealot-competitor-collection-v1";
 
@@ -68,6 +76,7 @@ const adminPage = {
 const authReady = ref(false);
 const authStatus = ref<AuthStatus>({ setup_required: false, bootstrap_allowed: false });
 const session = ref<AuthSession | null>(null);
+const selectedStoreId = ref<number | null>(null);
 const currentPage = ref<PageKey>(initialPage());
 const asOf = ref(localDate());
 const dailyReportAsOf = ref(currentOperationsBusinessDate());
@@ -104,6 +113,11 @@ const hasPermission = (permission: PermissionKey) =>
 const canManageUsers = computed(() => hasPermission("users.manage"));
 const canRefresh = computed(() => hasPermission("refresh.run"));
 const canCollectCompetitors = computed(() => hasPermission("competitors.collect"));
+const canControlCompetitorCollection = computed(
+  () =>
+    canCollectCompetitors.value
+    && session.value?.user.username.toLowerCase() === "kxx",
+);
 const canManageDailyReport = computed(() => hasPermission("daily_report.manage"));
 const canGenerateDailyReport = computed(() => hasPermission("daily_report.export"));
 const canUseNft102 = computed(() => hasPermission("nft102.manage"));
@@ -185,6 +199,35 @@ const roleLabel = computed(() => {
   const customized = user.permissions_customized ? " · 自定义权限" : "";
   return `${templateLabels[user.role]}模板${customized}`;
 });
+const storeScopeLabel = computed(() => {
+  const user = session.value?.user;
+  if (!user) return "";
+  const prefix = user.all_stores ? "全部店铺" : "已分配店铺";
+  return `${prefix} · ${user.accessible_stores.length} 个`;
+});
+const canAccessConnectedStore = computed(() =>
+  (session.value?.user.accessible_stores ?? []).some(
+    (store) => store.code === "current" && store.data_connected,
+  ),
+);
+const selectedStore = computed<StoreAccessItem | null>(() => {
+  const stores = session.value?.user.accessible_stores ?? [];
+  return (
+    stores.find((store) => store.id === selectedStoreId.value)
+    ?? stores.find((store) => store.code === "current" && store.data_connected)
+    ?? stores[0]
+    ?? null
+  );
+});
+const selectedStorePending = computed(
+  () =>
+    storeScopedPages.has(activePage.value.key as PageKey)
+    && (
+      selectedStore.value === null
+      || selectedStore.value.code !== "current"
+      || !selectedStore.value.data_connected
+    ),
+);
 const activePageProps = computed(() => {
   const key = activePage.value.key;
   const common = {
@@ -194,6 +237,7 @@ const activePageProps = computed(() => {
     return {
       ...common,
       canOperate: canCollectCompetitors.value,
+      canControlCollection: canControlCompetitorCollection.value,
       onPermissionDenied: showPermissionDenied,
     };
   }
@@ -281,9 +325,32 @@ async function retryAuthentication() {
 function acceptSession(next: AuthSession) {
   session.value = next;
   setAuthSession(next);
+  const currentSelection = next.user.accessible_stores.find(
+    (store) => store.id === selectedStoreId.value,
+  );
+  selectedStoreId.value = (
+    currentSelection
+    ?? next.user.accessible_stores.find(
+      (store) => store.code === "current" && store.data_connected,
+    )
+    ?? next.user.accessible_stores[0]
+    ?? null
+  )?.id ?? null;
   const allowedPage = pages.value.find((page) => page.key === currentPage.value);
-  if (!allowedPage && pages.value[0]) {
-    switchPage(pages.value[0].key);
+  const allowedPageNeedsStore = (
+    allowedPage
+    && storeScopedPages.has(allowedPage.key as PageKey)
+  );
+  if (
+    (!allowedPage || (!canAccessConnectedStore.value && allowedPageNeedsStore))
+    && pages.value[0]
+  ) {
+    const firstUsablePage = pages.value.find(
+      (page) =>
+        canAccessConnectedStore.value
+        || !storeScopedPages.has(page.key as PageKey),
+    );
+    switchPage((firstUsablePage ?? pages.value[0]).key);
   }
   authReady.value = true;
   void loadFreshness();
@@ -295,6 +362,7 @@ function acceptSession(next: AuthSession) {
 function handleExpired() {
   disconnectDailyReportEvents();
   session.value = null;
+  selectedStoreId.value = null;
   setAuthSession(null);
   currentPage.value = "overview";
   refreshStatus.value.can_refresh = false;
@@ -312,6 +380,13 @@ async function signOut() {
 }
 
 async function loadFreshness() {
+  if (!canAccessConnectedStore.value) {
+    freshness.value = {
+      last_collection_at: null,
+      latest_metric_date: null,
+    };
+    return;
+  }
   freshness.value = await fetchFreshness().catch(() => ({
     last_collection_at: null,
     latest_metric_date: null,
@@ -319,7 +394,7 @@ async function loadFreshness() {
 }
 
 async function loadDailyReportReminders() {
-  if (!hasPermission("daily_report.view")) {
+  if (!hasPermission("daily_report.view") || !canAccessConnectedStore.value) {
     dailyReportReminders.value = { count: 0, dates: [] };
     return;
   }
@@ -331,7 +406,11 @@ async function loadDailyReportReminders() {
 
 function connectDailyReportEvents() {
   disconnectDailyReportEvents();
-  if (!session.value || !hasPermission("daily_report.view")) return;
+  if (
+    !session.value
+    || !hasPermission("daily_report.view")
+    || !canAccessConnectedStore.value
+  ) return;
   const source = new EventSource("/api/erp/daily-report/events");
   const publishUpdate = (event: Event) => {
     const payload = JSON.parse((event as MessageEvent<string>).data) as {
@@ -354,7 +433,7 @@ function disconnectDailyReportEvents() {
 }
 
 async function loadRefreshStatus() {
-  if (!session.value) return;
+  if (!session.value || !canAccessConnectedStore.value) return;
   try {
     refreshStatus.value = await fetchRefreshStatus();
   } catch {
@@ -532,12 +611,39 @@ function currentOperationsBusinessDate() {
           <h1>{{ activePage.label }}</h1>
         </div>
         <div class="topbar-actions">
-          <label v-if="!['daily-report', 'reports', 'users'].includes(currentPage)">
+          <label v-if="session.user.accessible_stores.length" class="store-context">
+            <span>当前查看店铺</span>
+            <select v-model.number="selectedStoreId" aria-label="切换当前查看店铺">
+              <option
+                v-for="store in session.user.accessible_stores"
+                :key="store.id"
+                :value="store.id"
+              >
+                {{
+                  `${store.display_name} · ${
+                    store.code === "current" && store.data_connected
+                      ? "已接入"
+                      : "待接入"
+                  }`
+                }}
+              </option>
+            </select>
+          </label>
+          <label
+            v-if="
+              !selectedStorePending
+              && !['daily-report', 'reports', 'users'].includes(currentPage)
+            "
+          >
             <span>数据截止日期</span>
             <input v-model="asOf" type="date" />
           </label>
           <button
-            v-if="currentPage !== 'users'"
+            v-if="
+              currentPage !== 'users'
+              && !selectedStorePending
+              && canAccessConnectedStore
+            "
             class="refresh-button"
             :disabled="refreshing || (canRefresh && !refreshStatus.can_refresh)"
             @click="runRefresh"
@@ -547,6 +653,7 @@ function currentOperationsBusinessDate() {
           <div class="account-menu">
             <span>{{ session.user.display_name }}</span>
             <small>{{ roleLabel }}</small>
+            <small>{{ storeScopeLabel }}</small>
             <button type="button" @click="signOut">退出</button>
           </div>
         </div>
@@ -573,6 +680,7 @@ function currentOperationsBusinessDate() {
           canManageDailyReport
           && dailyReportReminders.count
           && currentPage !== 'daily-report'
+          && !selectedStorePending
         "
         class="pending-daily-banner"
         @click="switchPage('daily-report')"
@@ -586,7 +694,34 @@ function currentOperationsBusinessDate() {
       </button>
 
       <section class="erp-content">
-        <KeepAlive include="CompetitorsPage">
+        <div
+          v-if="selectedStorePending && currentPage !== 'users'"
+          class="store-context-pending"
+        >
+          <p>{{ selectedStore ? "STORE RESERVED" : "STORE ACCESS REQUIRED" }}</p>
+          <h2>
+            {{
+              selectedStore
+                ? `${selectedStore.display_name} 已预留，数据尚未接入`
+                : "当前账号尚未获授权访问已接入店铺"
+            }}
+          </h2>
+          <span>
+            {{
+              selectedStore
+                ? "当前页面不会复用“当前店铺”的数据。完成该店铺的数据表分区、采集密钥、计划任务和接口上下文后，才会开放真实业务数据。"
+                : "经营总览、商品、经营坐标、风险与运营日报属于店铺数据模块；竞品雷达等公共模块仍可按账号已开放的功能权限正常使用。"
+            }}
+          </span>
+          <button
+            v-if="canManageUsers"
+            type="button"
+            @click="switchPage('users')"
+          >
+            前往用户权限配置
+          </button>
+        </div>
+        <KeepAlive v-else include="CompetitorsPage">
           <component
             v-if="pages.length"
             :is="pageComponent"
@@ -693,6 +828,60 @@ function currentOperationsBusinessDate() {
   color: #6b481c;
   background: #fff6dc;
 }
+.store-context {
+  display: grid;
+  gap: 4px;
+  min-width: 190px;
+}
+.store-context span {
+  color: #6f7f77;
+  font-size: 11px;
+  font-weight: 700;
+}
+.store-context select {
+  min-height: 38px;
+  padding: 0 34px 0 11px;
+  border: 1px solid #ccd9d2;
+  border-radius: 9px;
+  color: #21483a;
+  background: #fff;
+  font: inherit;
+}
+.store-context-pending {
+  max-width: 720px;
+  margin: 48px auto;
+  padding: 34px;
+  border: 1px solid #d8c9a7;
+  border-radius: 20px;
+  background: #fffdf7;
+  box-shadow: 0 18px 50px rgb(39 64 54 / 8%);
+}
+.store-context-pending p {
+  margin: 0 0 8px;
+  color: #9b6525;
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: 0.12em;
+}
+.store-context-pending h2 {
+  margin: 0 0 14px;
+  color: #243c33;
+}
+.store-context-pending span {
+  display: block;
+  color: #684d2d;
+  line-height: 1.75;
+}
+.store-context-pending button {
+  margin-top: 22px;
+  border: 0;
+  border-radius: 10px;
+  padding: 10px 16px;
+  color: white;
+  background: #315f50;
+  font-weight: 700;
+  cursor: pointer;
+}
 .account-menu {
   display: grid;
   grid-template-columns: auto auto;
@@ -740,6 +929,9 @@ function currentOperationsBusinessDate() {
   font-size: 12px;
 }
 @media (max-width: 760px) {
+  .store-context {
+    width: 100%;
+  }
   .account-menu {
     padding-left: 0;
     border-left: 0;

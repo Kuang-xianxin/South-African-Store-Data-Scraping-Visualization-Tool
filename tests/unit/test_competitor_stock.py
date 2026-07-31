@@ -12,10 +12,12 @@ from takealot_ops.competitors.stock import (
     _find_main_add_to_cart_button,
     _find_product_quantity_combo,
     _open_quantity_menu_with_retry,
+    _parse_customer_purchase_limit,
     _probe_above_quick_menu,
     _probe_custom_quantity_with_retry,
     _read_visible_numeric_quantity_options,
     _select_quantity_option,
+    _stock_probe_failure_note,
     _submit_custom_quantity,
     _url_matches_plid,
 )
@@ -29,6 +31,17 @@ def test_target_url_requires_the_requested_plid() -> None:
     assert not _url_matches_plid(
         "https://www.takealot.com/recommendation/PLID91577928",
         "72189176",
+    )
+
+
+def test_stock_probe_failure_note_records_stage_and_network_code() -> None:
+    error = RuntimeError(
+        "Page.goto: net::ERR_CONNECTION_CLOSED at https://www.takealot.com/cart\n"
+        "Call log:\n  - navigating to cart"
+    )
+
+    assert _stock_probe_failure_note("打开购物车", error) == (
+        "打开购物车失败：连接在页面加载时被关闭（ERR_CONNECTION_CLOSED）"
     )
 
 
@@ -139,9 +152,7 @@ async def test_quantity_choice_stops_on_late_explicit_warehouse_warning(
         "warehouse (current stock = 4). The products will need to be ordered "
         "from our supplier."
     )
-    body.inner_text = AsyncMock(
-        side_effect=["Shopping Cart", "Shopping Cart", warning]
-    )
+    body.inner_text = AsyncMock(side_effect=["Shopping Cart", "Shopping Cart", warning])
     page.locator.return_value = body
 
     async def advance(_: int) -> None:
@@ -170,13 +181,13 @@ async def test_explicit_warehouse_warning_skips_all_followup_probes(
 ) -> None:
     page = Mock()
     combo = Mock()
-    submit_probe = AsyncMock(return_value=(False, 4))
+    submit_probe = AsyncMock(return_value=(False, 4, None))
     monkeypatch.setattr(
         "takealot_ops.competitors.stock._probe_custom_quantity_with_retry",
         submit_probe,
     )
 
-    assert await _probe_above_quick_menu(page, combo) == (4, True)
+    assert await _probe_above_quick_menu(page, combo) == (4, True, None)
     submit_probe.assert_awaited_once_with(page, combo, 10)
 
 
@@ -187,13 +198,13 @@ async def test_rejected_quantity_ten_confirms_exact_stock_of_nine(
     page = Mock()
     page.wait_for_timeout = AsyncMock()
     combo = Mock()
-    submit_probe = AsyncMock(return_value=(False, None))
+    submit_probe = AsyncMock(return_value=(False, None, None))
     monkeypatch.setattr(
         "takealot_ops.competitors.stock._probe_custom_quantity_with_retry",
         submit_probe,
     )
 
-    assert await _probe_above_quick_menu(page, combo) == (9, True)
+    assert await _probe_above_quick_menu(page, combo) == (9, True, None)
     submit_probe.assert_awaited_once_with(page, combo, 10)
     page.wait_for_timeout.assert_not_awaited()
 
@@ -205,7 +216,7 @@ async def test_unavailable_ten_plus_editor_without_warning_remains_indeterminate
     page = Mock()
     page.wait_for_timeout = AsyncMock()
     combo = Mock()
-    submit_probe = AsyncMock(return_value=(None, None))
+    submit_probe = AsyncMock(return_value=(None, None, None))
     monkeypatch.setattr(
         "takealot_ops.competitors.stock._probe_custom_quantity_with_retry",
         submit_probe,
@@ -225,8 +236,8 @@ async def test_accepted_quantity_ten_continues_to_high_quantity_probe(
     combo = Mock()
     submit_probe = AsyncMock(
         side_effect=[
-            (True, None),
-            (False, 42),
+            (True, None, None),
+            (False, 42, None),
         ]
     )
     monkeypatch.setattr(
@@ -234,11 +245,44 @@ async def test_accepted_quantity_ten_continues_to_high_quantity_probe(
         submit_probe,
     )
 
-    assert await _probe_above_quick_menu(page, combo) == (42, True)
+    assert await _probe_above_quick_menu(page, combo) == (42, True, None)
     assert submit_probe.await_args_list == [
         call(page, combo, 10),
         call(page, combo, 100),
     ]
+
+
+@pytest.mark.asyncio
+async def test_customer_limit_is_verified_and_retained_as_at_least_stock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    page = Mock()
+    page.wait_for_timeout = AsyncMock()
+    combo = Mock()
+    submit_probe = AsyncMock(
+        side_effect=[
+            (True, None, None),
+            (False, None, 20),
+            (True, None, 20),
+        ]
+    )
+    monkeypatch.setattr(
+        "takealot_ops.competitors.stock._probe_custom_quantity_with_retry",
+        submit_probe,
+    )
+
+    assert await _probe_above_quick_menu(page, combo) == (20, False, 20)
+    assert submit_probe.await_args_list == [
+        call(page, combo, 10),
+        call(page, combo, 100),
+        call(page, combo, 20),
+    ]
+
+
+def test_customer_purchase_limit_message_parser() -> None:
+    assert _parse_customer_purchase_limit("Limited to 20 per customer.") == 20
+    assert _parse_customer_purchase_limit("Limited to 1,250 per customer") == 1250
+    assert _parse_customer_purchase_limit("In stock") is None
 
 
 @pytest.mark.asyncio
@@ -249,7 +293,7 @@ async def test_explicit_custom_quantity_warning_returns_without_extra_wait(
     page.wait_for_timeout = AsyncMock()
     combo = Mock()
     ensure_input = AsyncMock(return_value=True)
-    submit_quantity = AsyncMock(return_value=(False, 4))
+    submit_quantity = AsyncMock(return_value=(False, 4, None))
     monkeypatch.setattr(
         "takealot_ops.competitors.stock._ensure_custom_quantity_input",
         ensure_input,
@@ -259,7 +303,11 @@ async def test_explicit_custom_quantity_warning_returns_without_extra_wait(
         submit_quantity,
     )
 
-    assert await _probe_custom_quantity_with_retry(page, combo, 100) == (False, 4)
+    assert await _probe_custom_quantity_with_retry(page, combo, 100) == (
+        False,
+        4,
+        None,
+    )
     ensure_input.assert_awaited_once_with(page, combo)
     submit_quantity.assert_awaited_once_with(page, combo, 100)
     page.wait_for_timeout.assert_not_awaited()
@@ -285,7 +333,11 @@ async def test_unavailable_ten_plus_editor_reads_explicit_no_ten_warning(
         submit_quantity,
     )
 
-    assert await _probe_custom_quantity_with_retry(page, combo, 10) == (False, None)
+    assert await _probe_custom_quantity_with_retry(page, combo, 10) == (
+        False,
+        None,
+        None,
+    )
     ensure_input.assert_awaited_once_with(page, combo)
     page.locator.assert_called_once_with("body")
     submit_quantity.assert_not_awaited()
@@ -299,6 +351,8 @@ async def test_unavailable_ten_plus_editor_without_warning_is_indeterminate(
     body = Mock()
     body.inner_text = AsyncMock(return_value="Shopping Cart")
     page.locator.return_value = body
+    page.reload = AsyncMock()
+    page.wait_for_timeout = AsyncMock()
     combo = Mock()
     ensure_input = AsyncMock(return_value=False)
     submit_quantity = AsyncMock()
@@ -311,8 +365,13 @@ async def test_unavailable_ten_plus_editor_without_warning_is_indeterminate(
         submit_quantity,
     )
 
-    assert await _probe_custom_quantity_with_retry(page, combo, 10) == (None, None)
-    ensure_input.assert_awaited_once_with(page, combo)
+    assert await _probe_custom_quantity_with_retry(page, combo, 10) == (
+        None,
+        None,
+        None,
+    )
+    assert ensure_input.await_count == 3
+    assert page.reload.await_count == 2
     submit_quantity.assert_not_awaited()
 
 
@@ -392,9 +451,7 @@ async def test_cart_never_falls_back_to_an_unrelated_single_item(
     with pytest.raises(RuntimeError, match="未找到目标竞品 PLID72189176"):
         await _find_product_quantity_combo(page, "72189176")
 
-    page.locator.assert_called_once_with(
-        'a[href*="/PLID72189176"]:visible'
-    )
+    page.locator.assert_called_once_with('a[href*="/PLID72189176"]:visible')
 
 
 @pytest.mark.asyncio
@@ -447,9 +504,7 @@ async def test_custom_quantity_accepts_closed_editor_with_matching_combo(
     body = Mock()
 
     def locator(selector: str) -> Mock:
-        if selector == (
-            'input[name="quantity"]:not([aria-hidden="true"]):visible'
-        ):
+        if selector == ('input[name="quantity"]:not([aria-hidden="true"]):visible'):
             return quantity_input
         if selector == "button:visible":
             return update_button
@@ -480,7 +535,7 @@ async def test_custom_quantity_accepts_closed_editor_with_matching_combo(
         SimpleNamespace(monotonic=lambda: clock[0]),
     )
 
-    assert await _submit_custom_quantity(page, combo, 14) == (True, None)
+    assert await _submit_custom_quantity(page, combo, 14) == (True, None, None)
     quantity_input.fill.assert_awaited_once_with("14", force=True)
 
 
@@ -491,7 +546,7 @@ async def test_custom_quantity_reloads_and_retries_transient_cart_error(
     page = Mock()
     combo = Mock()
     ensure = AsyncMock(return_value=True)
-    submit = AsyncMock(side_effect=[(None, None), (True, None)])
+    submit = AsyncMock(side_effect=[(None, None, None), (True, None, None)])
     page.reload = AsyncMock()
     page.wait_for_timeout = AsyncMock()
     monkeypatch.setattr(
@@ -506,8 +561,42 @@ async def test_custom_quantity_reloads_and_retries_transient_cart_error(
     assert await _probe_custom_quantity_with_retry(page, combo, 20) == (
         True,
         None,
+        None,
     )
     assert ensure.await_count == 2
     assert submit.await_count == 2
     page.reload.assert_awaited_once_with(wait_until="domcontentloaded")
     assert page.wait_for_timeout.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_custom_quantity_retries_transient_error_even_with_limit_banner(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    page = Mock()
+    combo = Mock()
+    ensure = AsyncMock(return_value=True)
+    submit = AsyncMock(
+        side_effect=[
+            (None, None, 20),
+            (True, None, 20),
+        ]
+    )
+    page.reload = AsyncMock()
+    page.wait_for_timeout = AsyncMock()
+    monkeypatch.setattr(
+        "takealot_ops.competitors.stock._ensure_custom_quantity_input",
+        ensure,
+    )
+    monkeypatch.setattr(
+        "takealot_ops.competitors.stock._submit_custom_quantity",
+        submit,
+    )
+
+    assert await _probe_custom_quantity_with_retry(page, combo, 20) == (
+        True,
+        None,
+        20,
+    )
+    assert ensure.await_count == 2
+    page.reload.assert_awaited_once_with(wait_until="domcontentloaded")

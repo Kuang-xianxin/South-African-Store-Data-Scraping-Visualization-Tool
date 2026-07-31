@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
+import logging
 import os
+import random
 import time
 from collections import defaultdict
 from collections.abc import AsyncIterator, Awaitable, Callable
@@ -31,7 +34,11 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
-from takealot_ops.competitors.api import CompetitorNetworkError, extract_plid
+from takealot_ops.competitors.api import (
+    CompetitorNetworkError,
+    CompetitorPublicClient,
+    extract_plid,
+)
 from takealot_ops.competitors.batch import (
     CollectionBatchBusyError,
     CollectionBatchRegistry,
@@ -237,9 +244,21 @@ class BootstrapRequest(LoginRequest):
     display_name: str = Field(default="", max_length=100)
 
 
+class StoreCreateRequest(BaseModel):
+    code: str = Field(min_length=1, max_length=64)
+    display_name: str = Field(min_length=1, max_length=100)
+
+
+class StoreUpdateRequest(BaseModel):
+    display_name: str | None = Field(default=None, max_length=100)
+    active: bool | None = None
+
+
 class UserCreateRequest(BootstrapRequest):
     role: str
     permissions: list[str] | None = None
+    all_stores: bool | None = None
+    store_ids: list[int] | None = None
 
 
 class UserUpdateRequest(BaseModel):
@@ -247,6 +266,8 @@ class UserUpdateRequest(BaseModel):
     password: str | None = Field(default=None, max_length=128)
     role: str | None = None
     permissions: list[str] | None = None
+    all_stores: bool | None = None
+    store_ids: list[int] | None = None
     active: bool | None = None
 
 
@@ -271,16 +292,110 @@ class _LoginLimiter:
             self._failures.pop(source, None)
 
 
+class _CompetitorPublicClientLease:
+    def __init__(self, client: CompetitorPublicClient) -> None:
+        self.client = client
+        self.reusable = True
+
+    def invalidate(self) -> None:
+        self.reusable = False
+
+
+def _competitor_link_cooldown_seconds(
+    min_seconds: float,
+    max_seconds: float,
+) -> float:
+    return random.uniform(min_seconds, max_seconds)
+
+
+async def _sleep_competitor_link_cooldown(seconds: float) -> None:
+    await asyncio.sleep(seconds)
+
+
+class _SharedCompetitorPublicClient:
+    """Serialize and bound reuse of the hidden public-data browser."""
+
+    def __init__(
+        self,
+        *,
+        max_uses: int = 25,
+        min_link_delay_seconds: float = 5.0,
+        max_link_delay_seconds: float = 10.0,
+    ) -> None:
+        if max_uses < 1:
+            raise ValueError("max_uses must be at least 1")
+        if min_link_delay_seconds < 0:
+            raise ValueError("min_link_delay_seconds cannot be negative")
+        if max_link_delay_seconds < min_link_delay_seconds:
+            raise ValueError(
+                "max_link_delay_seconds must be at least min_link_delay_seconds"
+            )
+        self._max_uses = max_uses
+        self._min_link_delay_seconds = min_link_delay_seconds
+        self._max_link_delay_seconds = max_link_delay_seconds
+        self._uses = 0
+        self._has_previous_lease = False
+        self._client: CompetitorPublicClient | None = None
+        self._lock = asyncio.Lock()
+
+    @asynccontextmanager
+    async def lease(
+        self,
+        *,
+        wait_callback: Callable[[float], None] | None = None,
+    ) -> AsyncIterator[_CompetitorPublicClientLease]:
+        async with self._lock:
+            if self._has_previous_lease:
+                delay_seconds = _competitor_link_cooldown_seconds(
+                    self._min_link_delay_seconds,
+                    self._max_link_delay_seconds,
+                )
+                if wait_callback is not None:
+                    wait_callback(delay_seconds)
+                await _sleep_competitor_link_cooldown(delay_seconds)
+            if self._client is None or self._uses >= self._max_uses:
+                await self._close_current()
+                self._client = CompetitorPublicClient()
+            client = self._client
+            lease = _CompetitorPublicClientLease(client)
+            try:
+                yield lease
+            except BaseException:
+                lease.invalidate()
+                raise
+            finally:
+                self._has_previous_lease = True
+                self._uses += 1
+                if not lease.reusable:
+                    await self._close_current()
+
+    async def close(self) -> None:
+        async with self._lock:
+            await self._close_current()
+
+    async def _close_current(self) -> None:
+        client = self._client
+        self._client = None
+        self._uses = 0
+        if client is None:
+            return
+        try:
+            await client.close()
+        except Exception:
+            logging.getLogger(__name__).warning(
+                "Failed to close the reusable competitor public browser",
+                exc_info=True,
+            )
+
+
 def create_app(project_root: Path | None = None) -> FastAPI:
     """Create the unified ERP API and attach its built Vue application."""
-    root = (
-        project_root
-        or Path(os.environ.get("TAKEALOT_PROJECT_ROOT", Path.cwd()))
-    ).resolve()
+    root = (project_root or Path(os.environ.get("TAKEALOT_PROJECT_ROOT", Path.cwd()))).resolve()
     auth = AuthManager(root)
     limiter = _LoginLimiter()
     competitor_logger = configure_collection_logger(root)
     collection_coordinator = CollectionRequestCoordinator[CompetitorCollectionResult]()
+    competitor_public_client = _SharedCompetitorPublicClient(max_uses=25)
     database_url = DashboardSettings.from_env(root).database_url
     collection_registry = CollectionBatchRegistry(
         None
@@ -292,10 +407,13 @@ def create_app(project_root: Path | None = None) -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
-        yield
-        refresh_coordinator.close()
-        product_thumbnails.close()
-        auth.close()
+        try:
+            yield
+        finally:
+            await competitor_public_client.close()
+            refresh_coordinator.close()
+            product_thumbnails.close()
+            auth.close()
 
     app = FastAPI(
         title="Takealot 本地运营 ERP",
@@ -306,6 +424,17 @@ def create_app(project_root: Path | None = None) -> FastAPI:
     )
     app.state.auth_manager = auth
     app.state.product_thumbnail_cache = product_thumbnails
+
+    def require_competitor_batch_controller(request: Request) -> None:
+        user = request.state.erp_user
+        if user.username.casefold() != "kxx":
+            raise HTTPException(
+                status_code=403,
+                detail=(
+                    "竞品批次的开始、继续和停止仅限 kxx 账号；"
+                    "当前账号仍可新增链接和插队"
+                ),
+            )
 
     @app.middleware("http")
     async def enforce_permissions(
@@ -347,11 +476,30 @@ def create_app(project_root: Path | None = None) -> FastAPI:
                     renewed=session.renewed,
                 )
         required_permission = _required_permission(path, request.method)
-        if required_permission and not session.user.can(required_permission):
+        if required_permission and not _can_access_required_permission(
+            session.user,
+            required_permission,
+        ):
             response = JSONResponse(
                 status_code=403,
                 content={
                     "detail": _permission_denied_message(required_permission),
+                },
+            )
+            return _renew_session_cookie(
+                response,
+                request,
+                session_token,
+                renewed=session.renewed,
+            )
+        if (
+            _requires_connected_store_access(path)
+            and not session.user.can_access_connected_store()
+        ):
+            response = JSONResponse(
+                status_code=403,
+                content={
+                    "detail": "当前账号未获授权访问已接入数据的店铺",
                 },
             )
             return _renew_session_cookie(
@@ -445,6 +593,40 @@ def create_app(project_root: Path | None = None) -> FastAPI:
     def auth_users() -> dict[str, Any]:
         return {"items": auth.list_users()}
 
+    @app.get("/api/auth/stores")
+    def auth_stores() -> dict[str, Any]:
+        return {"items": auth.list_stores()}
+
+    @app.post("/api/auth/stores")
+    def auth_create_store(payload: StoreCreateRequest) -> dict[str, Any]:
+        try:
+            store = auth.create_store(
+                code=payload.code,
+                display_name=payload.display_name,
+            )
+        except AuthInputError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except AuthConflictError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return {"store": store}
+
+    @app.patch("/api/auth/stores/{store_id}")
+    def auth_update_store(
+        store_id: int,
+        payload: StoreUpdateRequest,
+    ) -> dict[str, Any]:
+        try:
+            store = auth.update_store(
+                store_id,
+                display_name=payload.display_name,
+                active=payload.active,
+            )
+        except AuthInputError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except AuthConflictError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return {"store": store}
+
     @app.post("/api/auth/users")
     def auth_create_user(payload: UserCreateRequest) -> dict[str, Any]:
         try:
@@ -454,6 +636,8 @@ def create_app(project_root: Path | None = None) -> FastAPI:
                 password=payload.password,
                 role=payload.role,
                 permissions=payload.permissions,
+                all_stores=payload.all_stores,
+                store_ids=payload.store_ids,
             )
         except AuthInputError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -471,6 +655,9 @@ def create_app(project_root: Path | None = None) -> FastAPI:
                 role=payload.role,
                 permissions=payload.permissions,
                 permissions_provided="permissions" in payload.model_fields_set,
+                all_stores=payload.all_stores,
+                store_ids=payload.store_ids,
+                store_ids_provided="store_ids" in payload.model_fields_set,
                 active=payload.active,
             )
         except AuthInputError as exc:
@@ -494,9 +681,7 @@ def create_app(project_root: Path | None = None) -> FastAPI:
                         CollectionRun.run_type.in_(("offers", "sales")),
                     )
                 )
-                latest_metric = session.scalar(
-                    select(func.max(DailyProductMetric.metric_date))
-                )
+                latest_metric = session.scalar(select(func.max(DailyProductMetric.metric_date)))
         except SQLAlchemyError:
             return {"last_collection_at": None, "latest_metric_date": None}
         finally:
@@ -576,9 +761,7 @@ def create_app(project_root: Path | None = None) -> FastAPI:
 
     @app.get("/api/erp/refresh-status")
     def refresh_status(request: Request) -> dict[str, object]:
-        return refresh_coordinator.status(
-            role=_refresh_coordination_role(request.state.erp_user)
-        )
+        return refresh_coordinator.status(role=_refresh_coordination_role(request.state.erp_user))
 
     @app.post("/api/erp/refresh")
     def refresh(request: Request) -> dict[str, object]:
@@ -617,11 +800,24 @@ def create_app(project_root: Path | None = None) -> FastAPI:
     @app.get("/api/erp/daily-report")
     def operations_daily_report(
         business_date: date = Query(default_factory=_default_operations_business_date),
+        capture_start: date | None = Query(default=None),
+        capture_end: date | None = Query(default=None),
     ) -> dict[str, Any]:
+        effective_capture_end = min(capture_end or business_date, business_date)
+        if capture_start is not None and capture_start > effective_capture_end:
+            raise HTTPException(
+                status_code=422,
+                detail="数据完整性说明开始日期不能晚于结束日期",
+            )
         settings = DashboardSettings.from_env(root)
         engine = create_read_only_erp_engine(settings.database_url)
         try:
-            return daily_report_payload(engine, business_date)
+            return daily_report_payload(
+                engine,
+                business_date,
+                capture_start=capture_start,
+                capture_end=capture_end,
+            )
         finally:
             engine.dispose()
 
@@ -711,9 +907,7 @@ def create_app(project_root: Path | None = None) -> FastAPI:
             ),
         }
 
-    @app.post(
-        "/api/erp/daily-report/{business_date}/{offer_id}/revert-confirmation"
-    )
+    @app.post("/api/erp/daily-report/{business_date}/{offer_id}/revert-confirmation")
     def operations_daily_report_revert_confirmation(
         business_date: date,
         offer_id: str,
@@ -778,9 +972,7 @@ def create_app(project_root: Path | None = None) -> FastAPI:
         )
         return {"ok": True}
 
-    @app.post(
-        "/api/erp/daily-report/{business_date}/{offer_id}/stock-alert/eliminate"
-    )
+    @app.post("/api/erp/daily-report/{business_date}/{offer_id}/stock-alert/eliminate")
     def operations_daily_report_eliminate_stock_alert(
         business_date: date,
         offer_id: str,
@@ -799,9 +991,7 @@ def create_app(project_root: Path | None = None) -> FastAPI:
         )
         return {"ok": True}
 
-    @app.post(
-        "/api/erp/daily-report/{business_date}/{offer_id}/stock-alert/reopen"
-    )
+    @app.post("/api/erp/daily-report/{business_date}/{offer_id}/stock-alert/reopen")
     def operations_daily_report_reopen_stock_alert(
         business_date: date,
         offer_id: str,
@@ -1370,8 +1560,6 @@ def create_app(project_root: Path | None = None) -> FastAPI:
             reviews = reviews.loc[reviews["plid"].astype(str) == plid]
         if not variants.empty:
             variants = variants.loc[variants["plid"].astype(str) == plid]
-            latest_snapshot_id = variants["快照ID"].max()
-            variants = variants.loc[variants["快照ID"] == latest_snapshot_id]
         return {
             "history": frame_records(history),
             "reviews": frame_records(reviews),
@@ -1383,6 +1571,7 @@ def create_app(project_root: Path | None = None) -> FastAPI:
         payload: CollectCompetitorRequest,
         request: Request,
     ) -> dict[str, object]:
+        require_competitor_batch_controller(request)
         try:
             plid = extract_plid(payload.url)
         except ValueError as exc:
@@ -1400,10 +1589,27 @@ def create_app(project_root: Path | None = None) -> FastAPI:
                 plid=plid,
             )
         except CollectionBatchBusyError as exc:
-            raise HTTPException(status_code=409, detail=str(exc)) from exc
+            raise HTTPException(status_code=423, detail=str(exc)) from exc
 
         async def execute_collection() -> CompetitorCollectionResult:
             registry_reason = ""
+
+            def report_stage(stage: str) -> None:
+                collection_registry.update_link_stage(
+                    batch_id=payload.batch_id,
+                    request_id=payload.request_id,
+                    stage=stage,
+                )
+                competitor_logger.info(
+                    "link_stage batch=%s request=%s item=%s/%s plid=%s stage=%s",
+                    payload.batch_id or "-",
+                    payload.request_id or "-",
+                    _display_item_number(payload.item_index),
+                    payload.total_items or "-",
+                    plid,
+                    _single_line(stage),
+                )
+
             competitor_logger.info(
                 "link_start batch=%s request=%s item=%s/%s plid=%s",
                 payload.batch_id or "-",
@@ -1417,15 +1623,24 @@ def create_app(project_root: Path | None = None) -> FastAPI:
             try:
                 create_schema(engine)
                 try:
-                    async with CompetitorCollector(
-                        engine=engine,
-                        project_root=root,
-                    ) as collector:
-                        result = await collector.collect(
-                            payload.url,
-                            with_stock_probe=payload.with_stock_probe,
-                            visible_browser=payload.visible_browser,
+                    async with competitor_public_client.lease(
+                        wait_callback=lambda delay_seconds: report_stage(
+                            f"正在随机节流 {delay_seconds:.1f} 秒，降低访问频率"
                         )
+                    ) as public_client_lease:
+                        async with CompetitorCollector(
+                            engine=engine,
+                            project_root=root,
+                            client=public_client_lease.client,
+                            progress_callback=report_stage,
+                        ) as collector:
+                            result = await collector.collect(
+                                payload.url,
+                                with_stock_probe=payload.with_stock_probe,
+                                visible_browser=payload.visible_browser,
+                            )
+                        if result.failure_kind in {"network", "other"}:
+                            public_client_lease.invalidate()
                 except CompetitorNetworkError as exc:
                     registry_reason = _single_line(str(exc))
                     competitor_logger.warning(
@@ -1444,8 +1659,7 @@ def create_app(project_root: Path | None = None) -> FastAPI:
                 registry_reason = registry_reason or _single_line(str(exc))
                 if not isinstance(exc, CompetitorNetworkError):
                     competitor_logger.error(
-                        "link_exception batch=%s request=%s item=%s/%s "
-                        "plid=%s type=%s reason=%s",
+                        "link_exception batch=%s request=%s item=%s/%s plid=%s type=%s reason=%s",
                         payload.batch_id or "-",
                         payload.request_id or "-",
                         _display_item_number(payload.item_index),
@@ -1515,6 +1729,7 @@ def create_app(project_root: Path | None = None) -> FastAPI:
         payload: CompetitorBatchEventRequest,
         request: Request,
     ) -> dict[str, object]:
+        require_competitor_batch_controller(request)
         user = request.state.erp_user
         try:
             status = collection_registry.event(
@@ -1533,32 +1748,52 @@ def create_app(project_root: Path | None = None) -> FastAPI:
             )
         except CollectionBatchBusyError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
-        competitor_logger.info(
-            "batch_event batch=%s event=%s completed=%s total=%s pending=%s "
-            "succeeded=%s failed=%s terminal=%s user=%s reason=%s",
-            payload.batch_id,
-            payload.event,
-            payload.completed,
-            payload.total,
-            payload.pending,
-            payload.succeeded,
-            payload.failed,
-            payload.terminal,
-            user.username,
-            _single_line(payload.reason),
-        )
+        effective_event = str(status["event"])
+        if effective_event != payload.event:
+            competitor_logger.info(
+                "batch_event batch=%s event=%s submitted_event=%s completed=%s "
+                "total=%s pending=%s succeeded=%s failed=%s terminal=%s user=%s "
+                "reason=%s",
+                payload.batch_id,
+                effective_event,
+                payload.event,
+                payload.completed,
+                payload.total,
+                payload.pending,
+                payload.succeeded,
+                payload.failed,
+                payload.terminal,
+                user.username,
+                _single_line(payload.reason),
+            )
+        else:
+            competitor_logger.info(
+                "batch_event batch=%s event=%s completed=%s total=%s pending=%s "
+                "succeeded=%s failed=%s terminal=%s user=%s reason=%s",
+                payload.batch_id,
+                payload.event,
+                payload.completed,
+                payload.total,
+                payload.pending,
+                payload.succeeded,
+                payload.failed,
+                payload.terminal,
+                user.username,
+                _single_line(payload.reason),
+            )
         return {"ok": True, "status": status}
 
     frontend_dist = root / "frontend" / "competitor" / "dist"
     if frontend_dist.is_dir():
         app.mount("/", StaticFiles(directory=frontend_dist, html=True), name="frontend")
     else:
+
         @app.get("/", response_class=HTMLResponse)
         def missing_frontend() -> str:
             return (
-                "<h1>ERP 前端尚未构建</h1>"
-                "<p>请在 frontend/competitor 目录执行 npm run build。</p>"
+                "<h1>ERP 前端尚未构建</h1><p>请在 frontend/competitor 目录执行 npm run build。</p>"
             )
+
     return app
 
 
@@ -1659,15 +1894,17 @@ def _beijing_date_iso(value: datetime | None) -> str | None:
     return value.astimezone(ZoneInfo("Asia/Shanghai")).date().isoformat()
 
 
-def _required_permission(path: str, method: str) -> str | None:
+def _required_permission(path: str, method: str) -> str | tuple[str, ...] | None:
     """Map every authenticated API route to its server-enforced permission."""
     safe_method = method in {"GET", "HEAD", "OPTIONS"}
     if path == "/api/auth/logout":
         return None
-    if path.startswith("/api/auth/users"):
+    if path.startswith(("/api/auth/users", "/api/auth/stores")):
         return USERS_MANAGE
     if path in {"/api/erp/freshness", "/api/erp/refresh-status"}:
         return None
+    if path == "/api/erp/product-thumbnail":
+        return STORE_VIEW, COMPETITORS_VIEW, DAILY_REPORT_VIEW
     if path == "/api/erp/refresh":
         return REFRESH_RUN
     if path.startswith("/api/erp/daily-report/export"):
@@ -1692,7 +1929,38 @@ def _required_permission(path: str, method: str) -> str | None:
     return STORE_VIEW if safe_method else "__unsupported_write__"
 
 
-def _permission_denied_message(permission: str) -> str:
+def _requires_connected_store_access(path: str) -> bool:
+    """Gate the current single-store dataset behind an assigned connected store."""
+    return (
+        path
+        in {
+            "/api/erp/freshness",
+            "/api/erp/refresh-status",
+            "/api/erp/refresh",
+        }
+        or path.startswith(
+            (
+                "/api/erp/summary",
+                "/api/erp/products",
+                "/api/erp/quadrants",
+                "/api/erp/risks",
+                "/api/erp/daily-report",
+                "/api/erp/exports",
+            )
+        )
+    )
+
+
+def _can_access_required_permission(
+    user: UserIdentity,
+    permission: str | tuple[str, ...],
+) -> bool:
+    if isinstance(permission, tuple):
+        return any(user.can(candidate) for candidate in permission)
+    return user.can(permission)
+
+
+def _permission_denied_message(permission: str | tuple[str, ...]) -> str:
     if permission == USERS_MANAGE:
         return "当前账号没有用户权限管理权限"
     if permission == DAILY_REPORT_MANAGE:
@@ -1723,6 +1991,8 @@ def _collection_failure_status(
         return 503
     if failure_kind == "validation-uncertain":
         return 409
+    if failure_kind == "stock-unprobed":
+        return 424
     if failure_kind == "suspected-invalid":
         return 404
     if failure_kind == "confirmed-invalid":
@@ -1843,17 +2113,11 @@ def _export_payload(project_root: Path, as_of: date) -> dict[str, Any]:
 
 
 def _nft_download_url(report_date: date, name: str) -> str:
-    return (
-        "/api/erp/nft102/download?"
-        f"report_date={report_date.isoformat()}&name={quote(name)}"
-    )
+    return f"/api/erp/nft102/download?report_date={report_date.isoformat()}&name={quote(name)}"
 
 
 def _is_loopback_request(request: Request) -> bool:
-    return bool(
-        request.client
-        and request.client.host in {"127.0.0.1", "::1", "localhost"}
-    )
+    return bool(request.client and request.client.host in {"127.0.0.1", "::1", "localhost"})
 
 
 def _session_response(request: Request, issued: IssuedSession) -> Response:

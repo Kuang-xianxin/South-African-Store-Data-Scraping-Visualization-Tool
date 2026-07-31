@@ -38,10 +38,7 @@ class CollectRequest(BaseModel):
 
 def create_app(project_root: Path | None = None) -> FastAPI:
     """Create the local API and attach the built Vue application."""
-    root = (
-        project_root
-        or Path(os.environ.get("TAKEALOT_PROJECT_ROOT", Path.cwd()))
-    ).resolve()
+    root = (project_root or Path(os.environ.get("TAKEALOT_PROJECT_ROOT", Path.cwd()))).resolve()
     app = FastAPI(
         title="Takealot 竞品观察",
         docs_url=None,
@@ -89,8 +86,6 @@ def create_app(project_root: Path | None = None) -> FastAPI:
             reviews = reviews.loc[reviews["plid"].astype(str) == plid]
         if not variants.empty:
             variants = variants.loc[variants["plid"].astype(str) == plid]
-            latest_snapshot_id = variants["快照ID"].max()
-            variants = variants.loc[variants["快照ID"] == latest_snapshot_id]
         return {
             "history": _frame_records(history),
             "reviews": _frame_records(reviews),
@@ -137,12 +132,13 @@ def create_app(project_root: Path | None = None) -> FastAPI:
     if frontend_dist.is_dir():
         app.mount("/", StaticFiles(directory=frontend_dist, html=True), name="frontend")
     else:
+
         @app.get("/", response_class=HTMLResponse)
         def missing_frontend() -> str:
             return (
-                "<h1>竞品前端尚未构建</h1>"
-                "<p>请在 frontend/competitor 目录执行 npm run build。</p>"
+                "<h1>竞品前端尚未构建</h1><p>请在 frontend/competitor 目录执行 npm run build。</p>"
             )
+
     return app
 
 
@@ -155,6 +151,8 @@ def _collection_failure_status(
         return 503
     if failure_kind == "validation-uncertain":
         return 409
+    if failure_kind == "stock-unprobed":
+        return 424
     if failure_kind == "suspected-invalid":
         return 404
     if failure_kind == "confirmed-invalid":

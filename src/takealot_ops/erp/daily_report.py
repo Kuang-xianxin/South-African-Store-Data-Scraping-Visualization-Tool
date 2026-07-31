@@ -346,7 +346,13 @@ def capture_daily_report(
     )
 
 
-def daily_report_payload(engine: Engine, business_date: date) -> dict[str, Any]:
+def daily_report_payload(
+    engine: Engine,
+    business_date: date,
+    *,
+    capture_start: date | None = None,
+    capture_end: date | None = None,
+) -> dict[str, Any]:
     """Build one date's comparison table and all persistent prior reminders."""
     with Session(engine) as session:
         runs = list(
@@ -412,6 +418,15 @@ def daily_report_payload(engine: Engine, business_date: date) -> dict[str, Any]:
             current_items=items,
         )
         handled_actions = _handled_actions(session, through=business_date)
+        capture_issues, capture_issue_range = _capture_issue_history(
+            session,
+            through=business_date,
+            selected_start=capture_start,
+            selected_end=capture_end,
+            current_items=items,
+            current_runs=runs,
+            current_capture_status=capture_status,
+        )
         current_stock_values = [
             _platform_stock(offer)[0]
             for offer in session.scalars(
@@ -452,7 +467,8 @@ def daily_report_payload(engine: Engine, business_date: date) -> dict[str, Any]:
             for run in runs
         ],
         "capture_status": capture_status,
-        "capture_issues": _capture_issues(items, capture_status, runs),
+        "capture_issues": capture_issues,
+        "capture_issue_range": capture_issue_range,
         "comparison_history": comparison_history,
         "pending_actions": pending_actions,
         "handled_actions": handled_actions,
@@ -3954,6 +3970,99 @@ def _capture_issues(
                 }
             )
     return issues
+
+
+def _capture_issue_history(
+    session: Session,
+    *,
+    through: date,
+    selected_start: date | None,
+    selected_end: date | None,
+    current_items: list[dict[str, Any]],
+    current_runs: list[DailyReportRun],
+    current_capture_status: dict[str, dict[str, Any]],
+) -> tuple[list[dict[str, Any]], dict[str, str]]:
+    range_end = min(selected_end or through, through)
+    range_start = selected_start or (range_end - timedelta(days=2))
+    if range_start > range_end:
+        raise DailyReportInputError("数据完整性说明开始日期不能晚于结束日期")
+
+    run_dates = set(
+        session.scalars(
+            select(DailyReportRun.business_date)
+            .where(
+                DailyReportRun.business_date >= range_start,
+                DailyReportRun.business_date <= range_end,
+            )
+            .distinct()
+        )
+    )
+    resolution_dates = set(
+        session.scalars(
+            select(DailyReportResolution.business_date)
+            .where(
+                DailyReportResolution.business_date >= range_start,
+                DailyReportResolution.business_date <= range_end,
+            )
+            .distinct()
+        )
+    )
+    report_dates = run_dates | resolution_dates
+    if (
+        range_start <= through <= range_end
+        and (current_items or current_runs)
+    ):
+        report_dates.add(through)
+
+    issues: list[dict[str, Any]] = []
+    for report_date in sorted(report_dates, reverse=True):
+        if report_date == through:
+            items = current_items
+            runs = current_runs
+            capture_status = current_capture_status
+        else:
+            runs = list(
+                session.scalars(
+                    select(DailyReportRun)
+                    .where(DailyReportRun.business_date == report_date)
+                    .order_by(DailyReportRun.captured_at)
+                )
+            )
+            items = _comparison_items_for_date(session, report_date)
+            capture_status = _capture_status(runs, report_date)
+        issues.extend(
+            {
+                "business_date": report_date.isoformat(),
+                **issue,
+            }
+            for issue in _capture_issues(items, capture_status, runs)
+        )
+
+    available_start_candidates = [
+        value
+        for value in (
+            session.scalar(
+                select(func.min(DailyReportRun.business_date)).where(
+                    DailyReportRun.business_date <= through
+                )
+            ),
+            session.scalar(
+                select(func.min(DailyReportResolution.business_date)).where(
+                    DailyReportResolution.business_date <= through
+                )
+            ),
+        )
+        if value is not None
+    ]
+    available_start = (
+        min(available_start_candidates) if available_start_candidates else through
+    )
+    return issues, {
+        "available_start": available_start.isoformat(),
+        "available_end": through.isoformat(),
+        "selected_start": range_start.isoformat(),
+        "selected_end": range_end.isoformat(),
+    }
 
 
 def _missing_slot_reason(slot: str, state: dict[str, Any]) -> str:

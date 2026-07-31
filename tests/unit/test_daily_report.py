@@ -266,6 +266,81 @@ def test_reports_before_pre_close_activation_are_not_marked_missing() -> None:
     )
 
 
+def test_capture_issue_history_defaults_to_three_days_and_supports_a_custom_range(
+) -> None:
+    engine = _engine()
+    included_date = REPORT_DATE - timedelta(days=2)
+    older_date = REPORT_DATE - timedelta(days=3)
+    record_daily_report_failure(
+        engine,
+        business_date=included_date,
+        slot="morning",
+        captured_at=_report_capture_time(included_date, 2, 5),
+        reason="included capture failure",
+    )
+    record_daily_report_failure(
+        engine,
+        business_date=older_date,
+        slot="morning",
+        captured_at=_report_capture_time(older_date, 2, 5),
+        reason="older capture failure",
+    )
+
+    payload = daily_report_payload(engine, REPORT_DATE)
+
+    assert payload["capture_issue_range"]["selected_start"] == included_date.isoformat()
+    assert payload["capture_issue_range"]["selected_end"] == REPORT_DATE.isoformat()
+    assert all("business_date" in issue for issue in payload["capture_issues"])
+    assert all(
+        included_date.isoformat()
+        <= issue["business_date"]
+        <= REPORT_DATE.isoformat()
+        for issue in payload["capture_issues"]
+    )
+    assert any(
+        issue["reason"] == "included capture failure"
+        for issue in payload["capture_issues"]
+    )
+    assert not any(
+        issue["reason"] == "older capture failure"
+        for issue in payload["capture_issues"]
+    )
+
+    older_payload = daily_report_payload(
+        engine,
+        REPORT_DATE,
+        capture_start=older_date,
+        capture_end=older_date,
+    )
+
+    assert older_payload["capture_issue_range"]["selected_start"] == (
+        older_date.isoformat()
+    )
+    assert older_payload["capture_issue_range"]["selected_end"] == older_date.isoformat()
+    assert older_payload["capture_issues"]
+    assert all(
+        issue["business_date"] == older_date.isoformat()
+        for issue in older_payload["capture_issues"]
+    )
+    assert any(
+        issue["reason"] == "older capture failure"
+        for issue in older_payload["capture_issues"]
+    )
+
+
+def test_capture_issue_history_rejects_an_inverted_range() -> None:
+    with pytest.raises(
+        DailyReportInputError,
+        match="数据完整性说明开始日期不能晚于结束日期",
+    ):
+        daily_report_payload(
+            _engine(),
+            REPORT_DATE,
+            capture_start=REPORT_DATE,
+            capture_end=REPORT_DATE - timedelta(days=1),
+        )
+
+
 def test_every_manual_refresh_in_the_ten_to_ten_cycle_is_compared() -> None:
     engine = _engine()
     capture_daily_report(

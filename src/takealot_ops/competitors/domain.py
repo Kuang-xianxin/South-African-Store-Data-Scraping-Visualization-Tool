@@ -38,6 +38,7 @@ class CompetitorVariant:
     stock_status: str
     is_leadtime: bool
     is_add_to_cart_available: bool
+    image_url: str | None = None
 
 
 @dataclass(frozen=True)
@@ -90,6 +91,7 @@ class StockProbeResult:
     exact: bool
     method: str
     note: str
+    customer_purchase_limit: int | None = None
 
 
 @dataclass(frozen=True)

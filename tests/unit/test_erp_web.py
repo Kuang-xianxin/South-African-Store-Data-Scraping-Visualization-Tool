@@ -11,16 +11,16 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
 from takealot_ops.competitors.api import CompetitorNetworkError
+from takealot_ops.competitors.batch import CollectionBatchBusyError
 from takealot_ops.competitors.service import CompetitorCollectionResult
 from takealot_ops.erp.daily_report import capture_daily_report
 from takealot_ops.erp.web import create_app
-from takealot_ops.storage.models import ErpSession, OfferCurrent
+from takealot_ops.storage.models import CompetitorSnapshot, ErpSession, OfferCurrent
 
 
 PROJECT_ROOT = Path(__file__).parents[2]
 TRUSTED_PRODUCT_IMAGE_URL = (
-    "https://takealot.s3.amazonaws.com/"
-    "covers_images/37b5fc661b694ed5969280cc0cea2ce4/s.file"
+    "https://takealot.s3.amazonaws.com/covers_images/37b5fc661b694ed5969280cc0cea2ce4/s.file"
 )
 
 
@@ -28,8 +28,8 @@ def _bootstrap(client: TestClient) -> dict[str, object]:
     response = client.post(
         "/api/auth/bootstrap",
         json={
-            "username": "localadmin",
-            "display_name": "Local Admin",
+            "username": "kxx",
+            "display_name": "KXX Admin",
             "password": "pass-123",
         },
     )
@@ -112,9 +112,7 @@ def test_product_thumbnail_is_authenticated_and_rejects_untrusted_hosts(
 
         assert response.status_code == 200
         assert response.headers["content-type"] == "image/jpeg"
-        assert response.headers["cache-control"] == (
-            "private, max-age=604800, immutable"
-        )
+        assert response.headers["cache-control"] == ("private, max-age=604800, immutable")
         assert requested_urls == [TRUSTED_PRODUCT_IMAGE_URL]
         assert requested_sizes == [640]
 
@@ -168,6 +166,272 @@ def test_erp_requires_login_and_bootstraps_only_from_loopback(
         assert database_path.exists()
 
 
+def test_store_assignments_scale_and_all_store_accounts_include_future_stores(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    database_path = tmp_path / "erp-store-access.db"
+    monkeypatch.setenv(
+        "TAKEALOT_DATABASE_URL",
+        f"sqlite:///{database_path.as_posix()}",
+    )
+    app = create_app(PROJECT_ROOT)
+
+    with TestClient(app, client=("127.0.0.1", 50000)) as admin:
+        session = _bootstrap(admin)
+        csrf = str(session["csrf_token"])
+        assert session["user"]["all_stores"] is True
+        assert len(session["user"]["accessible_stores"]) == 1
+
+        initial_stores = admin.get("/api/auth/stores")
+        assert initial_stores.status_code == 200
+        current_store = initial_stores.json()["items"][0]
+        assert current_store["code"] == "current"
+        assert current_store["data_connected"] is True
+
+        planned_stores: list[dict[str, object]] = []
+        for number in range(2, 7):
+            created = admin.post(
+                "/api/auth/stores",
+                headers={"X-CSRF-Token": csrf},
+                json={
+                    "code": f"shop-{number:02d}",
+                    "display_name": f"店铺 {number}",
+                },
+            )
+            assert created.status_code == 200
+            planned_stores.append(created.json()["store"])
+
+        duplicate = admin.post(
+            "/api/auth/stores",
+            headers={"X-CSRF-Token": csrf},
+            json={"code": "shop-02", "display_name": "重复店铺"},
+        )
+        assert duplicate.status_code == 409
+        assert duplicate.json()["detail"] == "该店铺代码已存在"
+
+        admin_session = admin.get("/api/auth/session")
+        assert admin_session.status_code == 200
+        assert len(admin_session.json()["user"]["accessible_stores"]) == 6
+
+        current_store_id = int(current_store["id"])
+        planned_ids = [int(store["id"]) for store in planned_stores]
+        operator_one = admin.post(
+            "/api/auth/users",
+            headers={"X-CSRF-Token": csrf},
+            json={
+                "username": "operator.one",
+                "display_name": "运营一",
+                "password": "operator-password-123",
+                "role": "operator",
+                "all_stores": False,
+                "store_ids": [current_store_id, planned_ids[0]],
+            },
+        )
+        assert operator_one.status_code == 200
+        operator_one_user = operator_one.json()["user"]
+        assert operator_one_user["all_stores"] is False
+        assert operator_one_user["assigned_store_ids"] == [
+            current_store_id,
+            planned_ids[0],
+        ]
+
+        operator_two = admin.post(
+            "/api/auth/users",
+            headers={"X-CSRF-Token": csrf},
+            json={
+                "username": "operator.two",
+                "display_name": "运营二",
+                "password": "operator-password-123",
+                "role": "operator",
+                "all_stores": False,
+                "store_ids": planned_ids[1:3],
+            },
+        )
+        assert operator_two.status_code == 200
+
+        owner = admin.post(
+            "/api/auth/users",
+            headers={"X-CSRF-Token": csrf},
+            json={
+                "username": "owner.master",
+                "display_name": "大师（老板）",
+                "password": "owner-password-123",
+                "role": "viewer",
+                "all_stores": True,
+                "store_ids": [],
+            },
+        )
+        assert owner.status_code == 200
+        assert len(owner.json()["user"]["accessible_stores"]) == 6
+
+        unknown_store = admin.post(
+            "/api/auth/users",
+            headers={"X-CSRF-Token": csrf},
+            json={
+                "username": "invalid.store",
+                "display_name": "无效店铺",
+                "password": "invalid-password-123",
+                "role": "viewer",
+                "all_stores": False,
+                "store_ids": [999999],
+            },
+        )
+        assert unknown_store.status_code == 422
+        assert unknown_store.json()["detail"] == "店铺不存在：999999"
+
+        protected_current = admin.patch(
+            f"/api/auth/stores/{current_store_id}",
+            headers={"X-CSRF-Token": csrf},
+            json={"active": False},
+        )
+        assert protected_current.status_code == 409
+        assert protected_current.json()["detail"] == "当前已接入数据的店铺不能停用"
+
+        with TestClient(app, client=("192.168.1.8", 50001)) as first_operator:
+            login = first_operator.post(
+                "/api/auth/login",
+                json={
+                    "username": "operator.one",
+                    "password": "operator-password-123",
+                },
+            )
+            assert login.status_code == 200
+            accessible_ids = {
+                store["id"]
+                for store in login.json()["user"]["accessible_stores"]
+            }
+            assert accessible_ids == {current_store_id, planned_ids[0]}
+            assert first_operator.get("/api/erp/freshness").status_code == 200
+
+            reassigned = admin.patch(
+                f"/api/auth/users/{operator_one_user['id']}",
+                headers={"X-CSRF-Token": csrf},
+                json={
+                    "all_stores": False,
+                    "store_ids": planned_ids[3:5],
+                },
+            )
+            assert reassigned.status_code == 200
+            assert first_operator.get("/api/auth/session").status_code == 401
+
+        with TestClient(app, client=("192.168.1.8", 50002)) as second_operator:
+            login = second_operator.post(
+                "/api/auth/login",
+                json={
+                    "username": "operator.two",
+                    "password": "operator-password-123",
+                },
+            )
+            assert login.status_code == 200
+            denied = second_operator.get("/api/erp/freshness")
+            assert denied.status_code == 403
+            assert (
+                denied.json()["detail"]
+                == "当前账号未获授权访问已接入数据的店铺"
+            )
+
+        with TestClient(app, client=("192.168.1.8", 50003)) as owner_client:
+            login = owner_client.post(
+                "/api/auth/login",
+                json={
+                    "username": "owner.master",
+                    "password": "owner-password-123",
+                },
+            )
+            assert login.status_code == 200
+            assert len(login.json()["user"]["accessible_stores"]) == 6
+            assert owner_client.get("/api/erp/freshness").status_code == 200
+
+            future = admin.post(
+                "/api/auth/stores",
+                headers={"X-CSRF-Token": csrf},
+                json={"code": "shop-07", "display_name": "店铺 7"},
+            )
+            assert future.status_code == 200
+            refreshed_scope = owner_client.get("/api/auth/session")
+            assert refreshed_scope.status_code == 200
+            assert len(refreshed_scope.json()["user"]["accessible_stores"]) == 7
+
+
+def test_public_competitor_module_does_not_require_store_assignment(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    database_path = tmp_path / "erp-public-module.db"
+    monkeypatch.setenv(
+        "TAKEALOT_DATABASE_URL",
+        f"sqlite:///{database_path.as_posix()}",
+    )
+    app = create_app(PROJECT_ROOT)
+
+    with TestClient(app, client=("127.0.0.1", 50000)) as admin:
+        session = _bootstrap(admin)
+        csrf = str(session["csrf_token"])
+        created = admin.post(
+            "/api/auth/users",
+            headers={"X-CSRF-Token": csrf},
+            json={
+                "username": "public.competitors",
+                "display_name": "公共竞品账号",
+                "password": "competitor-password-123",
+                "role": "viewer",
+                "permissions": [
+                    "store.view",
+                    "competitors.view",
+                    "competitors.collect",
+                    "nft102.manage",
+                ],
+                "all_stores": False,
+                "store_ids": [],
+            },
+        )
+        assert created.status_code == 200
+        assert created.json()["user"]["accessible_stores"] == []
+
+        with TestClient(app, client=("192.168.1.8", 50001)) as public_user:
+            login = public_user.post(
+                "/api/auth/login",
+                json={
+                    "username": "public.competitors",
+                    "password": "competitor-password-123",
+                },
+            )
+            assert login.status_code == 200
+            assert login.json()["user"]["accessible_stores"] == []
+            public_csrf = str(login.json()["csrf_token"])
+
+            assert public_user.get("/api/competitors").status_code == 200
+            invalid_collect = public_user.post(
+                "/api/competitors/collect",
+                headers={"X-CSRF-Token": public_csrf},
+                json={"url": "invalid"},
+            )
+            assert invalid_collect.status_code == 403
+            assert "仅限 kxx 账号" in invalid_collect.json()["detail"]
+            assert public_user.get("/api/erp/product-thumbnail").status_code == 422
+            assert (
+                public_user.post(
+                    "/api/erp/nft102/inspect",
+                    headers={"X-CSRF-Token": public_csrf},
+                ).status_code
+                == 422
+            )
+
+            store_data = public_user.get("/api/erp/summary?as_of=2026-07-24")
+            assert store_data.status_code == 403
+            assert (
+                store_data.json()["detail"]
+                == "当前账号未获授权访问已接入数据的店铺"
+            )
+            freshness = public_user.get("/api/erp/freshness")
+            assert freshness.status_code == 403
+            assert (
+                freshness.json()["detail"]
+                == "当前账号未获授权访问已接入数据的店铺"
+            )
+
+
 def test_session_lasts_seven_days_and_slides_after_activity(
     tmp_path: Path,
     monkeypatch,
@@ -212,9 +476,7 @@ def test_session_lasts_seven_days_and_slides_after_activity(
             immediate = client.get("/api/auth/session")
             assert immediate.status_code == 200
             assert "set-cookie" not in immediate.headers
-            assert datetime.fromisoformat(immediate.json()["expires_at"]) == (
-                restored_expiry
-            )
+            assert datetime.fromisoformat(immediate.json()["expires_at"]) == (restored_expiry)
 
             with Session(engine) as session, session.begin():
                 record = session.get(ErpSession, token_hash)
@@ -229,9 +491,7 @@ def test_session_lasts_seven_days_and_slides_after_activity(
             with Session(engine) as session, session.begin():
                 record = session.get(ErpSession, token_hash)
                 assert record is not None
-                record.last_seen_at = datetime.utcnow() - timedelta(
-                    days=1, minutes=1
-                )
+                record.last_seen_at = datetime.utcnow() - timedelta(days=1, minutes=1)
                 record.expires_at = datetime.utcnow() + timedelta(days=7)
 
             protected = client.get("/api/erp/freshness")
@@ -275,18 +535,8 @@ def test_viewer_can_read_but_cannot_run_actions(
         assert login.status_code == 200
         csrf = login.json()["csrf_token"]
         assert viewer.get("/api/erp/freshness").status_code == 200
-        assert (
-            viewer.get(
-                "/api/erp/daily-report?business_date=2026-07-24"
-            ).status_code
-            == 200
-        )
-        assert (
-            viewer.get(
-                "/api/erp/daily-report/export?through=2026-07-24"
-            ).status_code
-            == 200
-        )
+        assert viewer.get("/api/erp/daily-report?business_date=2026-07-24").status_code == 200
+        assert viewer.get("/api/erp/daily-report/export?through=2026-07-24").status_code == 200
         denied = viewer.post(
             "/api/competitors/collect",
             headers={"X-CSRF-Token": csrf},
@@ -304,10 +554,7 @@ def test_viewer_can_read_but_cannot_run_actions(
             },
         )
         assert denied_daily_action.status_code == 403
-        assert (
-            denied_daily_action.json()["detail"]
-            == "当前账号可以查看运营日报，但不能处理待办"
-        )
+        assert denied_daily_action.json()["detail"] == "当前账号可以查看运营日报，但不能处理待办"
         denied_export = viewer.post(
             "/api/erp/daily-report/export",
             headers={"X-CSRF-Token": csrf},
@@ -362,12 +609,13 @@ def test_selection_template_and_account_permission_overrides(
             )
             assert login.status_code == 200
             selection_csrf = login.json()["csrf_token"]
-            allowed_collect = default_selection.post(
+            blocked_collect = default_selection.post(
                 "/api/competitors/collect",
                 headers={"X-CSRF-Token": selection_csrf},
                 json={"url": "invalid"},
             )
-            assert allowed_collect.status_code == 422
+            assert blocked_collect.status_code == 403
+            assert "仅限 kxx 账号" in blocked_collect.json()["detail"]
             denied_pending = default_selection.post(
                 "/api/erp/daily-report/2026-07-24/not-found/manual",
                 headers={"X-CSRF-Token": selection_csrf},
@@ -378,10 +626,7 @@ def test_selection_template_and_account_permission_overrides(
                 },
             )
             assert denied_pending.status_code == 403
-            assert (
-                denied_pending.json()["detail"]
-                == "当前账号可以查看运营日报，但不能处理待办"
-            )
+            assert denied_pending.json()["detail"] == "当前账号可以查看运营日报，但不能处理待办"
 
         customized = admin.patch(
             f"/api/auth/users/{selection['id']}",
@@ -420,9 +665,7 @@ def test_selection_template_and_account_permission_overrides(
             )
             assert denied_collect.status_code == 403
             assert (
-                selection_client.get(
-                    "/api/erp/daily-report?business_date=2026-07-24"
-                ).status_code
+                selection_client.get("/api/erp/daily-report?business_date=2026-07-24").status_code
                 == 200
             )
             allowed_daily_write = selection_client.post(
@@ -435,12 +678,7 @@ def test_selection_template_and_account_permission_overrides(
                 },
             )
             assert allowed_daily_write.status_code != 403
-            assert (
-                selection_client.get(
-                    "/api/erp/summary?as_of=2026-07-24"
-                ).status_code
-                == 403
-            )
+            assert selection_client.get("/api/erp/summary?as_of=2026-07-24").status_code == 403
 
         reset = admin.patch(
             f"/api/auth/users/{selection['id']}",
@@ -467,9 +705,7 @@ def test_competitor_network_failure_returns_retryable_service_error(
             pass
 
         async def __aenter__(self):
-            raise CompetitorNetworkError(
-                "Takealot 当前无法访问，请检查梯子或代理连接后重试"
-            )
+            raise CompetitorNetworkError("Takealot 当前无法访问，请检查梯子或代理连接后重试")
 
         async def __aexit__(self, *_: object) -> None:
             pass
@@ -494,15 +730,14 @@ def test_competitor_network_failure_returns_retryable_service_error(
         )
 
     assert response.status_code == 503
-    assert response.json()["detail"] == (
-        "Takealot 当前无法访问，请检查梯子或代理连接后重试"
-    )
+    assert response.json()["detail"] == ("Takealot 当前无法访问，请检查梯子或代理连接后重试")
 
 
 @pytest.mark.parametrize(
     ("failure_kind", "expected_status"),
     [
         ("validation-uncertain", 409),
+        ("stock-unprobed", 424),
         ("suspected-invalid", 404),
         ("confirmed-invalid", 410),
     ],
@@ -621,15 +856,148 @@ def test_competitor_batch_metadata_is_idempotent_and_logged(
     assert second.status_code == 200
     assert event.status_code == 200
     assert calls == 1
-    log_text = (tmp_path / "logs" / "competitor-collection.log").read_text(
-        encoding="utf-8"
-    )
+    log_text = (tmp_path / "logs" / "competitor-collection.log").read_text(encoding="utf-8")
     assert "link_start batch=batch-1 request=request-1 item=3/5 plid=12345678" in log_text
     assert "link_reused batch=batch-1 request=request-1 item=3/5 plid=12345678" in log_text
     assert "batch_event batch=batch-1 event=auto_resume completed=2 total=5 pending=3" in log_text
 
 
-def test_competitor_batch_status_is_shared_and_blocks_another_operator(
+def test_erp_reuses_and_recycles_hidden_competitor_browser(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    public_clients: list[object] = []
+    collector_clients: list[object] = []
+    link_delays: list[float] = []
+
+    async def fake_link_cooldown(seconds: float) -> None:
+        link_delays.append(seconds)
+
+    class FakePublicClient:
+        def __init__(self) -> None:
+            self.close_calls = 0
+            public_clients.append(self)
+
+        async def close(self) -> None:
+            self.close_calls += 1
+
+    class FakeCollector:
+        def __init__(self, *, client: object, **_: object) -> None:
+            self.client = client
+            collector_clients.append(client)
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_: object) -> None:
+            pass
+
+        async def collect(
+            self,
+            url: str,
+            **_: object,
+        ) -> CompetitorCollectionResult:
+            plid = url.rsplit("PLID", 1)[-1]
+            if plid == "33333333":
+                return CompetitorCollectionResult(
+                    plid=plid,
+                    title=f"PLID{plid}",
+                    succeeded=False,
+                    message="临时网络失败",
+                    retryable=True,
+                    failure_kind="network",
+                )
+            return CompetitorCollectionResult(
+                plid=plid,
+                title=f"PLID{plid}",
+                succeeded=True,
+                message="采集成功",
+            )
+
+    database_path = tmp_path / "erp.db"
+    monkeypatch.setenv(
+        "TAKEALOT_DATABASE_URL",
+        f"sqlite:///{database_path.as_posix()}",
+    )
+    monkeypatch.setattr(
+        "takealot_ops.erp.web.CompetitorPublicClient",
+        FakePublicClient,
+    )
+    monkeypatch.setattr(
+        "takealot_ops.erp.web.CompetitorCollector",
+        FakeCollector,
+    )
+    monkeypatch.setattr(
+        "takealot_ops.erp.web._competitor_link_cooldown_seconds",
+        lambda min_seconds, max_seconds: (min_seconds + max_seconds) / 2,
+    )
+    monkeypatch.setattr(
+        "takealot_ops.erp.web._sleep_competitor_link_cooldown",
+        fake_link_cooldown,
+    )
+    app = create_app(tmp_path)
+
+    with TestClient(app, client=("127.0.0.1", 50000)) as client:
+        session = _bootstrap(client)
+        headers = {"X-CSRF-Token": str(session["csrf_token"])}
+        statuses = [
+            client.post(
+                "/api/competitors/collect",
+                headers=headers,
+                json={"url": f"https://www.takealot.com/example/PLID{plid}"},
+            ).status_code
+            for plid in ("11111111", "22222222", "33333333", "44444444")
+        ]
+
+    assert statuses == [200, 200, 503, 200]
+    assert len(public_clients) == 2
+    assert collector_clients[:3] == [public_clients[0]] * 3
+    assert collector_clients[3] is public_clients[1]
+    assert [client.close_calls for client in public_clients] == [1, 1]
+    assert link_delays == [7.5, 7.5, 7.5]
+
+
+def test_collect_returns_locked_when_another_link_is_still_active(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    database_path = tmp_path / "erp.db"
+    monkeypatch.setenv(
+        "TAKEALOT_DATABASE_URL",
+        f"sqlite:///{database_path.as_posix()}",
+    )
+
+    def reject_parallel_link(*_: object, **__: object) -> None:
+        raise CollectionBatchBusyError(
+            "PLID12345678 仍在检测；已阻止另一页面并发启动新链接"
+        )
+
+    monkeypatch.setattr(
+        "takealot_ops.erp.web.CollectionBatchRegistry.start_link",
+        reject_parallel_link,
+    )
+    app = create_app(tmp_path)
+
+    with TestClient(app, client=("127.0.0.1", 50000)) as client:
+        session = _bootstrap(client)
+        response = client.post(
+            "/api/competitors/collect",
+            headers={"X-CSRF-Token": str(session["csrf_token"])},
+            json={
+                "url": "https://www.takealot.com/example/PLID87654321",
+                "batch_id": "batch-1",
+                "client_id": "client-1",
+                "request_id": "request-2",
+                "item_index": 1,
+                "total_items": 2,
+            },
+        )
+
+    assert response.status_code == 423
+    assert "阻止另一页面并发" in response.json()["detail"]
+
+
+def test_only_kxx_controls_batch_while_other_admin_can_add_and_prioritize(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -643,7 +1011,17 @@ def test_competitor_batch_status_is_shared_and_blocks_another_operator(
     with TestClient(app, client=("127.0.0.1", 50000)) as admin:
         session = _bootstrap(admin)
         admin_csrf = str(session["csrf_token"])
-        _create_operator(admin, admin_csrf, username="operator.two")
+        created_admin = admin.post(
+            "/api/auth/users",
+            headers={"X-CSRF-Token": admin_csrf},
+            json={
+                "username": "admin.two",
+                "display_name": "Admin Two",
+                "password": "operator-password-123",
+                "role": "admin",
+            },
+        )
+        assert created_admin.status_code == 200
         started = admin.post(
             "/api/competitors/batch-events",
             headers={"X-CSRF-Token": admin_csrf},
@@ -661,39 +1039,70 @@ def test_competitor_batch_status_is_shared_and_blocks_another_operator(
         )
         assert started.status_code == 200
 
-    with TestClient(app, client=("192.168.1.8", 50001)) as operator:
-        login = operator.post(
+    with TestClient(app, client=("192.168.1.8", 50001)) as other_admin:
+        login = other_admin.post(
             "/api/auth/login",
             json={
-                "username": "operator.two",
+                "username": "admin.two",
                 "password": "operator-password-123",
             },
         )
         assert login.status_code == 200
         operator_csrf = str(login.json()["csrf_token"])
-        shared = operator.get("/api/competitors/batch-status")
+        shared = other_admin.get("/api/competitors/batch-status")
         assert shared.status_code == 200
         assert shared.json()["active"] is True
-        assert shared.json()["owner_username"] == "localadmin"
-        blocked = operator.post(
+        assert shared.json()["owner_username"] == "kxx"
+        blocked = other_admin.post(
             "/api/competitors/batch-events",
             headers={"X-CSRF-Token": operator_csrf},
             json={
-                "batch_id": "batch-operator",
-                "client_id": "client-operator",
+                "batch_id": "batch-other-admin",
+                "client_id": "client-other-admin",
                 "event": "start",
                 "completed": 0,
                 "total": 3,
                 "pending": 3,
             },
         )
-        assert blocked.status_code == 409
-        assert "Local Admin 正在采集竞品" in blocked.json()["detail"]
+        assert blocked.status_code == 403
+        assert "仅限 kxx 账号" in blocked.json()["detail"]
+        collect_blocked = other_admin.post(
+            "/api/competitors/collect",
+            headers={"X-CSRF-Token": operator_csrf},
+            json={"url": "https://www.takealot.com/example/PLID12345678"},
+        )
+        assert collect_blocked.status_code == 403
+        created_target = other_admin.post(
+            "/api/competitors/targets",
+            headers={"X-CSRF-Token": operator_csrf},
+            json={"url": "https://www.takealot.com/example/PLID12345678"},
+        )
+        assert created_target.status_code == 200
+        assert created_target.json()["queued_to_active_batch"] is True
+        prioritized = other_admin.post(
+            "/api/competitors/targets/12345678/prioritize",
+            headers={"X-CSRF-Token": operator_csrf},
+        )
+        assert prioritized.status_code == 200
+        stop_blocked = other_admin.post(
+            "/api/competitors/batch-events",
+            headers={"X-CSRF-Token": operator_csrf},
+            json={
+                "batch_id": "batch-admin",
+                "client_id": "client-admin",
+                "event": "manual_stop",
+                "completed": 0,
+                "total": 13,
+                "pending": 13,
+            },
+        )
+        assert stop_blocked.status_code == 403
 
     with TestClient(app, client=("127.0.0.1", 50002)) as admin:
         login = admin.post(
             "/api/auth/login",
-            json={"username": "localadmin", "password": "pass-123"},
+            json={"username": "kxx", "password": "pass-123"},
         )
         admin_csrf = str(login.json()["csrf_token"])
         completed = admin.post(
@@ -713,6 +1122,170 @@ def test_competitor_batch_status_is_shared_and_blocks_another_operator(
         )
         assert completed.status_code == 200
         assert completed.json()["status"]["active"] is False
+
+
+def test_competitor_target_crud_audit_and_active_batch_head(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    database_path = tmp_path / "erp.db"
+    monkeypatch.setenv(
+        "TAKEALOT_DATABASE_URL",
+        f"sqlite:///{database_path.as_posix()}",
+    )
+    app = create_app(tmp_path)
+    original_url = "https://www.takealot.com/example/PLID12345678"
+    updated_url = f"{original_url}?variant=blue"
+
+    with TestClient(app, client=("127.0.0.1", 50000)) as client:
+        session = _bootstrap(client)
+        headers = {"X-CSRF-Token": str(session["csrf_token"])}
+        started = client.post(
+            "/api/competitors/batch-events",
+            headers=headers,
+            json={
+                "batch_id": "batch-1",
+                "client_id": "client-1",
+                "event": "start",
+                "completed": 0,
+                "total": 1,
+                "pending": 1,
+            },
+        )
+        assert started.status_code == 200
+
+        created = client.post(
+            "/api/competitors/targets",
+            headers=headers,
+            json={"url": original_url},
+        )
+        assert created.status_code == 200
+        assert created.json()["item"]["plid"] == "12345678"
+        assert created.json()["queued_to_active_batch"] is True
+
+        shared = client.get("/api/competitors/batch-status").json()
+        assert shared["total"] == 2
+        assert shared["pending"] == 2
+        assert shared["queued_targets"][0]["url"] == original_url
+        prioritized = client.post(
+            "/api/competitors/targets/12345678/prioritize",
+            headers=headers,
+        )
+        assert prioritized.status_code == 200
+        priority_status = prioritized.json()["status"]
+        assert priority_status["priority_targets"] == []
+        assert priority_status["prioritized_targets"][0]["plid"] == "12345678"
+        assert priority_status["prioritized_targets"][0]["source"] == "automatic"
+        assert (
+            priority_status["prioritized_targets"][0]["requested_by"]
+            == "新增链接自动插队"
+        )
+
+        listed = client.get("/api/competitors/targets")
+        assert listed.status_code == 200
+        assert [item["plid"] for item in listed.json()["items"]] == ["12345678"]
+        assert listed.json()["items"][0]["has_history"] is False
+
+        engine = create_engine(f"sqlite:///{database_path.as_posix()}")
+        with Session(engine) as database_session:
+            database_session.add(
+                CompetitorSnapshot(
+                    plid="12345678",
+                    collected_at=datetime.now(UTC),
+                    url=original_url,
+                    title="Example product",
+                    image_url=None,
+                    stock_quantity=None,
+                    stock_exact=False,
+                    stock_method="not_probed",
+                    review_count=0,
+                    fetched_review_count=0,
+                    positive_reviews=0,
+                    neutral_reviews=0,
+                    negative_reviews=0,
+                    lifetime_sales_min=0,
+                    lifetime_sales_max=0,
+                    trend_label="待建立基线",
+                    trend_note="首次观测",
+                )
+            )
+            database_session.commit()
+        engine.dispose()
+        assert client.get("/api/competitors/targets").json()["items"][0]["has_history"] is True
+
+        duplicate = client.post(
+            "/api/competitors/targets",
+            headers=headers,
+            json={"url": original_url},
+        )
+        assert duplicate.status_code == 409
+
+        updated = client.patch(
+            "/api/competitors/targets/12345678",
+            headers=headers,
+            json={"url": updated_url},
+        )
+        assert updated.status_code == 200
+        assert updated.json()["item"]["url"] == updated_url
+        changed_plid = client.patch(
+            "/api/competitors/targets/12345678",
+            headers=headers,
+            json={"url": "https://www.takealot.com/other/PLID87654321"},
+        )
+        assert changed_plid.status_code == 422
+        invalid_host = client.post(
+            "/api/competitors/targets",
+            headers=headers,
+            json={"url": "https://example.com/item/PLID87654321"},
+        )
+        assert invalid_host.status_code == 422
+
+        deleted = client.delete(
+            "/api/competitors/targets/12345678",
+            headers=headers,
+        )
+        assert deleted.status_code == 200
+        assert deleted.json()["history_retained"] is True
+        assert client.get("/api/competitors/targets").json()["items"] == []
+
+        audits = client.get("/api/competitors/target-audits")
+        assert audits.status_code == 200
+        audit_payload = audits.json()
+        assert [item["action"] for item in audit_payload["items"]] == [
+            "delete",
+            "update",
+            "add",
+        ]
+        assert all(item["actor_username"] == "kxx" for item in audit_payload["items"])
+        available_date = audit_payload["date_range"]["available_start"]
+        filtered = client.get(
+            "/api/competitors/target-audits",
+            params={"start_date": available_date, "end_date": available_date},
+        )
+        assert len(filtered.json()["items"]) == 3
+        first_page = client.get(
+            "/api/competitors/target-audits",
+            params={
+                "start_date": available_date,
+                "end_date": available_date,
+                "page": 1,
+                "page_size": 2,
+            },
+        ).json()
+        second_page = client.get(
+            "/api/competitors/target-audits",
+            params={
+                "start_date": available_date,
+                "end_date": available_date,
+                "page": 2,
+                "page_size": 2,
+            },
+        ).json()
+        assert first_page["total"] == 3
+        assert first_page["page"] == 1
+        assert len(first_page["items"]) == 2
+        assert second_page["page"] == 2
+        assert len(second_page["items"]) == 1
 
 
 def test_competitor_manual_retry_priority_is_audited_once(
@@ -825,7 +1398,7 @@ def test_refresh_cooldown_is_shared_for_operators_and_admin_is_exempt(
     with TestClient(app, client=("127.0.0.1", 50002)) as admin:
         login = admin.post(
             "/api/auth/login",
-            json={"username": "localadmin", "password": "pass-123"},
+            json={"username": "kxx", "password": "pass-123"},
         )
         admin_csrf = str(login.json()["csrf_token"])
         status = admin.get("/api/erp/refresh-status")
@@ -854,15 +1427,18 @@ def test_csrf_and_last_admin_protection(
     with TestClient(app, client=("127.0.0.1", 50000)) as client:
         session = _bootstrap(client)
         admin_id = session["user"]["id"]
-        assert client.post(
-            "/api/auth/users",
-            json={
-                "username": "operator.one",
-                "display_name": "Operator",
-                "password": "operator-password-1",
-                "role": "operator",
-            },
-        ).status_code == 403
+        assert (
+            client.post(
+                "/api/auth/users",
+                json={
+                    "username": "operator.one",
+                    "display_name": "Operator",
+                    "password": "operator-password-1",
+                    "role": "operator",
+                },
+            ).status_code
+            == 403
+        )
 
         response = client.patch(
             f"/api/auth/users/{admin_id}",
@@ -870,10 +1446,7 @@ def test_csrf_and_last_admin_protection(
             json={"role": "viewer"},
         )
         assert response.status_code == 409
-        assert (
-            response.json()["detail"]
-            == "必须保留至少一个可管理用户权限的启用账号"
-        )
+        assert response.json()["detail"] == "必须保留至少一个可管理用户权限的启用账号"
 
 
 def test_erp_rejects_unsupported_quadrant_percentile_after_login(
@@ -932,11 +1505,11 @@ def test_operator_can_use_all_daily_report_reconciliation_actions(
                     ]
                 )
             for slot, hour in (("morning", 2), ("evening", 10)):
-                    capture_daily_report(
-                        engine,
-                        business_date=date(2026, 7, 24),
-                        slot=slot,
-                        captured_at=datetime(2026, 7, 25, hour, tzinfo=UTC),
+                capture_daily_report(
+                    engine,
+                    business_date=date(2026, 7, 24),
+                    slot=slot,
+                    captured_at=datetime(2026, 7, 25, hour, tzinfo=UTC),
                 )
         finally:
             engine.dispose()
@@ -952,18 +1525,34 @@ def test_operator_can_use_all_daily_report_reconciliation_actions(
         assert login.json()["user"]["role"] == "operator"
         csrf = str(login.json()["csrf_token"])
 
-        report = client.get(
-            "/api/erp/daily-report?business_date=2026-07-24"
-        )
+        report = client.get("/api/erp/daily-report?business_date=2026-07-24")
         assert report.status_code == 200
         assert report.json()["counts"]["ready"] == 2
-        assert client.get("/api/erp/daily-report/reminders").status_code == 200
-        assert (
-            client.get(
-                "/api/erp/daily-report/export?through=2026-07-24"
-            ).status_code
-            == 200
+        assert report.json()["capture_issue_range"]["selected_start"] == "2026-07-22"
+        assert report.json()["capture_issue_range"]["selected_end"] == "2026-07-24"
+        ranged_report = client.get(
+            "/api/erp/daily-report",
+            params={
+                "business_date": "2026-07-24",
+                "capture_start": "2026-07-24",
+                "capture_end": "2026-07-24",
+            },
         )
+        assert ranged_report.status_code == 200
+        assert ranged_report.json()["capture_issue_range"]["selected_start"] == (
+            "2026-07-24"
+        )
+        inverted_range = client.get(
+            "/api/erp/daily-report",
+            params={
+                "business_date": "2026-07-24",
+                "capture_start": "2026-07-25",
+                "capture_end": "2026-07-24",
+            },
+        )
+        assert inverted_range.status_code == 422
+        assert client.get("/api/erp/daily-report/reminders").status_code == 200
+        assert client.get("/api/erp/daily-report/export?through=2026-07-24").status_code == 200
         noted = client.post(
             "/api/erp/daily-report/2026-07-24/offer-a/note",
             headers={"X-CSRF-Token": csrf},
@@ -973,12 +1562,8 @@ def test_operator_can_use_all_daily_report_reconciliation_actions(
             },
         )
         assert noted.status_code == 200
-        noted_report = client.get(
-            "/api/erp/daily-report?business_date=2026-07-24"
-        ).json()
-        assert noted_report["items"][0]["operator_notes"][0]["note"] == (
-            "运营员追加一条独立备注"
-        )
+        noted_report = client.get("/api/erp/daily-report?business_date=2026-07-24").json()
+        assert noted_report["items"][0]["operator_notes"][0]["note"] == ("运营员追加一条独立备注")
         note_id = noted_report["items"][0]["operator_notes"][0]["id"]
         updated = client.patch(
             f"/api/erp/daily-report/2026-07-24/offer-a/note/{note_id}",
@@ -989,9 +1574,9 @@ def test_operator_can_use_all_daily_report_reconciliation_actions(
             },
         )
         assert updated.status_code == 200
-        updated_note = client.get(
-            "/api/erp/daily-report?business_date=2026-07-24"
-        ).json()["items"][0]["operator_notes"][0]
+        updated_note = client.get("/api/erp/daily-report?business_date=2026-07-24").json()["items"][
+            0
+        ]["operator_notes"][0]
         assert updated_note["note"] == "运营员修改后的通用备注"
         assert updated_note["issue_type"] == "general"
         assert updated_note["updated_by"] == "Operator Daily"
@@ -1002,13 +1587,9 @@ def test_operator_can_use_all_daily_report_reconciliation_actions(
             json={},
         )
         assert deleted.status_code == 200
-        after_delete = client.get(
-            "/api/erp/daily-report?business_date=2026-07-24"
-        ).json()
+        after_delete = client.get("/api/erp/daily-report?business_date=2026-07-24").json()
         assert after_delete["items"][0]["operator_notes"] == []
-        assert after_delete["handled_actions"][0]["action_type"] == (
-            "operator_note_deleted"
-        )
+        assert after_delete["handled_actions"][0]["action_type"] == ("operator_note_deleted")
         assert after_delete["handled_actions"][0]["note"] is None
         assert after_delete["handled_actions"][0]["detail"]["deleted_note"] == (
             "运营员修改后的通用备注"
@@ -1023,9 +1604,7 @@ def test_operator_can_use_all_daily_report_reconciliation_actions(
             },
         )
         assert manual.status_code == 200
-        manual_report = client.get(
-            "/api/erp/daily-report?business_date=2026-07-24"
-        ).json()
+        manual_report = client.get("/api/erp/daily-report?business_date=2026-07-24").json()
         assert manual_report["items"][0]["manual_note"] is None
         missing_confirm_note = client.post(
             "/api/erp/daily-report/2026-07-24/offer-a/confirm",
@@ -1060,9 +1639,7 @@ def test_operator_can_use_all_daily_report_reconciliation_actions(
             json={"as_of": "2026-07-24"},
         )
         assert generated.status_code == 200
-        download = client.get(
-            "/api/erp/daily-report/export/download?through=2026-07-24"
-        )
+        download = client.get("/api/erp/daily-report/export/download?through=2026-07-24")
         assert download.status_code == 200
         assert (
             download.headers["content-type"]
@@ -1075,17 +1652,11 @@ def test_operator_can_use_all_daily_report_reconciliation_actions(
             json={"note": "运营员复核后发现需要重新选择版本"},
         )
         assert reverted.status_code == 200
-        reopened = client.get(
-            "/api/erp/daily-report?business_date=2026-07-24"
-        ).json()
+        reopened = client.get("/api/erp/daily-report?business_date=2026-07-24").json()
         assert reopened["items"][0]["status"] == "needs_review"
-        reopened_issue_types = {
-            issue["type"] for issue in reopened["items"][0]["review_issues"]
-        }
+        reopened_issue_types = {issue["type"] for issue in reopened["items"][0]["review_issues"]}
         assert reopened_issue_types == {"capture_difference"}
-        assert reopened["items"][0]["confirmation_revert"]["reverted_by"] == (
-            "Operator Daily"
-        )
+        assert reopened["items"][0]["confirmation_revert"]["reverted_by"] == ("Operator Daily")
         repeated_revert = client.post(
             "/api/erp/daily-report/2026-07-24/offer-a/revert-confirmation",
             headers={"X-CSRF-Token": csrf},
@@ -1125,11 +1696,11 @@ def test_daily_report_stock_difference_can_be_confirmed_logged_and_reopened(
                     )
                 )
             for slot, hour in (("morning", 2), ("evening", 10)):
-                    capture_daily_report(
-                        engine,
-                        business_date=date(2026, 7, 24),
-                        slot=slot,
-                        captured_at=datetime(2026, 7, 25, hour, tzinfo=UTC),
+                capture_daily_report(
+                    engine,
+                    business_date=date(2026, 7, 24),
+                    slot=slot,
+                    captured_at=datetime(2026, 7, 25, hour, tzinfo=UTC),
                 )
             with Session(engine) as session, session.begin():
                 session.get(
@@ -1137,11 +1708,11 @@ def test_daily_report_stock_difference_can_be_confirmed_logged_and_reopened(
                     "offer-stock",
                 ).takealot_available_stock = 8
             for slot, hour in (("morning", 2), ("evening", 10)):
-                    capture_daily_report(
-                        engine,
-                        business_date=date(2026, 7, 25),
-                        slot=slot,
-                        captured_at=datetime(2026, 7, 26, hour, tzinfo=UTC),
+                capture_daily_report(
+                    engine,
+                    business_date=date(2026, 7, 25),
+                    slot=slot,
+                    captured_at=datetime(2026, 7, 26, hour, tzinfo=UTC),
                 )
         finally:
             engine.dispose()
@@ -1157,9 +1728,7 @@ def test_daily_report_stock_difference_can_be_confirmed_logged_and_reopened(
         assert login.json()["user"]["role"] == "operator"
         csrf = str(login.json()["csrf_token"])
 
-        before = client.get(
-            "/api/erp/daily-report?business_date=2026-07-25"
-        ).json()
+        before = client.get("/api/erp/daily-report?business_date=2026-07-25").json()
         assert before["pending_actions"][0]["offer_id"] == "offer-stock"
         handled = client.post(
             "/api/erp/daily-report/2026-07-25/offer-stock/stock-alert",
@@ -1167,9 +1736,7 @@ def test_daily_report_stock_difference_can_be_confirmed_logged_and_reopened(
             json={"note": "确认属于平台库存调整"},
         )
         assert handled.status_code == 200
-        after = client.get(
-            "/api/erp/daily-report?business_date=2026-07-25"
-        ).json()
+        after = client.get("/api/erp/daily-report?business_date=2026-07-25").json()
         assert after["pending_actions"] == []
         assert after["items"][0]["stock_check"]["mismatch"] is True
         assert after["items"][0]["stock_check"]["dismissed"] is True
@@ -1182,23 +1749,15 @@ def test_daily_report_stock_difference_can_be_confirmed_logged_and_reopened(
             json={"note": "误操作，恢复待办"},
         )
         assert reopened.status_code == 200
-        final = client.get(
-            "/api/erp/daily-report?business_date=2026-07-25"
-        ).json()
+        final = client.get("/api/erp/daily-report?business_date=2026-07-25").json()
         assert final["pending_actions"][0]["offer_id"] == "offer-stock"
-        assert final["handled_actions"][0]["action_type"] == (
-            "stock_alert_reopened"
-        )
+        assert final["handled_actions"][0]["action_type"] == ("stock_alert_reopened")
         assert final["handled_actions"][0]["note"] == "误操作，恢复待办"
         original = next(
-            row
-            for row in final["handled_actions"]
-            if row["action_type"] == "stock_difference"
+            row for row in final["handled_actions"] if row["action_type"] == "stock_difference"
         )
         assert original["active"] is False
-        assert original["reversal"]["note"] == (
-            "误操作，恢复待办"
-        )
+        assert original["reversal"]["note"] == ("误操作，恢复待办")
 
         corrected = client.post(
             "/api/erp/daily-report/2026-07-25/offer-stock/manual",
@@ -1210,32 +1769,18 @@ def test_daily_report_stock_difference_can_be_confirmed_logged_and_reopened(
             },
         )
         assert corrected.status_code == 200
-        corrected_payload = client.get(
-            "/api/erp/daily-report?business_date=2026-07-25"
-        ).json()
+        corrected_payload = client.get("/api/erp/daily-report?business_date=2026-07-25").json()
         assert (
-            corrected_payload["pending_actions"][0]["stock_check"][
-                "resolution_action"
-            ]
+            corrected_payload["pending_actions"][0]["stock_check"]["resolution_action"]
             == "eliminate"
         )
         eliminated = client.post(
-            (
-                "/api/erp/daily-report/2026-07-25/offer-stock/"
-                "stock-alert/eliminate"
-            ),
+            ("/api/erp/daily-report/2026-07-25/offer-stock/stock-alert/eliminate"),
             headers={"X-CSRF-Token": csrf},
             json={"note": "采用修正库存并消除差异"},
         )
         assert eliminated.status_code == 200
-        eliminated_payload = client.get(
-            "/api/erp/daily-report?business_date=2026-07-25"
-        ).json()
+        eliminated_payload = client.get("/api/erp/daily-report?business_date=2026-07-25").json()
         assert eliminated_payload["pending_actions"] == []
-        assert (
-            eliminated_payload["items"][0]["stock_check"]["mismatch"]
-            is False
-        )
-        assert eliminated_payload["handled_actions"][0]["action_type"] == (
-            "stock_eliminated"
-        )
+        assert eliminated_payload["items"][0]["stock_check"]["mismatch"] is False
+        assert eliminated_payload["handled_actions"][0]["action_type"] == ("stock_eliminated")

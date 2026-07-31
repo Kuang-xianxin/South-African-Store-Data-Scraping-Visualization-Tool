@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import hashlib
 import os
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from io import BytesIO
 from pathlib import Path
 from threading import Lock, get_ident
@@ -49,7 +50,7 @@ class ProductThumbnailCache:
         self.cache_root = project_root / "data" / "runtime-cache"
         self.max_source_bytes = max_source_bytes
         self.max_source_pixels = max_source_pixels
-        self._locks: dict[str, Lock] = {}
+        self._locks: dict[str, tuple[Lock, int]] = {}
         self._locks_guard = Lock()
         self._network_client: httpx.Client | None = None
         self._direct_client: httpx.Client | None = None
@@ -92,7 +93,7 @@ class ProductThumbnailCache:
         if _usable_cache_file(target):
             return target
 
-        with self._lock_for(cache_key):
+        with self._cache_key_lock(cache_key):
             if _usable_cache_file(target):
                 return target
             source = self._fetcher(trusted_url)
@@ -108,9 +109,31 @@ class ProductThumbnailCache:
                 temporary.unlink(missing_ok=True)
         return target
 
-    def _lock_for(self, cache_key: str) -> Lock:
+    @contextmanager
+    def _cache_key_lock(self, cache_key: str) -> Iterator[None]:
+        """Serialize one cache key and discard its lock after the final user."""
         with self._locks_guard:
-            return self._locks.setdefault(cache_key, Lock())
+            existing = self._locks.get(cache_key)
+            lock, users = existing if existing is not None else (Lock(), 0)
+            self._locks[cache_key] = (lock, users + 1)
+
+        acquired = False
+        try:
+            lock.acquire()
+            acquired = True
+            yield
+        finally:
+            if acquired:
+                lock.release()
+            with self._locks_guard:
+                current = self._locks.get(cache_key)
+                if current is None or current[0] is not lock:
+                    raise RuntimeError("缩略图缓存锁状态不一致")
+                remaining_users = current[1] - 1
+                if remaining_users == 0:
+                    self._locks.pop(cache_key)
+                else:
+                    self._locks[cache_key] = (lock, remaining_users)
 
     def _download(self, image_url: str) -> bytes:
         clients = [self._network_client, self._direct_client]

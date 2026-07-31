@@ -227,6 +227,19 @@ export type PermissionKey =
   | "refresh.run"
   | "users.manage";
 
+export interface StoreAccessItem {
+  id: number;
+  code: string;
+  display_name: string;
+  active: boolean;
+  data_connected: boolean;
+}
+
+export interface ManagedStore extends StoreAccessItem {
+  created_at: string;
+  updated_at: string;
+}
+
 export interface AuthUser {
   id: number;
   username: string;
@@ -234,6 +247,9 @@ export interface AuthUser {
   role: UserRole;
   permissions: PermissionKey[];
   permissions_customized: boolean;
+  all_stores: boolean;
+  assigned_store_ids: number[];
+  accessible_stores: StoreAccessItem[];
 }
 
 export interface AuthSession {
@@ -628,6 +644,7 @@ export interface DailyReportPayload {
     }
   >;
   capture_issues: Array<{
+    business_date: string;
     kind: "slot" | "product";
     slot: "morning" | "evening" | "pre_close" | "manual" | null;
     offer_id: string | null;
@@ -635,6 +652,12 @@ export interface DailyReportPayload {
     title: string | null;
     reason: string;
   }>;
+  capture_issue_range: {
+    available_start: string;
+    available_end: string;
+    selected_start: string;
+    selected_end: string;
+  };
   comparison_history: Array<{
     business_date: string;
     items: Array<

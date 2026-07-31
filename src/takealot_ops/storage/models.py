@@ -57,9 +57,7 @@ class OfferCurrent(Base):
     image_url: Mapped[str | None] = mapped_column(Text)
     productline_id: Mapped[str | None] = mapped_column(String(100))
     conversion_percentage_30_days: Mapped[Decimal | None] = mapped_column(Numeric(10, 4))
-    conversion_percentage_previous_30_days: Mapped[Decimal | None] = mapped_column(
-        Numeric(10, 4)
-    )
+    conversion_percentage_previous_30_days: Mapped[Decimal | None] = mapped_column(Numeric(10, 4))
     page_views_30_days: Mapped[int | None] = mapped_column(Integer)
     quantity_returned_30_days: Mapped[int | None] = mapped_column(Integer)
     total_wishlist: Mapped[int | None] = mapped_column(Integer)
@@ -96,9 +94,7 @@ class OfferSnapshot(Base):
     image_url: Mapped[str | None] = mapped_column(Text)
     productline_id: Mapped[str | None] = mapped_column(String(100))
     conversion_percentage_30_days: Mapped[Decimal | None] = mapped_column(Numeric(10, 4))
-    conversion_percentage_previous_30_days: Mapped[Decimal | None] = mapped_column(
-        Numeric(10, 4)
-    )
+    conversion_percentage_previous_30_days: Mapped[Decimal | None] = mapped_column(Numeric(10, 4))
     page_views_30_days: Mapped[int | None] = mapped_column(Integer)
     quantity_returned_30_days: Mapped[int | None] = mapped_column(Integer)
     total_wishlist: Mapped[int | None] = mapped_column(Integer)
@@ -170,9 +166,7 @@ class DailyProductMetric(Base):
     page_views_30_day_average: Mapped[Decimal | None] = mapped_column(Numeric(14, 4))
     page_views_window_net_change: Mapped[int | None] = mapped_column(Integer)
     conversion_percentage_30_days: Mapped[Decimal | None] = mapped_column(Numeric(10, 4))
-    conversion_percentage_previous_30_days: Mapped[Decimal | None] = mapped_column(
-        Numeric(10, 4)
-    )
+    conversion_percentage_previous_30_days: Mapped[Decimal | None] = mapped_column(Numeric(10, 4))
     conversion_change_points: Mapped[Decimal | None] = mapped_column(Numeric(10, 4))
     total_stock: Mapped[int | None] = mapped_column(Integer)
     offer_status: Mapped[str | None] = mapped_column(String(100))
@@ -248,24 +242,12 @@ class CompetitorLinkHealth(Base):
 
     plid: Mapped[str] = mapped_column(String(30), primary_key=True)
     url: Mapped[str] = mapped_column(Text, nullable=False)
-    status: Mapped[str] = mapped_column(
-        String(30), nullable=False, default="healthy", index=True
-    )
-    confirmed_not_found_count: Mapped[int] = mapped_column(
-        Integer, nullable=False, default=0
-    )
-    first_not_found_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True)
-    )
-    last_evidence_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True)
-    )
-    last_checked_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False
-    )
-    last_success_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True)
-    )
+    status: Mapped[str] = mapped_column(String(30), nullable=False, default="healthy", index=True)
+    confirmed_not_found_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    first_not_found_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_evidence_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_checked_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    last_success_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     control_plid: Mapped[str | None] = mapped_column(String(30))
     control_check_ok: Mapped[bool | None] = mapped_column(Boolean)
     last_error: Mapped[str | None] = mapped_column(Text)
@@ -340,6 +322,7 @@ class CompetitorVariantSnapshot(Base):
     collected_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     variant_key: Mapped[str] = mapped_column(String(500), nullable=False)
     variant_label: Mapped[str] = mapped_column(Text, nullable=False)
+    image_url: Mapped[str | None] = mapped_column(Text)
     url: Mapped[str] = mapped_column(Text, nullable=False)
     sku: Mapped[str | None] = mapped_column(String(100))
     seller_id: Mapped[str | None] = mapped_column(String(100))
@@ -351,6 +334,30 @@ class CompetitorVariantSnapshot(Base):
     stock_exact: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     stock_method: Mapped[str] = mapped_column(String(100), nullable=False)
     stock_note: Mapped[str | None] = mapped_column(Text)
+    customer_purchase_limit: Mapped[int | None] = mapped_column(Integer)
+
+
+class ErpStore(Base):
+    """One store identity available for account-level access assignment."""
+
+    __tablename__ = "erp_stores"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    code: Mapped[str] = mapped_column(
+        String(64),
+        nullable=False,
+        unique=True,
+        index=True,
+    )
+    display_name: Mapped[str] = mapped_column(String(100), nullable=False)
+    active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    data_connected: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
 
 
 class ErpUser(Base):
@@ -364,10 +371,30 @@ class ErpUser(Base):
     password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
     role: Mapped[str] = mapped_column(String(20), nullable=False)
     permissions_json: Mapped[str | None] = mapped_column(Text)
+    store_access_all: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=True,
+    )
     active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
     last_login_at: Mapped[datetime | None] = mapped_column(DateTime)
+
+
+class ErpUserStore(Base):
+    """One explicit store assignment for an account with limited scope."""
+
+    __tablename__ = "erp_user_stores"
+
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("erp_users.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    store_id: Mapped[int] = mapped_column(
+        ForeignKey("erp_stores.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
 
 
 class ErpSession(Base):
@@ -477,13 +504,9 @@ class DailyReportResolution(Base):
     confirm_note: Mapped[str | None] = mapped_column(Text)
     confirmed_by: Mapped[int | None] = mapped_column(ForeignKey("erp_users.id"))
     confirmed_at: Mapped[datetime | None] = mapped_column(DateTime)
-    stock_alert_dismissed: Mapped[bool] = mapped_column(
-        Boolean, nullable=False, default=False
-    )
+    stock_alert_dismissed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     stock_alert_note: Mapped[str | None] = mapped_column(Text)
-    stock_alert_dismissed_by: Mapped[int | None] = mapped_column(
-        ForeignKey("erp_users.id")
-    )
+    stock_alert_dismissed_by: Mapped[int | None] = mapped_column(ForeignKey("erp_users.id"))
     stock_alert_dismissed_at: Mapped[datetime | None] = mapped_column(DateTime)
     operator_note: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)

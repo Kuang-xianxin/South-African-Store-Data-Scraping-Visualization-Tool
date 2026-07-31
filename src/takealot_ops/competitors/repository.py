@@ -55,8 +55,7 @@ class CompetitorRepository:
             .order_by(CompetitorSnapshot.collected_at.desc())
         )
         current_scope = {
-            (variant.key, variant.sku, variant.seller_id)
-            for variant in product.variants
+            (variant.key, variant.sku, variant.seller_id) for variant in product.variants
         }
         row: CompetitorSnapshot | None = None
         for candidate in candidates:
@@ -104,6 +103,11 @@ class CompetitorRepository:
             return None
         return str(row.plid), str(row.url)
 
+    def is_confirmed_invalid(self, plid: str) -> bool:
+        """Return whether prior durable evidence already confirmed this link."""
+        row = self._session.get(CompetitorLinkHealth, plid)
+        return row is not None and row.status == "confirmed_invalid"
+
     def record_not_found(
         self,
         *,
@@ -116,6 +120,7 @@ class CompetitorRepository:
         """Persist one 404 without confirming invalidity too quickly."""
         now = checked_at.astimezone(UTC)
         row = self._session.get(CompetitorLinkHealth, plid)
+        was_confirmed = row is not None and row.status == "confirmed_invalid"
         if row is None:
             row = CompetitorLinkHealth(
                 plid=plid,
@@ -134,12 +139,8 @@ class CompetitorRepository:
 
         evidence_counted = False
         last_evidence = _as_utc(row.last_evidence_at)
-        if (
-            control_check_ok
-            and (
-                last_evidence is None
-                or now - last_evidence >= NOT_FOUND_CONFIRMATION_INTERVAL
-            )
+        if control_check_ok and (
+            last_evidence is None or now - last_evidence >= NOT_FOUND_CONFIRMATION_INTERVAL
         ):
             row.confirmed_not_found_count += 1
             row.last_evidence_at = now
@@ -147,8 +148,9 @@ class CompetitorRepository:
 
         row.url = url
         row.last_checked_at = now
-        row.control_plid = control_plid
-        row.control_check_ok = control_check_ok
+        if control_check_ok or not was_confirmed:
+            row.control_plid = control_plid
+            row.control_check_ok = control_check_ok
         row.last_error = "Takealot 商品数据返回 404"
         if row.first_not_found_at is None:
             row.first_not_found_at = now
@@ -290,6 +292,7 @@ class CompetitorRepository:
                     collected_at=now,
                     variant_key=variant.key,
                     variant_label=variant.label,
+                    image_url=variant.image_url,
                     url=variant.url,
                     sku=variant.sku,
                     seller_id=variant.seller_id,
@@ -301,6 +304,7 @@ class CompetitorRepository:
                     stock_exact=variant_stock.exact,
                     stock_method=variant_stock.method,
                     stock_note=variant_stock.note,
+                    customer_purchase_limit=variant_stock.customer_purchase_limit,
                 )
             )
         self._upsert_reviews(product.plid, reviews, now)

@@ -57,6 +57,8 @@ const editorError = ref("");
 const editorStatus = ref("");
 const search = ref("");
 const filter = ref<"review" | "all" | "sales" | "stock" | "missing">("all");
+const captureIssueStart = ref("");
+const captureIssueEnd = ref("");
 const slots = ["morning", "evening", "pre_close"] as const;
 const matrixScroll = ref<HTMLElement | null>(null);
 const searchInput = ref<HTMLInputElement | null>(null);
@@ -138,7 +140,15 @@ function handleMatrixWheel(event: WheelEvent) {
   container.scrollLeft += wheelDelta * deltaScale;
 }
 
-watch(() => props.asOf, () => void load(), { immediate: true });
+watch(
+  () => props.asOf,
+  () => {
+    captureIssueStart.value = "";
+    captureIssueEnd.value = "";
+    void load();
+  },
+  { immediate: true },
+);
 onMounted(() => {
   window.addEventListener("erp-daily-report-updated", handleLiveUpdate);
 });
@@ -248,11 +258,17 @@ const filteredHandledActions = computed(() =>
 const hasHandledFilters = computed(
   () => Boolean(handledProcessingDate.value || handledBusinessDate.value),
 );
-const missingPageViewsCount = computed(
+const sameCycleVersionDifferenceCount = computed(
   () =>
-    report.value?.items.filter((item) =>
-      item.missing_fields.includes("page_views_30_days"),
-    ).length ?? 0,
+    actionItems.value.filter((item) =>
+      hasReviewIssue(item, "capture_difference"),
+    ).length,
+);
+const historicalStockMismatchCount = computed(
+  () =>
+    actionItems.value.filter((item) =>
+      hasReviewIssue(item, "stock_continuity"),
+    ).length,
 );
 
 watch(handledActions, () => {
@@ -421,10 +437,18 @@ async function load(
     message.value = "";
   }
   try {
-    [report.value, exportState.value] = await Promise.all([
-      fetchDailyReport(props.asOf),
+    const [nextReport, nextExportState] = await Promise.all([
+      fetchDailyReport(
+        props.asOf,
+        captureIssueStart.value || undefined,
+        captureIssueEnd.value || undefined,
+      ),
       fetchDailyReportExport(props.asOf),
     ]);
+    report.value = nextReport;
+    exportState.value = nextExportState;
+    captureIssueStart.value = nextReport.capture_issue_range.selected_start;
+    captureIssueEnd.value = nextReport.capture_issue_range.selected_end;
     await nextTick();
     if (matrixScroll.value) {
       matrixScroll.value.scrollTop = options.preserveScroll
@@ -441,6 +465,24 @@ async function load(
       queueMicrotask(flushLiveUpdate);
     }
   }
+}
+
+async function applyCaptureIssueRange() {
+  if (
+    captureIssueStart.value &&
+    captureIssueEnd.value &&
+    captureIssueStart.value > captureIssueEnd.value
+  ) {
+    message.value = "数据完整性说明开始日期不能晚于结束日期";
+    return;
+  }
+  await load({ preserveScroll: true });
+}
+
+async function resetCaptureIssueRange() {
+  captureIssueStart.value = "";
+  captureIssueEnd.value = "";
+  await load({ preserveScroll: true });
 }
 
 function handleLiveUpdate() {
@@ -1038,32 +1080,75 @@ function parseInput(value: string | number): number | null {
       </article>
       <article class="sales"><small>日报日有销量</small><strong>{{ report?.counts.with_sales ?? 0 }}</strong></article>
       <article class="review"><small>人工核对待办</small><strong>{{ actionItems.length }}</strong></article>
-      <article class="missing">
-        <small>暂缺近30天浏览量</small>
-        <strong>{{ missingPageViewsCount }}<span> 个商品</span></strong>
+      <article
+        class="version-difference"
+        title="截至当前日报日仍未处理的同周期销量版本差异待办"
+      >
+        <small>同周期销量版本差异</small>
+        <strong>{{ sameCycleVersionDifferenceCount }}</strong>
       </article>
-      <article class="danger"><small>库存不平</small><strong>{{ report?.counts.stock_alerts ?? 0 }}</strong></article>
-      <article class="confirmed"><small>已确认</small><strong>{{ report?.counts.confirmed ?? 0 }}</strong></article>
+      <article
+        class="danger"
+        title="截至当前日报日仍未处理的库存连续性待办"
+      >
+        <small>库存不平</small>
+        <strong>{{ historicalStockMismatchCount }}</strong>
+      </article>
+      <article class="confirmed" title="只统计当前日报日已确认商品">
+        <small>已确认</small>
+        <strong>{{ report?.counts.confirmed ?? 0 }}</strong>
+      </article>
     </section>
 
-    <section v-if="report?.capture_issues.length" class="capture-notice">
+    <section v-if="report" class="capture-notice">
       <div class="capture-notice-title">
         <strong>数据完整性说明：{{ report.capture_issues.length }} 条</strong>
-        <span>只在订单数或库存仍为空时标注漏爬；漏爬不算冲突</span>
+        <span>
+          数据日期 {{ report.capture_issue_range.selected_start }} 至
+          {{ report.capture_issue_range.selected_end }}；默认显示当前日报日及前 2 天
+        </span>
       </div>
-      <details>
+      <div class="capture-issue-filters">
+        <label>
+          开始日期
+          <input
+            v-model="captureIssueStart"
+            type="date"
+            :min="report.capture_issue_range.available_start"
+            :max="report.capture_issue_range.available_end"
+          />
+        </label>
+        <label>
+          结束日期
+          <input
+            v-model="captureIssueEnd"
+            type="date"
+            :min="report.capture_issue_range.available_start"
+            :max="report.capture_issue_range.available_end"
+          />
+        </label>
+        <button type="button" :disabled="loading" @click="resetCaptureIssueRange">
+          近 3 天
+        </button>
+      </div>
+      <details v-if="report.capture_issues.length">
         <summary>查看具体漏爬原因</summary>
         <ul>
-          <li v-for="(issue, index) in report.capture_issues.slice(0, 8)" :key="`${issue.offer_id || issue.slot}-${index}`">
+          <li
+            v-for="(issue, index) in report.capture_issues"
+            :key="`${issue.business_date}-${issue.offer_id || issue.slot}-${index}`"
+          >
+            <time>{{ issue.business_date }}</time>
             <b>{{ captureIssueSlotLabel(issue.slot) }}</b>
             <span v-if="issue.sku">{{ issue.sku }}：</span>
             {{ issue.reason }}
           </li>
         </ul>
-        <small v-if="report.capture_issues.length > 8">
-          另有 {{ report.capture_issues.length - 8 }} 条商品级说明，完整内容已写入 Excel 的“漏爬说明”工作表。
-        </small>
       </details>
+      <p v-else class="capture-issue-empty">
+        所选日期范围内没有数据完整性说明。
+      </p>
+      <small>只在订单数或库存仍为空时标注漏爬；漏爬不算冲突。</small>
     </section>
 
     <section class="erp-panel daily-workspace">
@@ -2242,16 +2327,22 @@ function parseInput(value: string | number): number | null {
 .daily-kpis .inventory > span { display: block; margin-top: 3px; color: #a06613; font-size: 9px; }
 .daily-kpis .sales strong { color: #bb622a; }
 .daily-kpis .review strong, .daily-kpis .danger strong { color: #bf4e3b; }
-.daily-kpis .missing strong { color: #a06613; }
-.daily-kpis .missing strong span { font-size: 11px; font-weight: 500; }
+.daily-kpis .version-difference strong { color: #7457a8; }
 .daily-kpis .confirmed strong { color: #1e7954; }
 .capture-notice { padding: 12px 16px; border: 1px solid #e0c27b; border-left: 5px solid #d6a42b; border-radius: 12px; background: #fff9e8; color: #6e5317; }
 .capture-notice-title { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 8px 18px; }
 .capture-notice-title span, .capture-notice small { color: #856f39; font-size: 11px; }
+.capture-issue-filters { display: flex; flex-wrap: wrap; align-items: end; gap: 8px; margin-top: 10px; }
+.capture-issue-filters label { display: grid; gap: 3px; color: #856f39; font-size: 10px; }
+.capture-issue-filters input { padding: 6px 8px; border: 1px solid #d9c68f; border-radius: 7px; background: #fffdf5; color: #614b19; font: inherit; }
+.capture-issue-filters button { padding: 7px 10px; border: 1px solid #d9c68f; border-radius: 7px; background: #fffdf5; color: #6e5317; cursor: pointer; font-size: 11px; }
+.capture-issue-filters button:disabled { cursor: not-allowed; opacity: .55; }
 .capture-notice details { margin-top: 7px; }
 .capture-notice summary { width: fit-content; cursor: pointer; color: #765716; font-size: 11px; font-weight: 700; }
-.capture-notice ul { display: grid; gap: 5px; margin: 9px 0 4px; padding-left: 19px; font-size: 12px; line-height: 1.55; }
+.capture-notice ul { display: grid; gap: 5px; max-height: 360px; margin: 9px 0 4px; padding-left: 19px; overflow: auto; font-size: 12px; line-height: 1.55; }
+.capture-notice li time { display: inline-block; min-width: 84px; color: #9a6920; font-variant-numeric: tabular-nums; }
 .capture-notice li b { display: inline-block; min-width: 38px; }
+.capture-issue-empty { margin: 9px 0 5px; color: #856f39; font-size: 12px; }
 .daily-workspace { overflow: hidden; }
 .daily-toolbar { display: flex; justify-content: space-between; gap: 16px; padding: 18px 20px; border-bottom: 1px solid #e0e5e1; }
 .daily-run-state, .daily-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 9px; }

@@ -1,13 +1,17 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from io import BytesIO
 from pathlib import Path
+from threading import Event
+from time import monotonic, sleep
 
 import pytest
 from PIL import Image
 
 from takealot_ops.erp.product_images import (
     ProductImageInputError,
+    ProductImageUnavailableError,
     ProductThumbnailCache,
     trusted_product_image_url,
     validated_thumbnail_dimension,
@@ -71,6 +75,62 @@ def test_thumbnail_cache_keeps_separate_supported_sizes(tmp_path: Path) -> None:
     ]
     with Image.open(detail) as thumbnail:
         assert max(thumbnail.size) == 640
+
+
+def test_thumbnail_cache_releases_lock_after_concurrent_reuse(tmp_path: Path) -> None:
+    fetch_started = Event()
+    allow_fetch_to_finish = Event()
+    downloads = 0
+
+    def fetcher(_: str) -> bytes:
+        nonlocal downloads
+        downloads += 1
+        fetch_started.set()
+        assert allow_fetch_to_finish.wait(timeout=5)
+        return _large_jpeg()
+
+    cache = ProductThumbnailCache(tmp_path, fetcher=fetcher)
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        first = executor.submit(cache.thumbnail_path, TRUSTED_URL)
+        assert fetch_started.wait(timeout=5)
+        second = executor.submit(cache.thumbnail_path, TRUSTED_URL)
+        deadline = monotonic() + 5
+        users = 0
+        while monotonic() < deadline:
+            with cache._locks_guard:
+                users = max((entry[1] for entry in cache._locks.values()), default=0)
+            if users == 2:
+                break
+            sleep(0.01)
+        assert users == 2
+        allow_fetch_to_finish.set()
+        assert first.result(timeout=5) == second.result(timeout=5)
+
+    assert downloads == 1
+    assert cache._locks == {}
+
+
+def test_thumbnail_cache_releases_lock_after_failure(tmp_path: Path) -> None:
+    cache = ProductThumbnailCache(tmp_path, fetcher=lambda _: b"")
+
+    with pytest.raises(ProductImageUnavailableError):
+        cache.thumbnail_path(TRUSTED_URL)
+
+    assert cache._locks == {}
+
+
+def test_thumbnail_cache_does_not_retain_completed_unique_keys(tmp_path: Path) -> None:
+    cache = ProductThumbnailCache(tmp_path, fetcher=lambda _: b"")
+
+    for index in range(100):
+        url = (
+            "https://media.takealot.com/covers_images/"
+            f"memory-check-{index}/s.file"
+        )
+        with pytest.raises(ProductImageUnavailableError):
+            cache.thumbnail_path(url)
+
+    assert cache._locks == {}
 
 
 def test_media_takealot_image_is_trusted_and_normalized() -> None:
