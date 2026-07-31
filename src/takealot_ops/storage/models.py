@@ -221,6 +221,26 @@ class CompetitorTarget(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
+class CompetitorTargetAudit(Base):
+    """One user-initiated competitor target list change."""
+
+    __tablename__ = "competitor_target_audits"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    plid: Mapped[str] = mapped_column(String(30), nullable=False, index=True)
+    action: Mapped[str] = mapped_column(String(20), nullable=False, index=True)
+    old_url: Mapped[str | None] = mapped_column(Text)
+    new_url: Mapped[str | None] = mapped_column(Text)
+    actor_user_id: Mapped[int | None] = mapped_column(Integer)
+    actor_username: Mapped[str] = mapped_column(String(64), nullable=False)
+    actor_display_name: Mapped[str] = mapped_column(String(100), nullable=False)
+    changed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        index=True,
+    )
+
+
 class CompetitorLinkHealth(Base):
     """Persistent validation state for a submitted competitor product link."""
 

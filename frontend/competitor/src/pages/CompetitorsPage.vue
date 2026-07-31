@@ -4,58 +4,64 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue"
 import {
   ApiRequestError,
   collectCompetitor,
+  createCompetitorTarget,
+  deleteCompetitorTarget,
   fetchCompetitorBatchStatus,
   fetchCompetitorDetail,
   fetchCompetitorLinkHealth,
+  fetchCompetitorTargetAudits,
+  fetchCompetitorTargets,
   fetchCompetitors,
   logCompetitorBatchEvent,
+  prioritizeCompetitorTarget,
+  updateCompetitorTarget,
   type CompetitorBatchStatus,
 } from "../api";
 import { PRODUCT_IMAGE_SIZE, productThumbnailUrl } from "../productImages";
+import {
+  MAX_AUTOMATIC_RETRY_ATTEMPTS,
+  scheduleRetryAfterGap,
+} from "../retryQueue";
 import type {
   CollectResult,
   CompetitorDateRange,
   CompetitorDetail,
   CompetitorItem,
   CompetitorLinkHealthItem,
+  CompetitorTargetAuditItem,
+  CompetitorTargetItem,
+  CompetitorVariantItem,
 } from "../types";
 import { formatChinaDateTime } from "../time";
 
 defineOptions({ name: "CompetitorsPage" });
 const props = defineProps<{
   canOperate?: boolean;
+  canControlCollection?: boolean;
   onPermissionDenied?: () => void;
 }>();
-
-const sampleUrls = [
-  "https://www.takealot.com/laser-lipo-slimming-machine/PLID72189176",
-  "https://www.takealot.com/multifunctional-led-modern-kitchen-sink-waterfall-push-button-te/PLID95526981",
-  "https://www.takealot.com/adjustable-hinged-stabilizer-support-fitness-run-knee-brace/PLID96909926?size=Right",
-  "https://www.takealot.com/cosmos-healing-enema-kit-medical-grade-silicone-2-litre/PLID94890093",
-];
-
-interface LinkValidationIssue {
-  lineNumber: number;
-  start: number;
-  end: number;
-  url: string;
-  message: string;
-}
 
 interface CollectionQueueItem {
   index: number;
   url: string;
+  priority?: boolean;
+}
+
+interface CollectionErrorItem {
+  plid: string;
+  url: string;
+  message: string;
 }
 
 interface CollectionCheckpoint {
-  version: 1 | 2 | 3 | 4 | 5;
+  version: 1 | 2 | 3 | 4 | 5 | 6 | 7;
   rawUrls: string;
   batchUrls: string[];
   attemptedIndexes: number[];
   failedIndexes: number[];
   terminalIndexes?: number[];
   results: CollectResult[];
-  errors: string[];
+  errors: Array<string | CollectionErrorItem>;
   stopReason: string;
   withStockProbe: boolean;
   visibleBrowser: boolean;
@@ -65,6 +71,7 @@ interface CollectionCheckpoint {
   activeIndex?: number | null;
   activeRequestId?: string | null;
   autoResumeAt?: string | null;
+  stockUnprobedIndexes?: number[];
 }
 
 type CollectionRunMode =
@@ -72,15 +79,45 @@ type CollectionRunMode =
   | "resume"
   | "auto_resume"
   | "scheduled_resume";
+type TargetActionSource = "default" | "manual_retry";
 
 const collectionCheckpointKey = "takealot-competitor-collection-v1";
 const collectionClientKey = "takealot-competitor-client-v1";
 const automaticResumeDelayMs = 10 * 60 * 1_000;
 const collectionClientId = restoreCollectionClientId();
-const rawUrls = ref(sampleUrls.join("\n"));
-const urlInput = ref<HTMLTextAreaElement | null>(null);
-const linkValidationIssue = ref<LinkValidationIssue | null>(null);
-const linkErrorPulse = ref(false);
+const rawUrls = ref("");
+const targets = ref<CompetitorTargetItem[]>([]);
+const targetQuery = ref("");
+const targetPage = ref(1);
+const targetPageSize = ref(20);
+const targetPageSizeOptions = [20, 50, 100] as const;
+const targetListOpen = ref(false);
+const targetListTrigger = ref<HTMLButtonElement | null>(null);
+const targetActionOpen = ref(false);
+const targetActionPlid = ref("");
+const targetActionFallbackUrl = ref("");
+const targetActionSource = ref<TargetActionSource>("default");
+const newTargetUrl = ref("");
+const targetManagerBusy = ref("");
+const targetManagerError = ref("");
+const targetManagerNotice = ref("");
+const duplicateTarget = ref<{
+  plid: string;
+  hasHistory: boolean;
+} | null>(null);
+const editingTargetPlid = ref("");
+const editingTargetUrl = ref("");
+const targetAuditItems = ref<CompetitorTargetAuditItem[]>([]);
+const targetAuditLoading = ref(false);
+const targetAuditError = ref("");
+const targetAuditOpen = ref(false);
+const targetAuditTrigger = ref<HTMLButtonElement | null>(null);
+const targetAuditLoaded = ref(false);
+const targetAuditTotal = ref(0);
+const targetAuditPage = ref(1);
+const targetAuditPageSize = 20;
+const targetAuditStartDate = ref(localDateInput(30));
+const targetAuditEndDate = ref(localDateInput(0));
 const withStockProbe = ref(true);
 const visibleBrowser = ref(false);
 const competitors = ref<CompetitorItem[]>([]);
@@ -97,13 +134,16 @@ const abortController = ref<AbortController | null>(null);
 const completed = ref(0);
 const total = ref(0);
 const collectionResults = ref<CollectResult[]>([]);
-const collectionErrors = ref<string[]>([]);
+const collectionErrors = ref<CollectionErrorItem[]>([]);
 const collectionStopReason = ref("");
 const collectionNoticeVersion = ref(0);
+const collectionActivityNotice = ref("");
 const batchUrls = ref<string[]>([]);
 const attemptedIndexes = ref<number[]>([]);
 const failedIndexes = ref<number[]>([]);
 const terminalIndexes = ref<number[]>([]);
+const stockUnprobedIndexes = ref<number[]>([]);
+const pendingPriorityTargets = ref<CompetitorBatchStatus["priority_targets"]>([]);
 const batchId = ref("");
 const activeIndex = ref<number | null>(null);
 const activeRequestId = ref<string | null>(null);
@@ -126,11 +166,16 @@ const sharedBatchStatus = ref<CompetitorBatchStatus>({
   current_index: null,
   current_plid: null,
   current_request_id: null,
+  current_stage: null,
   reason: "",
   started_at: null,
   updated_at: null,
+  queued_targets: [],
+  priority_targets: [],
+  prioritized_targets: [],
 });
 const linkHealth = ref<CompetitorLinkHealthItem[]>([]);
+const linkHealthOpen = ref(false);
 const pageError = ref("");
 const reviewFilter = ref<"全部" | "好评" | "中评" | "差评">("全部");
 const reviewStartDate = ref("");
@@ -141,6 +186,9 @@ const reviewSort = ref<
 const competitorQuery = ref("");
 const competitorStockFilter = ref<"全部" | "有货" | "没货" | "未探测">("全部");
 const competitorSignalFilter = ref("全部");
+const competitorPage = ref(1);
+const competitorPageSize = ref(20);
+const competitorPageSizeOptions = [20, 50, 100] as const;
 const rangeStartDate = ref("");
 const rangeEndDate = ref("");
 const appliedStartDate = ref("");
@@ -155,6 +203,37 @@ const failedCompetitorImages = ref<Set<string>>(new Set());
 
 const selected = computed(
   () => competitors.value.find((item) => item.plid === selectedPlid.value) ?? null,
+);
+const selectedTarget = computed(
+  () => targets.value.find((target) => target.plid === selectedPlid.value) ?? null,
+);
+const targetActionTarget = computed(
+  () => targets.value.find((target) => target.plid === targetActionPlid.value) ?? null,
+);
+const targetsWithHistoryCount = computed(
+  () => targets.value.filter((target) => target.has_history).length,
+);
+const targetsPendingFirstCaptureCount = computed(
+  () => targets.value.length - targetsWithHistoryCount.value,
+);
+const filteredTargets = computed(() => {
+  const query = competitorSearchTerm(targetQuery.value);
+  if (!query) return targets.value;
+  return targets.value.filter((target) =>
+    [target.plid, target.title ?? "", target.url].some((value) =>
+      value.toLocaleLowerCase().includes(query),
+    ),
+  );
+});
+const targetPageCount = computed(() =>
+  Math.max(1, Math.ceil(filteredTargets.value.length / targetPageSize.value)),
+);
+const pagedTargets = computed(() => {
+  const start = (targetPage.value - 1) * targetPageSize.value;
+  return filteredTargets.value.slice(start, start + targetPageSize.value);
+});
+const targetAuditPageCount = computed(() =>
+  Math.max(1, Math.ceil(targetAuditTotal.value / targetAuditPageSize)),
 );
 const sharedBatchMatchesCheckpoint = computed(
   () =>
@@ -174,13 +253,31 @@ const sharedBatchOwner = computed(
     || sharedBatchStatus.value.owner_username
     || "其他用户",
 );
+const prioritizedTargetStates = computed(
+  () =>
+    new Map(
+      (sharedBatchStatus.value.prioritized_targets ?? []).map((item) => [
+        item.plid,
+        item,
+      ]),
+    ),
+);
+const pendingPriorityTargetPlids = computed(
+  () =>
+    new Set(
+      (sharedBatchStatus.value.priority_targets ?? []).map((item) => item.plid),
+    ),
+);
+const targetActionIsManualRetry = computed(
+  () => targetActionSource.value === "manual_retry",
+);
 const competitorSignalOptions = computed(() =>
   [...new Set(competitors.value.map((item) => item.趋势判断).filter(Boolean))].sort(
     (first, second) => first.localeCompare(second, "zh-CN"),
   ),
 );
 const filteredCompetitors = computed(() => {
-  const query = competitorQuery.value.trim().toLocaleLowerCase();
+  const query = competitorSearchTerm(competitorQuery.value);
   return competitors.value.filter((item) => {
     if (
       query
@@ -206,6 +303,13 @@ const filteredCompetitors = computed(() => {
     );
   });
 });
+const competitorPageCount = computed(() =>
+  Math.max(1, Math.ceil(filteredCompetitors.value.length / competitorPageSize.value)),
+);
+const pagedCompetitors = computed(() => {
+  const start = (competitorPage.value - 1) * competitorPageSize.value;
+  return filteredCompetitors.value.slice(start, start + competitorPageSize.value);
+});
 const competitorFiltersActive = computed(
   () =>
     Boolean(competitorQuery.value.trim())
@@ -230,6 +334,24 @@ const activeRangeLabel = computed(() => {
   if (!appliedStartDate.value || !appliedEndDate.value) return "全部可用快照";
   return `${appliedStartDate.value} 至 ${appliedEndDate.value}`;
 });
+const variantsBySnapshot = computed(() => {
+  const grouped = new Map<number, CompetitorVariantItem[]>();
+  for (const variant of detail.value.variants) {
+    const variants = grouped.get(variant.快照ID) ?? [];
+    variants.push(variant);
+    grouped.set(variant.快照ID, variants);
+  }
+  return grouped;
+});
+const latestVariants = computed(() => {
+  const snapshotId = selected.value?.快照ID;
+  return snapshotId === undefined
+    ? []
+    : variantsBySnapshot.value.get(snapshotId) ?? [];
+});
+function snapshotVariants(snapshotId: number) {
+  return variantsBySnapshot.value.get(snapshotId) ?? [];
+}
 const reviewDates = computed(() =>
   detail.value.reviews
     .map((review) => reviewDateKey(review.评论日期))
@@ -257,8 +379,39 @@ const filteredReviews = computed(() => {
   });
   return [...result].sort(compareReviews);
 });
+const displayedBatchCompleted = computed(() =>
+  sharedBatchStatus.value.active
+    ? sharedBatchStatus.value.completed
+    : completed.value,
+);
+const displayedBatchTotal = computed(() =>
+  sharedBatchStatus.value.active ? sharedBatchStatus.value.total : total.value,
+);
+const displayedBatchSucceeded = computed(() =>
+  sharedBatchStatus.value.active
+    ? sharedBatchStatus.value.succeeded
+    : collectionResults.value.length,
+);
+const displayedBatchFailed = computed(() =>
+  sharedBatchStatus.value.active
+    ? sharedBatchStatus.value.failed
+    : failedIndexes.value.length,
+);
+const hasDisplayedBatchProgress = computed(
+  () =>
+    sharedBatchStatus.value.active
+    || Boolean(
+      collectionResults.value.length
+      || collectionErrors.value.length
+      || batchUrls.value.length,
+    ),
+);
 const progress = computed(() =>
-  total.value ? Math.round((completed.value / total.value) * 100) : 0,
+  displayedBatchTotal.value
+    ? Math.round(
+      (displayedBatchCompleted.value / displayedBatchTotal.value) * 100,
+    )
+    : 0,
 );
 const successfulPlids = computed(
   () => new Set(collectionResults.value.map((result) => result.plid)),
@@ -289,6 +442,7 @@ const resumeQueue = computed<CollectionQueueItem[]>(() => {
     ? Math.min(...failedIndexes.value)
     : Number.POSITIVE_INFINITY;
   const attempted = new Set(attemptedIndexes.value);
+  const failed = new Set(failedIndexes.value);
   const terminal = new Set(terminalIndexes.value);
   const firstUnattempted = batchUrls.value.findIndex(
     (_, index) => !attempted.has(index),
@@ -298,21 +452,48 @@ const resumeQueue = computed<CollectionQueueItem[]>(() => {
     firstUnattempted < 0 ? Number.POSITIVE_INFINITY : firstUnattempted,
   );
   if (!Number.isFinite(start)) return [];
+  const stockUnprobed = new Set(stockUnprobedIndexes.value);
   return batchUrls.value
     .map((url, index) => ({ index, url }))
     .filter(
       ({ index, url }) =>
         index >= start
         && !terminal.has(index)
-        && !successfulPlids.value.has(plidFromUrl(url)),
-    );
+        && (
+          failed.has(index)
+          || !successfulPlids.value.has(plidFromUrl(url))
+          || !attempted.has(index)
+        ),
+    )
+    .sort((first, second) => {
+      const deferredDifference =
+        Number(stockUnprobed.has(first.index))
+        - Number(stockUnprobed.has(second.index));
+      return deferredDifference || first.index - second.index;
+    });
 });
 const pendingResumeCount = computed(() => resumeQueue.value.length);
-const collectionNotices = computed(() =>
-  collectionResults.value.filter((result) => result.message !== "采集成功"),
+const displayedBatchPending = computed(() =>
+  sharedBatchStatus.value.active
+    ? sharedBatchStatus.value.pending
+    : pendingResumeCount.value,
+);
+const showLocalCollectionDetails = computed(
+  () => !sharedBatchStatus.value.active || sharedBatchMatchesCheckpoint.value,
 );
 const activeCollectionStatus = computed(() => {
   void collectionClock.value;
+  const shared = sharedBatchStatus.value;
+  const sharedStage = shared.current_stage?.trim() || "";
+  if (!collecting.value && shared.active) {
+    const current = shared.current_plid ? ` · PLID${shared.current_plid}` : "";
+    const stage = sharedStage ? ` · ${sharedStage}` : "";
+    const position =
+      shared.current_index !== null && shared.total
+        ? `第 ${shared.current_index + 1}/${shared.total} 条`
+        : "正在准备下一条商品";
+    return `${position}${current}${stage}`;
+  }
   if (!collecting.value) return "";
   if (activeIndex.value === null) {
     return "正在登记采集任务或准备下一条商品，请稍候。";
@@ -322,9 +503,27 @@ const activeCollectionStatus = computed(() => {
   const elapsed = activeStartedAt.value === null
     ? 0
     : Math.max(0, Math.floor((Date.now() - activeStartedAt.value) / 1_000));
-  return `正在检测第 ${activeIndex.value + 1}/${total.value} 条 · PLID${plid} · 已等待 ${elapsed} 秒`;
+  const stage =
+    shared.current_request_id === activeRequestId.value && sharedStage
+      ? ` · ${sharedStage}`
+      : "";
+  return `正在检测第 ${activeIndex.value + 1}/${total.value} 条 · PLID${plid}${stage} · 已等待 ${elapsed} 秒`;
 });
 const activeCollectionHint = computed(() => {
+  const stage = sharedBatchStatus.value.current_stage ?? "";
+  if (
+    stage.includes("后台数据")
+    || stage.includes("商品与变体")
+    || stage.includes("评论")
+  ) {
+    return "当前正在后台读取公开数据，这一阶段不会显示库存检测窗口；完成后才会打开可见浏览器。";
+  }
+  if (stage.includes("库存探测")) {
+    return "正在进行购物车库存探测；商品有多个变体时会在同一个检测窗口内依次处理。";
+  }
+  if (stage.includes("保存")) {
+    return "检测窗口已经关闭，正在写入商品、评论和各变体库存快照。";
+  }
   if (activeStartedAt.value === null) {
     return "正在建立任务状态，完成后会自动显示结果。";
   }
@@ -350,7 +549,11 @@ const autoResumeCountdown = computed(() => {
 onMounted(async () => {
   window.addEventListener("keydown", handleWindowKeydown);
   restoreCollectionCheckpoint();
-  await Promise.all([loadOverview(), loadSharedBatchStatus()]);
+  await Promise.all([
+    loadOverview(),
+    loadTargets(),
+    loadSharedBatchStatus(),
+  ]);
   sharedBatchTimer = window.setInterval(
     () => void loadSharedBatchStatus(),
     2_000,
@@ -381,6 +584,30 @@ let sharedBatchTimer: number | null = null;
 let batchHeartbeatTimer: number | null = null;
 let collectionClockTimer: number | null = null;
 
+watch([targetQuery, targetPageSize], () => {
+  targetPage.value = 1;
+});
+
+watch(targetPageCount, (pageCount) => {
+  if (targetPage.value > pageCount) targetPage.value = pageCount;
+});
+
+watch(
+  [
+    competitorQuery,
+    competitorStockFilter,
+    competitorSignalFilter,
+    competitorPageSize,
+  ],
+  () => {
+    competitorPage.value = 1;
+  },
+);
+
+watch(competitorPageCount, (pageCount) => {
+  if (competitorPage.value > pageCount) competitorPage.value = pageCount;
+});
+
 let detailRequestId = 0;
 watch([selectedPlid, appliedStartDate, appliedEndDate], async ([plid, start, end]) => {
   const requestId = ++detailRequestId;
@@ -404,9 +631,15 @@ watch([selectedPlid, appliedStartDate, appliedEndDate], async ([plid, start, end
   }
 });
 
-watch(detailModalOpen, (open) => {
-  document.body.style.overflow = open ? "hidden" : "";
-});
+watch(
+  [detailModalOpen, targetListOpen, targetAuditOpen, targetActionOpen],
+  ([detailOpen, targetManagerOpen, targetAuditDialogOpen, targetActionDialogOpen]) => {
+    document.body.style.overflow =
+      detailOpen || targetManagerOpen || targetAuditDialogOpen || targetActionDialogOpen
+        ? "hidden"
+        : "";
+  },
+);
 
 watch(reviewStartDate, (start) => {
   if (start && reviewEndDate.value && start > reviewEndDate.value) {
@@ -542,15 +775,112 @@ async function applyDateRange(): Promise<void> {
 
 function openProductModal(item: CompetitorItem) {
   selectedPlid.value = item.plid;
+  if (editingTargetPlid.value && editingTargetPlid.value !== item.plid) {
+    cancelEditTarget();
+  }
+  clearTargetManagerFeedback();
   detailModalOpen.value = true;
 }
 
 function closeProductModal() {
   detailModalOpen.value = false;
+  if (editingTargetPlid.value === selectedPlid.value) cancelEditTarget();
+  clearTargetManagerFeedback();
+}
+
+async function addSelectedTarget() {
+  if (!selected.value) return;
+  newTargetUrl.value = selected.value.链接;
+  await addTarget();
+}
+
+function targetUrlForPlid(plid: string) {
+  return (
+    targets.value.find((target) => target.plid === plid)?.url
+    || batchUrls.value.find((url) => plidFromUrl(url) === plid)
+    || ""
+  );
+}
+
+function openTargetActionForLink(
+  plid: string,
+  url: string,
+  source: TargetActionSource = "default",
+) {
+  const resolvedUrl = url || targetUrlForPlid(plid);
+  if (!plid || !resolvedUrl) {
+    showCollectionNotice("这条任务没有可识别的 PLID 或链接，暂时无法打开队列操作页。");
+    return;
+  }
+  if (editingTargetPlid.value && editingTargetPlid.value !== plid) {
+    cancelEditTarget();
+  }
+  clearTargetManagerFeedback();
+  targetActionPlid.value = plid;
+  targetActionFallbackUrl.value = resolvedUrl;
+  targetActionSource.value = source;
+  targetActionOpen.value = true;
+}
+
+function openTargetAction(item: CompetitorLinkHealthItem) {
+  openTargetActionForLink(item.plid, item.url);
+}
+
+function closeTargetAction() {
+  targetActionOpen.value = false;
+  if (editingTargetPlid.value === targetActionPlid.value) cancelEditTarget();
+  clearTargetManagerFeedback();
+  targetActionPlid.value = "";
+  targetActionFallbackUrl.value = "";
+  targetActionSource.value = "default";
+}
+
+async function addTargetActionTarget() {
+  if (!targetActionFallbackUrl.value) return;
+  const manualRetry = targetActionIsManualRetry.value;
+  const plid = targetActionPlid.value;
+  newTargetUrl.value = targetActionFallbackUrl.value;
+  await addTarget();
+  const addedTarget = targets.value.find((target) => target.plid === plid);
+  if (manualRetry && addedTarget && sharedBatchStatus.value.active) {
+    await prioritizeTarget(addedTarget, true);
+  }
+}
+
+function openTargetList() {
+  targetListOpen.value = true;
+}
+
+function closeTargetList() {
+  targetListOpen.value = false;
+  void nextTick(() => targetListTrigger.value?.focus());
+}
+
+function openTargetAudit() {
+  targetAuditOpen.value = true;
+  if (!targetAuditLoaded.value) void loadTargetAudits(1);
+}
+
+function closeTargetAudit() {
+  targetAuditOpen.value = false;
+  void nextTick(() => targetAuditTrigger.value?.focus());
 }
 
 function handleWindowKeydown(event: KeyboardEvent) {
-  if (event.key === "Escape" && detailModalOpen.value) closeProductModal();
+  if (event.key !== "Escape") return;
+  if (targetActionOpen.value) {
+    closeTargetAction();
+    return;
+  }
+  if (targetAuditOpen.value) {
+    closeTargetAudit();
+    return;
+  }
+  if (targetListOpen.value) {
+    closeTargetList();
+    return;
+  }
+  if (detailModalOpen.value) closeProductModal();
 }
 
 async function loadOverview() {
@@ -584,46 +914,392 @@ async function loadOverview() {
 
 async function loadSharedBatchStatus() {
   try {
-    sharedBatchStatus.value = await fetchCompetitorBatchStatus();
+    const status = await fetchCompetitorBatchStatus();
+    sharedBatchStatus.value = status;
+    mergeQueuedTargetsIntoLocalBatch(status);
   } catch {
     // Keep the last shared progress during a short local-service interruption.
   }
 }
 
-function parseUrls(): {
-  urls: string[];
-  issue: LinkValidationIssue | null;
-} {
-  const unique = new Map<string, string>();
-  const raw = rawUrls.value;
-  const lines = raw.split(/\r\n|\n|\r/);
-  let lineStart = 0;
-  for (const [lineIndex, line] of lines.entries()) {
-    const currentLineStart = lineStart;
-    lineStart += line.length + lineBreakLength(raw, lineStart + line.length);
-    const leadingWhitespace = line.match(/^\s*/)?.[0].length ?? 0;
-    const url = line.trim();
-    if (!url) continue;
-    const validationMessage = validateCompetitorUrl(url);
-    const match = url.match(/PLID(\d+)/i);
-    if (validationMessage || !match) {
-      return {
-        urls: [...unique.values()],
-        issue: {
-          lineNumber: lineIndex + 1,
-          start: currentLineStart + leadingWhitespace,
-          end: currentLineStart + leadingWhitespace + url.length,
-          url,
-          message: validationMessage ?? "链接中未找到 Takealot PLID",
-        },
-      };
+async function loadTargets() {
+  try {
+    targets.value = await fetchCompetitorTargets();
+    if (!batchUrls.value.length) {
+      rawUrls.value = targets.value.map((target) => target.url).join("\n");
     }
-    if (!unique.has(match[1])) unique.set(match[1], url);
+  } catch (error) {
+    targetManagerError.value =
+      error instanceof Error ? error.message : "读取竞品链接清单失败";
   }
-  return { urls: [...unique.values()], issue: null };
+}
+
+async function addTarget() {
+  if (!props.canOperate) {
+    props.onPermissionDenied?.();
+    return;
+  }
+  clearTargetManagerFeedback();
+  duplicateTarget.value = null;
+  const url = newTargetUrl.value.trim();
+  const issue = validateCompetitorUrl(url);
+  if (issue) {
+    targetManagerError.value = issue;
+    return;
+  }
+  const plid = plidFromUrl(url);
+  const existingTarget = targets.value.find((target) => target.plid === plid);
+  if (existingTarget) {
+    showDuplicateTarget(existingTarget);
+    return;
+  }
+  targetManagerBusy.value = "add";
+  try {
+    const result = await createCompetitorTarget(url);
+    newTargetUrl.value = "";
+    await Promise.all([loadTargets(), loadSharedBatchStatus()]);
+    targetManagerNotice.value = result.queued_to_active_batch
+      ? `PLID${result.item.plid} 已保存，并加入当前运行批次队头；当前商品结束后优先探测。`
+      : `PLID${result.item.plid} 已保存，将进入下一次采集清单。`;
+  } catch (error) {
+    if (error instanceof ApiRequestError && error.status === 409 && plid) {
+      await loadTargets();
+      const duplicate = targets.value.find((target) => target.plid === plid);
+      if (duplicate) {
+        showDuplicateTarget(duplicate);
+        return;
+      }
+    }
+    targetManagerError.value =
+      error instanceof Error ? error.message : "新增竞品链接失败";
+  } finally {
+    targetManagerBusy.value = "";
+  }
+}
+
+function clearTargetManagerFeedback() {
+  targetManagerError.value = "";
+  targetManagerNotice.value = "";
+  duplicateTarget.value = null;
+}
+
+function showDuplicateTarget(target: CompetitorTargetItem) {
+  targetManagerError.value = "";
+  targetManagerNotice.value = "";
+  duplicateTarget.value = {
+    plid: target.plid,
+    hasHistory: target.has_history,
+  };
+}
+
+async function jumpToDuplicateTarget() {
+  const duplicate = duplicateTarget.value;
+  if (!duplicate?.hasHistory) return;
+  competitorQuery.value = "";
+  competitorStockFilter.value = "全部";
+  competitorSignalFilter.value = "全部";
+  if (!competitors.value.some((item) => item.plid === duplicate.plid)) {
+    const availableStart = competitorDateRange.value.available_start;
+    const availableEnd = competitorDateRange.value.available_end;
+    rangeStartDate.value = availableStart ?? "";
+    rangeEndDate.value = availableEnd ?? "";
+    appliedStartDate.value = rangeStartDate.value;
+    appliedEndDate.value = rangeEndDate.value;
+    await loadOverview();
+  }
+  await nextTick();
+  selectedPlid.value = duplicate.plid;
+  const duplicateIndex = filteredCompetitors.value.findIndex(
+    (item) => item.plid === duplicate.plid,
+  );
+  if (duplicateIndex >= 0) {
+    competitorPage.value =
+      Math.floor(duplicateIndex / competitorPageSize.value) + 1;
+  }
+  await nextTick();
+  const row = document.getElementById(`competitor-row-${duplicate.plid}`);
+  if (!row) {
+    targetManagerError.value = "已有历史记录，但当前观察区间没有可显示的商品卡片";
+    return;
+  }
+  row.scrollIntoView({ behavior: "smooth", block: "center" });
+  row.focus({ preventScroll: true });
+}
+
+function beginEditTarget(target: CompetitorTargetItem) {
+  editingTargetPlid.value = target.plid;
+  editingTargetUrl.value = target.url;
+  clearTargetManagerFeedback();
+}
+
+function cancelEditTarget() {
+  editingTargetPlid.value = "";
+  editingTargetUrl.value = "";
+}
+
+async function saveTargetEdit(plid: string) {
+  if (!props.canOperate) {
+    props.onPermissionDenied?.();
+    return;
+  }
+  clearTargetManagerFeedback();
+  const url = editingTargetUrl.value.trim();
+  const issue = validateCompetitorUrl(url);
+  if (issue) {
+    targetManagerError.value = issue;
+    return;
+  }
+  targetManagerBusy.value = plid;
+  try {
+    await updateCompetitorTarget(plid, url);
+    cancelEditTarget();
+    await loadTargets();
+    targetManagerNotice.value = `PLID${plid} 的链接已更新。`;
+  } catch (error) {
+    targetManagerError.value =
+      error instanceof Error ? error.message : "修改竞品链接失败";
+  } finally {
+    targetManagerBusy.value = "";
+  }
+}
+
+async function removeTarget(target: CompetitorTargetItem) {
+  if (!props.canOperate) {
+    props.onPermissionDenied?.();
+    return;
+  }
+  if (
+    !window.confirm(
+      `确定从后续监控清单移除 PLID${target.plid} 吗？历史快照与操作记录会保留。`,
+    )
+  ) {
+    return;
+  }
+  clearTargetManagerFeedback();
+  targetManagerBusy.value = target.plid;
+  try {
+    await deleteCompetitorTarget(target.plid);
+    if (editingTargetPlid.value === target.plid) cancelEditTarget();
+    await loadTargets();
+    targetManagerNotice.value =
+      `PLID${target.plid} 已从后续监控移除，历史快照仍保留。`;
+  } catch (error) {
+    targetManagerError.value =
+      error instanceof Error ? error.message : "删除竞品链接失败";
+  } finally {
+    targetManagerBusy.value = "";
+  }
+}
+
+async function prioritizeTarget(
+  target: CompetitorTargetItem,
+  manualRetry = false,
+) {
+  if (!props.canOperate) {
+    props.onPermissionDenied?.();
+    return;
+  }
+  clearTargetManagerFeedback();
+  targetManagerBusy.value = `priority:${target.plid}`;
+  try {
+    const priorityResult = await prioritizeCompetitorTarget(
+      target.plid,
+      manualRetry ? "manual_retry" : "manual",
+    );
+    const status = priorityResult.status;
+    sharedBatchStatus.value = status;
+    mergeQueuedTargetsIntoLocalBatch(status);
+    targetManagerNotice.value = priorityResult.accepted
+      ? manualRetry
+        ? `PLID${target.plid} 的人工重试已记录并插队，等待当前商品完成后优先探测。`
+        : `PLID${target.plid} 已插队，等待当前商品完成后优先探测；原队列位置继续保留。`
+      : manualRetry
+        ? `PLID${target.plid} 已在人工重试插队队列中，无需重复提交。`
+        : `PLID${target.plid} 本批已经插队，无需重复提交。`;
+  } catch (error) {
+    targetManagerError.value =
+      error instanceof Error ? error.message : "竞品链接插队失败";
+  } finally {
+    targetManagerBusy.value = "";
+  }
+}
+
+function targetPriorityLabel(plid: string) {
+  const state = prioritizedTargetStates.value.get(plid);
+  if (!state) return "插队";
+  return state.source === "automatic" ? "已自动插队" : "已插队";
+}
+
+function targetActionPriorityLabel(plid: string) {
+  if (!targetActionIsManualRetry.value) return targetPriorityLabel(plid);
+  return pendingPriorityTargetPlids.value.has(plid)
+    ? "人工重试已插队"
+    : "人工重试并插队";
+}
+
+async function loadTargetAudits(page = 1) {
+  if (
+    targetAuditStartDate.value
+    && targetAuditEndDate.value
+    && targetAuditStartDate.value > targetAuditEndDate.value
+  ) {
+    targetAuditError.value = "开始日期不能晚于结束日期";
+    return;
+  }
+  targetAuditLoading.value = true;
+  targetAuditError.value = "";
+  try {
+    const result = await fetchCompetitorTargetAudits(
+      targetAuditStartDate.value,
+      targetAuditEndDate.value,
+      page,
+      targetAuditPageSize,
+    );
+    targetAuditItems.value = result.items;
+    targetAuditTotal.value = result.total;
+    targetAuditPage.value = result.page;
+    targetAuditLoaded.value = true;
+  } catch (error) {
+    targetAuditError.value =
+      error instanceof Error ? error.message : "读取链接操作记录失败";
+  } finally {
+    targetAuditLoading.value = false;
+  }
+}
+
+function mergeQueuedTargetsIntoLocalBatch(status: CompetitorBatchStatus) {
+  pendingPriorityTargets.value =
+    status.active && batchId.value && status.batch_id === batchId.value
+      ? [...(status.priority_targets ?? [])]
+      : [];
+  if (!status.active || !batchId.value || status.batch_id !== batchId.value) {
+    return;
+  }
+  const knownPlids = new Set(batchUrls.value.map(plidFromUrl));
+  let appended = 0;
+  for (const target of status.queued_targets ?? []) {
+    if (knownPlids.has(target.plid)) continue;
+    batchUrls.value.push(target.url);
+    knownPlids.add(target.plid);
+    appended += 1;
+  }
+  if (!appended) return;
+  rawUrls.value = batchUrls.value.join("\n");
+  total.value = batchUrls.value.length;
+  showCollectionActivityNotice(
+    `监控清单新增了 ${appended} 个链接，已加入当前批次队头；当前商品结束后优先探测。`,
+  );
+  persistCollectionCheckpoint();
+}
+
+function applyQueuedTargetsToRunQueue(
+  queue: CollectionQueueItem[],
+  cursor: number,
+  knownIndexes: Set<number>,
+) {
+  if (activeIndex.value !== null && activeRequestId.value) return;
+  let insertionCursor = cursor;
+  for (const target of sharedBatchStatus.value.queued_targets ?? []) {
+    const index = batchUrls.value.findIndex(
+      (url) => plidFromUrl(url) === target.plid,
+    );
+    if (index < 0) continue;
+    const existingPosition = queue.findIndex(
+      (item, position) =>
+        position >= cursor && item.index === index && !item.priority,
+    );
+    if (existingPosition >= 0) {
+      const [item] = queue.splice(existingPosition, 1);
+      if (item) {
+        queue.splice(insertionCursor, 0, item);
+        insertionCursor += 1;
+      }
+      knownIndexes.add(index);
+      continue;
+    }
+    if (attemptedIndexes.value.includes(index) || knownIndexes.has(index)) {
+      continue;
+    }
+    const pendingItem = resumeQueue.value.find((item) => item.index === index);
+    if (!pendingItem) continue;
+    queue.splice(insertionCursor, 0, pendingItem);
+    insertionCursor += 1;
+    knownIndexes.add(index);
+  }
+}
+
+function applyPriorityTargetsToRunQueue(
+  queue: CollectionQueueItem[],
+  cursor: number,
+  knownIndexes: Set<number>,
+) {
+  if (!pendingPriorityTargets.value.length) return;
+  const prioritized: CollectionQueueItem[] = [];
+  const prioritizedIndexes = new Set<number>();
+  for (const target of pendingPriorityTargets.value) {
+    let index = batchUrls.value.findIndex(
+      (url) => plidFromUrl(url) === target.plid,
+    );
+    if (index < 0) {
+      batchUrls.value.push(target.url);
+      index = batchUrls.value.length - 1;
+      rawUrls.value = batchUrls.value.join("\n");
+      total.value = batchUrls.value.length;
+    }
+    const originalStillQueued = queue.some(
+      (item, position) =>
+        position >= cursor && item.index === index && !item.priority,
+    );
+    if (
+      !originalStillQueued
+      && !attemptedIndexes.value.includes(index)
+      && !knownIndexes.has(index)
+    ) {
+      queue.push({ index, url: batchUrls.value[index]! });
+      knownIndexes.add(index);
+    }
+    if (prioritizedIndexes.has(index)) continue;
+    const priorityAlreadyQueued = queue.some(
+      (item, position) =>
+        position >= cursor && item.index === index && item.priority,
+    );
+    if (priorityAlreadyQueued) continue;
+    prioritized.push({
+      index,
+      url: batchUrls.value[index]!,
+      priority: true,
+    });
+    prioritizedIndexes.add(index);
+  }
+  if (!prioritized.length) return;
+  queue.splice(cursor, 0, ...prioritized);
+  pendingPriorityTargets.value = [];
+  persistCollectionCheckpoint();
+}
+
+function appendPendingItemsToRunQueue(
+  queue: CollectionQueueItem[],
+  knownIndexes: Set<number>,
+  cursor: number,
+) {
+  const stockUnprobed = new Set(stockUnprobedIndexes.value);
+  for (const item of resumeQueue.value) {
+    if (knownIndexes.has(item.index)) continue;
+    const firstDeferredPosition = queue.findIndex(
+      (queuedItem, position) =>
+        position >= cursor && stockUnprobed.has(queuedItem.index),
+    );
+    if (!stockUnprobed.has(item.index) && firstDeferredPosition >= 0) {
+      queue.splice(firstDeferredPosition, 0, item);
+    } else {
+      queue.push(item);
+    }
+    knownIndexes.add(item.index);
+  }
 }
 
 function validateCompetitorUrl(value: string): string | null {
+  if (!value) return "请输入 Takealot 商品链接";
   let parsed: URL;
   try {
     parsed = new URL(value);
@@ -641,39 +1317,22 @@ function validateCompetitorUrl(value: string): string | null {
   return null;
 }
 
-function lineBreakLength(value: string, position: number) {
-  if (value.slice(position, position + 2) === "\r\n") return 2;
-  return value[position] === "\n" || value[position] === "\r" ? 1 : 0;
+function localDateInput(daysAgo: number) {
+  const value = new Date();
+  value.setDate(value.getDate() - daysAgo);
+  const year = value.getFullYear();
+  const month = String(value.getMonth() + 1).padStart(2, "0");
+  const day = String(value.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
 }
 
-function clearLinkValidation() {
-  const hadValidationIssue = linkValidationIssue.value !== null;
-  linkValidationIssue.value = null;
-  linkErrorPulse.value = false;
-  if (hadValidationIssue) {
-    collectionErrors.value = collectionErrors.value.filter(
-      (message) => !/^第 \d+ 行：/.test(message),
-    );
-  }
-}
-
-async function focusInvalidLink(issue: LinkValidationIssue) {
-  linkValidationIssue.value = issue;
-  linkErrorPulse.value = false;
-  await nextTick();
-  linkErrorPulse.value = true;
-
-  const input = urlInput.value;
-  if (!input) return;
-  input.scrollIntoView({ behavior: "smooth", block: "center" });
-  input.focus({ preventScroll: true });
-  input.setSelectionRange(issue.start, issue.end);
-  const lineHeight =
-    Number.parseFloat(window.getComputedStyle(input).lineHeight) || 22;
-  input.scrollTop = Math.max(
-    0,
-    (issue.lineNumber - 1) * lineHeight - input.clientHeight / 2,
-  );
+function targetAuditActionLabel(action: CompetitorTargetAuditItem["action"]) {
+  return {
+    add: "新增",
+    update: "修改",
+    delete: "删除",
+    manual_retry: "人工重试",
+  }[action];
 }
 
 function delay(ms: number) {
@@ -704,6 +1363,11 @@ function plidFromUrl(url: string) {
   return url.match(/PLID(\d+)/i)?.[1] ?? "";
 }
 
+function competitorSearchTerm(value: string) {
+  const trimmed = value.trim();
+  return (plidFromUrl(trimmed) || trimmed).toLocaleLowerCase();
+}
+
 function markAttempted(index: number) {
   if (!attemptedIndexes.value.includes(index)) {
     attemptedIndexes.value = [...attemptedIndexes.value, index].sort(
@@ -727,17 +1391,52 @@ function markTerminal(index: number, terminal: boolean) {
   terminalIndexes.value = [...indexes].sort((first, second) => first - second);
 }
 
+function markStockUnprobed(index: number, unprobed: boolean) {
+  const indexes = new Set(stockUnprobedIndexes.value);
+  if (unprobed) indexes.add(index);
+  else indexes.delete(index);
+  stockUnprobedIndexes.value = [...indexes].sort((first, second) => first - second);
+}
+
 function removeCollectionError(plid: string) {
-  const prefix = `PLID${plid}：`;
   collectionErrors.value = collectionErrors.value.filter(
-    (message) => !message.startsWith(prefix),
+    (item) => item.plid !== plid,
   );
+}
+
+function normalizeCollectionError(
+  item: unknown,
+): CollectionErrorItem {
+  if (typeof item === "object" && item !== null) {
+    const candidate = item as Partial<CollectionErrorItem>;
+    const plid = typeof candidate.plid === "string" ? candidate.plid : "";
+    return {
+      plid,
+      url:
+        (typeof candidate.url === "string" ? candidate.url : "")
+        || targetUrlForPlid(plid),
+      message:
+        typeof candidate.message === "string"
+          ? candidate.message
+          : "旧版待重试详情格式不完整",
+    };
+  }
+  if (typeof item !== "string") {
+    return { plid: "", url: "", message: "旧版待重试详情格式不完整" };
+  }
+  const matched = item.match(/^PLID(\d+)：?(.*)$/s);
+  const plid = matched?.[1] ?? "";
+  return {
+    plid,
+    url: plid ? targetUrlForPlid(plid) : "",
+    message: matched?.[2] || item,
+  };
 }
 
 function persistCollectionCheckpoint() {
   if (!batchUrls.value.length) return;
   const checkpoint: CollectionCheckpoint = {
-    version: 5,
+    version: 7,
     rawUrls: rawUrls.value,
     batchUrls: batchUrls.value,
     attemptedIndexes: attemptedIndexes.value,
@@ -753,6 +1452,7 @@ function persistCollectionCheckpoint() {
     running: collecting.value && !manualStopRequested.value,
     activeIndex: activeIndex.value,
     activeRequestId: activeRequestId.value,
+    stockUnprobedIndexes: stockUnprobedIndexes.value,
     autoResumeAt:
       autoResumeAt.value === null
         ? null
@@ -780,7 +1480,7 @@ function restoreCollectionCheckpoint() {
     return;
   }
   if (
-    ![1, 2, 3, 4, 5].includes(checkpoint.version)
+    ![1, 2, 3, 4, 5, 6, 7].includes(checkpoint.version)
     || !Array.isArray(checkpoint.batchUrls)
     || !Array.isArray(checkpoint.attemptedIndexes)
     || !Array.isArray(checkpoint.failedIndexes)
@@ -801,8 +1501,14 @@ function restoreCollectionCheckpoint() {
   terminalIndexes.value = Array.isArray(checkpoint.terminalIndexes)
     ? checkpoint.terminalIndexes
     : [];
-  collectionResults.value = checkpoint.results;
-  collectionErrors.value = checkpoint.errors;
+  stockUnprobedIndexes.value = Array.isArray(checkpoint.stockUnprobedIndexes)
+    ? checkpoint.stockUnprobedIndexes
+    : [];
+  collectionResults.value = checkpoint.results.map((result) => ({
+    ...result,
+    url: result.url || targetUrlForPlid(result.plid),
+  }));
+  collectionErrors.value = checkpoint.errors.map(normalizeCollectionError);
   collectionStopReason.value =
     checkpoint.stopReason
       === "连续 2 次无法连接 Takealot，已暂停剩余链接。请恢复梯子或代理后点击“继续失败/未完成”。"
@@ -838,14 +1544,16 @@ function restoreCollectionCheckpoint() {
     && checkpoint.running === true
     && !checkpoint.stopReason
     && resumeQueue.value.length > 0;
-  if (checkpoint.version < 5 && autoResumeAt.value !== null) {
+  if (checkpoint.version < 7) {
     persistCollectionCheckpoint();
   }
 }
 
 async function startCollection() {
-  if (!props.canOperate) {
-    props.onPermissionDenied?.();
+  if (!props.canControlCollection) {
+    showCollectionNotice(
+      "竞品批次的开始、继续和停止仅限 kxx 账号；当前账号仍可新增链接和插队。",
+    );
     return;
   }
   if (sharedBatchStatus.value.active && !collecting.value) {
@@ -859,25 +1567,21 @@ async function startCollection() {
     return;
   }
   try {
-    clearLinkValidation();
-    const { urls, issue } = parseUrls();
-    if (issue) {
-      collectionErrors.value = [
-        `第 ${issue.lineNumber} 行：${issue.message}：${issue.url}`,
-      ];
-      await focusInvalidLink(issue);
-      return;
-    }
-    if (!urls.length) throw new Error("请至少填写一个 Takealot 竞品链接");
+    const urls = targets.value.map((target) => target.url);
+    if (!urls.length) throw new Error("请先在监控链接清单中新增至少一个商品");
     collectionResults.value = [];
     collectionErrors.value = [];
     collectionStopReason.value = "";
+    collectionActivityNotice.value = "";
     autoResumeAt.value = null;
     completed.value = 0;
     batchUrls.value = urls;
+    rawUrls.value = urls.join("\n");
     attemptedIndexes.value = [];
     failedIndexes.value = [];
     terminalIndexes.value = [];
+    stockUnprobedIndexes.value = [];
+    pendingPriorityTargets.value = [];
     batchId.value = collectionId("batch");
     activeIndex.value = null;
     activeRequestId.value = null;
@@ -891,7 +1595,11 @@ async function startCollection() {
     );
   } catch (error) {
     collectionErrors.value = [
-      error instanceof Error ? error.message : "无法开始采集",
+      {
+        plid: "",
+        url: "",
+        message: error instanceof Error ? error.message : "无法开始采集",
+      },
     ];
   }
 }
@@ -899,8 +1607,10 @@ async function startCollection() {
 async function resumeCollection(
   mode: "resume" | "auto_resume" | "scheduled_resume" = "resume",
 ) {
-  if (!props.canOperate) {
-    props.onPermissionDenied?.();
+  if (!props.canControlCollection) {
+    showCollectionNotice(
+      "竞品批次的开始、继续和停止仅限 kxx 账号；当前账号仍可新增链接和插队。",
+    );
     return;
   }
   if (collecting.value || !pendingResumeCount.value) return;
@@ -912,26 +1622,6 @@ async function resumeCollection(
     showCollectionNotice(activeBatchBlockedMessage());
     return;
   }
-  clearLinkValidation();
-  const { urls, issue } = parseUrls();
-  if (issue) {
-    collectionErrors.value = [
-      `第 ${issue.lineNumber} 行：${issue.message}：${issue.url}`,
-    ];
-    await focusInvalidLink(issue);
-    return;
-  }
-  const originalPlids = batchUrls.value.map(plidFromUrl);
-  const currentPlids = urls.map(plidFromUrl);
-  if (
-    originalPlids.length !== currentPlids.length
-    || originalPlids.some((plid, index) => plid !== currentPlids[index])
-  ) {
-    collectionStopReason.value =
-      "链接列表或顺序已经变化，请点击“开始采集”建立一个新批次。";
-    return;
-  }
-  batchUrls.value = urls;
   if (!batchId.value) batchId.value = collectionId("batch");
   if (
     mode === "auto_resume"
@@ -962,6 +1652,7 @@ async function resumeCollection(
     }
   }
   collectionStopReason.value = "";
+  collectionActivityNotice.value = "";
   manualStopRequested.value = false;
   persistCollectionCheckpoint();
   await runCollection(queue, mode);
@@ -969,7 +1660,7 @@ async function resumeCollection(
 
 async function resumeInterruptedCollection() {
   if (
-    !props.canOperate
+    !props.canControlCollection
     || collecting.value
     || !restoredRunWasActive.value
     || !pendingResumeCount.value
@@ -994,6 +1685,10 @@ function activeBatchBlockedMessage() {
 function showCollectionNotice(message: string) {
   collectionStopReason.value = message;
   collectionNoticeVersion.value += 1;
+}
+
+function showCollectionActivityNotice(message: string) {
+  collectionActivityNotice.value = message;
 }
 
 function isAutomaticResumeReason(reason: string) {
@@ -1029,7 +1724,7 @@ async function maybeAutoResumeScheduledCollection() {
     persistCollectionCheckpoint();
     return;
   }
-  if (!props.canOperate) {
+  if (!props.canControlCollection) {
     clearAutomaticResumeSchedule();
     persistCollectionCheckpoint();
     return;
@@ -1067,7 +1762,7 @@ async function recordBatchEvent(
 ) {
   if (!batchId.value) return;
   try {
-    sharedBatchStatus.value = await logCompetitorBatchEvent({
+    const status = await logCompetitorBatchEvent({
       batchId: batchId.value,
       clientId: collectionClientId,
       event,
@@ -1079,6 +1774,8 @@ async function recordBatchEvent(
       terminal: terminalIndexes.value.length,
       reason,
     });
+    sharedBatchStatus.value = status;
+    mergeQueuedTargetsIntoLocalBatch(status);
   } catch (error) {
     if (required) throw error;
     // Collection must continue even when diagnostic logging is unavailable.
@@ -1098,6 +1795,12 @@ async function runCollection(
   const controller = new AbortController();
   abortController.value = controller;
   let consecutiveConnectionFailures = 0;
+  let consecutiveConnectionFailureDetails: string[] = [];
+  let batchLeaseConflict = false;
+  let cursor = 0;
+  const knownIndexes = new Set(queue.map((item) => item.index));
+  const stockProbeRetryCounts = new Map<number, number>();
+  const ordinaryRetryCounts = new Map<number, number>();
   persistCollectionCheckpoint();
   try {
     await recordBatchEvent(
@@ -1122,76 +1825,183 @@ async function runCollection(
     return;
   }
   try {
-    for (const { index, url } of queue) {
-      if (controller.signal.aborted) break;
-      const plid = plidFromUrl(url) || "未知商品";
-      removeCollectionError(plid);
-      const requestId =
-        index === interruptedIndex && interruptedRequestId
-          ? interruptedRequestId
-          : collectionId("request");
-      activeIndex.value = index;
-      activeRequestId.value = requestId;
-      activeStartedAt.value = Date.now();
-      collectionClock.value = Date.now();
-      persistCollectionCheckpoint();
-      let settled = false;
-      try {
-        const result = await collectCompetitor(
-          url,
-          withStockProbe.value,
-          visibleBrowser.value,
-          controller.signal,
-          {
-            batchId: batchId.value,
-            clientId: collectionClientId,
-            requestId,
-            itemIndex: index,
-            totalItems: total.value,
-          },
-        );
-        collectionResults.value = [
-          ...collectionResults.value.filter((item) => item.plid !== result.plid),
-          result,
-        ];
-        markFailed(index, false);
-        markTerminal(index, false);
-        consecutiveConnectionFailures = 0;
-        settled = true;
-      } catch (error) {
+    while (!controller.signal.aborted && !collectionStopReason.value) {
+      applyQueuedTargetsToRunQueue(queue, cursor, knownIndexes);
+      applyPriorityTargetsToRunQueue(queue, cursor, knownIndexes);
+      while (cursor < queue.length) {
         if (controller.signal.aborted) break;
-        const message = error instanceof Error ? error.message : "采集失败";
-        collectionErrors.value.push(`PLID${plid}：${message}`);
-        const confirmedInvalid =
-          error instanceof ApiRequestError && error.status === 410;
-        markFailed(index, !confirmedInvalid);
-        markTerminal(index, confirmedInvalid);
-        const isConnectionFailure =
-          error instanceof ApiRequestError
-          && (error.status === 0 || error.status >= 500);
-        consecutiveConnectionFailures = isConnectionFailure
-          ? consecutiveConnectionFailures + 1
-          : 0;
-        if (consecutiveConnectionFailures >= 2) {
-          scheduleAutomaticResume(
-            "连续 2 次发生真实连接失败或 Takealot 临时服务错误，已暂停剩余链接。",
-          );
-        }
-        settled = true;
-      } finally {
-        if (settled) markAttempted(index);
-        activeIndex.value = null;
-        activeRequestId.value = null;
-        activeStartedAt.value = null;
+        applyQueuedTargetsToRunQueue(queue, cursor, knownIndexes);
+        applyPriorityTargetsToRunQueue(queue, cursor, knownIndexes);
+        const { index, url, priority = false } = queue[cursor]!;
+        cursor += 1;
+        const plid = plidFromUrl(url) || "未知商品";
+        removeCollectionError(plid);
+        const requestId =
+          index === interruptedIndex && interruptedRequestId
+            ? interruptedRequestId
+            : collectionId("request");
+        activeIndex.value = index;
+        activeRequestId.value = requestId;
+        activeStartedAt.value = Date.now();
+        collectionClock.value = Date.now();
         persistCollectionCheckpoint();
+        let settled = false;
+        try {
+          const result = await collectCompetitor(
+            url,
+            withStockProbe.value,
+            visibleBrowser.value,
+            controller.signal,
+            {
+              batchId: batchId.value,
+              clientId: collectionClientId,
+              requestId,
+              itemIndex: index,
+              totalItems: total.value,
+            },
+          );
+          const resultWithUrl = { ...result, url };
+          collectionResults.value = [
+            ...collectionResults.value.filter((item) => item.plid !== result.plid),
+            resultWithUrl,
+          ];
+          markFailed(index, false);
+          markTerminal(index, false);
+          markStockUnprobed(index, false);
+          stockProbeRetryCounts.delete(index);
+          ordinaryRetryCounts.delete(index);
+          consecutiveConnectionFailures = 0;
+          consecutiveConnectionFailureDetails = [];
+          settled = true;
+        } catch (error) {
+          if (controller.signal.aborted) break;
+          const message = error instanceof Error ? error.message : "采集失败";
+          const leaseConflict =
+            error instanceof ApiRequestError && error.status === 423;
+          if (leaseConflict) {
+            batchLeaseConflict = true;
+            showCollectionActivityNotice(
+              `${message}。本页面已停止重复续爬，服务端现有采集会继续运行。`,
+            );
+          } else {
+            collectionErrors.value.push({ plid, url, message });
+            const confirmedInvalid =
+              error instanceof ApiRequestError && error.status === 410;
+            const stockUnprobed =
+              error instanceof ApiRequestError && error.status === 424;
+            if (!priority) {
+              markFailed(index, !confirmedInvalid);
+              markTerminal(index, confirmedInvalid);
+              markStockUnprobed(index, stockUnprobed);
+            }
+            if (stockUnprobed && !priority) {
+              const retryCount = (stockProbeRetryCounts.get(index) ?? 0) + 1;
+              stockProbeRetryCounts.set(index, retryCount);
+              if (retryCount <= 2) {
+                const retrySchedule = scheduleRetryAfterGap(
+                  queue,
+                  cursor,
+                  { index, url },
+                  retryCount,
+                );
+                showCollectionActivityNotice(
+                  retrySchedule.scheduled
+                    ? `PLID${plid}：${message}；第 ${retryCount} 次库存复探已安排在间隔 ${retrySchedule.gap} 个任务后。`
+                    : `PLID${plid}：${message}；本轮剩余任务不足以间隔 ${retrySchedule.gap} 个任务，已保留待重试。`,
+                );
+              } else {
+                showCollectionActivityNotice(
+                  `PLID${plid}：${message}；连续 3 次库存未探测，已保留在待重试，本轮不再占住整批。`,
+                );
+              }
+            } else {
+              stockProbeRetryCounts.delete(index);
+            }
+            const tailRetryable =
+              !priority
+              && !confirmedInvalid
+              && !stockUnprobed
+              && error instanceof ApiRequestError
+              && (
+                error.status === 0
+                || error.status === 404
+                || error.status === 409
+                || error.status >= 500
+              );
+            if (tailRetryable) {
+              const retryCount = (ordinaryRetryCounts.get(index) ?? 0) + 1;
+              ordinaryRetryCounts.set(index, retryCount);
+              if (retryCount <= MAX_AUTOMATIC_RETRY_ATTEMPTS) {
+                const retrySchedule = scheduleRetryAfterGap(
+                  queue,
+                  cursor,
+                  { index, url },
+                  retryCount,
+                );
+                showCollectionActivityNotice(
+                  retrySchedule.scheduled
+                    ? `PLID${plid}：${message}；第 ${retryCount} 次自动重试已安排在间隔 ${retrySchedule.gap} 个任务后。`
+                    : `PLID${plid}：${message}；本轮剩余任务不足以间隔 ${retrySchedule.gap} 个任务，已保留待重试，可从详情中人工重试。`,
+                );
+              } else {
+                showCollectionActivityNotice(
+                  `PLID${plid}：${message}；本轮 1/2/4 间隔自动重试仍未成功，已保留在待重试。`,
+                );
+              }
+            } else if (!stockUnprobed) {
+              ordinaryRetryCounts.delete(index);
+            }
+            const isConnectionFailure =
+              error instanceof ApiRequestError
+              && (error.status === 0 || error.status >= 500);
+            if (isConnectionFailure) {
+              consecutiveConnectionFailures += 1;
+              const statusLabel =
+                error.status === 0 ? "浏览器连接失败" : `HTTP ${error.status}`;
+              consecutiveConnectionFailureDetails = [
+                ...consecutiveConnectionFailureDetails,
+                `PLID${plid}（${statusLabel}）：${message}`,
+              ].slice(-2);
+            } else {
+              consecutiveConnectionFailures = 0;
+              consecutiveConnectionFailureDetails = [];
+            }
+            if (consecutiveConnectionFailures >= 2) {
+              scheduleAutomaticResume(
+                `连续 2 次发生真实连接失败或 Takealot 临时服务错误：${consecutiveConnectionFailureDetails.join("；")}。已暂停剩余链接。`,
+              );
+            }
+            settled = true;
+          }
+        } finally {
+          if (settled && !priority) markAttempted(index);
+          activeIndex.value = null;
+          activeRequestId.value = null;
+          activeStartedAt.value = null;
+          persistCollectionCheckpoint();
+        }
+        if (batchLeaseConflict) break;
+        await recordBatchEvent("progress");
+        appendPendingItemsToRunQueue(queue, knownIndexes, cursor);
+        if (collectionStopReason.value || controller.signal.aborted) break;
+        if (cursor < queue.length) await delay(1_000);
       }
-      await recordBatchEvent("progress");
-      if (collectionStopReason.value) break;
-      if (index !== queue[queue.length - 1]?.index) await delay(5_000);
+      if (
+        batchLeaseConflict
+        || controller.signal.aborted
+        || collectionStopReason.value
+      ) break;
+      await loadSharedBatchStatus();
+      appendPendingItemsToRunQueue(queue, knownIndexes, cursor);
+      applyQueuedTargetsToRunQueue(queue, cursor, knownIndexes);
+      applyPriorityTargetsToRunQueue(queue, cursor, knownIndexes);
+      if (cursor >= queue.length) break;
     }
     await loadOverview();
   } finally {
-    if (!manualStopRequested.value && collectionStopReason.value) {
+    if (batchLeaseConflict) {
+      await loadSharedBatchStatus();
+    } else if (!manualStopRequested.value && collectionStopReason.value) {
       await recordBatchEvent("paused", collectionStopReason.value);
     } else if (!manualStopRequested.value && !controller.signal.aborted) {
       clearAutomaticResumeSchedule();
@@ -1209,6 +2019,12 @@ async function runCollection(
 }
 
 function stopCollection() {
+  if (!props.canControlCollection) {
+    showCollectionNotice(
+      "竞品批次的开始、继续和停止仅限 kxx 账号；当前账号仍可新增链接和插队。",
+    );
+    return;
+  }
   manualStopRequested.value = true;
   clearAutomaticResumeSchedule();
   collectionStopReason.value =
@@ -1258,10 +2074,403 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
     <section class="collector panel">
       <div class="section-heading">
         <div>
-          <p class="section-kicker">建立与刷新观察样本</p>
-          <h2>批量采集竞品</h2>
+          <p class="section-kicker">持久化监控清单</p>
+          <h2>竞品链接管理</h2>
         </div>
-        <p class="section-note">每行一个链接，重复 PLID 会自动去重</p>
+        <p class="section-note">
+          新增链接会自动加入当前运行批次队头；插队只增加优先探测，不移除原位置
+        </p>
+      </div>
+      <form class="target-add-row" @submit.prevent="addTarget">
+        <input
+          v-model="newTargetUrl"
+          type="url"
+          aria-label="新增 Takealot 竞品链接"
+          placeholder="粘贴 Takealot 商品链接，例如 https://www.takealot.com/.../PLID12345678"
+          :disabled="targetManagerBusy === 'add' || !props.canOperate"
+          @input="clearTargetManagerFeedback"
+        />
+        <button
+          class="primary-button"
+          type="submit"
+          :disabled="targetManagerBusy === 'add' || !props.canOperate"
+        >
+          {{ targetManagerBusy === "add" ? "正在新增…" : "新增链接" }}
+        </button>
+      </form>
+      <p v-if="targetManagerError" class="target-manager-message error" role="alert">
+        {{ targetManagerError }}
+      </p>
+      <div
+        v-if="duplicateTarget"
+        class="target-duplicate-notice"
+        role="status"
+      >
+        <span>
+          {{
+            duplicateTarget.hasHistory
+              ? "该链接已在监控清单中，并已纳入每日采集且已有历史记录。"
+              : "链接表单中已有这个链接。"
+          }}
+        </span>
+        <button
+          v-if="duplicateTarget.hasHistory"
+          class="secondary-button"
+          type="button"
+          @click="jumpToDuplicateTarget"
+        >
+          查看对应商品
+        </button>
+      </div>
+      <p v-if="targetManagerNotice" class="target-manager-message success" role="status">
+        {{ targetManagerNotice }}
+      </p>
+      <template v-if="targets.length">
+        <div class="target-list-panel">
+          <button
+            ref="targetListTrigger"
+            class="target-list-open-button"
+            type="button"
+            aria-haspopup="dialog"
+            @click="openTargetList"
+          >
+            <span>
+              <strong>监控链接汇总</strong>
+              <small>
+                共 {{ targets.length }} 条 · 已有历史 {{ targetsWithHistoryCount }} 条 ·
+                待首次采集 {{ targetsPendingFirstCaptureCount }} 条
+              </small>
+            </span>
+            <span>打开管理</span>
+          </button>
+        </div>
+        <Teleport to="body">
+          <div
+            v-if="targetListOpen"
+            class="competitor-modal-backdrop target-list-modal-backdrop"
+            @click.self="closeTargetList"
+          >
+            <section
+              class="competitor-modal target-list-modal"
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby="target-list-modal-title"
+            >
+              <header class="competitor-modal-header target-list-modal-header">
+                <div>
+                  <p class="section-kicker">MONITORING LINKS</p>
+                  <h2 id="target-list-modal-title">管理监控链接</h2>
+                  <span>
+                    共 {{ targets.length }} 条 · 已有历史
+                    {{ targetsWithHistoryCount }} 条 · 待首次采集
+                    {{ targetsPendingFirstCaptureCount }} 条
+                  </span>
+                </div>
+                <button
+                  class="competitor-modal-close"
+                  type="button"
+                  aria-label="关闭监控链接管理"
+                  @click="closeTargetList"
+                >
+                  ×
+                </button>
+              </header>
+              <div class="target-list-content">
+                <div class="target-list-toolbar">
+                  <label>
+                    <span>查找链接</span>
+                    <input
+                      v-model="targetQuery"
+                      type="search"
+                      placeholder="商品名称、PLID 或完整链接"
+                    />
+                  </label>
+                  <label class="target-page-size-field">
+                    <span>每页显示</span>
+                    <select v-model.number="targetPageSize">
+                      <option
+                        v-for="size in targetPageSizeOptions"
+                        :key="size"
+                        :value="size"
+                      >
+                        {{ size }} 条
+                      </option>
+                    </select>
+                  </label>
+                  <span>
+                    显示 {{ filteredTargets.length }} 条，每页
+                    {{ targetPageSize }} 条
+                  </span>
+                </div>
+                <div v-if="pagedTargets.length" class="target-list">
+                  <article
+                    v-for="target in pagedTargets"
+                    :key="target.plid"
+                    class="target-row"
+                  >
+                    <div class="target-identity">
+                      <strong>{{ target.title || `PLID${target.plid}` }}</strong>
+                      <span>PLID{{ target.plid }}</span>
+                    </div>
+                    <template v-if="editingTargetPlid === target.plid">
+                      <input
+                        v-model="editingTargetUrl"
+                        class="target-edit-input"
+                        type="url"
+                        :aria-label="`修改 PLID${target.plid} 链接`"
+                        :disabled="targetManagerBusy === target.plid"
+                      />
+                      <div class="target-row-actions">
+                        <button
+                          class="secondary-button"
+                          type="button"
+                          :disabled="targetManagerBusy === target.plid"
+                          @click="saveTargetEdit(target.plid)"
+                        >
+                          保存
+                        </button>
+                        <button
+                          class="secondary-button"
+                          type="button"
+                          :disabled="targetManagerBusy === target.plid"
+                          @click="cancelEditTarget"
+                        >
+                          取消
+                        </button>
+                      </div>
+                    </template>
+                    <template v-else>
+                      <a :href="target.url" target="_blank" rel="noreferrer">
+                        {{ target.url }}
+                      </a>
+                      <div class="target-row-actions">
+                        <button
+                          class="secondary-button priority"
+                          type="button"
+                          :disabled="
+                            Boolean(targetManagerBusy)
+                            || !props.canOperate
+                            || !sharedBatchStatus.active
+                            || sharedBatchStatus.current_plid === target.plid
+                            || prioritizedTargetStates.has(target.plid)
+                          "
+                          :title="
+                            prioritizedTargetStates.has(target.plid)
+                              ? targetPriorityLabel(target.plid)
+                              : sharedBatchStatus.active
+                                ? '额外插到当前商品之后，原队列位置继续保留'
+                                : '当前没有运行中的竞品批次'
+                          "
+                          @click="prioritizeTarget(target)"
+                        >
+                          {{
+                            targetManagerBusy === `priority:${target.plid}`
+                              ? "插队中…"
+                              : targetPriorityLabel(target.plid)
+                          }}
+                        </button>
+                        <button
+                          class="secondary-button"
+                          type="button"
+                          :disabled="Boolean(targetManagerBusy) || !props.canOperate"
+                          @click="beginEditTarget(target)"
+                        >
+                          修改
+                        </button>
+                        <button
+                          class="secondary-button danger"
+                          type="button"
+                          :disabled="Boolean(targetManagerBusy) || !props.canOperate"
+                          @click="removeTarget(target)"
+                        >
+                          删除
+                        </button>
+                      </div>
+                    </template>
+                  </article>
+                </div>
+                <p v-else class="target-empty">没有匹配的监控链接。</p>
+                <div
+                  v-if="filteredTargets.length > targetPageSize"
+                  class="compact-pagination"
+                >
+                  <button
+                    class="secondary-button"
+                    type="button"
+                    :disabled="targetPage <= 1"
+                    @click="targetPage -= 1"
+                  >
+                    上一页
+                  </button>
+                  <span>第 {{ targetPage }} / {{ targetPageCount }} 页</span>
+                  <button
+                    class="secondary-button"
+                    type="button"
+                    :disabled="targetPage >= targetPageCount"
+                    @click="targetPage += 1"
+                  >
+                    下一页
+                  </button>
+                </div>
+              </div>
+              <div class="competitor-modal-actions">
+                <button type="button" @click="closeTargetList">关闭</button>
+              </div>
+            </section>
+          </div>
+        </Teleport>
+      </template>
+      <p v-else class="target-empty">
+        监控清单为空。新增第一条链接后即可开始采集。
+      </p>
+      <div class="target-audit-panel">
+        <button
+          ref="targetAuditTrigger"
+          class="target-audit-open-button"
+          type="button"
+          aria-haspopup="dialog"
+          @click="openTargetAudit"
+        >
+          <span>
+            <strong>链接操作记录</strong>
+            <small>默认收起，需要时按日期查看用户增删改留痕</small>
+          </span>
+          <span>打开记录</span>
+        </button>
+      </div>
+      <Teleport to="body">
+        <div
+          v-if="targetAuditOpen"
+          class="competitor-modal-backdrop target-audit-modal-backdrop"
+          @click.self="closeTargetAudit"
+        >
+          <section
+            class="competitor-modal target-audit-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="target-audit-modal-title"
+          >
+            <header class="competitor-modal-header target-audit-modal-header">
+              <div>
+                <p class="section-kicker">LINK AUDIT</p>
+                <h2 id="target-audit-modal-title">链接操作记录</h2>
+                <span>按北京时间日期查看用户对监控链接的增删改留痕</span>
+              </div>
+              <button
+                class="competitor-modal-close"
+                type="button"
+                aria-label="关闭链接操作记录"
+                @click="closeTargetAudit"
+              >
+                ×
+              </button>
+            </header>
+            <div class="target-audit-content">
+              <div class="target-audit-filters">
+                <label>
+                  开始日期
+                  <input v-model="targetAuditStartDate" type="date" />
+                </label>
+                <label>
+                  结束日期
+                  <input v-model="targetAuditEndDate" type="date" />
+                </label>
+                <button
+                  class="secondary-button"
+                  type="button"
+                  :disabled="targetAuditLoading"
+                  @click="loadTargetAudits(1)"
+                >
+                  {{ targetAuditLoading ? "查询中…" : "查询记录" }}
+                </button>
+              </div>
+              <p
+                v-if="targetAuditError"
+                class="target-manager-message error"
+                role="alert"
+              >
+                {{ targetAuditError }}
+              </p>
+              <div v-if="targetAuditItems.length" class="target-audit-table-wrap">
+                <p class="target-audit-summary">
+                  共 {{ targetAuditTotal }} 条操作记录，当前显示第
+                  {{ targetAuditPage }} 页
+                </p>
+                <table class="target-audit-table">
+                  <thead>
+                    <tr>
+                      <th>时间</th>
+                      <th>用户</th>
+                      <th>动作</th>
+                      <th>PLID</th>
+                      <th>变更内容</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr v-for="audit in targetAuditItems" :key="audit.id">
+                      <td>{{ formatChinaDateTime(audit.changed_at) }}</td>
+                      <td>{{ audit.actor_display_name || audit.actor_username }}</td>
+                      <td>
+                        <span :class="['audit-action', `is-${audit.action}`]">
+                          {{ targetAuditActionLabel(audit.action) }}
+                        </span>
+                      </td>
+                      <td>PLID{{ audit.plid }}</td>
+                      <td>
+                        <span v-if="audit.old_url" class="audit-url old">
+                          原：{{ audit.old_url }}
+                        </span>
+                        <span v-if="audit.new_url" class="audit-url">
+                          新：{{ audit.new_url }}
+                        </span>
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+                <div
+                  v-if="targetAuditTotal > targetAuditPageSize"
+                  class="compact-pagination"
+                >
+                  <button
+                    class="secondary-button"
+                    type="button"
+                    :disabled="targetAuditLoading || targetAuditPage <= 1"
+                    @click="loadTargetAudits(targetAuditPage - 1)"
+                  >
+                    上一页
+                  </button>
+                  <span>第 {{ targetAuditPage }} / {{ targetAuditPageCount }} 页</span>
+                  <button
+                    class="secondary-button"
+                    type="button"
+                    :disabled="
+                      targetAuditLoading || targetAuditPage >= targetAuditPageCount
+                    "
+                    @click="loadTargetAudits(targetAuditPage + 1)"
+                  >
+                    下一页
+                  </button>
+                </div>
+              </div>
+              <p
+                v-else-if="!targetAuditLoading && !targetAuditError"
+                class="target-empty"
+              >
+                所选日期区间没有链接操作记录。
+              </p>
+            </div>
+            <div class="competitor-modal-actions">
+              <button type="button" @click="closeTargetAudit">关闭</button>
+            </div>
+          </section>
+        </div>
+      </Teleport>
+      <div class="collector-run-heading">
+        <div>
+          <p class="section-kicker">建立与刷新观察样本</p>
+          <h3>批量采集当前监控清单</h3>
+        </div>
+        <span>共 {{ targets.length }} 条活跃链接</span>
       </div>
       <div
         v-if="sharedBatchStatus.active"
@@ -1285,41 +2494,12 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
         </span>
         <span v-else>正在准备下一条商品</span>
       </div>
-      <textarea
-        ref="urlInput"
-        v-model="rawUrls"
-        aria-label="竞品链接"
-        :aria-describedby="linkValidationIssue ? 'link-validation-error' : undefined"
-        :aria-invalid="Boolean(linkValidationIssue)"
-        :class="{
-          'link-input-error': linkValidationIssue,
-          'link-input-error-pulse': linkErrorPulse,
-        }"
-        :disabled="collecting || anotherBatchIsActive || !props.canOperate"
-        spellcheck="false"
-        @input="clearLinkValidation"
-      ></textarea>
-      <div
-        v-if="linkValidationIssue"
-        id="link-validation-error"
-        class="link-diagnostic"
-        role="alert"
-      >
-        <span class="link-diagnostic-location">
-          第 {{ linkValidationIssue.lineNumber }} 行
-        </span>
-        <span class="link-diagnostic-marker" aria-hidden="true">×</span>
-        <span class="link-diagnostic-content">
-          <strong>{{ linkValidationIssue.message }}</strong>
-          <code>{{ linkValidationIssue.url }}</code>
-        </span>
-      </div>
       <div class="collector-actions">
         <label class="switch-row">
           <input
             v-model="withStockProbe"
             type="checkbox"
-            :disabled="collecting || anotherBatchIsActive || !props.canOperate"
+            :disabled="collecting || anotherBatchIsActive || !props.canControlCollection"
           />
           <span class="switch"></span>
           <span>
@@ -1331,25 +2511,31 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
           <input
             v-model="visibleBrowser"
             type="checkbox"
+            @change="persistCollectionCheckpoint"
             :disabled="
-              collecting
-              || anotherBatchIsActive
-              || !withStockProbe
-              || !props.canOperate
+              !withStockProbe
+              || !props.canControlCollection
             "
           />
           <span class="switch"></span>
-          <span><strong>显示检测浏览器</strong></span>
+          <span>
+            <strong>显示检测浏览器</strong>
+            <small>运行中可切换，从下一条任务链接开始生效</small>
+          </span>
         </label>
         <button
           class="primary-button"
           @click="startCollection"
-          v-if="!collecting"
+          v-if="props.canControlCollection && !collecting"
+          :disabled="
+            (!targets.length && !pendingResumeCount)
+            || anotherBatchIsActive
+          "
         >
           开始采集
         </button>
         <button
-          v-if="!collecting && pendingResumeCount"
+          v-if="props.canControlCollection && !collecting && pendingResumeCount"
           class="primary-button resume-button"
           @click="resumeCollection()"
         >
@@ -1358,10 +2544,16 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
         <button
           class="primary-button stop-button"
           @click="stopCollection"
-          v-if="collecting"
+          v-if="props.canControlCollection && collecting"
         >
           停止采集
         </button>
+        <p
+          v-if="props.canOperate && !props.canControlCollection"
+          class="section-note"
+        >
+          当前账号可新增链接和插队；批次开始、继续与停止仅限 kxx 账号。
+        </p>
       </div>
       <div
         v-if="collectionStopReason"
@@ -1387,42 +2579,134 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
           </small>
         </span>
       </div>
-      <div v-if="collecting || completed" class="progress-track" aria-live="polite">
+      <div
+        v-if="sharedBatchStatus.active || collecting || completed"
+        class="progress-track"
+        aria-live="polite"
+      >
         <span :style="{ width: `${progress}%` }"></span>
       </div>
       <div
-        v-if="collecting"
+        v-if="sharedBatchStatus.active || collecting"
         class="collection-active-status"
         role="status"
         aria-live="polite"
       >
         <strong>{{ activeCollectionStatus }}</strong>
         <span>{{ activeCollectionHint }}</span>
+        <span v-if="collectionActivityNotice">{{ collectionActivityNotice }}</span>
       </div>
       <p v-if="collecting" class="method-note collection-persistence-note">
         采集正在后台继续；切换到其他页面后再返回，进度和结果仍会保留。
       </p>
       <div
-        v-if="collectionResults.length || collectionErrors.length || batchUrls.length"
+        v-if="hasDisplayedBatchProgress"
         class="result-strip"
       >
-        <span v-if="collectionResults.length" class="result-good">
-          成功 {{ collectionResults.length }} 个
+        <span v-if="displayedBatchSucceeded" class="result-good">
+          成功 {{ displayedBatchSucceeded }} 个
         </span>
-        <span v-if="failedIndexes.length" class="result-bad">
-          待重试 {{ failedIndexes.length }} 个
+        <span v-if="displayedBatchFailed" class="result-bad">
+          待重试 {{ displayedBatchFailed }} 个
         </span>
         <span v-if="retainedConfirmedInvalidCount" class="result-terminal">
           确认失效 {{ retainedConfirmedInvalidCount }} 个，长期保留
         </span>
-        <span v-if="batchUrls.length">
-          本批已检查 {{ completed }}/{{ total }}，待续爬 {{ pendingResumeCount }} 个
+        <span v-if="displayedBatchTotal">
+          本批已检查 {{ displayedBatchCompleted }}/{{ displayedBatchTotal }}，待续爬
+          {{ displayedBatchPending }} 个
         </span>
-        <span v-for="notice in collectionNotices" :key="notice.plid">
-          PLID{{ notice.plid }}：{{ notice.message }}
-        </span>
-        <span v-for="error in collectionErrors" :key="error">{{ error }}</span>
       </div>
+      <details
+        v-if="
+          showLocalCollectionDetails
+          && (collectionResults.length || collectionErrors.length)
+        "
+        class="collection-task-detail collection-task-detail-panel"
+      >
+        <summary>
+          <span>
+            <strong>任务爬取详情</strong>
+            <small>成功与待重试任务在同一面板内分组查看</small>
+          </span>
+          <b>{{ collectionResults.length + collectionErrors.length }}</b>
+        </summary>
+        <div class="collection-task-detail-groups">
+          <section v-if="collectionResults.length" class="collection-task-detail-group success">
+            <header>
+              <strong>成功任务</strong>
+              <span>{{ collectionResults.length }} 个</span>
+            </header>
+            <div class="collection-task-detail-list">
+              <article
+                v-for="result in collectionResults"
+                :key="result.plid"
+                class="collection-task-link-action"
+                tabindex="0"
+                role="button"
+                aria-haspopup="dialog"
+                @click="
+                  openTargetActionForLink(
+                    result.plid,
+                    result.url || targetUrlForPlid(result.plid),
+                  )
+                "
+                @keydown.enter="
+                  openTargetActionForLink(
+                    result.plid,
+                    result.url || targetUrlForPlid(result.plid),
+                  )
+                "
+                @keydown.space.prevent="
+                  openTargetActionForLink(
+                    result.plid,
+                    result.url || targetUrlForPlid(result.plid),
+                  )
+                "
+              >
+                <strong>PLID{{ result.plid }}</strong>
+                <span>{{ result.title || "未取得商品名称" }}</span>
+                <small>{{ result.message }}</small>
+              </article>
+            </div>
+          </section>
+          <section v-if="collectionErrors.length" class="collection-task-detail-group retry">
+            <header>
+              <strong>待重试任务</strong>
+              <span>{{ collectionErrors.length }} 个</span>
+            </header>
+            <div class="collection-task-detail-list">
+              <article
+                v-for="error in collectionErrors"
+                :key="`${error.plid}-${error.message}`"
+                :class="{ 'collection-task-link-action': Boolean(error.plid && error.url) }"
+                :tabindex="error.plid && error.url ? 0 : undefined"
+                :role="error.plid && error.url ? 'button' : undefined"
+                :aria-haspopup="error.plid && error.url ? 'dialog' : undefined"
+                @click="
+                  error.plid
+                    && error.url
+                    && openTargetActionForLink(error.plid, error.url, 'manual_retry')
+                "
+                @keydown.enter="
+                  error.plid
+                    && error.url
+                    && openTargetActionForLink(error.plid, error.url, 'manual_retry')
+                "
+                @keydown.space.prevent="
+                  error.plid
+                    && error.url
+                    && openTargetActionForLink(error.plid, error.url, 'manual_retry')
+                "
+              >
+                <strong>{{ error.plid ? `PLID${error.plid}` : "采集任务" }}</strong>
+                <span>{{ error.message }}</span>
+                <small v-if="error.plid && error.url">点击可修改队列或发起人工重试</small>
+              </article>
+            </div>
+          </section>
+        </div>
+      </details>
     </section>
 
     <section class="metrics">
@@ -1448,79 +2732,281 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
       </article>
     </section>
 
-    <section v-if="linkHealth.length" class="panel link-health-panel">
+    <section
+      v-if="linkHealth.length"
+      class="panel link-health-panel"
+      :class="{ 'is-collapsed': !linkHealthOpen }"
+    >
       <div class="section-heading">
         <div>
           <p class="section-kicker">LINK REVIEW QUEUE</p>
           <h2>链接复核状态</h2>
         </div>
-        <p class="section-note">
-          疑似 {{ suspectedInvalidCount }} 个 · 确认失效 {{ confirmedInvalidCount }} 个
+        <div class="link-health-heading-actions">
+          <p class="section-note">
+            疑似 {{ suspectedInvalidCount }} 个 · 确认失效 {{ confirmedInvalidCount }} 个
+          </p>
+          <button
+            type="button"
+            class="quiet-button link-health-toggle"
+            :aria-expanded="linkHealthOpen"
+            aria-controls="competitor-link-health-details"
+            @click="linkHealthOpen = !linkHealthOpen"
+          >
+            {{ linkHealthOpen ? "收起状态" : "展开状态" }}
+          </button>
+        </div>
+      </div>
+      <div v-if="linkHealthOpen" id="competitor-link-health-details">
+        <div class="table-wrap">
+          <table class="link-health-table">
+            <thead>
+              <tr>
+                <th>商品链接</th>
+                <th>状态</th>
+                <th>有效复核</th>
+                <th>正常对照</th>
+                <th>最近检查（北京时间）</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr
+                v-for="item in linkHealth"
+                :key="item.plid"
+                v-memo="[item, failedCompetitorImages.has(item.图片 || '')]"
+                class="link-health-row-action"
+                tabindex="0"
+                role="button"
+                aria-haspopup="dialog"
+                @click="openTargetAction(item)"
+                @keydown.enter="openTargetAction(item)"
+                @keydown.space.prevent="openTargetAction(item)"
+              >
+                <td>
+                  <div class="competitor-product-cell">
+                    <div class="competitor-product-image compact">
+                      <img
+                        v-if="canShowCompetitorImage(item.图片)"
+                        :src="competitorImageUrl(item.图片)"
+                        :alt="item.商品 ? `${item.商品} 商品图片` : `PLID${item.plid} 商品图片`"
+                        width="192"
+                        height="192"
+                        loading="lazy"
+                        decoding="async"
+                        @error="markCompetitorImageFailed(item.图片)"
+                      />
+                      <span v-else>暂无图片</span>
+                    </div>
+                    <div>
+                      <strong>{{ item.商品 || `PLID${item.plid}` }}</strong>
+                      <a
+                        :href="item.url"
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        @click.stop
+                      >
+                        PLID{{ item.plid }}
+                      </a>
+                    </div>
+                  </div>
+                </td>
+                <td>
+                  <span class="link-health-pill" :class="item.status">
+                    {{ linkHealthLabel(item.status) }}
+                  </span>
+                </td>
+                <td>{{ item.confirmed_not_found_count }}/3</td>
+                <td>
+                  {{
+                    item.control_check_ok && item.control_plid
+                      ? `PLID${item.control_plid}`
+                      : "未取得有效对照"
+                  }}
+                </td>
+                <td>{{ formatChinaDateTime(item.last_checked_at) }}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p class="method-note">
+          单次 404 不会删除链接。只有目标商品页为空、同一浏览器中的已知正常商品可打开，且至少间隔
+          10 分钟累计 3 次，才会确认失效；确认失效只在当前断点续爬中自动跳过，重新点击“开始采集”仍可人工复核。
         </p>
       </div>
-      <div class="table-wrap">
-        <table class="link-health-table">
-          <thead>
-            <tr>
-              <th>商品链接</th>
-              <th>状态</th>
-              <th>有效复核</th>
-              <th>正常对照</th>
-              <th>最近检查（北京时间）</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr
-              v-for="item in linkHealth"
-              :key="item.plid"
-              v-memo="[item, failedCompetitorImages.has(item.图片 || '')]"
-            >
-              <td>
-                <div class="competitor-product-cell">
-                  <div class="competitor-product-image compact">
-                    <img
-                      v-if="canShowCompetitorImage(item.图片)"
-                      :src="competitorImageUrl(item.图片)"
-                      :alt="item.商品 ? `${item.商品} 商品图片` : `PLID${item.plid} 商品图片`"
-                      width="192"
-                      height="192"
-                      loading="lazy"
-                      decoding="async"
-                      @error="markCompetitorImageFailed(item.图片)"
-                    />
-                    <span v-else>暂无图片</span>
-                  </div>
-                  <div>
-                    <strong>{{ item.商品 || `PLID${item.plid}` }}</strong>
-                    <a :href="item.url" target="_blank" rel="noreferrer">
-                      PLID{{ item.plid }}
-                    </a>
-                  </div>
-                </div>
-              </td>
-              <td>
-                <span class="link-health-pill" :class="item.status">
-                  {{ linkHealthLabel(item.status) }}
-                </span>
-              </td>
-              <td>{{ item.confirmed_not_found_count }}/3</td>
-              <td>
-                {{
-                  item.control_check_ok && item.control_plid
-                    ? `PLID${item.control_plid}`
-                    : "未取得有效对照"
-                }}
-              </td>
-              <td>{{ formatChinaDateTime(item.last_checked_at) }}</td>
-            </tr>
-          </tbody>
-        </table>
-      </div>
-      <p class="method-note">
-        单次 404 不会删除链接。只有目标商品页为空、同一浏览器中的已知正常商品可打开，且至少间隔
-        10 分钟累计 3 次，才会确认失效；确认失效只在当前断点续爬中自动跳过，重新点击“开始采集”仍可人工复核。
-      </p>
     </section>
+
+    <Teleport to="body">
+      <div
+        v-if="targetActionOpen"
+        class="competitor-modal-backdrop target-action-modal-backdrop"
+        @click.self="closeTargetAction"
+      >
+        <section
+          class="competitor-modal target-action-modal"
+          role="dialog"
+          aria-modal="true"
+          :aria-label="`PLID${targetActionPlid} 监控队列操作`"
+        >
+          <header class="competitor-modal-header">
+            <div>
+              <p class="section-kicker">MONITORING LINK</p>
+              <h2>PLID{{ targetActionPlid }} 监控队列操作</h2>
+              <span>
+                {{
+                  targetActionIsManualRetry
+                    ? "从待重试任务打开；人工插队会记录操作者、时间和链接"
+                    : targetActionTarget
+                    ? "当前链接已在后续采集队列"
+                    : "当前仅保留复核记录，链接不在后续采集队列"
+                }}
+              </span>
+            </div>
+            <button
+              type="button"
+              class="competitor-modal-close"
+              aria-label="关闭监控队列操作"
+              @click="closeTargetAction"
+            >
+              ×
+            </button>
+          </header>
+          <div class="target-action-modal-content">
+            <section class="panel competitor-target-action-card">
+              <template v-if="targetActionTarget">
+                <template v-if="editingTargetPlid === targetActionTarget.plid">
+                  <input
+                    v-model="editingTargetUrl"
+                    class="target-edit-input"
+                    type="url"
+                    :aria-label="`修改 PLID${targetActionTarget.plid} 链接`"
+                    :disabled="targetManagerBusy === targetActionTarget.plid"
+                  />
+                  <div class="competitor-target-action-buttons">
+                    <button
+                      class="primary-button"
+                      type="button"
+                      :disabled="targetManagerBusy === targetActionTarget.plid"
+                      @click="saveTargetEdit(targetActionTarget.plid)"
+                    >
+                      {{
+                        targetManagerBusy === targetActionTarget.plid
+                          ? "保存中…"
+                          : "保存修改"
+                      }}
+                    </button>
+                    <button
+                      class="quiet-button"
+                      type="button"
+                      :disabled="targetManagerBusy === targetActionTarget.plid"
+                      @click="cancelEditTarget"
+                    >
+                      取消修改
+                    </button>
+                  </div>
+                </template>
+                <template v-else>
+                  <a
+                    class="competitor-target-current-url"
+                    :href="targetActionTarget.url"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                  >
+                    {{ targetActionTarget.url }}
+                  </a>
+                  <div class="competitor-target-action-buttons">
+                    <button
+                      class="secondary-button priority"
+                      type="button"
+                      :disabled="
+                        Boolean(targetManagerBusy)
+                        || !props.canOperate
+                        || !sharedBatchStatus.active
+                        || sharedBatchStatus.current_plid === targetActionTarget.plid
+                        || (
+                          targetActionIsManualRetry
+                            ? pendingPriorityTargetPlids.has(targetActionTarget.plid)
+                            : prioritizedTargetStates.has(targetActionTarget.plid)
+                        )
+                      "
+                      @click="
+                        prioritizeTarget(targetActionTarget, targetActionIsManualRetry)
+                      "
+                    >
+                      {{
+                        targetManagerBusy === `priority:${targetActionTarget.plid}`
+                          ? targetActionIsManualRetry
+                            ? "人工重试插队中…"
+                            : "插队中…"
+                          : targetActionPriorityLabel(targetActionTarget.plid)
+                      }}
+                    </button>
+                    <button
+                      class="secondary-button"
+                      type="button"
+                      :disabled="Boolean(targetManagerBusy) || !props.canOperate"
+                      @click="beginEditTarget(targetActionTarget)"
+                    >
+                      修改链接
+                    </button>
+                    <button
+                      class="secondary-button danger"
+                      type="button"
+                      :disabled="Boolean(targetManagerBusy) || !props.canOperate"
+                      @click="removeTarget(targetActionTarget)"
+                    >
+                      删除链接
+                    </button>
+                  </div>
+                </template>
+              </template>
+              <template v-else>
+                <a
+                  class="competitor-target-current-url"
+                  :href="targetActionFallbackUrl"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                >
+                  {{ targetActionFallbackUrl }}
+                </a>
+                <div class="competitor-target-action-buttons">
+                  <button
+                    class="primary-button"
+                    type="button"
+                    :disabled="targetManagerBusy === 'add' || !props.canOperate"
+                    @click="addTargetActionTarget"
+                  >
+                    {{
+                      targetManagerBusy === "add"
+                        ? "加入中…"
+                        : targetActionIsManualRetry
+                          ? "重新加入并人工重试"
+                          : "重新加入监控队列"
+                    }}
+                  </button>
+                </div>
+              </template>
+              <p
+                v-if="targetManagerError"
+                class="target-manager-message error"
+                role="alert"
+              >
+                {{ targetManagerError }}
+              </p>
+              <p
+                v-if="targetManagerNotice"
+                class="target-manager-message success"
+                role="status"
+              >
+                {{ targetManagerNotice }}
+              </p>
+            </section>
+          </div>
+          <div class="competitor-modal-actions">
+            <button type="button" @click="closeTargetAction">关闭</button>
+          </div>
+        </section>
+      </div>
+    </Teleport>
 
     <p v-if="pageError" class="error-banner">{{ pageError }}</p>
     <section class="panel overview">
@@ -1543,7 +3029,7 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
             <input
               v-model="competitorQuery"
               type="search"
-              placeholder="商品名称、PLID 或卖家"
+              placeholder="商品名称、PLID、完整链接或卖家"
             />
           </label>
           <label class="competitor-filter-field">
@@ -1561,6 +3047,18 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
               <option value="全部">全部信号</option>
               <option v-for="signal in competitorSignalOptions" :key="signal" :value="signal">
                 {{ signal }}
+              </option>
+            </select>
+          </label>
+          <label class="competitor-filter-field">
+            <span>每页显示</span>
+            <select v-model.number="competitorPageSize">
+              <option
+                v-for="size in competitorPageSizeOptions"
+                :key="size"
+                :value="size"
+              >
+                {{ size }} 条
               </option>
             </select>
           </label>
@@ -1627,8 +3125,9 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
             </thead>
             <tbody>
               <tr
-                v-for="item in filteredCompetitors"
+                v-for="item in pagedCompetitors"
                 :key="item.plid"
+                :id="`competitor-row-${item.plid}`"
                 v-memo="[item, selectedPlid === item.plid, failedCompetitorImages.has(item.图片 || '')]"
                 :class="{ selected: selectedPlid === item.plid }"
                 tabindex="0"
@@ -1685,6 +3184,31 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
               </tr>
             </tbody>
           </table>
+        </div>
+        <div
+          v-if="filteredCompetitors.length"
+          class="compact-pagination competitor-pagination"
+        >
+          <button
+            class="secondary-button"
+            type="button"
+            :disabled="competitorPage <= 1"
+            @click="competitorPage -= 1"
+          >
+            上一页
+          </button>
+          <span>
+            第 {{ competitorPage }} / {{ competitorPageCount }} 页 · 本页
+            {{ pagedCompetitors.length }} 条 · 共 {{ filteredCompetitors.length }} 条
+          </span>
+          <button
+            class="secondary-button"
+            type="button"
+            :disabled="competitorPage >= competitorPageCount"
+            @click="competitorPage += 1"
+          >
+            下一页
+          </button>
         </div>
       </div>
     </section>
@@ -1761,6 +3285,121 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
             </div>
 
             <div class="competitor-modal-content">
+              <section class="panel competitor-target-action-card">
+                <div class="competitor-target-action-heading">
+                  <div>
+                    <p class="section-kicker">MONITORING LINK</p>
+                    <h3>监控队列操作</h3>
+                  </div>
+                  <span>
+                    {{
+                      selectedTarget
+                        ? "当前链接已在后续采集队列"
+                        : "当前仅保留历史快照，链接不在后续采集队列"
+                    }}
+                  </span>
+                </div>
+                <template v-if="selectedTarget">
+                  <template v-if="editingTargetPlid === selectedTarget.plid">
+                    <input
+                      v-model="editingTargetUrl"
+                      class="target-edit-input"
+                      type="url"
+                      :aria-label="`修改 PLID${selectedTarget.plid} 链接`"
+                      :disabled="targetManagerBusy === selectedTarget.plid"
+                    />
+                    <div class="competitor-target-action-buttons">
+                      <button
+                        class="primary-button"
+                        type="button"
+                        :disabled="targetManagerBusy === selectedTarget.plid"
+                        @click="saveTargetEdit(selectedTarget.plid)"
+                      >
+                        {{ targetManagerBusy === selectedTarget.plid ? "保存中…" : "保存修改" }}
+                      </button>
+                      <button
+                        class="quiet-button"
+                        type="button"
+                        :disabled="targetManagerBusy === selectedTarget.plid"
+                        @click="cancelEditTarget"
+                      >
+                        取消修改
+                      </button>
+                    </div>
+                  </template>
+                  <template v-else>
+                    <a
+                      class="competitor-target-current-url"
+                      :href="selectedTarget.url"
+                      target="_blank"
+                      rel="noopener noreferrer"
+                    >
+                      {{ selectedTarget.url }}
+                    </a>
+                    <div class="competitor-target-action-buttons">
+                      <button
+                        class="secondary-button priority"
+                        type="button"
+                        :disabled="
+                          Boolean(targetManagerBusy)
+                          || !props.canOperate
+                          || !sharedBatchStatus.active
+                          || sharedBatchStatus.current_plid === selectedTarget.plid
+                          || prioritizedTargetStates.has(selectedTarget.plid)
+                        "
+                        @click="prioritizeTarget(selectedTarget)"
+                      >
+                        {{
+                          targetManagerBusy === `priority:${selectedTarget.plid}`
+                            ? "插队中…"
+                            : targetPriorityLabel(selectedTarget.plid)
+                        }}
+                      </button>
+                      <button
+                        class="secondary-button"
+                        type="button"
+                        :disabled="Boolean(targetManagerBusy) || !props.canOperate"
+                        @click="beginEditTarget(selectedTarget)"
+                      >
+                        修改链接
+                      </button>
+                      <button
+                        class="secondary-button danger"
+                        type="button"
+                        :disabled="Boolean(targetManagerBusy) || !props.canOperate"
+                        @click="removeTarget(selectedTarget)"
+                      >
+                        删除链接
+                      </button>
+                    </div>
+                  </template>
+                </template>
+                <div v-else class="competitor-target-action-buttons">
+                  <button
+                    class="primary-button"
+                    type="button"
+                    :disabled="targetManagerBusy === 'add' || !props.canOperate"
+                    @click="addSelectedTarget"
+                  >
+                    {{ targetManagerBusy === "add" ? "加入中…" : "重新加入监控队列" }}
+                  </button>
+                </div>
+                <p
+                  v-if="targetManagerError"
+                  class="target-manager-message error"
+                  role="alert"
+                >
+                  {{ targetManagerError }}
+                </p>
+                <p
+                  v-if="targetManagerNotice"
+                  class="target-manager-message success"
+                  role="status"
+                >
+                  {{ targetManagerNotice }}
+                </p>
+              </section>
+
               <section class="detail-grid modal-detail-grid">
                 <article class="panel decision-card">
                   <p class="section-kicker">OPERATING SIGNAL</p>
@@ -1845,9 +3484,9 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
                     <p class="section-kicker">VARIANT INVENTORY</p>
                     <h2>各变体库存</h2>
                   </div>
-                  <span>{{ detail.variants.length }} 个变体 · 评论共用商品数据</span>
+                  <span>{{ latestVariants.length }} 个变体 · 评论共用商品数据</span>
                 </div>
-                <div v-if="!detail.variants.length" class="empty-state slim">
+                <div v-if="!latestVariants.length" class="empty-state slim">
                   这条历史快照尚无变体明细，重新采集后会逐个显示。
                 </div>
                 <div v-else class="table-wrap">
@@ -1863,7 +3502,10 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
                       </tr>
                     </thead>
                     <tbody>
-                      <tr v-for="variant in detail.variants" :key="variant.变体键">
+                      <tr
+                        v-for="variant in latestVariants"
+                        :key="`${variant.快照ID}:${variant.变体键}`"
+                      >
                         <td>
                           <div class="competitor-product-cell compact-row">
                             <div class="competitor-product-image compact">
@@ -1897,6 +3539,12 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
                           >
                             {{ variant.库存 }}
                           </span>
+                          <small
+                            v-if="variant.每位客户限购 !== null"
+                            class="purchase-limit-note"
+                          >
+                            每位客户限购 {{ variant.每位客户限购 }} 件
+                          </small>
                         </td>
                         <td>
                           <small>{{ variant.库存说明 || "—" }}</small>
@@ -1907,6 +3555,7 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
                 </div>
                 <p class="method-note">
                   库存按变体分别探测；供应商调货、长时效到货和当前不可购买的变体按平台仓没货处理。
+                  达到每位客户限购数时只记录“至少”该数量，不把促销限购误判成精确库存。
                   评论按 PLID 商品维度共用，不因变体重复采集或重复计数。
                 </p>
               </section>
@@ -1922,11 +3571,10 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
                 <div v-if="detail.history.length < 2" class="empty-state slim">
                   本区间不足两个快照，只能建立基线，不能计算首尾变化。
                 </div>
-                <div v-else class="timeline">
+                <div v-if="detail.history.length" class="timeline">
                   <article
                     v-for="item in detail.history"
-                    :key="item.采集时间"
-                    v-memo="[item, failedCompetitorImages.has(item.图片 || '')]"
+                    :key="item.快照ID"
                   >
                     <div class="timeline-product-head">
                       <div class="competitor-product-image compact">
@@ -1949,6 +3597,42 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
                     </div>
                     <span>库存 {{ item.库存上限 }} · 评论 {{ item.评论数 }}</span>
                     <small>价格 {{ formatCurrency(item.价格) }} · 不在单个快照上重复判定区间信号</small>
+                    <div
+                      v-if="snapshotVariants(item.快照ID).length"
+                      class="snapshot-variant-list"
+                    >
+                      <div
+                        v-for="variant in snapshotVariants(item.快照ID)"
+                        :key="`${item.快照ID}:${variant.变体键}`"
+                        class="snapshot-variant-row"
+                      >
+                        <div class="competitor-product-image snapshot-variant-image">
+                          <img
+                            v-if="canShowCompetitorImage(variant.图片)"
+                            :src="competitorImageUrl(variant.图片)"
+                            :alt="`${variant.变体} 变体图片`"
+                            width="96"
+                            height="96"
+                            loading="lazy"
+                            decoding="async"
+                            @error="markCompetitorImageFailed(variant.图片)"
+                          />
+                          <span v-else>暂无图片</span>
+                        </div>
+                        <div>
+                          <strong>{{ variant.变体 }}</strong>
+                          <span>
+                            库存 {{ variant.库存 }}
+                            <template v-if="variant.每位客户限购 !== null">
+                              · 每位客户限购 {{ variant.每位客户限购 }} 件
+                            </template>
+                          </span>
+                        </div>
+                      </div>
+                    </div>
+                    <small v-else class="snapshot-variant-empty">
+                      此快照尚无变体明细
+                    </small>
                   </article>
                 </div>
               </section>

@@ -3,6 +3,8 @@ import type {
   CompetitorDetail,
   CompetitorLinkHealthItem,
   CompetitorOverview,
+  CompetitorTargetAuditPayload,
+  CompetitorTargetItem,
   ExportPayload,
   FreshnessPayload,
   NftGeneration,
@@ -206,6 +208,80 @@ export async function fetchCompetitorLinkHealth(): Promise<
   return result.items;
 }
 
+export async function fetchCompetitorTargets(): Promise<CompetitorTargetItem[]> {
+  const result = await request<{ items: CompetitorTargetItem[] }>(
+    "/api/competitors/targets",
+  );
+  return result.items;
+}
+
+export async function createCompetitorTarget(
+  url: string,
+): Promise<{
+  item: CompetitorTargetItem;
+  queued_to_active_batch: boolean;
+}> {
+  return request("/api/competitors/targets", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ url }),
+  });
+}
+
+export async function updateCompetitorTarget(
+  plid: string,
+  url: string,
+): Promise<CompetitorTargetItem> {
+  const result = await request<{ item: CompetitorTargetItem }>(
+    `/api/competitors/targets/${encodeURIComponent(plid)}`,
+    {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ url }),
+    },
+  );
+  return result.item;
+}
+
+export async function deleteCompetitorTarget(plid: string): Promise<void> {
+  await request(`/api/competitors/targets/${encodeURIComponent(plid)}`, {
+    method: "DELETE",
+  });
+}
+
+export async function prioritizeCompetitorTarget(
+  plid: string,
+  source: "manual" | "manual_retry" = "manual",
+): Promise<{ status: CompetitorBatchStatus; accepted: boolean }> {
+  const result = await request<{
+    ok: boolean;
+    accepted: boolean;
+    status: CompetitorBatchStatus;
+  }>(`/api/competitors/targets/${encodeURIComponent(plid)}/prioritize`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ source }),
+  });
+  return { status: result.status, accepted: result.accepted };
+}
+
+export function fetchCompetitorTargetAudits(
+  startDate?: string,
+  endDate?: string,
+  page = 1,
+  pageSize = 20,
+): Promise<CompetitorTargetAuditPayload> {
+  const query = new URLSearchParams();
+  if (startDate) query.set("start_date", startDate);
+  if (endDate) query.set("end_date", endDate);
+  query.set("page", String(page));
+  query.set("page_size", String(pageSize));
+  const suffix = query.size ? `?${query.toString()}` : "";
+  return request<CompetitorTargetAuditPayload>(
+    `/api/competitors/target-audits${suffix}`,
+  );
+}
+
 export async function fetchCompetitorDetail(
   plid: string,
   startDate?: string,
@@ -262,9 +338,29 @@ export interface CompetitorBatchStatus {
   current_index: number | null;
   current_plid: string | null;
   current_request_id: string | null;
+  current_stage: string | null;
   reason: string;
   started_at: string | null;
   updated_at: string | null;
+  queued_targets: Array<{
+    plid: string;
+    url: string;
+    queued_at: string;
+  }>;
+  priority_targets: Array<{
+    plid: string;
+    url: string;
+    requested_at: string;
+    requested_by: string;
+    source?: "manual" | "manual_retry";
+  }>;
+  prioritized_targets: Array<{
+    plid: string;
+    url: string;
+    requested_at: string;
+    requested_by: string;
+    source: "manual" | "manual_retry" | "automatic";
+  }>;
 }
 
 export async function collectCompetitor(

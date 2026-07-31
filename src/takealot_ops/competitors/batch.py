@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from collections import OrderedDict
 from collections.abc import Awaitable, Callable
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime, timedelta
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
@@ -16,6 +17,10 @@ from typing import Generic, TypeVar
 
 T = TypeVar("T")
 COLLECTION_STALE_AFTER = timedelta(minutes=2)
+NONBLOCKING_PAUSE_REASON_PREFIXES = (
+    "监控清单新增了 ",
+    "PLID",
+)
 
 
 class CollectionBatchBusyError(RuntimeError):
@@ -40,24 +45,115 @@ class CollectionBatchStatus:
     current_index: int | None = None
     current_plid: str | None = None
     current_request_id: str | None = None
+    current_stage: str | None = None
     reason: str = ""
     started_at: str | None = None
     updated_at: str | None = None
+    queued_targets: list[dict[str, str]] = field(default_factory=list)
+    priority_targets: list[dict[str, str]] = field(default_factory=list)
+    prioritized_targets: list[dict[str, str]] = field(default_factory=list)
 
 
 class CollectionBatchRegistry:
     """Synchronize one active competitor batch across all ERP users."""
 
-    def __init__(self) -> None:
+    def __init__(self, journal_path: Path | None = None) -> None:
         self._lock = RLock()
         self._state = CollectionBatchStatus()
         self._release_after_request = False
         self._owner_client_id: str | None = None
+        self._journal_path = journal_path
+        self._journal = self._load_journal()
 
     def status(self) -> dict[str, object]:
         with self._lock:
             self._expire_if_abandoned()
             return asdict(self._state)
+
+    def enqueue_target(self, *, plid: str, url: str) -> bool:
+        """Put a newly persisted target at the head of the active pending queue."""
+        with self._lock:
+            self._expire_if_abandoned()
+            if not self._state.active or self._release_after_request:
+                return False
+            if self._state.current_plid == plid or any(
+                item["plid"] == plid for item in self._state.queued_targets
+            ):
+                return False
+            queued_at = _utc_iso()
+            self._state.queued_targets.insert(
+                0,
+                {
+                    "plid": plid,
+                    "url": url,
+                    "queued_at": queued_at,
+                }
+            )
+            self._state.prioritized_targets.insert(
+                0,
+                {
+                    "plid": plid,
+                    "url": url,
+                    "requested_at": queued_at,
+                    "requested_by": "新增链接自动插队",
+                    "source": "automatic",
+                },
+            )
+            self._state.total += 1
+            self._state.pending += 1
+            self._state.updated_at = _utc_iso()
+            self._persist_journal()
+            return True
+
+    def prioritize_target(
+        self,
+        *,
+        plid: str,
+        url: str,
+        requested_by: str,
+        source: str = "manual",
+    ) -> tuple[dict[str, object], bool]:
+        """Request one extra priority attempt without removing the original slot."""
+        if source not in {"manual", "manual_retry"}:
+            raise ValueError(f"Unsupported priority source: {source}")
+        with self._lock:
+            self._expire_if_abandoned()
+            if not self._state.active or self._release_after_request:
+                raise CollectionBatchBusyError("当前没有可插队的运行中竞品批次")
+            if any(item["plid"] == plid for item in self._state.priority_targets):
+                return asdict(self._state), False
+            if source != "manual_retry" and any(
+                item["plid"] == plid for item in self._state.prioritized_targets
+            ):
+                return asdict(self._state), False
+            if self._state.current_plid == plid:
+                raise CollectionBatchBusyError(f"PLID{plid} 当前已经在探测，无需重复插队")
+            requested_at = _utc_iso()
+            self._state.priority_targets = [
+                item for item in self._state.priority_targets if item["plid"] != plid
+            ]
+            self._state.priority_targets.append(
+                {
+                    "plid": plid,
+                    "url": url,
+                    "requested_at": requested_at,
+                    "requested_by": requested_by,
+                    "source": source,
+                }
+            )
+            self._state.prioritized_targets.insert(
+                0,
+                {
+                    "plid": plid,
+                    "url": url,
+                    "requested_at": requested_at,
+                    "requested_by": requested_by,
+                    "source": source,
+                },
+            )
+            self._state.updated_at = _utc_iso()
+            self._persist_journal()
+            return asdict(self._state), True
 
     def event(
         self,
@@ -77,6 +173,8 @@ class CollectionBatchRegistry:
     ) -> dict[str, object]:
         with self._lock:
             self._expire_if_abandoned()
+            if event == "paused" and _is_nonblocking_pause_reason(reason):
+                event = "progress"
             active_event = event in {
                 "start",
                 "resume",
@@ -84,38 +182,26 @@ class CollectionBatchRegistry:
                 "progress",
                 "heartbeat",
             }
-            if (
-                active_event
-                and self._state.active
-                and self._state.batch_id != batch_id
-            ):
+            if active_event and self._state.active and self._state.batch_id != batch_id:
                 raise CollectionBatchBusyError(self._busy_message())
             if (
                 self._state.active
                 and self._state.batch_id == batch_id
                 and (
                     self._state.owner_username != username
-                    or (
-                        self._owner_client_id is not None
-                        and client_id != self._owner_client_id
-                    )
+                    or (self._owner_client_id is not None and client_id != self._owner_client_id)
                 )
             ):
                 raise CollectionBatchBusyError(self._busy_message())
-            if (
-                active_event
-                and self._state.batch_id == batch_id
-                and self._release_after_request
-            ):
-                raise CollectionBatchBusyError(
-                    "当前商品正在完成停止清理，请等待浏览器探测退出"
-                )
+            if active_event and self._state.batch_id == batch_id and self._release_after_request:
+                raise CollectionBatchBusyError("当前商品正在完成停止清理，请等待浏览器探测退出")
 
             now = _utc_iso()
             if active_event:
                 if not self._state.active:
                     self._release_after_request = False
                     self._owner_client_id = client_id
+                    restored = self._journal_for_batch(batch_id)
                     self._state = CollectionBatchStatus(
                         active=True,
                         batch_id=batch_id,
@@ -123,6 +209,9 @@ class CollectionBatchRegistry:
                         owner_display_name=display_name,
                         event=event,
                         started_at=now,
+                        queued_targets=restored["queued_targets"],
+                        priority_targets=restored["priority_targets"],
+                        prioritized_targets=restored["prioritized_targets"],
                     )
                 self._state.active = True
                 self._state.event = event
@@ -135,16 +224,24 @@ class CollectionBatchRegistry:
                     self._state.current_index = None
                     self._state.current_plid = None
                     self._state.current_request_id = None
+                    self._state.current_stage = None
 
             if self._state.batch_id == batch_id:
                 self._state.completed = completed
-                self._state.total = total
-                self._state.pending = pending
+                self._state.total = max(self._state.total, total)
+                self._state.pending = max(
+                    pending,
+                    self._state.total - completed,
+                )
                 self._state.succeeded = succeeded
                 self._state.failed = failed
                 self._state.terminal = terminal
                 self._state.reason = reason
                 self._state.updated_at = now
+                if event == "completed" and pending == 0:
+                    self._clear_journal()
+                else:
+                    self._persist_journal()
             return asdict(self._state)
 
     def start_link(
@@ -165,17 +262,30 @@ class CollectionBatchRegistry:
             self._expire_if_abandoned()
             if self._state.active and self._state.batch_id != batch_id:
                 raise CollectionBatchBusyError(self._busy_message())
-            if (
-                self._state.active
-                and (
-                    self._state.owner_username != username
-                    or (
-                        self._owner_client_id is not None
-                        and client_id != self._owner_client_id
-                    )
-                )
+            if self._state.active and (
+                self._state.owner_username != username
+                or (self._owner_client_id is not None and client_id != self._owner_client_id)
             ):
                 raise CollectionBatchBusyError(self._busy_message())
+            if (
+                self._state.current_request_id is not None
+                or self._state.current_plid is not None
+            ):
+                rejoining_same_request = (
+                    request_id is not None
+                    and self._state.current_request_id == request_id
+                    and self._state.current_plid == plid
+                )
+                if rejoining_same_request:
+                    return
+                current = (
+                    f"PLID{self._state.current_plid}"
+                    if self._state.current_plid
+                    else "上一条商品"
+                )
+                raise CollectionBatchBusyError(
+                    f"{current} 仍在检测；已阻止另一页面并发启动新链接"
+                )
             now = _utc_iso()
             if not self._state.active:
                 self._release_after_request = False
@@ -189,12 +299,39 @@ class CollectionBatchRegistry:
                     started_at=now,
                 )
             self._state.event = "collecting"
+            self._state.priority_targets = [
+                item for item in self._state.priority_targets if item["plid"] != plid
+            ]
+            self._state.queued_targets = [
+                item for item in self._state.queued_targets if item["plid"] != plid
+            ]
             self._state.current_index = item_index
             self._state.current_plid = plid
             self._state.current_request_id = request_id
+            self._state.current_stage = "正在登记采集链接"
             if total_items is not None:
                 self._state.total = total_items
             self._state.updated_at = now
+            self._persist_journal()
+
+    def update_link_stage(
+        self,
+        *,
+        batch_id: str | None,
+        request_id: str | None,
+        stage: str,
+    ) -> None:
+        """Publish the active link's current backend stage to every ERP page."""
+        if not batch_id:
+            return
+        with self._lock:
+            if (
+                self._state.batch_id != batch_id
+                or self._state.current_request_id != request_id
+            ):
+                return
+            self._state.current_stage = stage
+            self._state.updated_at = _utc_iso()
 
     def finish_link(
         self,
@@ -206,18 +343,68 @@ class CollectionBatchRegistry:
         if not batch_id:
             return
         with self._lock:
-            if (
-                self._state.batch_id == batch_id
-                and self._state.current_request_id == request_id
-            ):
+            if self._state.batch_id == batch_id and self._state.current_request_id == request_id:
                 self._state.current_index = None
                 self._state.current_plid = None
                 self._state.current_request_id = None
+                self._state.current_stage = None
                 self._state.reason = reason
                 self._state.updated_at = _utc_iso()
                 if self._release_after_request:
                     self._state.active = False
                     self._release_after_request = False
+                self._persist_journal()
+
+    def _load_journal(self) -> dict[str, object]:
+        if self._journal_path is None or not self._journal_path.is_file():
+            return {}
+        try:
+            payload = json.loads(self._journal_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return {}
+        return payload if isinstance(payload, dict) else {}
+
+    def _journal_for_batch(self, batch_id: str) -> dict[str, list[dict[str, str]]]:
+        if self._journal.get("batch_id") != batch_id:
+            self._journal = {}
+            return {
+                "queued_targets": [],
+                "priority_targets": [],
+                "prioritized_targets": [],
+            }
+        result: dict[str, list[dict[str, str]]] = {}
+        for key in ("queued_targets", "priority_targets", "prioritized_targets"):
+            raw_items = self._journal.get(key)
+            result[key] = [
+                {str(name): str(value) for name, value in item.items()}
+                for item in raw_items
+                if isinstance(item, dict)
+            ] if isinstance(raw_items, list) else []
+        return result
+
+    def _persist_journal(self) -> None:
+        if self._journal_path is None or not self._state.batch_id:
+            return
+        self._journal = {
+            "batch_id": self._state.batch_id,
+            "queued_targets": self._state.queued_targets,
+            "priority_targets": self._state.priority_targets,
+            "prioritized_targets": self._state.prioritized_targets,
+        }
+        self._journal_path.parent.mkdir(parents=True, exist_ok=True)
+        temporary_path = self._journal_path.with_suffix(
+            f"{self._journal_path.suffix}.tmp"
+        )
+        temporary_path.write_text(
+            json.dumps(self._journal, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        temporary_path.replace(self._journal_path)
+
+    def _clear_journal(self) -> None:
+        self._journal = {}
+        if self._journal_path is not None:
+            self._journal_path.unlink(missing_ok=True)
 
     def _expire_if_abandoned(self) -> None:
         if (
@@ -235,16 +422,23 @@ class CollectionBatchRegistry:
 
     def _busy_message(self) -> str:
         owner = self._state.owner_display_name or self._state.owner_username or "其他用户"
-        progress = (
-            f"{self._state.completed}/{self._state.total}"
-            if self._state.total
-            else "准备中"
-        )
+        progress = f"{self._state.completed}/{self._state.total}" if self._state.total else "准备中"
         return f"{owner} 正在采集竞品（{progress}），请等待当前批次结束或暂停"
 
 
 def _utc_iso() -> str:
     return datetime.now(UTC).isoformat()
+
+
+def _is_nonblocking_pause_reason(reason: str) -> bool:
+    normalized = " ".join(reason.split())
+    if normalized.startswith(NONBLOCKING_PAUSE_REASON_PREFIXES[0]):
+        return True
+    return (
+        normalized.startswith(NONBLOCKING_PAUSE_REASON_PREFIXES[1])
+        and "库存仍未探测" in normalized
+        and "复探" in normalized
+    )
 
 
 class CollectionRequestCoordinator(Generic[T]):
@@ -304,14 +498,11 @@ def configure_collection_logger(project_root: Path) -> logging.Logger:
     log_dir = project_root / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
     target = (log_dir / "competitor-collection.log").resolve()
-    logger = logging.getLogger(
-        f"takealot_ops.competitors.collection.{abs(hash(str(target)))}"
-    )
+    logger = logging.getLogger(f"takealot_ops.competitors.collection.{abs(hash(str(target)))}")
     logger.setLevel(logging.INFO)
     logger.propagate = False
     if not any(
-        isinstance(handler, logging.FileHandler)
-        and Path(handler.baseFilename).resolve() == target
+        isinstance(handler, logging.FileHandler) and Path(handler.baseFilename).resolve() == target
         for handler in logger.handlers
     ):
         handler = RotatingFileHandler(
@@ -320,8 +511,6 @@ def configure_collection_logger(project_root: Path) -> logging.Logger:
             backupCount=3,
             encoding="utf-8",
         )
-        handler.setFormatter(
-            logging.Formatter("%(asctime)s %(levelname)s %(message)s")
-        )
+        handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
         logger.addHandler(handler)
     return logger

@@ -1,4 +1,5 @@
 export interface CompetitorItem {
+  快照ID: number;
   plid: string;
   商品: string;
   图片: string | null;
@@ -47,6 +48,34 @@ export interface CompetitorOverview {
   date_range: CompetitorDateRange;
 }
 
+export interface CompetitorTargetItem {
+  plid: string;
+  url: string;
+  title: string | null;
+  created_at: string;
+  updated_at: string;
+  has_history: boolean;
+}
+
+export interface CompetitorTargetAuditItem {
+  id: number;
+  plid: string;
+  action: "add" | "update" | "delete" | "manual_retry";
+  old_url: string | null;
+  new_url: string | null;
+  actor_username: string;
+  actor_display_name: string;
+  changed_at: string;
+}
+
+export interface CompetitorTargetAuditPayload {
+  items: CompetitorTargetAuditItem[];
+  total: number;
+  page: number;
+  page_size: number;
+  date_range: CompetitorDateRange;
+}
+
 export interface ReviewItem {
   plid: string;
   评论日期: string | null;
@@ -71,6 +100,7 @@ export interface CompetitorVariantItem {
   库存精确: boolean;
   库存方式: string;
   库存说明: string | null;
+  每位客户限购: number | null;
   非平台仓: boolean;
   链接: string;
 }
@@ -85,6 +115,7 @@ export interface CollectResult {
   plid: string;
   title: string;
   message: string;
+  url?: string;
 }
 
 export interface CompetitorLinkHealthItem {

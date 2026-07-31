@@ -715,6 +715,64 @@ def test_competitor_batch_status_is_shared_and_blocks_another_operator(
         assert completed.json()["status"]["active"] is False
 
 
+def test_competitor_manual_retry_priority_is_audited_once(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    database_path = tmp_path / "erp-manual-retry.db"
+    monkeypatch.setenv(
+        "TAKEALOT_DATABASE_URL",
+        f"sqlite:///{database_path.as_posix()}",
+    )
+    app = create_app(tmp_path)
+    target_url = "https://www.takealot.com/example/PLID12345678"
+
+    with TestClient(app, client=("127.0.0.1", 50000)) as client:
+        session = _bootstrap(client)
+        headers = {"X-CSRF-Token": str(session["csrf_token"])}
+        created = client.post(
+            "/api/competitors/targets",
+            headers=headers,
+            json={"url": target_url},
+        )
+        assert created.status_code == 200
+        started = client.post(
+            "/api/competitors/batch-events",
+            headers=headers,
+            json={
+                "batch_id": "batch-manual-retry",
+                "client_id": "client-manual-retry",
+                "event": "start",
+                "completed": 1,
+                "total": 2,
+                "pending": 1,
+                "failed": 1,
+            },
+        )
+        assert started.status_code == 200
+
+        retried = client.post(
+            "/api/competitors/targets/12345678/prioritize",
+            headers=headers,
+            json={"source": "manual_retry"},
+        )
+        duplicate = client.post(
+            "/api/competitors/targets/12345678/prioritize",
+            headers=headers,
+            json={"source": "manual_retry"},
+        )
+
+        assert retried.status_code == 200
+        assert retried.json()["accepted"] is True
+        assert duplicate.status_code == 200
+        assert duplicate.json()["accepted"] is False
+        status = retried.json()["status"]
+        assert status["priority_targets"][0]["source"] == "manual_retry"
+        assert status["prioritized_targets"][0]["source"] == "manual_retry"
+        audits = client.get("/api/competitors/target-audits").json()["items"]
+        assert [item["action"] for item in audits] == ["manual_retry", "add"]
+
+
 def test_refresh_cooldown_is_shared_for_operators_and_admin_is_exempt(
     tmp_path: Path,
     monkeypatch,

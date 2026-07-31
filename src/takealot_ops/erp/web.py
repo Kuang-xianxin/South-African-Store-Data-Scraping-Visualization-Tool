@@ -7,11 +7,11 @@ import time
 from collections import defaultdict
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from threading import Lock
-from typing import Annotated, Any
-from urllib.parse import quote
+from typing import Annotated, Any, Literal
+from urllib.parse import quote, urlsplit
 from zoneinfo import ZoneInfo
 
 import pandas as pd
@@ -115,7 +115,13 @@ from takealot_ops.reporting import generate_daily_reports
 from takealot_ops.scheduler import verify_database_integrity
 from takealot_ops.settings import DashboardSettings
 from takealot_ops.storage.migrations import create_engine_for_settings, create_schema
-from takealot_ops.storage.models import CollectionRun, DailyProductMetric
+from takealot_ops.storage.models import (
+    CollectionRun,
+    CompetitorSnapshot,
+    CompetitorTarget,
+    CompetitorTargetAudit,
+    DailyProductMetric,
+)
 
 
 class CollectCompetitorRequest(BaseModel):
@@ -172,6 +178,18 @@ class CompetitorBatchEventRequest(BaseModel):
     failed: int = Field(default=0, ge=0)
     terminal: int = Field(default=0, ge=0)
     reason: str = Field(default="", max_length=500)
+
+
+class CompetitorTargetRequest(BaseModel):
+    """One persisted Takealot competitor product URL."""
+
+    url: str = Field(min_length=1, max_length=2000)
+
+
+class CompetitorTargetPriorityRequest(BaseModel):
+    """Describe why an operator is adding one priority collection attempt."""
+
+    source: Literal["manual", "manual_retry"] = "manual"
 
 
 class ExportRequest(BaseModel):
@@ -263,7 +281,12 @@ def create_app(project_root: Path | None = None) -> FastAPI:
     limiter = _LoginLimiter()
     competitor_logger = configure_collection_logger(root)
     collection_coordinator = CollectionRequestCoordinator[CompetitorCollectionResult]()
-    collection_registry = CollectionBatchRegistry()
+    database_url = DashboardSettings.from_env(root).database_url
+    collection_registry = CollectionBatchRegistry(
+        None
+        if database_url.startswith("sqlite")
+        else root / "logs" / "competitor-batch-queue.json"
+    )
     refresh_coordinator = RefreshCoordinator(root)
     product_thumbnails = ProductThumbnailCache(root)
 
@@ -1029,6 +1052,304 @@ def create_app(project_root: Path | None = None) -> FastAPI:
     def competitor_batch_status() -> dict[str, object]:
         return collection_registry.status()
 
+    @app.get("/api/competitors/targets")
+    def competitor_targets() -> dict[str, list[dict[str, object]]]:
+        settings = DashboardSettings.from_env(root)
+        engine = create_read_only_erp_engine(settings.database_url)
+        try:
+            with Session(engine) as session:
+                has_history = (
+                    select(CompetitorSnapshot.id)
+                    .where(CompetitorSnapshot.plid == CompetitorTarget.plid)
+                    .exists()
+                )
+                target_rows = session.execute(
+                    select(CompetitorTarget, has_history.label("has_history"))
+                    .where(CompetitorTarget.active.is_(True))
+                    .order_by(
+                        CompetitorTarget.created_at.asc(),
+                        CompetitorTarget.plid.asc(),
+                    )
+                ).all()
+                return {
+                    "items": [
+                        _competitor_target_payload(
+                            target,
+                            has_history=bool(target_has_history),
+                        )
+                        for target, target_has_history in target_rows
+                    ]
+                }
+        finally:
+            engine.dispose()
+
+    @app.post("/api/competitors/targets")
+    def create_competitor_target(
+        payload: CompetitorTargetRequest,
+        request: Request,
+    ) -> dict[str, object]:
+        plid, url = _validated_competitor_target_url(payload.url)
+        user = request.state.erp_user
+        settings = DashboardSettings.from_env(root)
+        engine = create_engine_for_settings(settings)
+        try:
+            create_schema(engine)
+            now = datetime.now(UTC)
+            with Session(engine) as session:
+                target = session.get(CompetitorTarget, plid)
+                if target is not None and target.active:
+                    raise HTTPException(status_code=409, detail=f"PLID{plid} 已在监控清单中")
+                old_url = target.url if target is not None else None
+                if target is None:
+                    target = CompetitorTarget(
+                        plid=plid,
+                        url=url,
+                        title=None,
+                        active=True,
+                        created_at=now,
+                        updated_at=now,
+                    )
+                    session.add(target)
+                else:
+                    target.url = url
+                    target.active = True
+                    target.updated_at = now
+                session.add(
+                    _competitor_target_audit(
+                        plid=plid,
+                        action="add",
+                        old_url=old_url,
+                        new_url=url,
+                        user=user,
+                        changed_at=now,
+                    )
+                )
+                session.commit()
+                result = _competitor_target_payload(
+                    target,
+                    has_history=_target_has_history(session, plid),
+                )
+        finally:
+            engine.dispose()
+        queued = collection_registry.enqueue_target(plid=plid, url=url)
+        competitor_logger.info(
+            "target_change action=add plid=%s user=%s queued=%s",
+            plid,
+            user.username,
+            queued,
+        )
+        return {
+            "item": result,
+            "queued_to_active_batch": queued,
+        }
+
+    @app.patch("/api/competitors/targets/{plid}")
+    def update_competitor_target(
+        plid: str,
+        payload: CompetitorTargetRequest,
+        request: Request,
+    ) -> dict[str, object]:
+        normalized_plid, url = _validated_competitor_target_url(payload.url)
+        if normalized_plid != plid:
+            raise HTTPException(
+                status_code=422,
+                detail="修改链接不能改变 PLID；请删除旧链接后再新增",
+            )
+        user = request.state.erp_user
+        settings = DashboardSettings.from_env(root)
+        engine = create_engine_for_settings(settings)
+        try:
+            create_schema(engine)
+            now = datetime.now(UTC)
+            with Session(engine) as session:
+                target = session.get(CompetitorTarget, plid)
+                if target is None or not target.active:
+                    raise HTTPException(status_code=404, detail=f"PLID{plid} 不在监控清单中")
+                if target.url == url:
+                    raise HTTPException(status_code=409, detail="链接没有变化")
+                old_url = target.url
+                target.url = url
+                target.updated_at = now
+                session.add(
+                    _competitor_target_audit(
+                        plid=plid,
+                        action="update",
+                        old_url=old_url,
+                        new_url=url,
+                        user=user,
+                        changed_at=now,
+                    )
+                )
+                session.commit()
+                result = _competitor_target_payload(
+                    target,
+                    has_history=_target_has_history(session, plid),
+                )
+        finally:
+            engine.dispose()
+        competitor_logger.info(
+            "target_change action=update plid=%s user=%s",
+            plid,
+            user.username,
+        )
+        return {"item": result}
+
+    @app.delete("/api/competitors/targets/{plid}")
+    def delete_competitor_target(
+        plid: str,
+        request: Request,
+    ) -> dict[str, object]:
+        user = request.state.erp_user
+        settings = DashboardSettings.from_env(root)
+        engine = create_engine_for_settings(settings)
+        try:
+            create_schema(engine)
+            now = datetime.now(UTC)
+            with Session(engine) as session:
+                target = session.get(CompetitorTarget, plid)
+                if target is None or not target.active:
+                    raise HTTPException(status_code=404, detail=f"PLID{plid} 不在监控清单中")
+                old_url = target.url
+                target.active = False
+                target.updated_at = now
+                session.add(
+                    _competitor_target_audit(
+                        plid=plid,
+                        action="delete",
+                        old_url=old_url,
+                        new_url=None,
+                        user=user,
+                        changed_at=now,
+                    )
+                )
+                session.commit()
+        finally:
+            engine.dispose()
+        competitor_logger.info(
+            "target_change action=delete plid=%s user=%s",
+            plid,
+            user.username,
+        )
+        return {
+            "ok": True,
+            "history_retained": True,
+        }
+
+    @app.post("/api/competitors/targets/{plid}/prioritize")
+    def prioritize_competitor_target(
+        plid: str,
+        request: Request,
+        payload: CompetitorTargetPriorityRequest | None = None,
+    ) -> dict[str, object]:
+        user = request.state.erp_user
+        source = payload.source if payload is not None else "manual"
+        settings = DashboardSettings.from_env(root)
+        engine = create_read_only_erp_engine(settings.database_url)
+        try:
+            with Session(engine) as session:
+                target = session.get(CompetitorTarget, plid)
+                if target is None or not target.active:
+                    raise HTTPException(status_code=404, detail=f"PLID{plid} 不在监控清单中")
+                url = target.url
+        finally:
+            engine.dispose()
+        try:
+            status, accepted = collection_registry.prioritize_target(
+                plid=plid,
+                url=url,
+                requested_by=user.display_name or user.username,
+                source=source,
+            )
+        except CollectionBatchBusyError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        if accepted and source == "manual_retry":
+            audit_engine = create_engine_for_settings(settings)
+            try:
+                create_schema(audit_engine)
+                with Session(audit_engine) as session:
+                    session.add(
+                        _competitor_target_audit(
+                            plid=plid,
+                            action="manual_retry",
+                            old_url=None,
+                            new_url=url,
+                            user=user,
+                            changed_at=datetime.now(UTC),
+                        )
+                    )
+                    session.commit()
+            finally:
+                audit_engine.dispose()
+        competitor_logger.info(
+            "target_priority plid=%s user=%s batch=%s source=%s accepted=%s",
+            plid,
+            user.username,
+            status["batch_id"],
+            source,
+            accepted,
+        )
+        return {"ok": True, "accepted": accepted, "status": status}
+
+    @app.get("/api/competitors/target-audits")
+    def competitor_target_audits(
+        start_date: date | None = Query(default=None),
+        end_date: date | None = Query(default=None),
+        page: int = Query(default=1, ge=1),
+        page_size: int = Query(default=20, ge=1, le=100),
+    ) -> dict[str, object]:
+        if start_date is not None and end_date is not None and start_date > end_date:
+            raise HTTPException(status_code=422, detail="开始日期不能晚于结束日期")
+        settings = DashboardSettings.from_env(root)
+        engine = create_read_only_erp_engine(settings.database_url)
+        try:
+            with Session(engine) as session:
+                available_start, available_end = session.execute(
+                    select(
+                        func.min(CompetitorTargetAudit.changed_at),
+                        func.max(CompetitorTargetAudit.changed_at),
+                    )
+                ).one()
+                statement = select(CompetitorTargetAudit)
+                count_statement = select(func.count()).select_from(
+                    CompetitorTargetAudit
+                )
+                if start_date is not None:
+                    start_condition = (
+                        CompetitorTargetAudit.changed_at >= _beijing_day_start_utc(start_date)
+                    )
+                    statement = statement.where(start_condition)
+                    count_statement = count_statement.where(start_condition)
+                if end_date is not None:
+                    end_condition = (
+                        CompetitorTargetAudit.changed_at
+                        < _beijing_day_start_utc(end_date + timedelta(days=1))
+                    )
+                    statement = statement.where(end_condition)
+                    count_statement = count_statement.where(end_condition)
+                total = int(session.scalar(count_statement) or 0)
+                audits = session.scalars(
+                    statement.order_by(
+                        CompetitorTargetAudit.changed_at.desc(),
+                        CompetitorTargetAudit.id.desc(),
+                    )
+                    .offset((page - 1) * page_size)
+                    .limit(page_size)
+                ).all()
+        finally:
+            engine.dispose()
+        return {
+            "items": [_competitor_target_audit_payload(audit) for audit in audits],
+            "total": total,
+            "page": page,
+            "page_size": page_size,
+            "date_range": {
+                "available_start": _beijing_date_iso(available_start),
+                "available_end": _beijing_date_iso(available_end),
+                "selected_start": start_date.isoformat() if start_date else None,
+                "selected_end": end_date.isoformat() if end_date else None,
+            },
+        }
+
     @app.get("/api/competitors/{plid}")
     def competitor_detail(
         plid: str,
@@ -1239,6 +1560,103 @@ def create_app(project_root: Path | None = None) -> FastAPI:
                 "<p>请在 frontend/competitor 目录执行 npm run build。</p>"
             )
     return app
+
+
+def _validated_competitor_target_url(value: str) -> tuple[str, str]:
+    url = value.strip()
+    try:
+        parsed = urlsplit(url)
+        hostname = (parsed.hostname or "").casefold()
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail="链接格式无效") from exc
+    if (
+        parsed.scheme.casefold() not in {"http", "https"}
+        or not hostname
+        or (hostname != "takealot.com" and not hostname.endswith(".takealot.com"))
+    ):
+        raise HTTPException(status_code=422, detail="请输入 Takealot 商品链接")
+    try:
+        plid = extract_plid(url)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return plid, url
+
+
+def _competitor_target_payload(
+    target: CompetitorTarget,
+    *,
+    has_history: bool,
+) -> dict[str, object]:
+    return {
+        "plid": target.plid,
+        "url": target.url,
+        "title": target.title,
+        "created_at": target.created_at.isoformat(),
+        "updated_at": target.updated_at.isoformat(),
+        "has_history": has_history,
+    }
+
+
+def _target_has_history(session: Session, plid: str) -> bool:
+    return bool(
+        session.scalar(
+            select(func.count())
+            .select_from(CompetitorSnapshot)
+            .where(CompetitorSnapshot.plid == plid)
+        )
+    )
+
+
+def _competitor_target_audit(
+    *,
+    plid: str,
+    action: str,
+    old_url: str | None,
+    new_url: str | None,
+    user: UserIdentity,
+    changed_at: datetime,
+) -> CompetitorTargetAudit:
+    return CompetitorTargetAudit(
+        plid=plid,
+        action=action,
+        old_url=old_url,
+        new_url=new_url,
+        actor_user_id=user.id,
+        actor_username=user.username,
+        actor_display_name=user.display_name,
+        changed_at=changed_at,
+    )
+
+
+def _competitor_target_audit_payload(
+    audit: CompetitorTargetAudit,
+) -> dict[str, object]:
+    return {
+        "id": audit.id,
+        "plid": audit.plid,
+        "action": audit.action,
+        "old_url": audit.old_url,
+        "new_url": audit.new_url,
+        "actor_username": audit.actor_username,
+        "actor_display_name": audit.actor_display_name,
+        "changed_at": audit.changed_at.isoformat(),
+    }
+
+
+def _beijing_day_start_utc(value: date) -> datetime:
+    return datetime.combine(
+        value,
+        datetime.min.time(),
+        tzinfo=ZoneInfo("Asia/Shanghai"),
+    ).astimezone(UTC)
+
+
+def _beijing_date_iso(value: datetime | None) -> str | None:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=UTC)
+    return value.astimezone(ZoneInfo("Asia/Shanghai")).date().isoformat()
 
 
 def _required_permission(path: str, method: str) -> str | None:
