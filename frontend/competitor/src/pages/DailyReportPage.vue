@@ -1148,7 +1148,10 @@ function parseInput(value: string | number): number | null {
       <p v-else class="capture-issue-empty">
         所选日期范围内没有数据完整性说明。
       </p>
-      <small>只在订单数或库存仍为空时标注漏爬；漏爬不算冲突。</small>
+      <small>
+        只在订单数或库存仍为空时按商品标注漏爬；早间库存漏爬被当天后续完整拉取补齐后，
+        不再为每个商品重复占位，实际库存时间统一写在下方库存与日期单元格。
+      </small>
     </section>
 
     <section class="erp-panel daily-workspace">
@@ -1334,7 +1337,7 @@ function parseInput(value: string | number): number | null {
                 </td>
               </tr>
               <tr>
-                <th>平台库存数量（次日早间实采）</th>
+                <th>平台库存数量（次日实采）</th>
                 <td
                   class="matrix-date matrix-total-cell stock-total"
                   :class="{
@@ -1353,6 +1356,15 @@ function parseInput(value: string | number): number | null {
                       （缺 {{ matrixDayTotal(day.business_date, "platform_stock").missing }} 个）
                     </span>
                   </span>
+                  <small
+                    class="inventory-capture-summary"
+                    :class="{
+                      delayed: day.inventory_context.delayed,
+                      resolved: day.inventory_context.resolved_after_missing,
+                    }"
+                  >
+                    {{ day.inventory_context.note }}
+                  </small>
                 </td>
                 <td
                   v-for="item in visibleItems"
@@ -2414,6 +2426,10 @@ function parseInput(value: string | number): number | null {
 .matrix-product.has-conflict { box-shadow: inset 0 5px #c94d3d; }
 .matrix-product.has-missing:not(.has-conflict) { box-shadow: inset 0 5px #d6a42b; }
 .daily-matrix .matrix-total-cell { padding: 5px 9px; color: inherit; font: inherit; font-weight: 400; line-height: normal; white-space: nowrap; }
+.daily-matrix .stock-total { height: auto; min-height: var(--daily-data-row-height); white-space: normal; }
+.inventory-capture-summary { display: block; margin-top: 4px; color: #53685d; font-family: "Microsoft YaHei", sans-serif; font-size: 10px; font-weight: 400; line-height: 1.35; overflow-wrap: anywhere; }
+.inventory-capture-summary.delayed { color: #8a5b19; }
+.inventory-capture-summary.resolved { color: #277146; }
 .daily-matrix tbody .order-total { background: #fff4ec; }
 .daily-matrix tbody .stock-total { background: #edf7f0; }
 .daily-matrix td.sales-hit { background: #fce4d6; color: #6a391d; }

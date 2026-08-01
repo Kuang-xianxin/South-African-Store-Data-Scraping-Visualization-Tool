@@ -441,7 +441,7 @@ class DailyReportRun(Base):
 
 
 class DailyInventorySnapshot(Base):
-    """One immutable 10:05 inventory snapshot keyed by its actual Beijing date."""
+    """Preferred next-day inventory, with delayed same-day recovery when needed."""
 
     __tablename__ = "daily_inventory_snapshots"
     __table_args__ = (UniqueConstraint("inventory_date", "offer_id"),)

@@ -161,6 +161,12 @@ def test_project_status_rules_classify_observed_takealot_statuses(tmp_path: Path
             status="Returned",
             quantity=5,
         ),
+        _sale(
+            "cancelled-stock-inquiry",
+            datetime(2026, 7, 20, 8, tzinfo=UTC),
+            status="Cancelled by Takealot - DC Stock Inquiry",
+            quantity=2,
+        ),
     ]
     engine = create_engine("sqlite://")
     create_schema(engine)
@@ -177,7 +183,7 @@ def test_project_status_rules_classify_observed_takealot_statuses(tmp_path: Path
         dataset = service.dashboard_dataset(as_of)
 
     row = dataset.product_daily.iloc[0]
-    assert row["ordered_units"] == 14
+    assert row["ordered_units"] == 16
     assert row["effective_units"] == 9
     assert "unknown_sale_status" not in dataset.anomalies["anomaly_type"].tolist()
     assert "unknown_sale_status" not in dataset.quality_events["event_type"].tolist()

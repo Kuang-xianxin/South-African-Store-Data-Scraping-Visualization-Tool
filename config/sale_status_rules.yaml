@@ -4,4 +4,5 @@ included:
   - Inter DC Transfer
 excluded:
   - Returned
+  - Cancelled by Takealot - DC Stock Inquiry
 unknown: []

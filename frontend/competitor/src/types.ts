@@ -660,6 +660,18 @@ export interface DailyReportPayload {
   };
   comparison_history: Array<{
     business_date: string;
+    inventory_context: {
+      inventory_date: string;
+      captured_at: string | null;
+      source_slot: "morning" | "evening" | "pre_close" | "manual" | null;
+      source_label: string | null;
+      delayed: boolean;
+      resolved_after_missing: boolean;
+      complete: boolean;
+      product_count: number;
+      missing_count: number;
+      note: string;
+    };
     items: Array<
       Pick<
         DailyReportItem,
