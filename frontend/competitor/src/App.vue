@@ -16,6 +16,7 @@ import {
 import CompetitorsPage from "./pages/CompetitorsPage.vue";
 import DailyReportPage from "./pages/DailyReportPage.vue";
 import LoginPage from "./pages/LoginPage.vue";
+import LogisticsPage from "./pages/LogisticsPage.vue";
 import OverviewPage from "./pages/OverviewPage.vue";
 import ProductsPage from "./pages/ProductsPage.vue";
 import QuadrantsPage from "./pages/QuadrantsPage.vue";
@@ -41,6 +42,7 @@ type PageKey =
   | "products"
   | "quadrants"
   | "risks"
+  | "logistics"
   | "competitors"
   | "daily-report"
   | "reports"
@@ -51,6 +53,7 @@ const storeScopedPages = new Set<PageKey>([
   "products",
   "quadrants",
   "risks",
+  "logistics",
   "daily-report",
 ]);
 const pageStorageKey = "takealot-erp-active-page-v1";
@@ -61,15 +64,16 @@ const basePages = [
   { key: "products", label: "商品中心", hint: "单品销售与流量", mark: "02", permission: "store.view" },
   { key: "quadrants", label: "经营坐标", hint: "流量与下单分布", mark: "03", permission: "store.view" },
   { key: "risks", label: "风险与质量", hint: "异常和数据质量", mark: "04", permission: "store.view" },
-  { key: "competitors", label: "竞品雷达", hint: "库存评论与销量", mark: "05", permission: "competitors.view" },
-  { key: "daily-report", label: "运营日报", hint: "全周期核对与合并", mark: "06", permission: "daily_report.view" },
-  { key: "reports", label: "报表工作台", hint: "NFT102 续写", mark: "07", permission: "nft102.manage" },
+  { key: "logistics", label: "物流管理", hint: "长睿与平台货件", mark: "05", permission: "store.view" },
+  { key: "competitors", label: "竞品雷达", hint: "库存评论与销量", mark: "06", permission: "competitors.view" },
+  { key: "daily-report", label: "运营日报", hint: "全周期核对与合并", mark: "07", permission: "daily_report.view" },
+  { key: "reports", label: "报表工作台", hint: "NFT102 续写", mark: "08", permission: "nft102.manage" },
 ] as const;
 const adminPage = {
   key: "users",
   label: "用户权限",
   hint: "账号与权限管理",
-  mark: "08",
+  mark: "09",
   permission: "users.manage",
 } as const;
 
@@ -186,6 +190,7 @@ const pageComponent = computed(() => {
     products: ProductsPage,
     quadrants: QuadrantsPage,
     risks: RisksPage,
+    logistics: LogisticsPage,
     competitors: CompetitorsPage,
     "daily-report": DailyReportPage,
     reports: ReportsPage,
@@ -502,6 +507,7 @@ function initialPage(): PageKey {
       "products",
       "quadrants",
       "risks",
+      "logistics",
       "competitors",
       "daily-report",
       "reports",
@@ -632,7 +638,7 @@ function currentOperationsBusinessDate() {
           <label
             v-if="
               !selectedStorePending
-              && !['daily-report', 'reports', 'users'].includes(currentPage)
+              && !['logistics', 'daily-report', 'reports', 'users'].includes(currentPage)
             "
           >
             <span>数据截止日期</span>
@@ -640,7 +646,7 @@ function currentOperationsBusinessDate() {
           </label>
           <button
             v-if="
-              currentPage !== 'users'
+              !['logistics', 'users'].includes(currentPage)
               && !selectedStorePending
               && canAccessConnectedStore
             "

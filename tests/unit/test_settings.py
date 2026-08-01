@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from takealot_ops.settings import Settings, SettingsError
+from takealot_ops.settings import Settings, SettingsError, W8Settings
 
 
 def test_settings_requires_api_key(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -104,3 +104,46 @@ def test_settings_rejects_blank_api_key(tmp_path: Path, monkeypatch: pytest.Monk
 
     with pytest.raises(SettingsError, match="接口密钥"):
         Settings.from_env(tmp_path)
+
+
+def test_w8_settings_loads_optional_token_and_formal_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("W8_API_TOKEN", "fixture-w8-token")
+    monkeypatch.delenv("W8_BASE_URL", raising=False)
+    monkeypatch.delenv("W8_REQUEST_TIMEOUT_SECONDS", raising=False)
+
+    settings = W8Settings.from_env(tmp_path)
+
+    assert settings.configured is True
+    assert settings.token == "fixture-w8-token"
+    assert settings.base_url == "https://crgyl.w8soft.net/prod-api/w8"
+    assert settings.request_timeout_seconds == 30.0
+
+
+def test_w8_settings_allows_unconfigured_optional_integration(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("W8_API_TOKEN", raising=False)
+
+    settings = W8Settings.from_env(tmp_path)
+
+    assert settings.configured is False
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://crgyl.w8soft.net/prod-api/w8",
+        "https://w8soft.net.example.com/prod-api/w8",
+        "https://example.com/prod-api/w8",
+        "https://crgyl.w8soft.net/not-the-api",
+    ],
+)
+def test_w8_settings_rejects_untrusted_urls(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, url: str
+) -> None:
+    monkeypatch.setenv("W8_BASE_URL", url)
+
+    with pytest.raises(SettingsError, match="w8soft.net"):
+        W8Settings.from_env(tmp_path)

@@ -1,6 +1,6 @@
 # Takealot 店铺运营数据工具
 
-这是一个在 Windows 本机运行的小型运营 ERP：通过只读 Seller API 采集自有店铺 Offer 与 Sales 数据，并通过公开商品接口和隔离匿名购物车观察竞品。统一的 Vue 3 + TypeScript 前端包含经营总览、商品中心、经营坐标、风险与质量、竞品雷达、运营日报，以及仅用于 NFT102 续写的报表工作台；自有店铺和竞品历史统一保存在本机 MySQL 8.0。
+这是一个在 Windows 本机运行的小型运营 ERP：通过只读 Seller API 采集自有店铺 Offer、Sales 与 Shipment 数据，通过长睿 W8 客户接口读取仓配数据，并通过公开商品接口和隔离匿名购物车观察竞品。统一的 Vue 3 + TypeScript 前端包含经营总览、商品中心、经营坐标、风险与质量、物流管理、竞品雷达、运营日报，以及仅用于 NFT102 续写的报表工作台；自有店铺和竞品历史统一保存在本机 MySQL 8.0。
 
 ## 1. 安装
 
@@ -36,6 +36,13 @@ TAKEALOT_DATABASE_URL=mysql+pymysql://takealot_app:密码@127.0.0.1:3306/takealo
 ```
 
 密码中的 `+`、`@`、`:` 等特殊字符必须使用 URL 百分号编码。程序会自动读取 `D:\南非店铺数据抓取\.env`，已经存在的系统环境变量优先于 `.env`。不要把真实 Key 或数据库密码写进 `.env.example`，也不要把 `.env` 发给他人或提交到 GitHub。
+
+物流管理还需要在同一个被 Git 忽略的 `.env` 中配置长睿提供的 W8 授权码。当前正式服务商域名是 `crgyl.w8soft.net`，测试域名与正式域名不是同一租户；不要把正式授权码写进测试地址。
+
+```env
+W8_API_TOKEN=在这里粘贴长睿提供的授权码
+W8_BASE_URL=https://crgyl.w8soft.net/prod-api/w8
+```
 
 旧 SQLite 数据只作为迁移源和回退留档，不再被 ERP、采集或日报读取。首次切换时，MySQL 目标库必须为空，然后执行：
 
@@ -79,6 +86,8 @@ TAKEALOT_DATABASE_URL=mysql+pymysql://takealot_app:密码@127.0.0.1:3306/takealo
 初始化完成后，同事可打开 `http://服务器局域网IP:8501` 登录。服务器 IP 可在 PowerShell 执行 `ipconfig` 查看 IPv4 地址。正式 ERP 监听 `0.0.0.0:8501`，但 MySQL 仍只连接本机 `127.0.0.1`，数据库端口不会提供给局域网。当前方案适用于同一受信任局域网，不应把 `8501` 直接映射到公网；如需跨网络或公网访问，应增加 HTTPS 反向代理和网络访问控制。
 
 完成并验证项目修复后，使用 `.\scripts\restart_erp.ps1` 自动停止当前项目 ERP、隐藏启动新进程并等待 `/api/health` 通过。脚本只会停止命令行明确包含 `takealot_ops.erp.web:app` 的8501监听进程；端口被其他程序占用时会拒绝操作，启动输出写入 `logs\erp.stdout.log` 和 `logs\erp.stderr.log`。
+
+“物流管理”把长睿正式环境的仓库、渠道、产品数、库存、入库、出库、退货与状态分布，同 Takealot Shipment、PO、目的仓、发货/卸货状态和 SKU 收货数量放在一页。后端只允许经过审核的查询路径，结果短时缓存，人工刷新也有最小间隔；页面不创建、取消、打印或修改任何物流单据，不展示长睿收件人地址。两边只在头程号、箱唛或长睿单号明确出现在 Takealot Reference、Tracking Info 或 PO 字段时才列为自动匹配，不按日期或数量猜测关系。W8 当前查询结果没有逐站扫描轨迹；退货接口返回条数与 `total` 不一致时会明确告警，并按实际返回条目展示。
 
 权限页面提供四个快速模板：
 

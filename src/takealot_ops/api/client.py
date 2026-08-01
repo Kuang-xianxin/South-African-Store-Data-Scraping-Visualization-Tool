@@ -103,6 +103,16 @@ class TakealotClient:
             },
         )
 
+    def list_shipments(self) -> Iterator[dict[str, Any]]:
+        """Yield replenishment and customer shipments with item-level receiving data."""
+        return self.iter_items(
+            "/shipments",
+            {
+                "limit": 1000,
+                "expands": ["shipment_items"],
+            },
+        )
+
     def close(self) -> None:
         """Close the owned HTTP client."""
         self._client.close()

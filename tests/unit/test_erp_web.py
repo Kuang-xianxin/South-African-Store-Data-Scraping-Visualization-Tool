@@ -433,6 +433,12 @@ def test_public_competitor_module_does_not_require_store_assignment(
                 freshness.json()["detail"]
                 == "当前账号未获授权访问已接入数据的店铺"
             )
+            logistics = public_user.get("/api/erp/logistics")
+            assert logistics.status_code == 403
+            assert (
+                logistics.json()["detail"]
+                == "当前账号未获授权访问已接入数据的店铺"
+            )
 
 
 def test_session_lasts_seven_days_and_slides_after_activity(

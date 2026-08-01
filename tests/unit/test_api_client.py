@@ -366,6 +366,26 @@ def test_returns_query_uses_inclusive_dates_and_limit_100() -> None:
     }
 
 
+def test_shipments_query_expands_item_level_receiving_data() -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, json={"items": []})
+
+    client = _client(handler)
+    try:
+        assert list(client.list_shipments()) == []
+    finally:
+        client.close()
+
+    assert requests[0].url.path.endswith("/shipments")
+    assert dict(requests[0].url.params) == {
+        "limit": "1000",
+        "expands": "shipment_items",
+    }
+
+
 @pytest.mark.parametrize(
     "response",
     [
@@ -602,4 +622,11 @@ def test_client_rejects_non_get_requests() -> None:
         for name, value in vars(TakealotClient).items()
         if not name.startswith("_") and callable(value)
     }
-    assert public_methods == {"iter_items", "list_offers", "list_sales", "list_returns", "close"}
+    assert public_methods == {
+        "iter_items",
+        "list_offers",
+        "list_sales",
+        "list_returns",
+        "list_shipments",
+        "close",
+    }

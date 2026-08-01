@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from dotenv import load_dotenv
 from sqlalchemy.engine import make_url
@@ -18,6 +19,8 @@ DEFAULT_DATABASE_URL = (
 DEFAULT_REQUEST_TIMEOUT_SECONDS = 30.0
 DEFAULT_DASHBOARD_HOST = "0.0.0.0"
 DEFAULT_DASHBOARD_PORT = 8501
+DEFAULT_W8_BASE_URL = "https://crgyl.w8soft.net/prod-api/w8"
+DEFAULT_W8_REQUEST_TIMEOUT_SECONDS = 30.0
 
 
 class SettingsError(ValueError):
@@ -97,6 +100,56 @@ class DashboardSettings:
             database_url=database_url,
             dashboard_host=_dashboard_host_from_env(),
             dashboard_port=_dashboard_port_from_env(),
+        )
+
+
+@dataclass(frozen=True)
+class W8Settings:
+    """Optional Long Reach W8 read-only integration settings."""
+
+    project_root: Path
+    token: str
+    base_url: str
+    request_timeout_seconds: float
+
+    @property
+    def configured(self) -> bool:
+        return bool(self.token)
+
+    @classmethod
+    def from_env(cls, project_root: Path) -> W8Settings:
+        resolved_root = project_root.resolve()
+        load_dotenv(resolved_root / ".env", override=False)
+        base_url = os.environ.get("W8_BASE_URL", DEFAULT_W8_BASE_URL).strip().rstrip("/")
+        parsed = urlsplit(base_url)
+        hostname = (parsed.hostname or "").casefold()
+        if (
+            parsed.scheme != "https"
+            or not hostname
+            or not (hostname == "w8soft.net" or hostname.endswith(".w8soft.net"))
+            or parsed.path.rstrip("/") != "/prod-api/w8"
+            or parsed.query
+            or parsed.fragment
+        ):
+            raise SettingsError(
+                "长睿 W8 地址必须是 w8soft.net 下的 HTTPS /prod-api/w8 地址"
+            )
+        try:
+            timeout = float(
+                os.environ.get(
+                    "W8_REQUEST_TIMEOUT_SECONDS",
+                    DEFAULT_W8_REQUEST_TIMEOUT_SECONDS,
+                )
+            )
+        except ValueError as exc:
+            raise SettingsError("长睿 W8 请求超时必须是数字") from exc
+        if not 1 <= timeout <= 120:
+            raise SettingsError("长睿 W8 请求超时必须在1到120秒之间")
+        return cls(
+            project_root=resolved_root,
+            token=os.environ.get("W8_API_TOKEN", "").strip(),
+            base_url=base_url,
+            request_timeout_seconds=timeout,
         )
 
 

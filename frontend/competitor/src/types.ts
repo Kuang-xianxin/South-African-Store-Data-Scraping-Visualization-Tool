@@ -438,6 +438,122 @@ export interface NftGeneration {
   audit_url: string;
 }
 
+export interface LogisticsStatusCount {
+  status: string;
+  count: number;
+}
+
+export interface W8InboundItem {
+  order_no: string;
+  status: string;
+  created_at: string;
+  forecast_date: string;
+  inbound_date: string;
+  shelf_date: string;
+  headway_no: string;
+  shipping_mark: string;
+  sku_types: number;
+  forecast_quantity: number;
+}
+
+export interface W8OutboundItem {
+  order_no: string;
+  status: string;
+  created_at: string;
+  outbound_date: string;
+  waybill_no: string;
+  logistics_type: string;
+  sku_types: number;
+  total_quantity: number;
+  has_document: boolean;
+}
+
+export interface TakealotShipmentItem {
+  shipment_id: number | null;
+  reference: string;
+  purchase_order_number: string;
+  destination_region: string;
+  purchase_order_state: string;
+  shipment_type: string;
+  shipped: boolean;
+  cancelled: boolean;
+  due_date: string;
+  date_unloaded: string;
+  tracking_info: string;
+  sku_lines: number;
+  quantity_sending: number;
+  quantity_received: number;
+  quantity_damaged: number;
+}
+
+export interface LogisticsOverviewPayload {
+  generated_at: string;
+  cache_ttl_seconds: number;
+  cache_age_seconds: number;
+  w8: {
+    connected: boolean;
+    provider: string;
+    environment: string;
+    message?: string;
+    warehouse: {
+      id: number;
+      code: string;
+      name: string;
+      country: string;
+    } | null;
+    channels: Array<{ code: string; name: string }>;
+    summary: {
+      products: number;
+      stock_records: number;
+      stock_total: number;
+      usable_stock: number;
+      locked_stock: number;
+      outbound_allocated: number;
+      transit_stock: number;
+      defective_stock: number;
+      inbound_orders: number;
+      outbound_orders: number;
+      returned_records: number;
+    };
+    inbound_statuses: LogisticsStatusCount[];
+    outbound_statuses: LogisticsStatusCount[];
+    recent_inbound: W8InboundItem[];
+    recent_outbound: W8OutboundItem[];
+    warnings: string[];
+  };
+  takealot: {
+    connected: boolean;
+    message?: string;
+    summary: {
+      shipments: number;
+      replenishment: number;
+      shipped: number;
+      unloaded: number;
+      cancelled: number;
+      with_tracking_info: number;
+      quantity_sending: number;
+      quantity_received: number;
+      quantity_damaged: number;
+    };
+    recent_shipments: TakealotShipmentItem[];
+  };
+  matching: {
+    method: string;
+    direct_match_count: number;
+    matched_w8_inbound: number;
+    matched_takealot_shipments: number;
+    unmatched_w8_inbound: number;
+    unmatched_takealot_shipments: number;
+    items: Array<{
+      w8_order_no: string;
+      w8_headway_no: string;
+      takealot_shipment_id: number;
+      takealot_reference: string;
+    }>;
+  };
+  boundaries: string[];
+}
+
 export type DailyReportStatus =
   | "awaiting_evening"
   | "ready"

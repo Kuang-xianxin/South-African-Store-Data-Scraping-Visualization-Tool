@@ -116,6 +116,7 @@ from takealot_ops.erp.service import (
     load_erp_dataset,
     sqlite_database_path,
 )
+from takealot_ops.logistics import LogisticsOverviewService
 from takealot_ops.nft102_portal import (
     generate_nft102_from_baseline,
     inspect_nft102_upload,
@@ -407,6 +408,7 @@ def create_app(project_root: Path | None = None) -> FastAPI:
     )
     refresh_coordinator = RefreshCoordinator(root)
     product_thumbnails = ProductThumbnailCache(root)
+    logistics_overview = LogisticsOverviewService(root)
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
@@ -762,6 +764,11 @@ def create_app(project_root: Path | None = None) -> FastAPI:
     def risks(as_of: date = Query(default_factory=date.today)) -> dict[str, Any]:
         settings = DashboardSettings.from_env(root)
         return build_risk_payload(load_erp_dataset(settings, as_of), as_of)
+
+    @app.get("/api/erp/logistics")
+    def logistics(refresh: bool = Query(False)) -> dict[str, Any]:
+        """Return a cached, sanitized, read-only W8 and Takealot shipment overview."""
+        return logistics_overview.load(force=refresh)
 
     @app.get("/api/erp/refresh-status")
     def refresh_status(request: Request) -> dict[str, object]:
@@ -2054,6 +2061,7 @@ def _required_permission(path: str, method: str) -> str | tuple[str, ...] | None
             "/api/erp/products",
             "/api/erp/quadrants",
             "/api/erp/risks",
+            "/api/erp/logistics",
         )
     ):
         return STORE_VIEW
@@ -2075,6 +2083,7 @@ def _requires_connected_store_access(path: str) -> bool:
                 "/api/erp/products",
                 "/api/erp/quadrants",
                 "/api/erp/risks",
+                "/api/erp/logistics",
                 "/api/erp/daily-report",
                 "/api/erp/exports",
             )

@@ -37,7 +37,7 @@
 - 通过官方 Seller API 只读采集 Offer 与 Sales 数据；
 - 使用本机 MySQL 8.0 保存全部店铺、指标和竞品历史；
 - 生成 HTML、Excel、PNG 日报；
-- 提供统一的 Vue 3 + TypeScript 小型 ERP，覆盖经营总览、商品、经营坐标、风险/质量、竞品、报表和用户权限；
+- 提供统一的 Vue 3 + TypeScript 小型 ERP，覆盖经营总览、商品、经营坐标、风险/质量、物流、竞品、报表和用户权限；
 - 保留 Streamlit 旧版看板作为临时兼容回退，不作为正式功能入口；
 - 更新 NFT102 访客表并生成可追溯核对报告。
 
@@ -45,6 +45,8 @@
 
 - API 客户端只允许读取操作，不得擅自增加写入、修改或删除店铺数据的请求。
 - 真实 API Key 只能放在项目根目录 `.env` 或受控环境变量中；不得进入源码、测试夹具、日志、报表、文档或版本库。
+- 长睿物流集成只允许调用代码白名单内的 W8 查询接口；当前正式基础地址固定为长睿提供的 `https://crgyl.w8soft.net/prod-api/w8`，自定义地址仍必须是 `w8soft.net` 下的 HTTPS `/prod-api/w8` 路径。授权码只能放在被 Git 忽略的 `.env` 或受控环境变量中，不得写入源码、测试、日志、页面响应、文档或版本库。物流页面不得显示 W8 收件人姓名、电话或地址，不得提供创建、删除、打印、预约或改单入口；普通缓存60秒，强制刷新也必须至少间隔10秒，避免页面反复读取放大为供应商接口压力。
+- 长睿与 Takealot 货件只允许在 W8 头程号、箱唛、入库单号明确出现在 Takealot Reference、Tracking Info 或 PO 字段时列为自动匹配；不得按日期、SKU数量或相近文本猜测一对一关系。W8 运单号不等于逐站扫描轨迹；接口未返回轨迹时必须明确缺失。分页 `total` 与实际记录数不一致时必须保留告警并按实际记录展示，不得把 `total` 伪装成已经取得的明细数量。
 - 日期边界使用南非标准时间（SAST）业务日；不得用本机日期直接替代既定转换。
 - ERP 中“最近采集”和竞品历史快照属于记录时刻，必须固定按北京时间（Asia/Shanghai）显示；指标日期仍按 SAST 业务日，两种口径不得混淆。
 - `page_views_30_days` 只能称为“近30天浏览量”，不是独立访客数，也不是精确当天流量。
@@ -124,6 +126,7 @@
 - `src/takealot_ops/`：业务源码
 - `src/takealot_ops/competitors/`：竞品公开接口、库存探测、估算、持久化和本机 API
 - `src/takealot_ops/erp/`：统一 ERP 的只读数据投影、动作接口和静态前端服务
+- `src/takealot_ops/logistics/`：长睿 W8 与 Takealot Shipment 的只读查询、脱敏投影、缓存和明确编号关联
 - `frontend/competitor/`：统一 Vue 3 + TypeScript ERP 源码及生产构建（沿用竞品目录名）
 - `tests/`：单元、集成和端到端测试
 - `config/`：业务规则与程序设置
@@ -185,6 +188,7 @@ Set-Location .\frontend\competitor; npm.cmd run build
 
 | 日期 | 修改摘要 | 主要文件 | 验证与结论 |
 |---|---|---|---|
+| 2026-08-01 | 接入长睿 W8 与 Takealot Shipment 的只读物流管理模块：W8客户端仅放行仓库、渠道、产品、库存、入库、出库和退货查询路径，正式域名与路径受配置校验，授权码仅保存在Git忽略`.env`；后端并行读取两边接口并缓存60秒，强制刷新至少间隔10秒，页面展示仓库/渠道/库存/入出库/退货、平台Shipment/PO和SKU发送/实收/破损，不展示长睿收件人信息。两边只按头程号、箱唛或入库单号在Takealot Reference/Tracking Info/PO中的明确出现形成候选匹配，不按日期或数量猜测；W8退货分页`total`与实际记录不一致时保留告警并按实际记录展示 | `.env.example`、`src/takealot_ops/settings.py`、`src/takealot_ops/api/client.py`、`src/takealot_ops/logistics/`、`src/takealot_ops/erp/web.py`、`frontend/competitor/src/`、相关测试、`README.md`、`docs/PROJECT_STATUS.md`、`AGENT.md` | 长睿正式接口读取南非仓、399个产品档案、326条库存、238个入库单、166个出库单和29条实际退货记录；退货接口自报`total=136`但未返回对应明细，已告警。Takealot读取187个货件，当前明确编号匹配为0。专项`73 passed`、完整回归`361 passed`（均只有1条第三方TestClient弃用提示），Ruff、Mypy（53个源码文件）、数据库`verify`、Vue TypeScript/生产构建和`git diff --check`通过。正式ERP经`restart_erp.ps1`重启为PID 9900，`/api/health`和首页均HTTP 200，资源为`index-C0mwayX-.js`与`index-DteeVW28.css`，未登录物流接口返回401；按既定偏好未执行浏览器自动化 |
 | 2026-08-01 | 让竞品详情中的卖家报价成为可切换的当前上下文：点击任一主报价或跟卖行后，弹窗标题身份、顶部价格与卖家库存、报价级涨跌/库存信号、经营信号证据、SKU、变体、条件以及经营信号卡/底部外链统一切换到该报价，并以描边和“正在查看”标识当前选择。评论结构、公开评论、PLID原始快照、商品变体表和监控队列继续按商品共用，界面明确标注；切换卖家不会重复加入PLID队列。未点开的商品卡尺寸保持不变 | `frontend/competitor/src/pages/CompetitorsPage.vue`、`frontend/competitor/src/styles.css`、前端构建产物、`README.md`、`docs/PROJECT_STATUS.md`、`AGENT.md` | Vue TypeScript检查与生产构建通过，资源为`index-DMPWnC-g.js`与`index-B8T9C6MK.css`；完整回归`351 passed`（1条第三方TestClient弃用提示），数据库`verify`和`git diff --check`通过。正式ERP经`restart_erp.ps1`重启（启动器PID 10928），`/api/health`、首页和两项资源均HTTP 200；按既定偏好未执行浏览器自动化 |
 | 2026-08-01 | 按运营反馈收紧竞品最新状态：未点开的PLID商品卡只保留商品、报价数、报价区间、主报价库存、经营信号和评论评分的紧凑摘要，不再在长列表中创建全部报价行；点击或键盘打开既有详情弹窗后，顶部统一展示主报价与全部跟卖的卖家、Offer ID、SKU、价格涨跌及各自库存数量、公开状态、证据和变化。无可核验数量时明确显示“数量未返回”，继续保持缺失且不补0；监控队列操作、经营信号、变体、历史和评论仍复用同一详情弹窗 | `frontend/competitor/src/pages/CompetitorsPage.vue`、`frontend/competitor/src/styles.css`、前端构建产物、`README.md`、`docs/PROJECT_STATUS.md`、`AGENT.md` | Vue TypeScript检查与生产构建通过，最终资源为`index-DCSysG5O.js`与`index-bnBL0ujo.css`；完整回归`351 passed`（1条第三方TestClient弃用提示），数据库`verify`和`git diff --check`通过。正式ERP经`restart_erp.ps1`重启（启动器PID 29980），`/api/health`返回`ok`，首页及两项资源均HTTP 200；按既定偏好未执行浏览器自动化 |
 | 2026-08-01 | 将“竞品最新状态”由每商品一行表格重构为每PLID一张父卡片：卡片头集中显示商品身份、报价区间、主报价库存与商品经营信号，卡内逐行统一展示当前主报价及全部跟卖的卖家、Offer ID、SKU、变体、价格涨跌和报价独立库存变化；旧快照未返回可区分报价时保留商品主报价与原链接并明确不猜原始卖家。卖家搜索扩展到全部报价，经营信号筛选扩展到报价级价格与库存信号；卡片继续复用原完整详情弹窗、分页和响应式布局 | `frontend/competitor/src/pages/CompetitorsPage.vue`、`frontend/competitor/src/styles.css`、前端构建产物、`README.md`、`docs/PROJECT_STATUS.md`、`AGENT.md` | Vue TypeScript检查与生产构建通过，最终资源为`index-C4t_G7mn.js`与`index-CPi9nrQG.css`；完整回归`351 passed`（1条第三方TestClient弃用提示），数据库`verify`和`git diff --check`通过。正式ERP经`restart_erp.ps1`重启（启动器PID 24220），`/api/health`返回`ok`，首页及两项资源均HTTP 200；按既定偏好未执行浏览器自动化 |

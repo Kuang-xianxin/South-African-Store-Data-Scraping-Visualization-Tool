@@ -7,6 +7,7 @@ import type {
   CompetitorTargetItem,
   ExportPayload,
   FreshnessPayload,
+  LogisticsOverviewPayload,
   NftGeneration,
   NftInspection,
   AuthSession,
@@ -499,6 +500,13 @@ export async function fetchQuadrants(
 
 export async function fetchRisks(asOf: string): Promise<RiskPayload> {
   return request<RiskPayload>(`/api/erp/risks?${query(asOf)}`);
+}
+
+export async function fetchLogisticsOverview(
+  refresh = false,
+): Promise<LogisticsOverviewPayload> {
+  const suffix = refresh ? "?refresh=true" : "";
+  return request<LogisticsOverviewPayload>(`/api/erp/logistics${suffix}`);
 }
 
 export interface RefreshStatus {
