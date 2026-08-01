@@ -34,6 +34,7 @@ from sqlalchemy import func, select
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
+from starlette.middleware.gzip import GZipMiddleware
 
 from takealot_ops.competitors.api import (
     CompetitorNetworkError,
@@ -424,6 +425,7 @@ def create_app(project_root: Path | None = None) -> FastAPI:
         openapi_url=None,
         lifespan=lifespan,
     )
+    app.add_middleware(GZipMiddleware, minimum_size=1024, compresslevel=5)
     app.state.auth_manager = auth
     app.state.product_thumbnail_cache = product_thumbnails
 

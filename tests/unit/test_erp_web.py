@@ -1636,6 +1636,7 @@ def test_operator_can_use_all_daily_report_reconciliation_actions(
 
         report = client.get("/api/erp/daily-report?business_date=2026-07-24")
         assert report.status_code == 200
+        assert report.headers["content-encoding"] == "gzip"
         assert report.json()["counts"]["ready"] == 2
         assert report.json()["capture_issue_range"]["selected_start"] == "2026-07-22"
         assert report.json()["capture_issue_range"]["selected_end"] == "2026-07-24"

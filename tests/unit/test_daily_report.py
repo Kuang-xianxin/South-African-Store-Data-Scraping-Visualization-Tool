@@ -8,6 +8,7 @@ from openpyxl import load_workbook
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
+from takealot_ops.erp import daily_report as daily_report_module
 from takealot_ops.erp.daily_report import (
     DailyReportConflictError,
     DailyReportInputError,
@@ -466,6 +467,7 @@ def test_delayed_same_day_capture_fills_missing_morning_stock_and_marks_resolved
     assert context["missing_count"] == 0
     assert "早间库存漏爬已解决" in context["note"]
     assert "北京时间 2026-07-25 10:44:00" in context["note"]
+    assert context["exception_note"] == context["note"]
 
     manual_run = next(run for run in payload["runs"] if run["slot"] == "manual")
     assert manual_run["counts"]["reported_inventory_missing"] == 0
@@ -511,6 +513,7 @@ def test_latest_delayed_inventory_replaces_an_earlier_fallback() -> None:
     assert context["captured_at"] == "2026-07-25T10:00:00"
     assert context["complete"] is True
     assert "北京时间 2026-07-25 18:00:00" in context["note"]
+    assert context["exception_note"] == context["note"]
 
 
 def test_current_stock_total_follows_latest_offer_inventory_and_preserves_missing() -> None:
@@ -1390,10 +1393,9 @@ def test_export_is_blocked_until_every_entry_is_confirmed(tmp_path: Path) -> Non
         assert report_sheet["A3"].value == "当天订单数"
         assert report_sheet["C3"].fill.fgColor.rgb == "00FCE4D6"
         assert report_sheet["A4"].value == "平台库存数量（次日实采）"
-        assert "库存实际采集时间：北京时间 2026-07-25 10:00:00" in str(
-            report_sheet["B4"].value
-        )
+        assert report_sheet["B4"].value is None
         assert report_sheet["A5"].value == "备注"
+        assert report_sheet["B5"].value is None
         assert report_sheet["C5"].value == (
             "（确认：采用晚间库存值） （库存：平台临时调仓）"
         )
@@ -1401,6 +1403,40 @@ def test_export_is_blocked_until_every_entry_is_confirmed(tmp_path: Path) -> Non
             report_sheet.cell(row=row, column=1).value
             for row in range(1, report_sheet.max_row + 1)
         }
+    finally:
+        workbook.close()
+
+
+def test_delayed_inventory_note_is_exported_in_the_remark_date_cell(
+    tmp_path: Path,
+) -> None:
+    engine = _engine()
+    record_daily_report_failure(
+        engine,
+        business_date=REPORT_DATE,
+        slot="morning",
+        captured_at=_report_capture_time(REPORT_DATE, 2, 6),
+        reason="Offers HTTP 403",
+    )
+    for slot, hour, minute in (("manual", 2, 44), ("evening", 10, 0)):
+        capture_daily_report(
+            engine,
+            business_date=REPORT_DATE,
+            slot=slot,
+            captured_at=_report_capture_time(REPORT_DATE, hour, minute),
+        )
+
+    output = export_operations_workbook(
+        engine,
+        business_date=REPORT_DATE,
+        destination=tmp_path / "delayed-inventory-note.xlsx",
+    )
+    workbook = load_workbook(output)
+    try:
+        report_sheet = workbook["运营日报"]
+        assert report_sheet["B4"].value is None
+        assert "早间库存漏爬已解决" in str(report_sheet["B5"].value)
+        assert "北京时间 2026-07-25 18:00:00" in str(report_sheet["B5"].value)
     finally:
         workbook.close()
 
@@ -1683,6 +1719,38 @@ def test_payload_includes_recent_dates_for_vertical_comparison() -> None:
     assert first_day["current"]["page_views_30_days"] == 50
     assert second_day["current"]["page_views_30_days"] == 58
     assert second_day["current"]["platform_stock"] == 8
+    assert history[0]["inventory_context"]["exception_note"] is None
+    assert history[1]["inventory_context"]["exception_note"] is None
+
+
+def test_payload_reuses_each_historical_date_within_one_request(monkeypatch) -> None:
+    engine = _engine()
+    for report_date in (REPORT_DATE, REPORT_DATE + timedelta(days=1)):
+        for slot, hour in (("morning", 2), ("evening", 10)):
+            capture_daily_report(
+                engine,
+                business_date=report_date,
+                slot=slot,
+                captured_at=_report_capture_time(report_date, hour),
+            )
+
+    original = daily_report_module._comparison_items_for_date
+    calls: list[date] = []
+
+    def tracked_comparison_items(session, business_date):
+        calls.append(business_date)
+        return original(session, business_date)
+
+    monkeypatch.setattr(
+        daily_report_module,
+        "_comparison_items_for_date",
+        tracked_comparison_items,
+    )
+
+    payload = daily_report_payload(engine, REPORT_DATE + timedelta(days=1))
+
+    assert len(payload["comparison_history"]) == 2
+    assert calls.count(REPORT_DATE) == 1
 
 
 def test_vertical_comparison_keeps_latest_thirty_data_dates() -> None:

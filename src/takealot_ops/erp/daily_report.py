@@ -407,17 +407,18 @@ def daily_report_payload(
             )
             for offer_id in offer_ids
         ]
+        comparison_items_by_date = {business_date: items}
         reminders = _reminders(session, before=business_date)
         deadline = session.get(DailyReportDeadlineSnapshot, business_date)
         comparison_history = _comparison_history(
             session,
             through=business_date,
-            current_items=items,
+            items_by_date=comparison_items_by_date,
         )
         pending_actions = _pending_actions(
             session,
             through=business_date,
-            current_items=items,
+            items_by_date=comparison_items_by_date,
         )
         handled_actions = _handled_actions(session, through=business_date)
         capture_issues, capture_issue_range = _capture_issue_history(
@@ -428,6 +429,7 @@ def daily_report_payload(
             current_items=items,
             current_runs=runs,
             current_capture_status=capture_status,
+            items_by_date=comparison_items_by_date,
         )
         current_stock_values = [
             _platform_stock(offer)[0]
@@ -1599,7 +1601,7 @@ def export_operations_workbook(
                 for column in range(1, len(offer_ids) + 3):
                     sheet.cell(row_number + offset, column).fill = date_fill
         inventory_context = inventory_contexts[report_date]
-        sheet.cell(row_number + 2, 2, inventory_context["note"])
+        sheet.cell(row_number + 3, 2, inventory_context["exception_note"])
         for column, offer_id in enumerate(offer_ids, start=3):
             resolution = by_key.get((report_date, offer_id))
             if resolution is None:
@@ -1827,6 +1829,10 @@ def _inventory_capture_context(
         inventory_date,
     )
     if not snapshots:
+        note = (
+            f"{inventory_date.isoformat()} 计划10:05的早间库存尚未取得；"
+            "等待当天后续完整拉取补齐"
+        )
         return {
             "inventory_date": inventory_date.isoformat(),
             "captured_at": None,
@@ -1837,10 +1843,8 @@ def _inventory_capture_context(
             "complete": False,
             "product_count": 0,
             "missing_count": 0,
-            "note": (
-                f"{inventory_date.isoformat()} 计划10:05的早间库存尚未取得；"
-                "等待当天后续完整拉取补齐"
-            ),
+            "note": note,
+            "exception_note": note,
         }
 
     latest_snapshot = max(snapshots.values(), key=lambda row: row.captured_at)
@@ -1891,6 +1895,7 @@ def _inventory_capture_context(
         "product_count": expected_count,
         "missing_count": missing_count,
         "note": note,
+        "exception_note": note if delayed or not complete else None,
     }
 
 
@@ -3039,7 +3044,7 @@ def _comparison_history(
     session: Session,
     *,
     through: date,
-    current_items: list[dict[str, Any]],
+    items_by_date: dict[date, list[dict[str, Any]]],
     limit: int = 30,
 ) -> list[dict[str, Any]]:
     recent_dates = list(
@@ -3054,10 +3059,11 @@ def _comparison_history(
     recent_dates.reverse()
     history: list[dict[str, Any]] = []
     for report_date in recent_dates:
-        if report_date == through:
-            items = current_items
-        else:
-            items = _comparison_items_for_date(session, report_date)
+        items = _cached_comparison_items(
+            session,
+            report_date,
+            items_by_date,
+        )
         history.append(
             {
                 "business_date": report_date.isoformat(),
@@ -3092,7 +3098,7 @@ def _pending_actions(
     session: Session,
     *,
     through: date,
-    current_items: list[dict[str, Any]],
+    items_by_date: dict[date, list[dict[str, Any]]],
 ) -> list[dict[str, Any]]:
     rows = list(
         session.execute(
@@ -3117,10 +3123,10 @@ def _pending_actions(
         requested_by_date.setdefault(report_date, set()).add(offer_id)
     result: list[dict[str, Any]] = []
     for report_date, offer_ids in requested_by_date.items():
-        items = (
-            current_items
-            if report_date == through
-            else _comparison_items_for_date(session, report_date)
+        items = _cached_comparison_items(
+            session,
+            report_date,
+            items_by_date,
         )
         for item in items:
             if item["offer_id"] not in offer_ids or item["status"] != "needs_review":
@@ -3485,6 +3491,18 @@ def _comparison_items_for_date(
         )
         for offer_id in offer_ids
     ]
+
+
+def _cached_comparison_items(
+    session: Session,
+    business_date: date,
+    items_by_date: dict[date, list[dict[str, Any]]],
+) -> list[dict[str, Any]]:
+    items = items_by_date.get(business_date)
+    if items is None:
+        items = _comparison_items_for_date(session, business_date)
+        items_by_date[business_date] = items
+    return items
 
 
 def _confirmation_trigger_map(
@@ -4201,6 +4219,7 @@ def _capture_issue_history(
     current_items: list[dict[str, Any]],
     current_runs: list[DailyReportRun],
     current_capture_status: dict[str, dict[str, Any]],
+    items_by_date: dict[date, list[dict[str, Any]]],
 ) -> tuple[list[dict[str, Any]], dict[str, str]]:
     range_end = min(selected_end or through, through)
     range_start = selected_start or (range_end - timedelta(days=2))
@@ -4248,7 +4267,11 @@ def _capture_issue_history(
                     .order_by(DailyReportRun.captured_at)
                 )
             )
-            items = _comparison_items_for_date(session, report_date)
+            items = _cached_comparison_items(
+                session,
+                report_date,
+                items_by_date,
+            )
             capture_status = _capture_status(runs, report_date)
         issues.extend(
             {
