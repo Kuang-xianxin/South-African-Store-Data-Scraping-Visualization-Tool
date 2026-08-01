@@ -2132,10 +2132,24 @@ function formatSignedQuantity(value: number | null) {
 }
 
 function offerStockDisplay(offer: CompetitorOfferItem) {
-  if (offer.库存数量 === null) return offer.库存状态 || "未知";
+  if (offer.库存数量 === null) {
+    return `${offer.库存状态 || "未知"}（数量未返回）`;
+  }
   return offer.库存精确
     ? `${offer.库存数量} 件`
     : `至少 ${offer.库存数量} 件`;
+}
+
+function offerStockEvidenceLabel(offer: CompetitorOfferItem) {
+  if (offer.库存数量 === null) {
+    return offer.库存方式
+      ? `${offer.库存方式} · 未取得数量`
+      : "未取得库存数量";
+  }
+  if (offer.库存精确) return "精确库存证据";
+  return offer.库存方式
+    ? `${offer.库存方式} · 非精确下限`
+    : "非精确库存下限";
 }
 
 function offerStockSignalClass(signal: string) {
@@ -3411,34 +3425,17 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
                     <span>{{ formatChinaDateTime(item.采集时间) }}</span>
                   </div>
                   <h3>{{ item.商品 }}</h3>
-                  <p>
-                    同一商品统一归档
-                    <strong>{{ item.跟卖报价.length }}</strong>
-                    个卖家报价；每个报价的库存独立统计。
-                  </p>
+                  <p>{{ item.跟卖报价.length }} 个卖家报价 · 主卖家 {{ item.当前卖家 || "未知" }}</p>
                 </div>
               </div>
-              <span class="competitor-status-open">查看完整详情 →</span>
+              <span class="competitor-status-open">查看卖家库存 →</span>
             </header>
 
             <div class="competitor-status-summary">
               <div>
-                <span>全部报价区间</span>
+                <span>报价区间 / 主报价</span>
                 <strong>{{ competitorOfferPriceRange(item) }}</strong>
-                <small>{{ item.跟卖报价.length }} 个独立报价</small>
-              </div>
-              <div>
-                <span>当前主报价</span>
-                <strong>{{ formatCurrency(item.价格) }}</strong>
-                <small
-                  class="price-signal"
-                  :class="priceSignalClass(item.价格信号)"
-                >
-                  {{ item.价格信号 }}
-                  <template v-if="item.价格变化 !== null">
-                    · {{ formatSignedCurrency(item.价格变化) }}
-                  </template>
-                </small>
+                <small>主报价 {{ formatCurrency(item.价格) }}</small>
               </div>
               <div>
                 <span>主报价库存</span>
@@ -3456,7 +3453,7 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
                 <small v-else>{{ item.当前卖家 || "未知卖家" }}</small>
               </div>
               <div>
-                <span>商品经营信号</span>
+                <span>经营信号</span>
                 <div class="signal-labels">
                   <strong class="signal-label">{{ item.趋势判断 }}</strong>
                   <strong
@@ -3464,84 +3461,16 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
                     :class="priceSignalClass(item.价格信号)"
                   >{{ item.价格信号 }}</strong>
                 </div>
-                <small>{{ item.评论数 }} 条评论 · 评分 {{ item.评分 ?? "—" }}</small>
+                <small v-if="item.价格变化 !== null">
+                  价格变化 {{ formatSignedCurrency(item.价格变化) }}
+                </small>
+              </div>
+              <div>
+                <span>评论 / 评分</span>
+                <strong>{{ item.评论数 }} 条 · {{ item.评分 ?? "—" }}</strong>
+                <small>点击查看历史和评论</small>
               </div>
             </div>
-
-            <section class="competitor-offer-roster" aria-label="全部卖家报价">
-              <div class="competitor-offer-roster-heading">
-                <div>
-                  <strong>全部卖家报价</strong>
-                  <span>主报价与跟卖都保留在本商品卡片内，不把共享 PLID 当成报价身份。</span>
-                </div>
-                <span>{{ item.跟卖报价.length }} 个报价</span>
-              </div>
-              <div v-if="item.跟卖报价.length" class="competitor-offer-list">
-                <div
-                  v-for="offer in item.跟卖报价"
-                  :key="offer.报价键"
-                  class="competitor-offer-row"
-                >
-                  <div class="competitor-offer-identity">
-                    <div>
-                      <strong>{{ offer.卖家 }}</strong>
-                      <span
-                        class="competitor-offer-kind"
-                        :class="{ primary: offer.是否主报价 }"
-                      >{{ offer.是否主报价 ? "当前主报价" : "跟卖报价" }}</span>
-                    </div>
-                    <small>
-                      Offer ID {{ offer.offer_id || "未返回" }}
-                      · SKU {{ offer.SKU || "未返回" }}
-                    </small>
-                    <small>
-                      {{ offer.变体 || "默认款" }}
-                      <template v-if="offer.条件"> · {{ offer.条件 }}</template>
-                    </small>
-                  </div>
-                  <div class="competitor-offer-metric">
-                    <span>价格</span>
-                    <strong>{{ formatCurrency(offer.价格) }}</strong>
-                    <small
-                      class="price-signal"
-                      :class="priceSignalClass(offer.价格信号)"
-                    >
-                      {{ offer.价格信号 }}
-                      <template v-if="offer.价格变化 !== null">
-                        · {{ formatSignedCurrency(offer.价格变化) }}
-                      </template>
-                    </small>
-                  </div>
-                  <div class="competitor-offer-metric">
-                    <span>独立库存</span>
-                    <strong>{{ offerStockDisplay(offer) }}</strong>
-                    <small
-                      class="offer-stock-signal"
-                      :class="offerStockSignalClass(offer.库存信号)"
-                    >
-                      {{ offer.库存信号 }}
-                      <template v-if="offer.库存数量变化 !== null">
-                        · {{ formatSignedQuantity(offer.库存数量变化) }}
-                      </template>
-                    </small>
-                  </div>
-                  <div class="competitor-offer-metric">
-                    <span>报价范围</span>
-                    <strong>{{ offer.是否变体主报价 ? "变体主报价" : "公开跟卖" }}</strong>
-                    <small>{{ offer.库存精确 ? "精确库存证据" : offer.库存方式 }}</small>
-                  </div>
-                </div>
-              </div>
-              <div v-else class="competitor-offer-empty">
-                <strong>当前快照未返回可区分的卖家报价</strong>
-                <span>商品主报价和原始链接仍然保留；系统不会猜测原始卖家或伪造 Offer ID。</span>
-              </div>
-            </section>
-
-            <footer class="competitor-status-footer">
-              <span>观察期信号：{{ item.观察期销量信号 }}</span>
-              <span>点击卡片查看历史、评论与监控队列操作</span>
-            </footer>
           </article>
         </div>
         <div
@@ -3650,6 +3579,78 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
             </div>
 
             <div class="competitor-modal-content">
+              <section class="panel competitor-offer-roster" aria-label="全部卖家报价与库存">
+                <div class="competitor-offer-roster-heading">
+                  <div>
+                    <p class="section-kicker">SELLER OFFER INVENTORY</p>
+                    <h2>全部卖家报价与库存</h2>
+                    <span>同一 PLID 下按 Offer ID / SKU 区分报价，每个卖家的价格与库存独立统计。</span>
+                  </div>
+                  <span>{{ selected.跟卖报价.length }} 个报价</span>
+                </div>
+                <div v-if="selected.跟卖报价.length" class="competitor-offer-list">
+                  <article
+                    v-for="offer in selected.跟卖报价"
+                    :key="offer.报价键"
+                    class="competitor-offer-row"
+                  >
+                    <div class="competitor-offer-identity">
+                      <div>
+                        <strong>{{ offer.卖家 || "未知卖家" }}</strong>
+                        <span
+                          class="competitor-offer-kind"
+                          :class="{ primary: offer.是否主报价 }"
+                        >{{ offer.是否主报价 ? "当前主报价" : "跟卖报价" }}</span>
+                      </div>
+                      <small>
+                        Offer ID {{ offer.offer_id || "未返回" }}
+                        · SKU {{ offer.SKU || "未返回" }}
+                      </small>
+                      <small>
+                        {{ offer.变体 || "默认款" }}
+                        <template v-if="offer.条件"> · {{ offer.条件 }}</template>
+                      </small>
+                    </div>
+                    <div class="competitor-offer-metric">
+                      <span>该卖家价格</span>
+                      <strong>{{ formatCurrency(offer.价格) }}</strong>
+                      <small
+                        class="price-signal"
+                        :class="priceSignalClass(offer.价格信号)"
+                      >
+                        {{ offer.价格信号 }}
+                        <template v-if="offer.价格变化 !== null">
+                          · {{ formatSignedCurrency(offer.价格变化) }}
+                        </template>
+                      </small>
+                    </div>
+                    <div class="competitor-offer-metric competitor-offer-stock-metric">
+                      <span>该卖家库存</span>
+                      <strong>{{ offerStockDisplay(offer) }}</strong>
+                      <small>{{ offerStockEvidenceLabel(offer) }}</small>
+                      <small
+                        class="offer-stock-signal"
+                        :class="offerStockSignalClass(offer.库存信号)"
+                      >
+                        {{ offer.库存信号 }}
+                        <template v-if="offer.库存数量变化 !== null">
+                          · {{ formatSignedQuantity(offer.库存数量变化) }}
+                        </template>
+                      </small>
+                    </div>
+                    <div class="competitor-offer-metric">
+                      <span>库存说明</span>
+                      <strong>{{ offer.是否变体主报价 ? "变体主报价" : "公开跟卖" }}</strong>
+                      <small>{{ offer.库存说明 || offer.库存原始状态 || "平台未返回更多说明" }}</small>
+                    </div>
+                  </article>
+                </div>
+                <div v-else class="competitor-offer-empty">
+                  <strong>当前快照未返回可区分的卖家报价</strong>
+                  <span>原链接和商品主报价仍然保留；系统不会猜测原始卖家或伪造 Offer ID、库存数量。</span>
+                </div>
+              </section>
+
               <section class="panel competitor-target-action-card">
                 <div class="competitor-target-action-heading">
                   <div>
