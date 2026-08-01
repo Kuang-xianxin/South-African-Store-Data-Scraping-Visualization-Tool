@@ -1400,11 +1400,34 @@ textarea.link-input-error-pulse {
   grid-template-columns: minmax(220px, 1.55fr) repeat(3, minmax(125px, 0.8fr));
   gap: 12px;
   align-items: center;
+  width: 100%;
   min-width: 0;
   padding: 11px 12px;
   border: 1px solid #e0e6e1;
   border-radius: 11px;
   background: #fff;
+  color: var(--ink);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: border-color 160ms ease, box-shadow 160ms ease, transform 160ms ease;
+}
+
+.competitor-offer-row:hover {
+  border-color: #9fbaa9;
+  transform: translateY(-1px);
+}
+
+.competitor-offer-row:focus-visible {
+  outline: none;
+  border-color: var(--green);
+  box-shadow: 0 0 0 3px rgba(42, 112, 83, 0.14);
+}
+
+.competitor-offer-row.selected {
+  border-color: var(--green);
+  background: #f0f7f1;
+  box-shadow: inset 4px 0 0 var(--green);
 }
 
 .competitor-offer-stock-metric {
@@ -1449,6 +1472,15 @@ textarea.link-input-error-pulse {
 .competitor-offer-kind.primary {
   background: #dcebd9;
   color: var(--green);
+}
+
+.competitor-offer-selected {
+  padding: 3px 7px;
+  border-radius: 999px;
+  background: var(--green);
+  color: #fff;
+  font-size: 0.57rem;
+  font-weight: 800;
 }
 
 .competitor-offer-empty {

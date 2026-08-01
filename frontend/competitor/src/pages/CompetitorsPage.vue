@@ -129,6 +129,7 @@ const withStockProbe = ref(true);
 const visibleBrowser = ref(false);
 const competitors = ref<CompetitorItem[]>([]);
 const selectedPlid = ref("");
+const selectedOfferKey = ref("");
 const detail = ref<CompetitorDetail>({ history: [], reviews: [], variants: [] });
 const detailModalOpen = ref(false);
 const detailLoading = ref(false);
@@ -210,6 +211,16 @@ const failedCompetitorImages = ref<Set<string>>(new Set());
 
 const selected = computed(
   () => competitors.value.find((item) => item.plid === selectedPlid.value) ?? null,
+);
+const selectedOffer = computed(() => {
+  const offers = selected.value?.跟卖报价 ?? [];
+  return offers.find((offer) => offer.报价键 === selectedOfferKey.value)
+    ?? offers.find((offer) => offer.是否主报价)
+    ?? offers[0]
+    ?? null;
+});
+const selectedOfferLink = computed(
+  () => selectedOffer.value?.链接 || selected.value?.链接 || "#",
 );
 const competitorsByPlid = computed(
   () => new Map(competitors.value.map((item) => [item.plid, item])),
@@ -837,6 +848,9 @@ async function applyDateRange(): Promise<void> {
 
 function openProductModal(item: CompetitorItem) {
   selectedPlid.value = item.plid;
+  selectedOfferKey.value = item.跟卖报价.find((offer) => offer.是否主报价)?.报价键
+    ?? item.跟卖报价[0]?.报价键
+    ?? "";
   if (editingTargetPlid.value && editingTargetPlid.value !== item.plid) {
     cancelEditTarget();
   }
@@ -846,8 +860,13 @@ function openProductModal(item: CompetitorItem) {
 
 function closeProductModal() {
   detailModalOpen.value = false;
+  selectedOfferKey.value = "";
   if (editingTargetPlid.value === selectedPlid.value) cancelEditTarget();
   clearTargetManagerFeedback();
+}
+
+function selectCompetitorOffer(offer: CompetitorOfferItem) {
+  selectedOfferKey.value = offer.报价键;
 }
 
 async function addSelectedTarget() {
@@ -3532,7 +3551,13 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
                 <p class="section-kicker">COMPETITOR DETAIL</p>
                 <h2>{{ selected.商品 }}</h2>
                 <span>
-                  PLID{{ selected.plid }} · {{ selected.当前卖家 || "未知卖家" }}
+                  PLID{{ selected.plid }}
+                  · 当前查看
+                  {{ selectedOffer ? (selectedOffer.卖家 || "未知卖家") : (selected.当前卖家 || "未知卖家") }}
+                  <template v-if="selectedOffer">
+                    · Offer ID {{ selectedOffer.offer_id || "未返回" }}
+                    · SKU {{ selectedOffer.SKU || "未返回" }}
+                  </template>
                 </span>
               </div>
             </div>
@@ -3552,25 +3577,29 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
             <div class="competitor-modal-metrics">
               <article>
                 <small>当前价格</small>
-                <strong>{{ formatCurrency(selected.价格) }}</strong>
+                <strong>{{ formatCurrency(selectedOffer ? selectedOffer.价格 : selected.价格) }}</strong>
                 <span>
-                  {{ selected.价格信号 }}
-                  <template v-if="selected.价格变化 !== null">
-                    · {{ formatSignedCurrency(selected.价格变化) }}
+                  {{ selectedOffer ? selectedOffer.价格信号 : selected.价格信号 }}
+                  <template v-if="(selectedOffer ? selectedOffer.价格变化 : selected.价格变化) !== null">
+                    · {{ formatSignedCurrency(selectedOffer ? selectedOffer.价格变化 : selected.价格变化) }}
                   </template>
                 </span>
               </article>
               <article>
-                <small>平台仓库存</small>
-                <strong>{{ selected.库存上限 }}</strong>
-                <span v-if="selected.库存参考过期 && selected.上次成功库存">
+                <small>当前卖家库存</small>
+                <strong>{{ selectedOffer ? offerStockDisplay(selectedOffer) : selected.库存上限 }}</strong>
+                <span v-if="selectedOffer">
+                  {{ selectedOffer.库存信号 }} · {{ offerStockEvidenceLabel(selectedOffer) }}
+                </span>
+                <span v-else-if="selected.库存参考过期 && selected.上次成功库存">
                   本次未探测；上次成功 {{ selected.上次成功库存 }}
                   · {{ formatChinaDateTime(selected.上次成功库存时间) }}
                 </span>
               </article>
               <article>
-                <small>评论 / 评分</small>
+                <small>PLID 共用评论 / 评分</small>
                 <strong>{{ selected.评论数 }} 条 · {{ selected.评分 ?? "—" }}</strong>
+                <span>不随卖家报价切换</span>
               </article>
               <article>
                 <small>最近采集</small>
@@ -3584,15 +3613,19 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
                   <div>
                     <p class="section-kicker">SELLER OFFER INVENTORY</p>
                     <h2>全部卖家报价与库存</h2>
-                    <span>同一 PLID 下按 Offer ID / SKU 区分报价，每个卖家的价格与库存独立统计。</span>
+                    <span>点击任一卖家报价，下方价格、库存、涨跌信号和商品链接会切换到该报价。</span>
                   </div>
                   <span>{{ selected.跟卖报价.length }} 个报价</span>
                 </div>
                 <div v-if="selected.跟卖报价.length" class="competitor-offer-list">
-                  <article
+                  <button
                     v-for="offer in selected.跟卖报价"
                     :key="offer.报价键"
+                    type="button"
                     class="competitor-offer-row"
+                    :class="{ selected: selectedOffer?.报价键 === offer.报价键 }"
+                    :aria-pressed="selectedOffer?.报价键 === offer.报价键"
+                    @click="selectCompetitorOffer(offer)"
                   >
                     <div class="competitor-offer-identity">
                       <div>
@@ -3601,6 +3634,10 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
                           class="competitor-offer-kind"
                           :class="{ primary: offer.是否主报价 }"
                         >{{ offer.是否主报价 ? "当前主报价" : "跟卖报价" }}</span>
+                        <span
+                          v-if="selectedOffer?.报价键 === offer.报价键"
+                          class="competitor-offer-selected"
+                        >正在查看</span>
                       </div>
                       <small>
                         Offer ID {{ offer.offer_id || "未返回" }}
@@ -3643,7 +3680,7 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
                       <strong>{{ offer.是否变体主报价 ? "变体主报价" : "公开跟卖" }}</strong>
                       <small>{{ offer.库存说明 || offer.库存原始状态 || "平台未返回更多说明" }}</small>
                     </div>
-                  </article>
+                  </button>
                 </div>
                 <div v-else class="competitor-offer-empty">
                   <strong>当前快照未返回可区分的卖家报价</strong>
@@ -3665,6 +3702,9 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
                     }}
                   </span>
                 </div>
+                <p class="method-note">
+                  监控队列按 PLID 管理；切换卖家报价只改变详情展示，不会重复加入队列。
+                </p>
                 <template v-if="selectedTarget">
                   <template v-if="editingTargetPlid === selectedTarget.plid">
                     <input
@@ -3767,10 +3807,18 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
               </section>
 
               <section class="detail-grid modal-detail-grid">
-                <article class="panel decision-card">
-                  <p class="section-kicker">OPERATING SIGNAL</p>
-                  <h2>{{ selected.趋势判断 }} · {{ selected.价格信号 }}</h2>
-                  <p>{{ selected.判断说明 }}</p>
+                <article v-if="selectedOffer" class="panel decision-card">
+                  <p class="section-kicker">SELLER OFFER SIGNAL</p>
+                  <h2>
+                    {{ selectedOffer.卖家 || "未知卖家" }}
+                    · {{ selectedOffer.价格信号 }}
+                    · {{ selectedOffer.库存信号 }}
+                  </h2>
+                  <p>
+                    当前只展示该报价身份的价格、库存与区间变化：
+                    Offer ID {{ selectedOffer.offer_id || "未返回" }}
+                    · SKU {{ selectedOffer.SKU || "未返回" }}。
+                  </p>
                   <p class="method-note">
                     实际比较：
                     {{ formatChinaDateTime(selected.信号区间开始) }}
@@ -3779,46 +3827,48 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
                   </p>
                   <div class="decision-stats">
                     <span>
-                      <small>库存上限</small>
-                      <strong>{{ selected.库存上限 }}</strong>
-                      <em
-                        v-if="selected.库存参考过期 && selected.上次成功库存"
-                        class="stale-stock-note"
-                      >
-                        过期参考：{{ selected.上次成功库存 }}
-                        · {{ formatChinaDateTime(selected.上次成功库存时间) }}
-                      </em>
+                      <small>当前库存</small>
+                      <strong>{{ offerStockDisplay(selectedOffer) }}</strong>
                     </span>
-                    <span><small>累计评论</small><strong>{{ selected.评论数 }}</strong></span>
                     <span>
-                      <small>区间库存净变化</small>
+                      <small>当前价格</small>
+                      <strong>{{ formatCurrency(selectedOffer.价格) }}</strong>
+                    </span>
+                    <span>
+                      <small>区间价格变化</small>
+                      <strong>
+                        {{ formatCurrency(selectedOffer.区间起始价格) }} →
+                        {{ formatCurrency(selectedOffer.价格) }}
+                        <template v-if="selectedOffer.价格变化 !== null">
+                          （{{ formatSignedCurrency(selectedOffer.价格变化) }}）
+                        </template>
+                      </strong>
+                    </span>
+                    <span>
+                      <small>区间库存变化</small>
                       <strong>
                         {{
-                          selected.库存可比 && selected.库存净变化 !== null
-                            ? `${selected.库存净变化 > 0 ? "+" : ""}${selected.库存净变化}`
+                          selectedOffer.库存可比 && selectedOffer.库存数量变化 !== null
+                            ? formatSignedQuantity(selectedOffer.库存数量变化)
                             : "不可比"
                         }}
                       </strong>
                     </span>
                     <span>
-                      <small>区间新增评论</small>
-                      <strong>{{ selected.新增评论 ?? "—" }}</strong>
+                      <small>变体</small>
+                      <strong>{{ selectedOffer.变体 || "默认款" }}</strong>
                     </span>
-                    <span>
-                      <small>观察期估算</small>
-                      <strong>{{ selected.观察期销量信号 }}</strong>
-                    </span>
-                    <span>
-                      <small>区间价格变化</small>
-                      <strong>
-                        {{ formatCurrency(selected.区间起始价格) }} →
-                        {{ formatCurrency(selected.价格) }}
-                        <template v-if="selected.价格变化 !== null">
-                          （{{ formatSignedCurrency(selected.价格变化) }}）
-                        </template>
-                      </strong>
-                    </span>
+                    <span><small>条件</small><strong>{{ selectedOffer.条件 || "未返回" }}</strong></span>
                   </div>
+                  <a :href="selectedOfferLink" target="_blank" rel="noreferrer">
+                    打开当前卖家报价页
+                  </a>
+                </article>
+
+                <article v-else class="panel decision-card">
+                  <p class="section-kicker">OPERATING SIGNAL</p>
+                  <h2>{{ selected.趋势判断 }} · {{ selected.价格信号 }}</h2>
+                  <p>{{ selected.判断说明 }}</p>
                   <a :href="selected.链接" target="_blank" rel="noreferrer">
                     打开 Takealot 商品页
                   </a>
@@ -3826,7 +3876,7 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
 
                 <article class="panel review-balance">
                   <p class="section-kicker">REVIEW BALANCE</p>
-                  <h2>评论结构</h2>
+                  <h2>评论结构（PLID 商品共用）</h2>
                   <div class="balance-row positive">
                     <span>好评 4–5 星</span><strong>{{ selected.好评 }}</strong>
                     <i
@@ -3858,9 +3908,9 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
                 <div class="section-heading">
                   <div>
                     <p class="section-kicker">VARIANT INVENTORY</p>
-                    <h2>各变体库存</h2>
+                    <h2>PLID 商品变体库存（共用）</h2>
                   </div>
-                  <span>{{ latestVariants.length }} 个变体 · 评论共用商品数据</span>
+                  <span>{{ latestVariants.length }} 个变体 · 当前卖家库存以上方所选报价为准</span>
                 </div>
                 <div v-if="!latestVariants.length" class="empty-state slim">
                   这条历史快照尚无变体明细，重新采集后会逐个显示。
@@ -3940,7 +3990,7 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
                 <div class="section-heading">
                   <div>
                     <p class="section-kicker">OBSERVATION HISTORY</p>
-                    <h2>区间原始快照</h2>
+                    <h2>PLID 区间原始快照（共用）</h2>
                   </div>
                   <span>{{ detail.history.length }} 个时间点</span>
                 </div>
@@ -4017,7 +4067,7 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
                 <div class="section-heading">
                   <div>
                     <p class="section-kicker">VOICE OF CUSTOMER</p>
-                    <h2>公开评论</h2>
+                    <h2>公开评论（PLID 商品共用）</h2>
                   </div>
                   <span class="review-result-count">
                     显示 {{ filteredReviews.length }} / {{ detail.reviews.length }} 条
@@ -4096,8 +4146,8 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
             </div>
 
             <div class="competitor-modal-actions">
-              <a :href="selected.链接" target="_blank" rel="noreferrer">
-                打开 Takealot 商品页
+              <a :href="selectedOfferLink" target="_blank" rel="noreferrer">
+                打开当前卖家报价页
               </a>
               <button type="button" @click="closeProductModal">关闭</button>
             </div>
