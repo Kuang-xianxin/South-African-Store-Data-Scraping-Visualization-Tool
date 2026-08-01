@@ -27,12 +27,14 @@ from takealot_ops.competitors.domain import (
     StockProbeResult,
     VariantStockObservation,
     analyze_sales_signal,
+    competitor_offer_identity,
     estimate_lifetime_sales,
     summarize_reviews,
 )
 from takealot_ops.competitors.repository import CompetitorRepository
 from takealot_ops.competitors.service import (
     CompetitorCollector,
+    _discovered_offer_targets,
     _interval_price_signal,
     load_competitor_link_health,
     parse_competitor_urls,
@@ -615,6 +617,27 @@ def test_interval_price_signal_labels_selected_range_endpoints(
     assert label == expected_label
 
 
+def test_competitor_offer_identity_prefers_offer_id_and_never_uses_plid() -> None:
+    assert (
+        competitor_offer_identity(
+            offer_id="OFFER-123",
+            seller_id="seller-1",
+            sku="SKU-1",
+        )
+        == "offer:offer-123"
+    )
+    assert (
+        competitor_offer_identity(
+            seller_id="seller-1",
+            sku="SKU-1",
+            variant_key="colour=black",
+            condition="New",
+        )
+        == "fallback:seller-1|sku-1|colour=black|new"
+    )
+    assert competitor_offer_identity(seller_id="seller-1") is None
+
+
 async def test_public_client_parses_product_offers_and_all_review_pages() -> None:
     canned: dict[str, dict[str, object]] = {
         "https://api.takealot.com/rest/v-1-10-0/product-details/PLID123": {
@@ -624,6 +647,7 @@ async def test_public_client_parses_product_offers_and_all_review_pages() -> Non
                 "tsin": "TSIN-1",
                 "items": [
                     {
+                        "offer_id": "offer-1",
                         "is_selected": True,
                         "sku": "SKU-1",
                         "price": 199.0,
@@ -643,12 +667,14 @@ async def test_public_client_parses_product_offers_and_all_review_pages() -> Non
             "other_offers": {
                 "conditions": [
                     {
+                        "display_name": "New",
                         "items": [
                             {
+                                "offer_id": "offer-2",
                                 "sku": "SKU-2",
                                 "price": 205,
                                 "product": {
-                                    "desktop_href": "https://www.takealot.com/other/PLID456"
+                                    "desktop_href": "https://www.takealot.com/example/PLID123"
                                 },
                                 "seller": {
                                     "seller_id": "seller-2",
@@ -708,8 +734,20 @@ async def test_public_client_parses_product_offers_and_all_review_pages() -> Non
     assert len(product.offers) == 2
     assert product.offers[0].plid == "123"
     assert product.offers[0].url == "https://www.takealot.com/example/PLID123"
-    assert product.offers[1].plid == "456"
-    assert product.offers[1].url == "https://www.takealot.com/other/PLID456"
+    assert product.offers[0].offer_id == "offer-1"
+    assert product.offers[1].plid == "123"
+    assert product.offers[1].url == "https://www.takealot.com/example/PLID123"
+    assert product.offers[1].offer_id == "offer-2"
+    assert product.offers[1].condition == "New"
+    assert product.offers[0].identity_key == "offer:offer-1"
+    assert product.offers[1].identity_key == "offer:offer-2"
+    discovered = _discovered_offer_targets(
+        product,
+        submitted_url="https://www.takealot.com/example/PLID123",
+    )
+    assert [(target.plid, target.url) for target in discovered] == [
+        ("123", "https://www.takealot.com/example/PLID123")
+    ]
     assert len(product.variants) == 1
     assert product.variants[0].label == "默认款"
     assert product.image_url == "https://img/zoom.jpg"

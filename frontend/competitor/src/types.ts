@@ -1,3 +1,22 @@
+export interface CompetitorOfferItem {
+  报价键: string;
+  offer_id: string | null;
+  卖家ID: string | null;
+  卖家: string;
+  SKU: string | null;
+  价格: number | null;
+  库存状态: string;
+  条件: string | null;
+  变体键: string;
+  变体: string;
+  是否主报价: boolean;
+  plid: string;
+  链接: string;
+  区间起始价格: number | null;
+  价格变化: number | null;
+  价格信号: string;
+}
+
 export interface CompetitorItem {
   快照ID: number;
   plid: string;
@@ -37,6 +56,7 @@ export interface CompetitorItem {
   区间快照数: number | null;
   库存可比: boolean | null;
   链接: string;
+  跟卖报价: CompetitorOfferItem[];
 }
 
 export interface CompetitorDateRange {

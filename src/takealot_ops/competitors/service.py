@@ -29,6 +29,7 @@ from takealot_ops.competitors.domain import (
     StockProbeResult,
     VariantStockObservation,
     analyze_sales_signal,
+    competitor_offer_identity,
     estimate_lifetime_sales,
     summarize_reviews,
 )
@@ -637,6 +638,7 @@ def load_competitor_dataset(
             variant_signatures=variant_signatures,
         )
         price_start, price_change, price_signal = _interval_price_signal(oldest, latest)
+        offer_rows = _interval_offer_rows(oldest, latest)
         current_rows.append(
             _snapshot_row(
                 latest,
@@ -650,10 +652,20 @@ def load_competitor_dataset(
                 price_start=price_start,
                 price_change=price_change,
                 price_signal=price_signal,
+                offer_rows=offer_rows,
             )
         )
     current = pd.DataFrame(current_rows)
-    history = pd.DataFrame([_snapshot_row(row, raw_history=True) for row in interval_snapshots])
+    history = pd.DataFrame(
+        [
+            _snapshot_row(
+                row,
+                offer_rows=_interval_offer_rows(row, row, raw_history=True),
+                raw_history=True,
+            )
+            for row in interval_snapshots
+        ]
+    )
     review_frame = pd.DataFrame(
         [
             {
@@ -800,6 +812,131 @@ def _interval_price_signal(
     return start_price, float(change), label
 
 
+def _offer_identity_from_mapping(offer: Mapping[str, object]) -> str | None:
+    identity = str(offer.get("identity_key") or "").strip()
+    if identity:
+        return identity
+    return competitor_offer_identity(
+        offer_id=offer.get("offer_id"),
+        seller_id=offer.get("seller_id"),
+        seller_name=offer.get("seller_name"),
+        sku=offer.get("sku"),
+        variant_key=offer.get("variant_key"),
+        condition=offer.get("condition"),
+    )
+
+
+def _snapshot_offers(row: CompetitorSnapshot) -> list[Mapping[str, object]]:
+    value: object = row.offers or []
+    if isinstance(value, str):
+        try:
+            value = ast.literal_eval(value)
+        except (SyntaxError, ValueError):
+            return []
+    if not isinstance(value, list):
+        return []
+    return [item for item in value if isinstance(item, Mapping)]
+
+
+def _offer_price(offer: Mapping[str, object]) -> float | None:
+    value = offer.get("price")
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        return float(str(value))
+    except (TypeError, ValueError):
+        return None
+
+
+def _offer_comparison_signature(offer: Mapping[str, object]) -> tuple[object, ...]:
+    return (
+        offer.get("seller_id"),
+        offer.get("seller_name"),
+        offer.get("sku"),
+        offer.get("variant_key"),
+        offer.get("condition"),
+        _offer_price(offer),
+    )
+
+
+def _indexed_snapshot_offers(
+    row: CompetitorSnapshot,
+) -> tuple[list[tuple[str, Mapping[str, object]]], set[str]]:
+    indexed: dict[str, Mapping[str, object]] = {}
+    order: list[str] = []
+    ambiguous: set[str] = set()
+    for index, offer in enumerate(_snapshot_offers(row)):
+        identity = _offer_identity_from_mapping(offer)
+        key = identity or f"unidentified:{row.id}:{index}"
+        existing = indexed.get(key)
+        if existing is None:
+            indexed[key] = offer
+            order.append(key)
+            continue
+        if _offer_comparison_signature(existing) != _offer_comparison_signature(offer):
+            ambiguous.add(key)
+        if bool(offer.get("selected")) and not bool(existing.get("selected")):
+            indexed[key] = offer
+    return [(key, indexed[key]) for key in order], ambiguous
+
+
+def _interval_offer_rows(
+    oldest: CompetitorSnapshot,
+    latest: CompetitorSnapshot,
+    *,
+    raw_history: bool = False,
+) -> list[dict[str, object]]:
+    """Compare each seller offer by offer_id, never by the shared product PLID."""
+
+    oldest_items, oldest_ambiguous = _indexed_snapshot_offers(oldest)
+    latest_items, latest_ambiguous = _indexed_snapshot_offers(latest)
+    oldest_by_key = dict(oldest_items)
+    rows: list[dict[str, object]] = []
+    for key, offer in latest_items:
+        identity = _offer_identity_from_mapping(offer)
+        latest_price = _offer_price(offer)
+        previous = oldest_by_key.get(key) if identity is not None else None
+        start_price = _offer_price(previous) if previous is not None else None
+        price_change: float | None = None
+        if raw_history:
+            price_signal = "原始报价"
+        elif identity is None or oldest.id == latest.id or previous is None:
+            price_signal = "待建立报价基线"
+        elif key in oldest_ambiguous or key in latest_ambiguous:
+            price_signal = "报价不可比"
+        elif start_price is None or latest_price is None:
+            price_signal = "价格不可比"
+        else:
+            price_change = latest_price - start_price
+            if price_change < 0:
+                price_signal = "降价"
+            elif price_change > 0:
+                price_signal = "涨价"
+            else:
+                price_signal = "价格不变"
+        rows.append(
+            {
+                "报价键": key,
+                "offer_id": str(offer.get("offer_id") or "").strip() or None,
+                "卖家ID": str(offer.get("seller_id") or "").strip() or None,
+                "卖家": str(offer.get("seller_name") or "未知卖家"),
+                "SKU": str(offer.get("sku") or "").strip() or None,
+                "价格": latest_price,
+                "库存状态": str(offer.get("stock_status") or "未知"),
+                "条件": str(offer.get("condition") or "").strip() or None,
+                "变体键": str(offer.get("variant_key") or "default"),
+                "变体": str(offer.get("variant_label") or "默认款"),
+                "是否主报价": bool(offer.get("selected")),
+                "plid": str(offer.get("plid") or latest.plid),
+                "链接": str(offer.get("url") or latest.url),
+                "区间起始价格": start_price,
+                "价格变化": price_change,
+                "价格信号": price_signal,
+            }
+        )
+    return rows
+
+
 def _snapshot_row(
     row: CompetitorSnapshot,
     *,
@@ -813,6 +950,7 @@ def _snapshot_row(
     price_start: float | None = None,
     price_change: float | None = None,
     price_signal: str | None = None,
+    offer_rows: list[dict[str, object]] | None = None,
     raw_history: bool = False,
 ) -> dict[str, object]:
     stock_text = _stock_text(row)
@@ -884,6 +1022,7 @@ def _snapshot_row(
         "区间快照数": interval_snapshot_count,
         "库存可比": stock_comparable,
         "链接": row.url,
+        "跟卖报价": offer_rows or [],
     }
 
 

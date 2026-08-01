@@ -24,6 +24,7 @@ from takealot_ops.competitors.domain import (
     CompetitorProduct,
     CompetitorReviewRecord,
     CompetitorVariant,
+    competitor_offer_identity,
 )
 
 
@@ -269,6 +270,7 @@ class CompetitorPublicClient:
         selected_variant = variants[selected_index]
         compact_offers: list[CompetitorOffer] = []
         for detail_index, offer_detail in enumerate(variant_details):
+            variant = variants[detail_index]
             variant_offer = _selected_offer(offer_detail)
             variant_seller = _mapping(offer_detail.get("seller_detail"))
             if variant_offer:
@@ -282,16 +284,28 @@ class CompetitorPublicClient:
                             or detail.get("desktop_href")
                             or url
                         ),
+                        condition=_condition_label(variant_offer.get("condition")),
+                        variant_key=variant.key,
+                        variant_label=variant.label,
                     )
                 )
             other_offers = _mapping(offer_detail.get("other_offers"))
             for condition in _mapping_list(other_offers.get("conditions")):
+                condition_label = _condition_label(condition)
                 for other_offer in _mapping_list(condition.get("items")):
                     compact_offers.append(
                         _offer_record(
                             other_offer,
                             _mapping(other_offer.get("seller")),
                             selected=False,
+                            fallback_url=str(
+                                offer_detail.get("desktop_href")
+                                or detail.get("desktop_href")
+                                or url
+                            ),
+                            condition=condition_label,
+                            variant_key=variant.key,
+                            variant_label=variant.label,
                         )
                     )
         core = _mapping(detail.get("core"))
@@ -516,19 +530,53 @@ def _offer_record(
     *,
     selected: bool,
     fallback_url: str | None = None,
+    condition: str | None = None,
+    variant_key: str = "default",
+    variant_label: str = "默认款",
 ) -> CompetitorOffer:
     stock = _mapping(offer.get("stock_availability"))
     offer_url, offer_plid = _offer_target(offer, fallback_url=fallback_url)
+    offer_id = str(offer.get("offer_id") or "").strip() or None
+    seller_id = str(seller.get("seller_id") or "").strip()
+    seller_name = str(seller.get("display_name") or "未知卖家")
+    sku = str(offer.get("sku") or offer.get("product_id") or "").strip()
     return CompetitorOffer(
         selected=selected,
-        sku=str(offer.get("sku") or offer.get("product_id") or ""),
-        seller_id=str(seller.get("seller_id") or ""),
-        seller_name=str(seller.get("display_name") or "未知卖家"),
+        sku=sku,
+        seller_id=seller_id,
+        seller_name=seller_name,
         price=_number(offer.get("price")),
         stock_status=str(stock.get("status") or "未知"),
         plid=offer_plid,
         url=offer_url,
+        offer_id=offer_id,
+        condition=condition,
+        variant_key=variant_key,
+        variant_label=variant_label,
+        identity_key=competitor_offer_identity(
+            offer_id=offer_id,
+            seller_id=seller_id,
+            seller_name=seller_name,
+            sku=sku,
+            variant_key=variant_key,
+            condition=condition,
+        ),
     )
+
+
+def _condition_label(value: object) -> str | None:
+    if isinstance(value, Mapping):
+        mapped = value
+        label = (
+            mapped.get("display_name")
+            or mapped.get("title")
+            or mapped.get("name")
+            or mapped.get("condition")
+        )
+    else:
+        label = value
+    normalized = " ".join(str(label or "").split())
+    return normalized or None
 
 
 def _offer_target(

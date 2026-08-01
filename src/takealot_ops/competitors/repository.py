@@ -281,6 +281,11 @@ class CompetitorRepository:
                     "stock_status": offer.stock_status,
                     "plid": offer.plid,
                     "url": offer.url,
+                    "offer_id": offer.offer_id,
+                    "condition": offer.condition,
+                    "variant_key": offer.variant_key,
+                    "variant_label": offer.variant_label,
+                    "identity_key": offer.identity_key,
                 }
                 for offer in product.offers
             ],

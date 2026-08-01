@@ -243,9 +243,17 @@ const filteredTargetGroups = computed(() => {
   if (!query) return targetGroups.value;
   return targetGroups.value.filter((group) =>
     group.members.some((target) =>
-      [target.plid, target.title ?? "", target.url].some((value) =>
-        value.toLocaleLowerCase().includes(query),
-      ),
+      [
+        target.plid,
+        target.title ?? "",
+        target.url,
+        ...targetOffers(target).flatMap((offer) => [
+          offer.offer_id ?? "",
+          offer.卖家ID ?? "",
+          offer.卖家,
+          offer.SKU ?? "",
+        ]),
+      ].some((value) => value.toLocaleLowerCase().includes(query)),
     ),
   );
 });
@@ -2098,6 +2106,10 @@ function targetSnapshot(target: CompetitorTargetItem) {
   return competitorsByPlid.value.get(target.plid) ?? null;
 }
 
+function targetOffers(target: CompetitorTargetItem) {
+  return targetSnapshot(target)?.跟卖报价 ?? [];
+}
+
 function targetGroupTitle(group: CompetitorTargetGroup) {
   const primary =
     group.members.find((target) => target.plid === group.groupPlid)
@@ -2107,7 +2119,12 @@ function targetGroupTitle(group: CompetitorTargetGroup) {
 
 function targetGroupPriceSummary(group: CompetitorTargetGroup) {
   const prices = group.members
-    .map((target) => targetSnapshot(target)?.价格 ?? null)
+    .flatMap((target) => {
+      const offerPrices = targetOffers(target).map((offer) => offer.价格);
+      return offerPrices.length
+        ? offerPrices
+        : [targetSnapshot(target)?.价格 ?? null];
+    })
     .filter((price): price is number => price !== null)
     .sort((first, second) => first - second);
   if (!prices.length) return "价格待采集";
@@ -2116,6 +2133,13 @@ function targetGroupPriceSummary(group: CompetitorTargetGroup) {
   return lowest === highest
     ? formatCurrency(lowest)
     : `${formatCurrency(lowest)} – ${formatCurrency(highest)}`;
+}
+
+function targetGroupOfferCount(group: CompetitorTargetGroup) {
+  return group.members.reduce(
+    (total, target) => total + targetOffers(target).length,
+    0,
+  );
 }
 
 function toggleTargetGroup(groupPlid: string) {
@@ -2298,7 +2322,8 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
                       <span>
                         <strong>{{ targetGroupTitle(group) }}</strong>
                         <small>
-                          原链接和跟卖链接共 {{ group.members.length }} 条 ·
+                          {{ group.members.length }} 条商品链接 ·
+                          {{ targetGroupOfferCount(group) }} 个卖家报价 ·
                           {{ targetGroupPriceSummary(group) }}
                         </small>
                       </span>
@@ -2391,6 +2416,65 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
                             >删除</button>
                           </div>
                         </template>
+                        <div
+                          v-if="!editingTargetPlid || editingTargetPlid !== target.plid"
+                          class="target-offer-list"
+                        >
+                          <p class="target-offer-list-heading">
+                            <strong>原链接及跟卖报价</strong>
+                            <span>同一 PLID 只入队一次，报价按 Offer ID 区分</span>
+                          </p>
+                          <article
+                            v-for="offer in targetOffers(target)"
+                            :key="offer.报价键"
+                            class="target-offer-row"
+                          >
+                            <div>
+                              <strong>
+                                {{ offer.卖家 }}
+                                <span v-if="offer.是否主报价" class="offer-selected-badge">
+                                  当前主报价
+                                </span>
+                              </strong>
+                              <small>
+                                {{
+                                  offer.offer_id
+                                    ? `Offer ${offer.offer_id}`
+                                    : "Offer ID 未公开（按卖家/SKU跟踪）"
+                                }}
+                                <template v-if="offer.SKU"> · SKU {{ offer.SKU }}</template>
+                                <template v-if="offer.变体 && offer.变体 !== '默认款'">
+                                  · {{ offer.变体 }}
+                                </template>
+                                <template v-if="offer.条件"> · {{ offer.条件 }}</template>
+                              </small>
+                            </div>
+                            <div class="target-offer-price">
+                              <strong>{{ formatCurrency(offer.价格) }}</strong>
+                              <small :class="priceSignalClass(offer.价格信号)">
+                                {{ offer.价格信号 }}
+                                <template v-if="offer.价格变化 !== null">
+                                  · {{ formatSignedCurrency(offer.价格变化) }}
+                                </template>
+                              </small>
+                            </div>
+                            <a
+                              :href="offer.链接 || target.url"
+                              target="_blank"
+                              rel="noreferrer"
+                            >打开商品页</a>
+                          </article>
+                          <p
+                            v-if="!targetOffers(target).length"
+                            class="target-offer-empty"
+                          >
+                            {{
+                              target.has_history
+                                ? "最近快照未返回可区分的公开卖家报价，原链接仍保留。"
+                                : "首次采集后将在这里显示全部公开卖家报价。"
+                            }}
+                          </p>
+                        </div>
                       </article>
                     </div>
                   </section>

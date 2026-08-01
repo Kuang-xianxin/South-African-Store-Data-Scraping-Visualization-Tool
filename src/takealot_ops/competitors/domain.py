@@ -23,6 +23,44 @@ class CompetitorOffer:
     stock_status: str
     plid: str | None = None
     url: str | None = None
+    offer_id: str | None = None
+    condition: str | None = None
+    variant_key: str = "default"
+    variant_label: str = "默认款"
+    identity_key: str | None = None
+
+
+def competitor_offer_identity(
+    *,
+    offer_id: object = None,
+    seller_id: object = None,
+    seller_name: object = None,
+    sku: object = None,
+    variant_key: object = None,
+    condition: object = None,
+) -> str | None:
+    """Return an offer identity without treating the shared PLID as unique."""
+
+    explicit_offer_id = str(offer_id or "").strip().casefold()
+    if explicit_offer_id:
+        return f"offer:{explicit_offer_id}"
+
+    normalized_seller_id = str(seller_id or "").strip().casefold()
+    normalized_seller_name = " ".join(str(seller_name or "").split()).casefold()
+    seller = normalized_seller_id or normalized_seller_name
+    normalized_sku = str(sku or "").strip().casefold()
+    if (
+        not seller
+        or not normalized_sku
+        or (not normalized_seller_id and normalized_seller_name == "未知卖家")
+    ):
+        return None
+    normalized_variant = str(variant_key or "default").strip().casefold() or "default"
+    normalized_condition = " ".join(str(condition or "").split()).casefold()
+    return (
+        f"fallback:{seller}|{normalized_sku}|{normalized_variant}|"
+        f"{normalized_condition}"
+    )
 
 
 @dataclass(frozen=True)
