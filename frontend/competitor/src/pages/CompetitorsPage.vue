@@ -28,6 +28,7 @@ import type {
   CompetitorDetail,
   CompetitorItem,
   CompetitorLinkHealthItem,
+  CompetitorOfferItem,
   CompetitorTargetAuditItem,
   CompetitorTargetItem,
   CompetitorVariantItem,
@@ -252,6 +253,8 @@ const filteredTargetGroups = computed(() => {
           offer.卖家ID ?? "",
           offer.卖家,
           offer.SKU ?? "",
+          offer.库存状态,
+          offer.库存信号,
         ]),
       ].some((value) => value.toLocaleLowerCase().includes(query)),
     ),
@@ -2102,6 +2105,26 @@ function priceSignalClass(signal: string) {
   };
 }
 
+function formatSignedQuantity(value: number | null) {
+  if (value === null) return "—";
+  return `${value > 0 ? "+" : ""}${value} 件`;
+}
+
+function offerStockDisplay(offer: CompetitorOfferItem) {
+  if (offer.库存数量 === null) return offer.库存状态 || "未知";
+  return offer.库存精确
+    ? `${offer.库存数量} 件`
+    : `至少 ${offer.库存数量} 件`;
+}
+
+function offerStockSignalClass(signal: string) {
+  return {
+    "stock-increase": signal === "库存增加" || signal === "恢复有货",
+    "stock-decrease": signal === "库存减少" || signal === "转为没货",
+    "stock-flat": signal === "库存数量不变" || signal === "库存状态不变",
+  };
+}
+
 function targetSnapshot(target: CompetitorTargetItem) {
   return competitorsByPlid.value.get(target.plid) ?? null;
 }
@@ -2422,7 +2445,7 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
                         >
                           <p class="target-offer-list-heading">
                             <strong>原链接及跟卖报价</strong>
-                            <span>同一 PLID 只入队一次，报价按 Offer ID 区分</span>
+                            <span>同一 PLID 只入队一次，价格和库存均按 Offer ID 区分</span>
                           </p>
                           <article
                             v-for="offer in targetOffers(target)"
@@ -2451,10 +2474,25 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
                             </div>
                             <div class="target-offer-price">
                               <strong>{{ formatCurrency(offer.价格) }}</strong>
-                              <small :class="priceSignalClass(offer.价格信号)">
+                              <small
+                                class="price-signal"
+                                :class="priceSignalClass(offer.价格信号)"
+                              >
                                 {{ offer.价格信号 }}
                                 <template v-if="offer.价格变化 !== null">
                                   · {{ formatSignedCurrency(offer.价格变化) }}
+                                </template>
+                              </small>
+                            </div>
+                            <div
+                              class="target-offer-stock"
+                              :title="offer.库存说明 || offer.库存原始状态"
+                            >
+                              <strong>{{ offerStockDisplay(offer) }}</strong>
+                              <small :class="offerStockSignalClass(offer.库存信号)">
+                                {{ offer.库存信号 }}
+                                <template v-if="offer.库存数量变化 !== null">
+                                  · {{ formatSignedQuantity(offer.库存数量变化) }}
                                 </template>
                               </small>
                             </div>

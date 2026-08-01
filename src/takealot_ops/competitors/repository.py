@@ -10,6 +10,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from takealot_ops.competitors.domain import (
+    CompetitorOffer,
     CompetitorProduct,
     CompetitorReviewRecord,
     PreviousObservation,
@@ -17,6 +18,7 @@ from takealot_ops.competitors.domain import (
     SalesSignal,
     StockProbeResult,
     VariantStockObservation,
+    competitor_offer_stock_state,
 )
 from takealot_ops.storage.models import (
     CompetitorLinkHealth,
@@ -37,6 +39,76 @@ class LinkHealthDecision:
     status: str
     confirmed_not_found_count: int
     evidence_counted: bool
+
+
+def _normalized_offer_scope(value: object) -> str:
+    return " ".join(str(value or "").casefold().split())
+
+
+def _matching_buybox_stock(
+    offer: CompetitorOffer,
+    observations: list[VariantStockObservation],
+) -> StockProbeResult | None:
+    """Bind a cart probe only to the buybox variant that was actually tested."""
+
+    if not offer.is_buybox:
+        return None
+    for observation in observations:
+        variant = observation.variant
+        if _normalized_offer_scope(variant.key) != _normalized_offer_scope(
+            offer.variant_key
+        ):
+            continue
+        if _normalized_offer_scope(variant.sku) != _normalized_offer_scope(offer.sku):
+            continue
+        offer_seller_id = _normalized_offer_scope(offer.seller_id)
+        variant_seller_id = _normalized_offer_scope(variant.seller_id)
+        if offer_seller_id and variant_seller_id:
+            if offer_seller_id != variant_seller_id:
+                continue
+        elif _normalized_offer_scope(variant.seller_name) != _normalized_offer_scope(
+            offer.seller_name
+        ):
+            continue
+        return observation.stock
+    return None
+
+
+def _offer_stock_payload(
+    offer: CompetitorOffer,
+    observations: list[VariantStockObservation],
+) -> dict[str, object]:
+    probe = _matching_buybox_stock(offer, observations)
+    if probe is None:
+        return {
+            "stock_state": competitor_offer_stock_state(
+                offer.stock_status,
+                is_leadtime=offer.is_leadtime,
+                is_add_to_cart_available=offer.is_add_to_cart_available,
+            ),
+            "stock_quantity": None,
+            "stock_exact": False,
+            "stock_method": "public-offer-status",
+            "stock_note": (
+                "公开报价只返回库存状态，未提供可核验数量；数量保留缺失，不补 0。"
+            ),
+        }
+    return {
+        "stock_state": competitor_offer_stock_state(
+            offer.stock_status,
+            is_leadtime=offer.is_leadtime,
+            is_add_to_cart_available=offer.is_add_to_cart_available,
+            exact_quantity=(
+                probe.quantity
+                if probe.exact or (probe.quantity is not None and probe.quantity > 0)
+                else None
+            ),
+        ),
+        "stock_quantity": probe.quantity,
+        "stock_exact": probe.exact,
+        "stock_method": probe.method,
+        "stock_note": probe.note,
+    }
 
 
 class CompetitorRepository:
@@ -279,6 +351,9 @@ class CompetitorRepository:
                     "seller_name": offer.seller_name,
                     "price": offer.price,
                     "stock_status": offer.stock_status,
+                    "is_buybox": offer.is_buybox,
+                    "is_leadtime": offer.is_leadtime,
+                    "is_add_to_cart_available": offer.is_add_to_cart_available,
                     "plid": offer.plid,
                     "url": offer.url,
                     "offer_id": offer.offer_id,
@@ -286,6 +361,7 @@ class CompetitorRepository:
                     "variant_key": offer.variant_key,
                     "variant_label": offer.variant_label,
                     "identity_key": offer.identity_key,
+                    **_offer_stock_payload(offer, variant_stocks),
                 }
                 for offer in product.offers
             ],

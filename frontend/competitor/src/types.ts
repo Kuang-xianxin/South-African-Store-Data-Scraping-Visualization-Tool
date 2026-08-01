@@ -6,15 +6,26 @@ export interface CompetitorOfferItem {
   SKU: string | null;
   价格: number | null;
   库存状态: string;
+  库存原始状态: string;
+  库存数量: number | null;
+  库存精确: boolean;
+  库存方式: string;
+  库存说明: string | null;
   条件: string | null;
   变体键: string;
   变体: string;
   是否主报价: boolean;
+  是否变体主报价: boolean;
   plid: string;
   链接: string;
   区间起始价格: number | null;
   价格变化: number | null;
   价格信号: string;
+  区间起始库存状态: string | null;
+  区间起始库存数量: number | null;
+  库存数量变化: number | null;
+  库存可比: boolean;
+  库存信号: string;
 }
 
 export interface CompetitorItem {
