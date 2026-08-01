@@ -696,6 +696,7 @@ export interface DailyReportPayload {
       product_count: number;
       missing_count: number;
       note: string;
+      exception_note: string | null;
     };
     items: Array<
       Pick<

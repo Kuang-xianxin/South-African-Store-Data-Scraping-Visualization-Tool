@@ -101,6 +101,7 @@ const form = ref({
   note: "",
 });
 let liveRefreshPending = false;
+let loadSequence = 0;
 
 function handleMatrixWheel(event: WheelEvent) {
   const container = matrixScroll.value;
@@ -431,24 +432,29 @@ async function locateReportEntry(
 async function load(
   options: { quiet?: boolean; preserveScroll?: boolean } = {},
 ) {
+  const sequence = ++loadSequence;
   const previousScrollTop = matrixScroll.value?.scrollTop ?? 0;
   if (!options.quiet) {
     loading.value = true;
     message.value = "";
+    exportState.value = null;
   }
+  const exportRequest = fetchDailyReportExport(props.asOf).catch(() => null);
   try {
-    const [nextReport, nextExportState] = await Promise.all([
-      fetchDailyReport(
-        props.asOf,
-        captureIssueStart.value || undefined,
-        captureIssueEnd.value || undefined,
-      ),
-      fetchDailyReportExport(props.asOf),
-    ]);
+    const nextReport = await fetchDailyReport(
+      props.asOf,
+      captureIssueStart.value || undefined,
+      captureIssueEnd.value || undefined,
+    );
+    if (sequence !== loadSequence) return;
     report.value = nextReport;
-    exportState.value = nextExportState;
     captureIssueStart.value = nextReport.capture_issue_range.selected_start;
     captureIssueEnd.value = nextReport.capture_issue_range.selected_end;
+    void exportRequest.then((nextExportState) => {
+      if (sequence === loadSequence) {
+        exportState.value = nextExportState;
+      }
+    });
     await nextTick();
     if (matrixScroll.value) {
       matrixScroll.value.scrollTop = options.preserveScroll
@@ -456,11 +462,11 @@ async function load(
         : matrixScroll.value.scrollHeight;
     }
   } catch (error) {
-    if (!options.quiet) {
+    if (!options.quiet && sequence === loadSequence) {
       message.value = error instanceof Error ? error.message : "运营日报读取失败";
     }
   } finally {
-    if (!options.quiet) {
+    if (!options.quiet && sequence === loadSequence) {
       loading.value = false;
       queueMicrotask(flushLiveUpdate);
     }
@@ -1356,15 +1362,6 @@ function parseInput(value: string | number): number | null {
                       （缺 {{ matrixDayTotal(day.business_date, "platform_stock").missing }} 个）
                     </span>
                   </span>
-                  <small
-                    class="inventory-capture-summary"
-                    :class="{
-                      delayed: day.inventory_context.delayed,
-                      resolved: day.inventory_context.resolved_after_missing,
-                    }"
-                  >
-                    {{ day.inventory_context.note }}
-                  </small>
                 </td>
                 <td
                   v-for="item in visibleItems"
@@ -1385,7 +1382,16 @@ function parseInput(value: string | number): number | null {
               </tr>
               <tr class="date-end matrix-note-row">
                 <th>备注</th>
-                <td></td>
+                <td
+                  class="matrix-date inventory-exception-note"
+                  :class="{
+                    delayed: day.inventory_context.delayed,
+                    resolved: day.inventory_context.resolved_after_missing,
+                  }"
+                  :title="day.inventory_context.exception_note || ''"
+                >
+                  {{ day.inventory_context.exception_note || "" }}
+                </td>
                 <td
                   v-for="item in visibleItems"
                   :key="item.offer_id"
@@ -2426,10 +2432,9 @@ function parseInput(value: string | number): number | null {
 .matrix-product.has-conflict { box-shadow: inset 0 5px #c94d3d; }
 .matrix-product.has-missing:not(.has-conflict) { box-shadow: inset 0 5px #d6a42b; }
 .daily-matrix .matrix-total-cell { padding: 5px 9px; color: inherit; font: inherit; font-weight: 400; line-height: normal; white-space: nowrap; }
-.daily-matrix .stock-total { height: auto; min-height: var(--daily-data-row-height); white-space: normal; }
-.inventory-capture-summary { display: block; margin-top: 4px; color: #53685d; font-family: "Microsoft YaHei", sans-serif; font-size: 10px; font-weight: 400; line-height: 1.35; overflow-wrap: anywhere; }
-.inventory-capture-summary.delayed { color: #8a5b19; }
-.inventory-capture-summary.resolved { color: #277146; }
+.daily-matrix .stock-total { height: var(--daily-data-row-height); }
+.inventory-exception-note { color: #765716; font-family: "Microsoft YaHei", sans-serif; font-size: 10px; font-weight: 400; line-height: 1.35; white-space: normal; overflow-wrap: anywhere; }
+.inventory-exception-note.resolved { color: #277146; }
 .daily-matrix tbody .order-total { background: #fff4ec; }
 .daily-matrix tbody .stock-total { background: #edf7f0; }
 .daily-matrix td.sales-hit { background: #fce4d6; color: #6a391d; }
