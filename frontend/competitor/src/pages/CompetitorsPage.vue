@@ -39,6 +39,7 @@ defineOptions({ name: "CompetitorsPage" });
 const props = defineProps<{
   canOperate?: boolean;
   canControlCollection?: boolean;
+  currentUsername?: string;
   onPermissionDenied?: () => void;
 }>();
 
@@ -60,7 +61,7 @@ interface CompetitorTargetGroup {
 }
 
 interface CollectionCheckpoint {
-  version: 1 | 2 | 3 | 4 | 5 | 6 | 7;
+  version: 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8;
   rawUrls: string;
   batchUrls: string[];
   attemptedIndexes: number[];
@@ -78,6 +79,14 @@ interface CollectionCheckpoint {
   activeRequestId?: string | null;
   autoResumeAt?: string | null;
   stockUnprobedIndexes?: number[];
+  clientId?: string;
+}
+
+interface CollectionClientMessage {
+  type: "probe" | "occupied";
+  clientId: string;
+  instanceId: string;
+  probeId: string;
 }
 
 type CollectionRunMode =
@@ -89,8 +98,11 @@ type TargetActionSource = "default" | "manual_retry";
 
 const collectionCheckpointKey = "takealot-competitor-collection-v1";
 const collectionClientKey = "takealot-competitor-client-v1";
+const collectionClientChannelName = "takealot-competitor-client-claims-v1";
 const automaticResumeDelayMs = 10 * 60 * 1_000;
-const collectionClientId = restoreCollectionClientId();
+let collectionClientId = restoreCollectionClientId();
+const collectionClientInstanceId = collectionId("client");
+let collectionClientChannel: BroadcastChannel | null = null;
 const rawUrls = ref("");
 const targets = ref<CompetitorTargetItem[]>([]);
 const targetQuery = ref("");
@@ -299,6 +311,26 @@ const sharedBatchOwner = computed(
     || sharedBatchStatus.value.owner_username
     || "其他用户",
 );
+const sharedBatchBelongsToCurrentAccount = computed(
+  () =>
+    Boolean(props.currentUsername)
+    && sharedBatchStatus.value.owner_username?.toLowerCase()
+      === props.currentUsername?.toLowerCase(),
+);
+const sharedBatchOwnerLabel = computed(() => {
+  if (!sharedBatchBelongsToCurrentAccount.value) return sharedBatchOwner.value;
+  return sharedBatchMatchesCheckpoint.value ? "本页面" : "本账号另一页面";
+});
+const collectionAlertTitle = computed(() => {
+  if (sharedBatchStatus.value.active && !collecting.value) {
+    if (sharedBatchMatchesCheckpoint.value) return "正在恢复刷新前的采集任务";
+    return sharedBatchBelongsToCurrentAccount.value
+      ? "本账号另一页面正在采集"
+      : "当前已有竞品采集正在运行";
+  }
+  if (autoResumeAt.value) return "网络异常，已安排自动续爬";
+  return "本次采集已暂停";
+});
 const prioritizedTargetStates = computed(
   () =>
     new Map(
@@ -621,12 +653,14 @@ const autoResumeCountdown = computed(() => {
 
 onMounted(async () => {
   window.addEventListener("keydown", handleWindowKeydown);
-  restoreCollectionCheckpoint();
+  await ensureUniqueCollectionClientId();
+  const checkpoint = readCollectionCheckpoint();
   await Promise.all([
     loadOverview(),
     loadTargets(),
     loadSharedBatchStatus(),
   ]);
+  if (checkpoint) await restoreCollectionCheckpoint(checkpoint);
   sharedBatchTimer = window.setInterval(
     () => void loadSharedBatchStatus(),
     2_000,
@@ -647,6 +681,8 @@ onMounted(async () => {
 
 onBeforeUnmount(() => {
   window.removeEventListener("keydown", handleWindowKeydown);
+  collectionClientChannel?.close();
+  collectionClientChannel = null;
   if (sharedBatchTimer !== null) window.clearInterval(sharedBatchTimer);
   if (batchHeartbeatTimer !== null) window.clearInterval(batchHeartbeatTimer);
   if (collectionClockTimer !== null) window.clearInterval(collectionClockTimer);
@@ -1441,6 +1477,50 @@ function restoreCollectionClientId(): string {
   }
 }
 
+async function ensureUniqueCollectionClientId() {
+  if (typeof BroadcastChannel === "undefined") return;
+  try {
+    const channel = new BroadcastChannel(collectionClientChannelName);
+    collectionClientChannel = channel;
+    const probeId = collectionId("request");
+    let occupied = false;
+    channel.onmessage = (event: MessageEvent<CollectionClientMessage>) => {
+      const message = event.data;
+      if (!message || message.clientId !== collectionClientId) return;
+      if (
+        message.type === "probe"
+        && message.instanceId !== collectionClientInstanceId
+      ) {
+        channel.postMessage({
+          type: "occupied",
+          clientId: collectionClientId,
+          instanceId: collectionClientInstanceId,
+          probeId: message.probeId,
+        } satisfies CollectionClientMessage);
+      } else if (
+        message.type === "occupied"
+        && message.probeId === probeId
+        && message.instanceId !== collectionClientInstanceId
+      ) {
+        occupied = true;
+      }
+    };
+    channel.postMessage({
+      type: "probe",
+      clientId: collectionClientId,
+      instanceId: collectionClientInstanceId,
+      probeId,
+    } satisfies CollectionClientMessage);
+    await delay(120);
+    if (!occupied) return;
+    collectionClientId = collectionId("client");
+    sessionStorage.setItem(collectionClientKey, collectionClientId);
+  } catch {
+    collectionClientChannel?.close();
+    collectionClientChannel = null;
+  }
+}
+
 function plidFromUrl(url: string) {
   return url.match(/PLID(\d+)/i)?.[1] ?? "";
 }
@@ -1518,7 +1598,7 @@ function normalizeCollectionError(
 function persistCollectionCheckpoint() {
   if (!batchUrls.value.length) return;
   const checkpoint: CollectionCheckpoint = {
-    version: 7,
+    version: 8,
     rawUrls: rawUrls.value,
     batchUrls: batchUrls.value,
     attemptedIndexes: attemptedIndexes.value,
@@ -1539,6 +1619,7 @@ function persistCollectionCheckpoint() {
       autoResumeAt.value === null
         ? null
         : new Date(autoResumeAt.value).toISOString(),
+    clientId: collectionClientId,
   };
   try {
     localStorage.setItem(collectionCheckpointKey, JSON.stringify(checkpoint));
@@ -1547,11 +1628,11 @@ function persistCollectionCheckpoint() {
   }
 }
 
-function restoreCollectionCheckpoint() {
+function readCollectionCheckpoint(): CollectionCheckpoint | null {
   let checkpoint: CollectionCheckpoint;
   try {
     const raw = localStorage.getItem(collectionCheckpointKey);
-    if (!raw) return;
+    if (!raw) return null;
     checkpoint = JSON.parse(raw) as CollectionCheckpoint;
   } catch {
     try {
@@ -1559,10 +1640,10 @@ function restoreCollectionCheckpoint() {
     } catch {
       // Ignore unavailable browser storage and continue with a fresh batch.
     }
-    return;
+    return null;
   }
   if (
-    ![1, 2, 3, 4, 5, 6, 7].includes(checkpoint.version)
+    ![1, 2, 3, 4, 5, 6, 7, 8].includes(checkpoint.version)
     || !Array.isArray(checkpoint.batchUrls)
     || !Array.isArray(checkpoint.attemptedIndexes)
     || !Array.isArray(checkpoint.failedIndexes)
@@ -1574,8 +1655,33 @@ function restoreCollectionCheckpoint() {
     } catch {
       // Ignore unavailable browser storage and continue with a fresh batch.
     }
+    return null;
+  }
+  return checkpoint;
+}
+
+async function restoreCollectionCheckpoint(checkpoint: CollectionCheckpoint) {
+  const checkpointBelongsToThisPage =
+    checkpoint.version < 8 || checkpoint.clientId === collectionClientId;
+  const checkpointMatchesActiveBatch =
+    sharedBatchStatus.value.active
+    && Boolean(checkpoint.batchId)
+    && sharedBatchStatus.value.batch_id === checkpoint.batchId;
+  if (!checkpointBelongsToThisPage) return;
+  if (
+    sharedBatchStatus.value.active
+    && !checkpointMatchesActiveBatch
+  ) {
     return;
   }
+  if (
+    checkpoint.version < 8
+    && checkpointMatchesActiveBatch
+    && !(await confirmLegacyCheckpointOwnership(checkpoint))
+  ) {
+    return;
+  }
+
   rawUrls.value = checkpoint.rawUrls;
   batchUrls.value = checkpoint.batchUrls;
   attemptedIndexes.value = checkpoint.attemptedIndexes;
@@ -1626,8 +1732,38 @@ function restoreCollectionCheckpoint() {
     && checkpoint.running === true
     && !checkpoint.stopReason
     && resumeQueue.value.length > 0;
-  if (checkpoint.version < 7) {
+  if (checkpoint.version < 8) {
     persistCollectionCheckpoint();
+  }
+}
+
+async function confirmLegacyCheckpointOwnership(
+  checkpoint: CollectionCheckpoint,
+): Promise<boolean> {
+  if (
+    !props.canControlCollection
+    || !checkpoint.batchId
+    || !sharedBatchBelongsToCurrentAccount.value
+  ) {
+    return false;
+  }
+  const status = sharedBatchStatus.value;
+  try {
+    sharedBatchStatus.value = await logCompetitorBatchEvent({
+      batchId: checkpoint.batchId,
+      clientId: collectionClientId,
+      event: "heartbeat",
+      completed: status.completed,
+      total: status.total,
+      pending: status.pending,
+      succeeded: status.succeeded,
+      failed: status.failed,
+      terminal: status.terminal,
+      reason: status.reason,
+    });
+    return true;
+  } catch {
+    return false;
   }
 }
 
@@ -1761,6 +1897,9 @@ function activeBatchBlockedMessage() {
   const current = status.current_plid
     ? `，当前第 ${(status.current_index ?? 0) + 1} 条 PLID${status.current_plid}`
     : "，正在准备下一条商品";
+  if (sharedBatchBelongsToCurrentAccount.value) {
+    return `本账号已有竞品批次在另一页面运行：已检查 ${status.completed}/${status.total}，待续爬 ${status.pending}${current}。为避免两个库存浏览器并发，本页面不会重复启动；请回到原页面操作。`;
+  }
   return `${sharedBatchOwner.value} 的竞品批次正在运行：已检查 ${status.completed}/${status.total}，待续爬 ${status.pending}${current}。请等待当前批次结束，或由发起人点击“停止采集”后再开始。`;
 }
 
@@ -2774,7 +2913,7 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
         aria-live="polite"
       >
         <div>
-          <strong>全员同步采集中 · {{ sharedBatchOwner }}</strong>
+          <strong>全员同步采集中 · {{ sharedBatchOwnerLabel }}</strong>
           <span>
             已检查 {{ sharedBatchStatus.completed }}/{{ sharedBatchStatus.total }}
             · 成功 {{ sharedBatchStatus.succeeded }}
@@ -2833,6 +2972,7 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
           v-if="props.canControlCollection && !collecting && pendingResumeCount"
           class="primary-button resume-button"
           @click="resumeCollection()"
+          :disabled="anotherBatchIsActive"
         >
           继续失败/未完成（{{ pendingResumeCount }}）
         </button>
@@ -2860,13 +3000,7 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
         <span class="collection-action-alert-icon" aria-hidden="true">!</span>
         <span>
           <strong>
-            {{ sharedBatchStatus.active && !collecting
-              ? sharedBatchMatchesCheckpoint
-                ? "正在恢复刷新前的采集任务"
-                : "当前已有竞品采集正在运行"
-              : autoResumeAt
-                ? "网络异常，已安排自动续爬"
-              : "本次采集已暂停" }}
+            {{ collectionAlertTitle }}
           </strong>
           <small>{{ collectionStopReason }}</small>
           <small v-if="autoResumeAt" class="collection-auto-resume-countdown">

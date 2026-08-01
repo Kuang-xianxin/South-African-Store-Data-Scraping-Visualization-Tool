@@ -58,6 +58,7 @@ const storeScopedPages = new Set<PageKey>([
 ]);
 const pageStorageKey = "takealot-erp-active-page-v1";
 const competitorCheckpointKey = "takealot-competitor-collection-v1";
+const competitorClientKey = "takealot-competitor-client-v1";
 
 const basePages = [
   { key: "overview", label: "经营总览", hint: "今日经营脉搏", mark: "01", permission: "store.view" },
@@ -243,6 +244,7 @@ const activePageProps = computed(() => {
       ...common,
       canOperate: canCollectCompetitors.value,
       canControlCollection: canControlCompetitorCollection.value,
+      currentUsername: session.value?.user.username ?? "",
       onPermissionDenied: showPermissionDenied,
     };
   }
@@ -493,11 +495,24 @@ function initialPage(): PageKey {
   try {
     const checkpoint = JSON.parse(
       localStorage.getItem(competitorCheckpointKey) ?? "null",
-    ) as { version?: number; running?: boolean; stopReason?: string } | null;
+    ) as {
+      version?: number;
+      running?: boolean;
+      stopReason?: string;
+      clientId?: string;
+    } | null;
+    const currentClientId = sessionStorage.getItem(competitorClientKey);
+    const checkpointBelongsToThisPage =
+      (checkpoint?.version ?? 0) < 8
+      || (
+        Boolean(currentClientId)
+        && checkpoint?.clientId === currentClientId
+      );
     if (
-      checkpoint?.version === 4
-      && checkpoint.running === true
-      && !checkpoint.stopReason
+      (checkpoint?.version ?? 0) >= 4
+      && checkpoint?.running === true
+      && !checkpoint?.stopReason
+      && checkpointBelongsToThisPage
     ) {
       return "competitors";
     }
