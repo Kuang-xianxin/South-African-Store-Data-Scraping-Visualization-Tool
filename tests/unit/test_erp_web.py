@@ -1047,6 +1047,23 @@ def test_only_kxx_controls_batch_while_other_admin_can_add_and_prioritize(
             },
         )
         assert started.status_code == 200
+        options = admin.post(
+            "/api/competitors/batch-options",
+            headers={"X-CSRF-Token": admin_csrf},
+            json={"batch_id": "batch-admin", "visible_browser": True},
+        )
+        assert options.status_code == 200
+        assert options.json()["status"]["visible_browser"] is True
+        takeover = admin.post(
+            "/api/competitors/batch-takeover",
+            headers={"X-CSRF-Token": admin_csrf},
+            json={
+                "batch_id": "batch-admin",
+                "client_id": "client-admin-takeover",
+            },
+        )
+        assert takeover.status_code == 200
+        assert takeover.json()["ready"] is True
 
     with TestClient(app, client=("192.168.1.8", 50001)) as other_admin:
         login = other_admin.post(
@@ -1099,7 +1116,7 @@ def test_only_kxx_controls_batch_while_other_admin_can_add_and_prioritize(
             headers={"X-CSRF-Token": operator_csrf},
             json={
                 "batch_id": "batch-admin",
-                "client_id": "client-admin",
+                "client_id": "client-admin-takeover",
                 "event": "manual_stop",
                 "completed": 0,
                 "total": 13,
@@ -1119,7 +1136,7 @@ def test_only_kxx_controls_batch_while_other_admin_can_add_and_prioritize(
             headers={"X-CSRF-Token": admin_csrf},
             json={
                 "batch_id": "batch-admin",
-                "client_id": "client-admin",
+                "client_id": "client-admin-takeover",
                 "event": "completed",
                 "completed": 12,
                 "total": 12,

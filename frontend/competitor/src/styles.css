@@ -683,9 +683,19 @@ h2 {
 }
 
 .shared-current-plid {
+  display: grid;
+  gap: 3px;
   flex: 0 0 auto;
   font-family: "Cascadia Mono", Consolas, monospace;
   font-weight: 700;
+}
+
+.shared-current-plid small {
+  max-width: 460px;
+  color: #607066;
+  font-family: "Microsoft YaHei", "PingFang SC", sans-serif;
+  font-weight: 400;
+  white-space: normal;
 }
 
 textarea {

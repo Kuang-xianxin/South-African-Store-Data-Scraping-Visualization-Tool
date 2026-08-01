@@ -14,7 +14,9 @@ import {
   fetchCompetitors,
   logCompetitorBatchEvent,
   prioritizeCompetitorTarget,
+  takeoverCompetitorBatch,
   updateCompetitorTarget,
+  updateCompetitorBatchOptions,
   type CompetitorBatchStatus,
 } from "../api";
 import { PRODUCT_IMAGE_SIZE, productThumbnailUrl } from "../productImages";
@@ -47,6 +49,8 @@ interface CollectionQueueItem {
   index: number;
   url: string;
   priority?: boolean;
+  retryKind?: "stock" | "automatic";
+  retryAttempt?: number;
 }
 
 interface CollectionErrorItem {
@@ -171,6 +175,8 @@ const autoResumeAt = ref<number | null>(null);
 const autoResumeAttempting = ref(false);
 const restoredRunWasActive = ref(false);
 const manualStopRequested = ref(false);
+const takeoverBusy = ref(false);
+const adoptableCheckpoint = ref<CollectionCheckpoint | null>(null);
 const sharedBatchStatus = ref<CompetitorBatchStatus>({
   active: false,
   batch_id: null,
@@ -187,6 +193,11 @@ const sharedBatchStatus = ref<CompetitorBatchStatus>({
   current_plid: null,
   current_request_id: null,
   current_stage: null,
+  current_retry_kind: null,
+  current_retry_attempt: null,
+  with_stock_probe: true,
+  visible_browser: false,
+  takeover_pending: false,
   reason: "",
   started_at: null,
   updated_at: null,
@@ -320,6 +331,41 @@ const sharedBatchBelongsToCurrentAccount = computed(
 const sharedBatchOwnerLabel = computed(() => {
   if (!sharedBatchBelongsToCurrentAccount.value) return sharedBatchOwner.value;
   return sharedBatchMatchesCheckpoint.value ? "本页面" : "本账号另一页面";
+});
+const adoptablePendingCount = computed(() => {
+  if (
+    sharedBatchStatus.value.active
+    && sharedBatchBelongsToCurrentAccount.value
+  ) {
+    return Math.max(
+      sharedBatchStatus.value.failed,
+      adoptableCheckpoint.value
+        ? checkpointPendingCount(adoptableCheckpoint.value)
+        : 0,
+    );
+  }
+  return adoptableCheckpoint.value
+    ? checkpointPendingCount(adoptableCheckpoint.value)
+    : 0;
+});
+const canTakeOverCollection = computed(
+  () =>
+    Boolean(props.canControlCollection)
+    && !collecting.value
+    && !takeoverBusy.value
+    && Boolean(adoptableCheckpoint.value)
+    && adoptablePendingCount.value > 0
+    && (
+      !sharedBatchStatus.value.active
+      || sharedBatchBelongsToCurrentAccount.value
+    ),
+);
+const sharedRetryProgress = computed(() => {
+  const attempt = sharedBatchStatus.value.current_retry_attempt;
+  if (!attempt) return "";
+  return sharedBatchStatus.value.current_retry_kind === "stock"
+    ? `正在库存复探 ${attempt}/2（总探测第 ${attempt + 1}/3 次）`
+    : `正在自动重试 ${attempt}/${MAX_AUTOMATIC_RETRY_ATTEMPTS}`;
 });
 const collectionAlertTitle = computed(() => {
   if (sharedBatchStatus.value.active && !collecting.value) {
@@ -1033,6 +1079,27 @@ async function loadSharedBatchStatus() {
   try {
     const status = await fetchCompetitorBatchStatus();
     sharedBatchStatus.value = status;
+    if (
+      status.active
+      && Boolean(props.currentUsername)
+      && status.owner_username?.toLowerCase() === props.currentUsername?.toLowerCase()
+    ) {
+      withStockProbe.value = status.with_stock_probe;
+      visibleBrowser.value = status.visible_browser;
+    }
+    const checkpoint = readCollectionCheckpoint();
+    if (
+      checkpoint
+      && checkpoint.version >= 8
+      && checkpoint.clientId !== collectionClientId
+      && checkpointPendingCount(checkpoint) > 0
+      && (
+        !status.active
+        || status.batch_id === checkpoint.batchId
+      )
+    ) {
+      adoptableCheckpoint.value = checkpoint;
+    }
     mergeQueuedTargetsIntoLocalBatch(status);
   } catch {
     // Keep the last shared progress during a short local-service interruption.
@@ -1660,26 +1727,43 @@ function readCollectionCheckpoint(): CollectionCheckpoint | null {
   return checkpoint;
 }
 
-async function restoreCollectionCheckpoint(checkpoint: CollectionCheckpoint) {
+function checkpointPendingCount(checkpoint: CollectionCheckpoint) {
+  const attempted = new Set(checkpoint.attemptedIndexes);
+  const terminal = new Set(checkpoint.terminalIndexes ?? []);
+  const pending = new Set(checkpoint.failedIndexes);
+  checkpoint.batchUrls.forEach((_url, index) => {
+    if (!attempted.has(index) && !terminal.has(index)) pending.add(index);
+  });
+  terminal.forEach((index) => pending.delete(index));
+  return pending.size;
+}
+
+async function restoreCollectionCheckpoint(
+  checkpoint: CollectionCheckpoint,
+  forceAdopt = false,
+) {
   const checkpointBelongsToThisPage =
     checkpoint.version < 8 || checkpoint.clientId === collectionClientId;
   const checkpointMatchesActiveBatch =
     sharedBatchStatus.value.active
     && Boolean(checkpoint.batchId)
     && sharedBatchStatus.value.batch_id === checkpoint.batchId;
-  if (!checkpointBelongsToThisPage) return;
+  if (!checkpointBelongsToThisPage && !forceAdopt) {
+    adoptableCheckpoint.value = checkpoint;
+    return false;
+  }
   if (
     sharedBatchStatus.value.active
     && !checkpointMatchesActiveBatch
   ) {
-    return;
+    return false;
   }
   if (
     checkpoint.version < 8
     && checkpointMatchesActiveBatch
     && !(await confirmLegacyCheckpointOwnership(checkpoint))
   ) {
-    return;
+    return false;
   }
 
   rawUrls.value = checkpoint.rawUrls;
@@ -1735,6 +1819,8 @@ async function restoreCollectionCheckpoint(checkpoint: CollectionCheckpoint) {
   if (checkpoint.version < 8) {
     persistCollectionCheckpoint();
   }
+  adoptableCheckpoint.value = null;
+  return true;
 }
 
 async function confirmLegacyCheckpointOwnership(
@@ -1759,6 +1845,8 @@ async function confirmLegacyCheckpointOwnership(
       succeeded: status.succeeded,
       failed: status.failed,
       terminal: status.terminal,
+      withStockProbe: status.with_stock_probe,
+      visibleBrowser: status.visible_browser,
       reason: status.reason,
     });
     return true;
@@ -1903,6 +1991,107 @@ function activeBatchBlockedMessage() {
   return `${sharedBatchOwner.value} 的竞品批次正在运行：已检查 ${status.completed}/${status.total}，待续爬 ${status.pending}${current}。请等待当前批次结束，或由发起人点击“停止采集”后再开始。`;
 }
 
+async function updateVisibleBrowserSetting() {
+  persistCollectionCheckpoint();
+  const status = sharedBatchStatus.value;
+  if (!status.active) return;
+  if (!sharedBatchBelongsToCurrentAccount.value || !status.batch_id) {
+    visibleBrowser.value = status.visible_browser;
+    showCollectionNotice("只能由当前批次所属账号修改显示浏览器设置。");
+    return;
+  }
+  try {
+    sharedBatchStatus.value = await updateCompetitorBatchOptions(
+      status.batch_id,
+      visibleBrowser.value,
+    );
+    showCollectionActivityNotice(
+      visibleBrowser.value
+        ? "已同步到运行批次：从下一条链接开始显示库存探测浏览器。"
+        : "已同步到运行批次：从下一条链接开始隐藏库存探测浏览器。",
+    );
+  } catch (error) {
+    visibleBrowser.value = status.visible_browser;
+    showCollectionNotice(
+      error instanceof Error ? error.message : "更新显示浏览器设置失败",
+    );
+  }
+}
+
+async function takeOverAndResumeCollection() {
+  if (!props.canControlCollection || takeoverBusy.value) return;
+  let checkpoint = adoptableCheckpoint.value ?? readCollectionCheckpoint();
+  if (!checkpoint || checkpointPendingCount(checkpoint) === 0) {
+    showCollectionNotice("没有找到可接回的失败或未完成断点。");
+    return;
+  }
+  takeoverBusy.value = true;
+  collectionStopReason.value = "";
+  try {
+    const activeStatus = sharedBatchStatus.value;
+    if (activeStatus.active) {
+      if (
+        !sharedBatchBelongsToCurrentAccount.value
+        || !activeStatus.batch_id
+        || activeStatus.batch_id !== checkpoint.batchId
+      ) {
+        throw new Error("当前运行批次与本页保存的断点不一致，不能安全接管。");
+      }
+      let ready = false;
+      for (let attempt = 0; attempt < 600 && !ready; attempt += 1) {
+        try {
+          const takeover = await takeoverCompetitorBatch(
+            activeStatus.batch_id,
+            collectionClientId,
+          );
+          sharedBatchStatus.value = takeover.status;
+          ready = takeover.ready;
+        } catch (error) {
+          await loadSharedBatchStatus();
+          if (!sharedBatchStatus.value.active) break;
+          throw error;
+        }
+        if (!ready) {
+          showCollectionNotice(
+            "已申请接管本账号批次；正在等待当前商品探测完成，完成后自动继续待重试链接。",
+          );
+          await delay(1_000);
+        }
+      }
+      if (!ready && sharedBatchStatus.value.active) {
+        throw new Error("等待当前商品结束超过10分钟，暂未完成接管，请稍后重试。");
+      }
+      // Let the former page receive its lease rejection and write its last
+      // checkpoint before this page adopts and becomes the sole writer.
+      await delay(1_500);
+      checkpoint = readCollectionCheckpoint() ?? checkpoint;
+    }
+    if (
+      sharedBatchStatus.value.active
+      && sharedBatchStatus.value.batch_id !== checkpoint.batchId
+    ) {
+      throw new Error("服务端批次与本地断点已不一致，已停止接管以避免重复采集。");
+    }
+    const restored = await restoreCollectionCheckpoint(checkpoint, true);
+    if (!restored || !pendingResumeCount.value) {
+      throw new Error("断点中没有可继续的待重试链接。");
+    }
+    restoredRunWasActive.value = false;
+    collectionStopReason.value = "";
+    collectionActivityNotice.value =
+      `已接管本账号批次，正在继续 ${pendingResumeCount.value} 条待重试或未完成链接。`;
+    persistCollectionCheckpoint();
+    await resumeCollection("auto_resume");
+  } catch (error) {
+    showCollectionNotice(
+      error instanceof Error ? error.message : "接管竞品批次失败",
+    );
+  } finally {
+    takeoverBusy.value = false;
+    await loadSharedBatchStatus();
+  }
+}
+
 function showCollectionNotice(message: string) {
   collectionStopReason.value = message;
   collectionNoticeVersion.value += 1;
@@ -1993,6 +2182,8 @@ async function recordBatchEvent(
       succeeded: collectionResults.value.length,
       failed: failedIndexes.value.length,
       terminal: terminalIndexes.value.length,
+      withStockProbe: withStockProbe.value,
+      visibleBrowser: visibleBrowser.value,
       reason,
     });
     sharedBatchStatus.value = status;
@@ -2053,7 +2244,13 @@ async function runCollection(
         if (controller.signal.aborted) break;
         applyQueuedTargetsToRunQueue(queue, cursor, knownIndexes);
         applyPriorityTargetsToRunQueue(queue, cursor, knownIndexes);
-        const { index, url, priority = false } = queue[cursor]!;
+        const {
+          index,
+          url,
+          priority = false,
+          retryKind,
+          retryAttempt,
+        } = queue[cursor]!;
         cursor += 1;
         const plid = plidFromUrl(url) || "未知商品";
         removeCollectionError(plid);
@@ -2079,6 +2276,8 @@ async function runCollection(
               requestId,
               itemIndex: index,
               totalItems: total.value,
+              retryKind,
+              retryAttempt,
             },
           );
           const resultWithUrl = { ...result, url };
@@ -2128,7 +2327,12 @@ async function runCollection(
                 const retrySchedule = scheduleRetryAfterGap(
                   queue,
                   cursor,
-                  { index, url },
+                  {
+                    index,
+                    url,
+                    retryKind: "stock",
+                    retryAttempt: retryCount,
+                  },
                   retryCount,
                 );
                 showCollectionActivityNotice(
@@ -2162,7 +2366,12 @@ async function runCollection(
                 const retrySchedule = scheduleRetryAfterGap(
                   queue,
                   cursor,
-                  { index, url },
+                  {
+                    index,
+                    url,
+                    retryKind: "automatic",
+                    retryAttempt: retryCount,
+                  },
                   retryCount,
                 );
                 showCollectionActivityNotice(
@@ -2917,14 +3126,21 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
           <span>
             已检查 {{ sharedBatchStatus.completed }}/{{ sharedBatchStatus.total }}
             · 成功 {{ sharedBatchStatus.succeeded }}
-            · 待重试 {{ sharedBatchStatus.failed }}
+            · 未解决 {{ sharedBatchStatus.failed }}
             · 确认失效 {{ retainedConfirmedInvalidCount }}
             · 待续爬 {{ sharedBatchStatus.pending }}
           </span>
+          <small v-if="sharedBatchStatus.failed">
+            未解决数量只在某条链接成功后减少；复探进行中数字可能暂时不变。
+          </small>
         </div>
         <span v-if="sharedBatchStatus.current_plid" class="shared-current-plid">
           当前第 {{ (sharedBatchStatus.current_index ?? 0) + 1 }} 条 ·
           PLID{{ sharedBatchStatus.current_plid }}
+          <small v-if="sharedRetryProgress">{{ sharedRetryProgress }}</small>
+          <small v-if="sharedBatchStatus.current_stage">
+            {{ sharedBatchStatus.current_stage }}
+          </small>
         </span>
         <span v-else>正在准备下一条商品</span>
       </div>
@@ -2945,10 +3161,14 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
           <input
             v-model="visibleBrowser"
             type="checkbox"
-            @change="persistCollectionCheckpoint"
+            @change="updateVisibleBrowserSetting"
             :disabled="
               !withStockProbe
               || !props.canControlCollection
+              || (
+                sharedBatchStatus.active
+                && !sharedBatchBelongsToCurrentAccount
+              )
             "
           />
           <span class="switch"></span>
@@ -2957,6 +3177,23 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
             <small>运行中可切换，从下一条任务链接开始生效</small>
           </span>
         </label>
+        <button
+          v-if="
+            props.canControlCollection
+            && !collecting
+            && adoptableCheckpoint
+            && adoptablePendingCount > 0
+            && (
+              !sharedBatchStatus.active
+              || sharedBatchBelongsToCurrentAccount
+            )
+          "
+          class="primary-button resume-button"
+          @click="takeOverAndResumeCollection"
+          :disabled="!canTakeOverCollection"
+        >
+          {{ takeoverBusy ? "等待当前商品结束…" : `接管并继续待重试（${adoptablePendingCount}）` }}
+        </button>
         <button
           class="primary-button"
           @click="startCollection"

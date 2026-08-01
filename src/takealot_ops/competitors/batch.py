@@ -46,6 +46,11 @@ class CollectionBatchStatus:
     current_plid: str | None = None
     current_request_id: str | None = None
     current_stage: str | None = None
+    current_retry_kind: str | None = None
+    current_retry_attempt: int | None = None
+    with_stock_probe: bool = True
+    visible_browser: bool = False
+    takeover_pending: bool = False
     reason: str = ""
     started_at: str | None = None
     updated_at: str | None = None
@@ -62,6 +67,7 @@ class CollectionBatchRegistry:
         self._state = CollectionBatchStatus()
         self._release_after_request = False
         self._owner_client_id: str | None = None
+        self._takeover_client_id: str | None = None
         self._journal_path = journal_path
         self._journal = self._load_journal()
 
@@ -69,6 +75,78 @@ class CollectionBatchRegistry:
         with self._lock:
             self._expire_if_abandoned()
             return asdict(self._state)
+
+    def update_options(
+        self,
+        *,
+        batch_id: str,
+        username: str,
+        visible_browser: bool,
+    ) -> dict[str, object]:
+        """Update options that may safely take effect from the next link."""
+        with self._lock:
+            self._expire_if_abandoned()
+            if not self._state.active or self._state.batch_id != batch_id:
+                raise CollectionBatchBusyError("当前竞品批次已结束或批次编号不匹配")
+            if self._state.owner_username != username:
+                raise CollectionBatchBusyError(self._busy_message())
+            if self._release_after_request:
+                raise CollectionBatchBusyError("当前商品正在完成停止清理，不能再修改批次设置")
+            self._state.visible_browser = visible_browser
+            self._state.updated_at = _utc_iso()
+            return asdict(self._state)
+
+    def request_takeover(
+        self,
+        *,
+        batch_id: str,
+        client_id: str,
+        username: str,
+    ) -> tuple[dict[str, object], bool]:
+        """Transfer same-account control at a link boundary, never mid-request."""
+        with self._lock:
+            self._expire_if_abandoned()
+            if not self._state.active or self._state.batch_id != batch_id:
+                raise CollectionBatchBusyError("当前竞品批次已结束或批次编号不匹配")
+            if self._state.owner_username != username:
+                raise CollectionBatchBusyError(self._busy_message())
+            if self._release_after_request:
+                raise CollectionBatchBusyError("当前商品正在完成停止清理，请稍后从断点继续")
+            if self._owner_client_id == client_id:
+                self._takeover_client_id = None
+                self._state.takeover_pending = False
+                return asdict(self._state), True
+            if (
+                self._takeover_client_id is not None
+                and self._takeover_client_id != client_id
+            ):
+                raise CollectionBatchBusyError("本账号已有另一个页面正在申请接管该批次")
+            if self._state.current_request_id is not None:
+                self._takeover_client_id = client_id
+                self._state.takeover_pending = True
+                self._state.updated_at = _utc_iso()
+                return asdict(self._state), False
+            self._owner_client_id = client_id
+            self._takeover_client_id = None
+            self._state.takeover_pending = False
+            self._state.event = "takeover_ready"
+            self._state.updated_at = _utc_iso()
+            return asdict(self._state), True
+
+    def collection_options(
+        self,
+        *,
+        batch_id: str | None,
+        fallback_with_stock_probe: bool,
+        fallback_visible_browser: bool,
+    ) -> tuple[bool, bool]:
+        """Freeze effective options when one link request starts."""
+        if not batch_id:
+            return fallback_with_stock_probe, fallback_visible_browser
+        with self._lock:
+            if self._state.active and self._state.batch_id == batch_id:
+                return self._state.with_stock_probe, self._state.visible_browser
+        return fallback_with_stock_probe, fallback_visible_browser
 
     def enqueue_target(self, *, plid: str, url: str) -> bool:
         """Put a newly persisted target at the head of the active pending queue."""
@@ -170,6 +248,8 @@ class CollectionBatchRegistry:
         failed: int,
         terminal: int,
         reason: str,
+        with_stock_probe: bool = True,
+        visible_browser: bool = False,
     ) -> dict[str, object]:
         with self._lock:
             self._expire_if_abandoned()
@@ -209,6 +289,8 @@ class CollectionBatchRegistry:
                         owner_display_name=display_name,
                         event=event,
                         started_at=now,
+                        with_stock_probe=with_stock_probe,
+                        visible_browser=visible_browser,
                         queued_targets=restored["queued_targets"],
                         priority_targets=restored["priority_targets"],
                         prioritized_targets=restored["prioritized_targets"],
@@ -225,6 +307,10 @@ class CollectionBatchRegistry:
                     self._state.current_plid = None
                     self._state.current_request_id = None
                     self._state.current_stage = None
+                    self._state.current_retry_kind = None
+                    self._state.current_retry_attempt = None
+                    self._state.takeover_pending = False
+                    self._takeover_client_id = None
 
             if self._state.batch_id == batch_id:
                 self._state.completed = completed
@@ -255,6 +341,10 @@ class CollectionBatchRegistry:
         item_index: int | None,
         total_items: int | None,
         plid: str,
+        retry_kind: str | None = None,
+        retry_attempt: int | None = None,
+        with_stock_probe: bool = True,
+        visible_browser: bool = False,
     ) -> None:
         if not batch_id:
             return
@@ -297,6 +387,8 @@ class CollectionBatchRegistry:
                     owner_display_name=display_name,
                     event="collecting",
                     started_at=now,
+                    with_stock_probe=with_stock_probe,
+                    visible_browser=visible_browser,
                 )
             self._state.event = "collecting"
             self._state.priority_targets = [
@@ -309,6 +401,8 @@ class CollectionBatchRegistry:
             self._state.current_plid = plid
             self._state.current_request_id = request_id
             self._state.current_stage = "正在登记采集链接"
+            self._state.current_retry_kind = retry_kind
+            self._state.current_retry_attempt = retry_attempt
             if total_items is not None:
                 self._state.total = total_items
             self._state.updated_at = now
@@ -348,11 +442,20 @@ class CollectionBatchRegistry:
                 self._state.current_plid = None
                 self._state.current_request_id = None
                 self._state.current_stage = None
+                self._state.current_retry_kind = None
+                self._state.current_retry_attempt = None
                 self._state.reason = reason
                 self._state.updated_at = _utc_iso()
                 if self._release_after_request:
                     self._state.active = False
                     self._release_after_request = False
+                    self._takeover_client_id = None
+                    self._state.takeover_pending = False
+                elif self._takeover_client_id is not None:
+                    self._owner_client_id = self._takeover_client_id
+                    self._takeover_client_id = None
+                    self._state.takeover_pending = False
+                    self._state.event = "takeover_ready"
                 self._persist_journal()
 
     def _load_journal(self) -> dict[str, object]:
@@ -417,6 +520,8 @@ class CollectionBatchRegistry:
         if datetime.now(UTC) - updated > COLLECTION_STALE_AFTER:
             self._state.active = False
             self._state.event = "stale"
+            self._takeover_client_id = None
+            self._state.takeover_pending = False
             self._state.reason = "采集页面长时间未发送进度，已自动释放全局采集占用"
             self._state.updated_at = _utc_iso()
 

@@ -310,6 +310,124 @@ def test_collection_batch_registry_blocks_parallel_links_but_allows_rejoin() -> 
     assert status["current_stage"] is None
 
 
+def test_collection_batch_registry_transfers_same_account_control_at_link_boundary() -> None:
+    registry = CollectionBatchRegistry()
+    registry.event(
+        batch_id="batch-1",
+        client_id="client-old",
+        event="start",
+        username="kxx",
+        display_name="管理员",
+        completed=279,
+        total=316,
+        pending=37,
+        succeeded=279,
+        failed=37,
+        terminal=0,
+        reason="",
+        visible_browser=False,
+    )
+    registry.start_link(
+        batch_id="batch-1",
+        client_id="client-old",
+        request_id="request-1",
+        username="kxx",
+        display_name="管理员",
+        item_index=280,
+        total_items=316,
+        plid="12345678",
+        retry_kind="stock",
+        retry_attempt=1,
+    )
+
+    pending, ready = registry.request_takeover(
+        batch_id="batch-1",
+        client_id="client-new",
+        username="kxx",
+    )
+    assert ready is False
+    assert pending["takeover_pending"] is True
+    assert pending["current_retry_kind"] == "stock"
+    assert pending["current_retry_attempt"] == 1
+
+    registry.finish_link(
+        batch_id="batch-1",
+        request_id="request-1",
+        reason="库存仍未探测",
+    )
+    transferred, ready = registry.request_takeover(
+        batch_id="batch-1",
+        client_id="client-new",
+        username="kxx",
+    )
+    assert ready is True
+    assert transferred["event"] == "takeover_ready"
+    assert transferred["takeover_pending"] is False
+    with pytest.raises(CollectionBatchBusyError, match="管理员"):
+        registry.event(
+            batch_id="batch-1",
+            client_id="client-old",
+            event="progress",
+            username="kxx",
+            display_name="管理员",
+            completed=280,
+            total=316,
+            pending=36,
+            succeeded=280,
+            failed=36,
+            terminal=0,
+            reason="",
+        )
+    registry.start_link(
+        batch_id="batch-1",
+        client_id="client-new",
+        request_id="request-2",
+        username="kxx",
+        display_name="管理员",
+        item_index=281,
+        total_items=316,
+        plid="87654321",
+    )
+    assert registry.status()["current_request_id"] == "request-2"
+
+
+def test_collection_batch_registry_syncs_visible_browser_for_next_link() -> None:
+    registry = CollectionBatchRegistry()
+    registry.event(
+        batch_id="batch-1",
+        client_id="client-1",
+        event="start",
+        username="kxx",
+        display_name="管理员",
+        completed=0,
+        total=2,
+        pending=2,
+        succeeded=0,
+        failed=0,
+        terminal=0,
+        reason="",
+        visible_browser=False,
+    )
+
+    status = registry.update_options(
+        batch_id="batch-1",
+        username="kxx",
+        visible_browser=True,
+    )
+    assert status["visible_browser"] is True
+    assert registry.collection_options(
+        batch_id="batch-1",
+        fallback_with_stock_probe=False,
+        fallback_visible_browser=False,
+    ) == (True, True)
+    with pytest.raises(CollectionBatchBusyError, match="管理员"):
+        registry.update_options(
+            batch_id="batch-1",
+            username="another.user",
+            visible_browser=False,
+        )
+
+
 def test_collection_batch_registry_appends_new_targets_to_active_tail() -> None:
     registry = CollectionBatchRegistry()
     registry.event(

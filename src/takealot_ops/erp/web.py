@@ -161,6 +161,8 @@ class CollectCompetitorRequest(BaseModel):
     )
     item_index: int | None = Field(default=None, ge=0)
     total_items: int | None = Field(default=None, ge=1)
+    retry_kind: str | None = Field(default=None, pattern=r"^(stock|automatic)$")
+    retry_attempt: int | None = Field(default=None, ge=1, le=10)
 
 
 class CompetitorBatchEventRequest(BaseModel):
@@ -188,7 +190,35 @@ class CompetitorBatchEventRequest(BaseModel):
     succeeded: int = Field(default=0, ge=0)
     failed: int = Field(default=0, ge=0)
     terminal: int = Field(default=0, ge=0)
+    with_stock_probe: bool = True
+    visible_browser: bool = False
     reason: str = Field(default="", max_length=500)
+
+
+class CompetitorBatchOptionsRequest(BaseModel):
+    """One same-account update to a running batch's safe options."""
+
+    batch_id: str = Field(
+        min_length=1,
+        max_length=80,
+        pattern=r"^[A-Za-z0-9_-]+$",
+    )
+    visible_browser: bool
+
+
+class CompetitorBatchTakeoverRequest(BaseModel):
+    """Request control transfer to another page of the same account."""
+
+    batch_id: str = Field(
+        min_length=1,
+        max_length=80,
+        pattern=r"^[A-Za-z0-9_-]+$",
+    )
+    client_id: str = Field(
+        min_length=1,
+        max_length=80,
+        pattern=r"^[A-Za-z0-9_-]+$",
+    )
 
 
 class CompetitorTargetRequest(BaseModel):
@@ -1253,6 +1283,53 @@ def create_app(project_root: Path | None = None) -> FastAPI:
     def competitor_batch_status() -> dict[str, object]:
         return collection_registry.status()
 
+    @app.post("/api/competitors/batch-options")
+    def update_competitor_batch_options(
+        payload: CompetitorBatchOptionsRequest,
+        request: Request,
+    ) -> dict[str, object]:
+        require_competitor_batch_controller(request)
+        user = request.state.erp_user
+        try:
+            status = collection_registry.update_options(
+                batch_id=payload.batch_id,
+                username=user.username,
+                visible_browser=payload.visible_browser,
+            )
+        except CollectionBatchBusyError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        competitor_logger.info(
+            "batch_options batch=%s visible_browser=%s user=%s",
+            payload.batch_id,
+            payload.visible_browser,
+            user.username,
+        )
+        return {"ok": True, "status": status}
+
+    @app.post("/api/competitors/batch-takeover")
+    def takeover_competitor_batch(
+        payload: CompetitorBatchTakeoverRequest,
+        request: Request,
+    ) -> dict[str, object]:
+        require_competitor_batch_controller(request)
+        user = request.state.erp_user
+        try:
+            status, ready = collection_registry.request_takeover(
+                batch_id=payload.batch_id,
+                client_id=payload.client_id,
+                username=user.username,
+            )
+        except CollectionBatchBusyError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        competitor_logger.info(
+            "batch_takeover batch=%s ready=%s current_plid=%s user=%s",
+            payload.batch_id,
+            ready,
+            status.get("current_plid") or "-",
+            user.username,
+        )
+        return {"ok": True, "ready": ready, "status": status}
+
     @app.get("/api/competitors/targets")
     def competitor_targets() -> dict[str, list[dict[str, object]]]:
         settings = DashboardSettings.from_env(root)
@@ -1601,9 +1678,20 @@ def create_app(project_root: Path | None = None) -> FastAPI:
                 item_index=payload.item_index,
                 total_items=payload.total_items,
                 plid=plid,
+                retry_kind=payload.retry_kind,
+                retry_attempt=payload.retry_attempt,
+                with_stock_probe=payload.with_stock_probe,
+                visible_browser=payload.visible_browser,
             )
         except CollectionBatchBusyError as exc:
             raise HTTPException(status_code=423, detail=str(exc)) from exc
+        effective_with_stock_probe, effective_visible_browser = (
+            collection_registry.collection_options(
+                batch_id=payload.batch_id,
+                fallback_with_stock_probe=payload.with_stock_probe,
+                fallback_visible_browser=payload.visible_browser,
+            )
+        )
 
         async def execute_collection() -> CompetitorCollectionResult:
             registry_reason = ""
@@ -1650,8 +1738,8 @@ def create_app(project_root: Path | None = None) -> FastAPI:
                         ) as collector:
                             result = await collector.collect(
                                 payload.url,
-                                with_stock_probe=payload.with_stock_probe,
-                                visible_browser=payload.visible_browser,
+                                with_stock_probe=effective_with_stock_probe,
+                                visible_browser=effective_visible_browser,
                             )
                         added_targets = _sync_discovered_competitor_targets(
                             engine,
@@ -1789,6 +1877,8 @@ def create_app(project_root: Path | None = None) -> FastAPI:
                 failed=payload.failed,
                 terminal=payload.terminal,
                 reason=payload.reason,
+                with_stock_probe=payload.with_stock_probe,
+                visible_browser=payload.visible_browser,
             )
         except CollectionBatchBusyError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc

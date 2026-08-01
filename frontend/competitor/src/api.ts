@@ -348,6 +348,8 @@ export interface CompetitorCollectionContext {
   requestId: string;
   itemIndex: number;
   totalItems: number;
+  retryKind?: "stock" | "automatic";
+  retryAttempt?: number;
 }
 
 export interface CompetitorBatchEvent {
@@ -368,6 +370,8 @@ export interface CompetitorBatchEvent {
   succeeded: number;
   failed: number;
   terminal: number;
+  withStockProbe: boolean;
+  visibleBrowser: boolean;
   reason?: string;
 }
 
@@ -387,6 +391,11 @@ export interface CompetitorBatchStatus {
   current_plid: string | null;
   current_request_id: string | null;
   current_stage: string | null;
+  current_retry_kind: "stock" | "automatic" | null;
+  current_retry_attempt: number | null;
+  with_stock_probe: boolean;
+  visible_browser: boolean;
+  takeover_pending: boolean;
   reason: string;
   started_at: string | null;
   updated_at: string | null;
@@ -430,6 +439,8 @@ export async function collectCompetitor(
       request_id: context?.requestId,
       item_index: context?.itemIndex,
       total_items: context?.totalItems,
+      retry_kind: context?.retryKind,
+      retry_attempt: context?.retryAttempt,
     }),
     signal,
   });
@@ -454,6 +465,8 @@ export async function logCompetitorBatchEvent(
       succeeded: event.succeeded,
       failed: event.failed,
       terminal: event.terminal,
+      with_stock_probe: event.withStockProbe,
+      visible_browser: event.visibleBrowser,
       reason: event.reason ?? "",
     }),
   });
@@ -462,6 +475,38 @@ export async function logCompetitorBatchEvent(
 
 export function fetchCompetitorBatchStatus(): Promise<CompetitorBatchStatus> {
   return request<CompetitorBatchStatus>("/api/competitors/batch-status");
+}
+
+export async function updateCompetitorBatchOptions(
+  batchId: string,
+  visibleBrowser: boolean,
+): Promise<CompetitorBatchStatus> {
+  const result = await request<{ ok: boolean; status: CompetitorBatchStatus }>(
+    "/api/competitors/batch-options",
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        batch_id: batchId,
+        visible_browser: visibleBrowser,
+      }),
+    },
+  );
+  return result.status;
+}
+
+export function takeoverCompetitorBatch(
+  batchId: string,
+  clientId: string,
+): Promise<{ ok: boolean; ready: boolean; status: CompetitorBatchStatus }> {
+  return request<{ ok: boolean; ready: boolean; status: CompetitorBatchStatus }>(
+    "/api/competitors/batch-takeover",
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ batch_id: batchId, client_id: clientId }),
+    },
+  );
 }
 
 function query(asOf: string) {
