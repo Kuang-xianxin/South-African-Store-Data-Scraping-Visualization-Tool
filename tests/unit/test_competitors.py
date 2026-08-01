@@ -28,6 +28,7 @@ from takealot_ops.competitors.domain import (
     VariantStockObservation,
     analyze_sales_signal,
     competitor_offer_identity,
+    competitor_offer_stock_state,
     estimate_lifetime_sales,
     summarize_reviews,
 )
@@ -638,6 +639,13 @@ def test_competitor_offer_identity_prefers_offer_id_and_never_uses_plid() -> Non
     assert competitor_offer_identity(seller_id="seller-1") is None
 
 
+def test_competitor_offer_stock_state_keeps_unknown_separate_from_zero() -> None:
+    assert competitor_offer_stock_state("In stock") == "有货"
+    assert competitor_offer_stock_state("Out of stock") == "没货"
+    assert competitor_offer_stock_state("Ships in 10 days", is_leadtime=True) == "没货"
+    assert competitor_offer_stock_state("Status pending") == "未知"
+
+
 async def test_public_client_parses_product_offers_and_all_review_pages() -> None:
     canned: dict[str, dict[str, object]] = {
         "https://api.takealot.com/rest/v-1-10-0/product-details/PLID123": {
@@ -735,9 +743,12 @@ async def test_public_client_parses_product_offers_and_all_review_pages() -> Non
     assert product.offers[0].plid == "123"
     assert product.offers[0].url == "https://www.takealot.com/example/PLID123"
     assert product.offers[0].offer_id == "offer-1"
+    assert product.offers[0].is_buybox is True
+    assert product.offers[0].is_leadtime is True
     assert product.offers[1].plid == "123"
     assert product.offers[1].url == "https://www.takealot.com/example/PLID123"
     assert product.offers[1].offer_id == "offer-2"
+    assert product.offers[1].is_buybox is False
     assert product.offers[1].condition == "New"
     assert product.offers[0].identity_key == "offer:offer-1"
     assert product.offers[1].identity_key == "offer:offer-2"

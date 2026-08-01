@@ -30,6 +30,7 @@ from takealot_ops.competitors.domain import (
     VariantStockObservation,
     analyze_sales_signal,
     competitor_offer_identity,
+    competitor_offer_stock_state,
     estimate_lifetime_sales,
     summarize_reviews,
 )
@@ -848,6 +849,104 @@ def _offer_price(offer: Mapping[str, object]) -> float | None:
         return None
 
 
+def _offer_stock_quantity(offer: Mapping[str, object]) -> int | None:
+    value = offer.get("stock_quantity")
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        return int(str(value))
+    except (TypeError, ValueError):
+        return None
+
+
+def _offer_optional_bool(offer: Mapping[str, object], key: str) -> bool | None:
+    value = offer.get(key)
+    return value if isinstance(value, bool) else None
+
+
+def _offer_stock_state(offer: Mapping[str, object]) -> str:
+    persisted = str(offer.get("stock_state") or "").strip()
+    if persisted in {"有货", "没货", "未知"}:
+        return persisted
+    quantity = _offer_stock_quantity(offer)
+    exact = bool(offer.get("stock_exact"))
+    exact_quantity = quantity if exact or (quantity is not None and quantity > 0) else None
+    return competitor_offer_stock_state(
+        offer.get("stock_status"),
+        is_leadtime=bool(offer.get("is_leadtime")),
+        is_add_to_cart_available=_offer_optional_bool(
+            offer, "is_add_to_cart_available"
+        ),
+        exact_quantity=exact_quantity,
+    )
+
+
+def _offer_inventory_scope_matches(
+    previous: Mapping[str, object],
+    latest: Mapping[str, object],
+) -> bool:
+    keys = ("seller_id", "seller_name", "sku", "variant_key", "condition")
+    return all(
+        " ".join(str(previous.get(key) or "").casefold().split())
+        == " ".join(str(latest.get(key) or "").casefold().split())
+        for key in keys
+    )
+
+
+def _offer_inventory_signal(
+    *,
+    key: str,
+    identity: str | None,
+    offer: Mapping[str, object],
+    previous: Mapping[str, object] | None,
+    oldest_id: int,
+    latest_id: int,
+    oldest_ambiguous: set[str],
+    latest_ambiguous: set[str],
+    raw_history: bool,
+) -> tuple[str | None, int | None, int | None, bool, str]:
+    if raw_history:
+        return None, None, None, False, "原始库存状态"
+    if identity is None or oldest_id == latest_id or previous is None:
+        return None, None, None, False, "待建立库存基线"
+    start_state = _offer_stock_state(previous)
+    start_quantity = _offer_stock_quantity(previous)
+    if key in oldest_ambiguous or key in latest_ambiguous:
+        return start_state, start_quantity, None, False, "库存不可比"
+    if not _offer_inventory_scope_matches(previous, offer):
+        return start_state, start_quantity, None, False, "库存不可比"
+
+    latest_state = _offer_stock_state(offer)
+    latest_quantity = _offer_stock_quantity(offer)
+    exact_pair = (
+        bool(previous.get("stock_exact"))
+        and bool(offer.get("stock_exact"))
+        and start_quantity is not None
+        and latest_quantity is not None
+    )
+    if exact_pair:
+        assert latest_quantity is not None
+        assert start_quantity is not None
+        quantity_change = latest_quantity - start_quantity
+        if quantity_change < 0:
+            signal = "库存减少"
+        elif quantity_change > 0:
+            signal = "库存增加"
+        else:
+            signal = "库存数量不变"
+        return start_state, start_quantity, quantity_change, True, signal
+
+    if start_state not in {"有货", "没货"} or latest_state not in {"有货", "没货"}:
+        return start_state, start_quantity, None, False, "库存不可比"
+    if start_state == "有货" and latest_state == "没货":
+        signal = "转为没货"
+    elif start_state == "没货" and latest_state == "有货":
+        signal = "恢复有货"
+    else:
+        signal = "库存状态不变"
+    return start_state, start_quantity, None, True, signal
+
+
 def _offer_comparison_signature(offer: Mapping[str, object]) -> tuple[object, ...]:
     return (
         offer.get("seller_id"),
@@ -856,6 +955,9 @@ def _offer_comparison_signature(offer: Mapping[str, object]) -> tuple[object, ..
         offer.get("variant_key"),
         offer.get("condition"),
         _offer_price(offer),
+        _offer_stock_state(offer),
+        _offer_stock_quantity(offer),
+        bool(offer.get("stock_exact")),
     )
 
 
@@ -914,6 +1016,25 @@ def _interval_offer_rows(
                 price_signal = "涨价"
             else:
                 price_signal = "价格不变"
+        (
+            start_stock_state,
+            start_stock_quantity,
+            stock_quantity_change,
+            stock_comparable,
+            stock_signal,
+        ) = _offer_inventory_signal(
+            key=key,
+            identity=identity,
+            offer=offer,
+            previous=previous,
+            oldest_id=oldest.id,
+            latest_id=latest.id,
+            oldest_ambiguous=oldest_ambiguous,
+            latest_ambiguous=latest_ambiguous,
+            raw_history=raw_history,
+        )
+        stock_state = _offer_stock_state(offer)
+        stock_quantity = _offer_stock_quantity(offer)
         rows.append(
             {
                 "报价键": key,
@@ -922,16 +1043,27 @@ def _interval_offer_rows(
                 "卖家": str(offer.get("seller_name") or "未知卖家"),
                 "SKU": str(offer.get("sku") or "").strip() or None,
                 "价格": latest_price,
-                "库存状态": str(offer.get("stock_status") or "未知"),
+                "库存状态": stock_state,
+                "库存原始状态": str(offer.get("stock_status") or "未知"),
+                "库存数量": stock_quantity,
+                "库存精确": bool(offer.get("stock_exact")),
+                "库存方式": str(offer.get("stock_method") or "public-offer-status"),
+                "库存说明": str(offer.get("stock_note") or "").strip() or None,
                 "条件": str(offer.get("condition") or "").strip() or None,
                 "变体键": str(offer.get("variant_key") or "default"),
                 "变体": str(offer.get("variant_label") or "默认款"),
                 "是否主报价": bool(offer.get("selected")),
+                "是否变体主报价": bool(offer.get("is_buybox")),
                 "plid": str(offer.get("plid") or latest.plid),
                 "链接": str(offer.get("url") or latest.url),
                 "区间起始价格": start_price,
                 "价格变化": price_change,
                 "价格信号": price_signal,
+                "区间起始库存状态": start_stock_state,
+                "区间起始库存数量": start_stock_quantity,
+                "库存数量变化": stock_quantity_change,
+                "库存可比": stock_comparable,
+                "库存信号": stock_signal,
             }
         )
     return rows

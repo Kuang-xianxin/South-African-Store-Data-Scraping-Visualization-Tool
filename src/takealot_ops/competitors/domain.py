@@ -21,6 +21,9 @@ class CompetitorOffer:
     seller_name: str
     price: float
     stock_status: str
+    is_buybox: bool = False
+    is_leadtime: bool = False
+    is_add_to_cart_available: bool | None = None
     plid: str | None = None
     url: str | None = None
     offer_id: str | None = None
@@ -28,6 +31,42 @@ class CompetitorOffer:
     variant_key: str = "default"
     variant_label: str = "默认款"
     identity_key: str | None = None
+
+
+def competitor_offer_stock_state(
+    stock_status: object,
+    *,
+    is_leadtime: bool = False,
+    is_add_to_cart_available: bool | None = None,
+    exact_quantity: int | None = None,
+) -> str:
+    """Normalize only explicit public or exact stock evidence for one offer."""
+
+    if exact_quantity is not None:
+        return "有货" if exact_quantity > 0 else "没货"
+    if is_leadtime:
+        return "没货"
+    if is_add_to_cart_available is False:
+        return "没货"
+    if is_add_to_cart_available is True:
+        return "有货"
+
+    normalized = " ".join(str(stock_status or "").casefold().split())
+    unavailable_markers = (
+        "out of stock",
+        "sold out",
+        "unavailable",
+        "not available",
+        "没货",
+        "售罄",
+        "无货",
+    )
+    if any(marker in normalized for marker in unavailable_markers):
+        return "没货"
+    available_markers = ("in stock", "available", "有货", "现货")
+    if any(marker in normalized for marker in available_markers):
+        return "有货"
+    return "未知"
 
 
 def competitor_offer_identity(

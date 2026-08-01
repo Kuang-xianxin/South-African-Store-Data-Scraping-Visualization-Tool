@@ -279,6 +279,7 @@ class CompetitorPublicClient:
                         variant_offer,
                         variant_seller,
                         selected=detail_index == selected_index,
+                        is_buybox=True,
                         fallback_url=str(
                             offer_detail.get("desktop_href")
                             or detail.get("desktop_href")
@@ -298,6 +299,7 @@ class CompetitorPublicClient:
                             other_offer,
                             _mapping(other_offer.get("seller")),
                             selected=False,
+                            is_buybox=False,
                             fallback_url=str(
                                 offer_detail.get("desktop_href")
                                 or detail.get("desktop_href")
@@ -529,6 +531,7 @@ def _offer_record(
     seller: Mapping[str, Any],
     *,
     selected: bool,
+    is_buybox: bool,
     fallback_url: str | None = None,
     condition: str | None = None,
     variant_key: str = "default",
@@ -540,6 +543,10 @@ def _offer_record(
     seller_id = str(seller.get("seller_id") or "").strip()
     seller_name = str(seller.get("display_name") or "未知卖家")
     sku = str(offer.get("sku") or offer.get("product_id") or "").strip()
+    add_to_cart_value = offer.get("is_add_to_cart_available")
+    is_add_to_cart_available = (
+        add_to_cart_value if isinstance(add_to_cart_value, bool) else None
+    )
     return CompetitorOffer(
         selected=selected,
         sku=sku,
@@ -547,6 +554,9 @@ def _offer_record(
         seller_name=seller_name,
         price=_number(offer.get("price")),
         stock_status=str(stock.get("status") or "未知"),
+        is_buybox=is_buybox,
+        is_leadtime=bool(stock.get("is_leadtime")),
+        is_add_to_cart_available=is_add_to_cart_available,
         plid=offer_plid,
         url=offer_url,
         offer_id=offer_id,
