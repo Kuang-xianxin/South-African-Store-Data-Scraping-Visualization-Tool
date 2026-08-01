@@ -309,7 +309,13 @@ const targetActionIsManualRetry = computed(
 const competitorSignalOptions = computed(() =>
   [
     ...new Set(
-      competitors.value.flatMap((item) => [item.趋势判断, item.价格信号]).filter(Boolean),
+      competitors.value
+        .flatMap((item) => [
+          item.趋势判断,
+          item.价格信号,
+          ...item.跟卖报价.flatMap((offer) => [offer.价格信号, offer.库存信号]),
+        ])
+        .filter(Boolean),
     ),
   ].sort(
     (first, second) => first.localeCompare(second, "zh-CN"),
@@ -327,6 +333,16 @@ const filteredCompetitors = computed(() => {
         item.库存上限,
         item.趋势判断,
         item.价格信号,
+        ...item.跟卖报价.flatMap((offer) => [
+          offer.offer_id ?? "",
+          offer.卖家ID ?? "",
+          offer.卖家,
+          offer.SKU ?? "",
+          offer.变体,
+          offer.库存状态,
+          offer.价格信号,
+          offer.库存信号,
+        ]),
       ].some((value) => value.toLocaleLowerCase().includes(query))
     ) {
       return false;
@@ -341,6 +357,11 @@ const filteredCompetitors = computed(() => {
       competitorSignalFilter.value === "全部"
       || item.趋势判断 === competitorSignalFilter.value
       || item.价格信号 === competitorSignalFilter.value
+      || item.跟卖报价.some(
+        (offer) =>
+          offer.价格信号 === competitorSignalFilter.value
+          || offer.库存信号 === competitorSignalFilter.value,
+      )
     );
   });
 });
@@ -2125,6 +2146,19 @@ function offerStockSignalClass(signal: string) {
   };
 }
 
+function competitorOfferPriceRange(item: CompetitorItem) {
+  const prices = item.跟卖报价
+    .map((offer) => offer.价格)
+    .filter((price): price is number => price !== null)
+    .sort((first, second) => first - second);
+  if (!prices.length) return formatCurrency(item.价格);
+  const lowest = prices[0]!;
+  const highest = prices[prices.length - 1]!;
+  return lowest === highest
+    ? formatCurrency(lowest)
+    : `${formatCurrency(lowest)} – ${formatCurrency(highest)}`;
+}
+
 function targetSnapshot(target: CompetitorTargetItem) {
   return competitorsByPlid.value.get(target.plid) ?? null;
 }
@@ -3340,95 +3374,175 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
           <strong>没有符合条件的竞品</strong>
           <span>可以调整关键词、库存状态或经营信号。</span>
         </div>
-        <div v-else class="table-wrap">
-          <table>
-            <thead>
-              <tr>
-                <th>竞品</th>
-                <th>价格</th>
-                <th>库存上限</th>
-                <th>评论 / 评分</th>
-                <th>观察期信号</th>
-              </tr>
-            </thead>
-            <tbody>
-              <tr
-                v-for="item in pagedCompetitors"
-                :key="item.plid"
-                :id="`competitor-row-${item.plid}`"
-                v-memo="[item, selectedPlid === item.plid, failedCompetitorImages.has(item.图片 || '')]"
-                :class="{ selected: selectedPlid === item.plid }"
-                tabindex="0"
-                role="button"
-                aria-haspopup="dialog"
-                @click="openProductModal(item)"
-                @keydown.enter="openProductModal(item)"
-                @keydown.space.prevent="openProductModal(item)"
-              >
-                <td>
-                  <div class="competitor-product-cell">
-                    <div class="competitor-product-image">
-                      <img
-                        v-if="canShowCompetitorImage(item.图片)"
-                        :src="competitorImageUrl(item.图片)"
-                        :alt="`${item.商品} 商品图片`"
-                        width="192"
-                        height="192"
-                        loading="lazy"
-                        decoding="async"
-                        @error="markCompetitorImageFailed(item.图片)"
-                      />
-                      <span v-else>暂无图片</span>
-                    </div>
-                    <div>
-                      <strong>{{ item.商品 }}</strong>
-                      <span>
-                        PLID{{ item.plid }} · {{ item.当前卖家 || "未知卖家" }}
-                      </span>
-                    </div>
+        <div v-else class="competitor-status-list">
+          <article
+            v-for="item in pagedCompetitors"
+            :key="item.plid"
+            :id="`competitor-row-${item.plid}`"
+            v-memo="[item, selectedPlid === item.plid, failedCompetitorImages.has(item.图片 || '')]"
+            class="competitor-status-card"
+            :class="{ selected: selectedPlid === item.plid }"
+            tabindex="0"
+            role="button"
+            aria-haspopup="dialog"
+            :aria-label="`查看 ${item.商品} 及全部 ${item.跟卖报价.length} 个报价的详情`"
+            @click="openProductModal(item)"
+            @keydown.enter="openProductModal(item)"
+            @keydown.space.prevent="openProductModal(item)"
+          >
+            <header class="competitor-status-header">
+              <div class="competitor-status-identity">
+                <div class="competitor-product-image competitor-status-image">
+                  <img
+                    v-if="canShowCompetitorImage(item.图片)"
+                    :src="competitorImageUrl(item.图片)"
+                    :alt="`${item.商品} 商品图片`"
+                    width="192"
+                    height="192"
+                    loading="lazy"
+                    decoding="async"
+                    @error="markCompetitorImageFailed(item.图片)"
+                  />
+                  <span v-else>暂无图片</span>
+                </div>
+                <div class="competitor-status-title">
+                  <div class="competitor-status-eyebrow">
+                    <span>PLID{{ item.plid }}</span>
+                    <span>{{ formatChinaDateTime(item.采集时间) }}</span>
                   </div>
-                </td>
-                <td>
-                  <strong>{{ formatCurrency(item.价格) }}</strong>
-                  <small
-                    class="price-signal"
+                  <h3>{{ item.商品 }}</h3>
+                  <p>
+                    同一商品统一归档
+                    <strong>{{ item.跟卖报价.length }}</strong>
+                    个卖家报价；每个报价的库存独立统计。
+                  </p>
+                </div>
+              </div>
+              <span class="competitor-status-open">查看完整详情 →</span>
+            </header>
+
+            <div class="competitor-status-summary">
+              <div>
+                <span>全部报价区间</span>
+                <strong>{{ competitorOfferPriceRange(item) }}</strong>
+                <small>{{ item.跟卖报价.length }} 个独立报价</small>
+              </div>
+              <div>
+                <span>当前主报价</span>
+                <strong>{{ formatCurrency(item.价格) }}</strong>
+                <small
+                  class="price-signal"
+                  :class="priceSignalClass(item.价格信号)"
+                >
+                  {{ item.价格信号 }}
+                  <template v-if="item.价格变化 !== null">
+                    · {{ formatSignedCurrency(item.价格变化) }}
+                  </template>
+                </small>
+              </div>
+              <div>
+                <span>主报价库存</span>
+                <strong
+                  class="stock-pill"
+                  :class="{
+                    exact: item.库存精确,
+                    unavailable: item.库存上限 === '没货',
+                  }"
+                >{{ item.库存上限 }}</strong>
+                <small v-if="item.库存参考过期 && item.上次成功库存">
+                  上次成功 {{ item.上次成功库存 }}
+                  · {{ formatChinaDateTime(item.上次成功库存时间) }}
+                </small>
+                <small v-else>{{ item.当前卖家 || "未知卖家" }}</small>
+              </div>
+              <div>
+                <span>商品经营信号</span>
+                <div class="signal-labels">
+                  <strong class="signal-label">{{ item.趋势判断 }}</strong>
+                  <strong
+                    class="signal-label price-signal"
                     :class="priceSignalClass(item.价格信号)"
-                  >
-                    {{ item.价格信号 }}
-                    <template v-if="item.价格变化 !== null">
-                      · {{ formatSignedCurrency(item.价格变化) }}
-                    </template>
-                  </small>
-                </td>
-                <td>
-                  <span
-                    class="stock-pill"
-                    :class="{
-                      exact: item.库存精确,
-                      unavailable: item.库存上限 === '没货',
-                    }"
-                  >
-                    {{ item.库存上限 }}
-                  </span>
-                  <small v-if="item.库存参考过期 && item.上次成功库存">
-                    本次未探测成功；上次成功 {{ item.上次成功库存 }}
-                    · {{ formatChinaDateTime(item.上次成功库存时间) }}
-                  </small>
-                </td>
-                <td>{{ item.评论数 }} 条 · {{ item.评分 ?? "—" }}</td>
-                <td>
-                  <div class="signal-labels">
-                    <span class="signal-label">{{ item.趋势判断 }}</span>
-                    <span
-                      class="signal-label price-signal"
-                      :class="priceSignalClass(item.价格信号)"
-                    >{{ item.价格信号 }}</span>
+                  >{{ item.价格信号 }}</strong>
+                </div>
+                <small>{{ item.评论数 }} 条评论 · 评分 {{ item.评分 ?? "—" }}</small>
+              </div>
+            </div>
+
+            <section class="competitor-offer-roster" aria-label="全部卖家报价">
+              <div class="competitor-offer-roster-heading">
+                <div>
+                  <strong>全部卖家报价</strong>
+                  <span>主报价与跟卖都保留在本商品卡片内，不把共享 PLID 当成报价身份。</span>
+                </div>
+                <span>{{ item.跟卖报价.length }} 个报价</span>
+              </div>
+              <div v-if="item.跟卖报价.length" class="competitor-offer-list">
+                <div
+                  v-for="offer in item.跟卖报价"
+                  :key="offer.报价键"
+                  class="competitor-offer-row"
+                >
+                  <div class="competitor-offer-identity">
+                    <div>
+                      <strong>{{ offer.卖家 }}</strong>
+                      <span
+                        class="competitor-offer-kind"
+                        :class="{ primary: offer.是否主报价 }"
+                      >{{ offer.是否主报价 ? "当前主报价" : "跟卖报价" }}</span>
+                    </div>
+                    <small>
+                      Offer ID {{ offer.offer_id || "未返回" }}
+                      · SKU {{ offer.SKU || "未返回" }}
+                    </small>
+                    <small>
+                      {{ offer.变体 || "默认款" }}
+                      <template v-if="offer.条件"> · {{ offer.条件 }}</template>
+                    </small>
                   </div>
-                  <small>{{ item.观察期销量信号 }}</small>
-                </td>
-              </tr>
-            </tbody>
-          </table>
+                  <div class="competitor-offer-metric">
+                    <span>价格</span>
+                    <strong>{{ formatCurrency(offer.价格) }}</strong>
+                    <small
+                      class="price-signal"
+                      :class="priceSignalClass(offer.价格信号)"
+                    >
+                      {{ offer.价格信号 }}
+                      <template v-if="offer.价格变化 !== null">
+                        · {{ formatSignedCurrency(offer.价格变化) }}
+                      </template>
+                    </small>
+                  </div>
+                  <div class="competitor-offer-metric">
+                    <span>独立库存</span>
+                    <strong>{{ offerStockDisplay(offer) }}</strong>
+                    <small
+                      class="offer-stock-signal"
+                      :class="offerStockSignalClass(offer.库存信号)"
+                    >
+                      {{ offer.库存信号 }}
+                      <template v-if="offer.库存数量变化 !== null">
+                        · {{ formatSignedQuantity(offer.库存数量变化) }}
+                      </template>
+                    </small>
+                  </div>
+                  <div class="competitor-offer-metric">
+                    <span>报价范围</span>
+                    <strong>{{ offer.是否变体主报价 ? "变体主报价" : "公开跟卖" }}</strong>
+                    <small>{{ offer.库存精确 ? "精确库存证据" : offer.库存方式 }}</small>
+                  </div>
+                </div>
+              </div>
+              <div v-else class="competitor-offer-empty">
+                <strong>当前快照未返回可区分的卖家报价</strong>
+                <span>商品主报价和原始链接仍然保留；系统不会猜测原始卖家或伪造 Offer ID。</span>
+              </div>
+            </section>
+
+            <footer class="competitor-status-footer">
+              <span>观察期信号：{{ item.观察期销量信号 }}</span>
+              <span>点击卡片查看历史、评论与监控队列操作</span>
+            </footer>
+          </article>
         </div>
         <div
           v-if="filteredCompetitors.length"

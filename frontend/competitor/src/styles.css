@@ -1195,6 +1195,268 @@ textarea.link-input-error-pulse {
   min-height: 180px;
 }
 
+.competitor-status-list {
+  display: grid;
+  gap: 16px;
+}
+
+.competitor-status-card {
+  display: grid;
+  gap: 16px;
+  padding: 18px;
+  border: 1px solid #dce4de;
+  border-radius: 18px;
+  outline: none;
+  background: #fff;
+  box-shadow: 0 10px 28px rgba(20, 54, 39, 0.06);
+  cursor: pointer;
+  content-visibility: auto;
+  contain-intrinsic-size: 420px;
+  transition:
+    border-color 150ms ease,
+    box-shadow 150ms ease,
+    transform 150ms ease;
+}
+
+.competitor-status-card:hover,
+.competitor-status-card.selected {
+  border-color: #8fb59f;
+  box-shadow: 0 16px 36px rgba(20, 71, 48, 0.11);
+  transform: translateY(-1px);
+}
+
+.competitor-status-card:focus-visible {
+  border-color: var(--green);
+  box-shadow: 0 0 0 3px rgba(42, 112, 83, 0.14);
+}
+
+.competitor-status-header,
+.competitor-status-identity,
+.competitor-status-eyebrow,
+.competitor-offer-roster-heading,
+.competitor-offer-identity > div,
+.competitor-status-footer {
+  display: flex;
+}
+
+.competitor-status-header,
+.competitor-offer-roster-heading,
+.competitor-status-footer {
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.competitor-status-identity {
+  align-items: center;
+  gap: 14px;
+  min-width: 0;
+}
+
+.competitor-status-image {
+  flex-basis: 76px;
+  width: 76px;
+  height: 76px;
+  border-radius: 13px;
+}
+
+.competitor-status-title {
+  min-width: 0;
+}
+
+.competitor-status-eyebrow {
+  flex-wrap: wrap;
+  gap: 6px 12px;
+  margin-bottom: 5px;
+  color: var(--muted);
+  font-size: 0.64rem;
+  font-weight: 800;
+}
+
+.competitor-status-title h3 {
+  margin: 0;
+  font-size: 1rem;
+  line-height: 1.4;
+}
+
+.competitor-status-title p {
+  margin: 6px 0 0;
+  color: var(--muted);
+  font-size: 0.68rem;
+  line-height: 1.55;
+}
+
+.competitor-status-title p strong {
+  color: var(--green);
+}
+
+.competitor-status-open {
+  flex: 0 0 auto;
+  color: var(--green);
+  font-size: 0.68rem;
+  font-weight: 800;
+}
+
+.competitor-status-summary {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.competitor-status-summary > div {
+  display: grid;
+  align-content: start;
+  gap: 7px;
+  min-width: 0;
+  padding: 12px;
+  border: 1px solid #e0e7e1;
+  border-radius: 12px;
+  background: #f7f9f6;
+}
+
+.competitor-status-summary > div > span,
+.competitor-offer-metric > span {
+  color: var(--muted);
+  font-size: 0.61rem;
+  font-weight: 800;
+}
+
+.competitor-status-summary > div > strong {
+  color: var(--ink);
+  font-size: 0.85rem;
+  line-height: 1.35;
+}
+
+.competitor-status-summary small,
+.competitor-offer-identity small,
+.competitor-offer-metric small {
+  color: var(--muted);
+  font-size: 0.63rem;
+  line-height: 1.45;
+}
+
+.competitor-status-summary .stock-pill {
+  display: inline-flex;
+  align-items: center;
+  width: fit-content;
+}
+
+.competitor-status-summary .signal-labels {
+  align-items: flex-start;
+}
+
+.competitor-status-summary .signal-label {
+  margin: 0;
+}
+
+.competitor-offer-roster {
+  padding: 14px;
+  border: 1px solid #d9e4dc;
+  border-radius: 14px;
+  background: #f2f6f2;
+}
+
+.competitor-offer-roster-heading {
+  margin-bottom: 11px;
+}
+
+.competitor-offer-roster-heading > div {
+  display: grid;
+  gap: 4px;
+}
+
+.competitor-offer-roster-heading strong {
+  font-size: 0.78rem;
+}
+
+.competitor-offer-roster-heading > div span,
+.competitor-offer-roster-heading > span {
+  color: var(--muted);
+  font-size: 0.63rem;
+}
+
+.competitor-offer-roster-heading > span {
+  flex: 0 0 auto;
+  padding: 5px 9px;
+  border-radius: 999px;
+  background: #dcebd9;
+  color: var(--green);
+  font-weight: 800;
+}
+
+.competitor-offer-list {
+  display: grid;
+  gap: 8px;
+}
+
+.competitor-offer-row {
+  display: grid;
+  grid-template-columns: minmax(220px, 1.55fr) repeat(3, minmax(125px, 0.8fr));
+  gap: 12px;
+  align-items: center;
+  min-width: 0;
+  padding: 11px 12px;
+  border: 1px solid #e0e6e1;
+  border-radius: 11px;
+  background: #fff;
+}
+
+.competitor-offer-identity,
+.competitor-offer-metric {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.competitor-offer-identity > div {
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 7px;
+}
+
+.competitor-offer-identity strong,
+.competitor-offer-metric strong {
+  overflow-wrap: anywhere;
+  font-size: 0.74rem;
+  line-height: 1.35;
+}
+
+.competitor-offer-kind {
+  padding: 3px 7px;
+  border-radius: 999px;
+  background: #edf0ed;
+  color: var(--muted);
+  font-size: 0.57rem;
+  font-weight: 800;
+}
+
+.competitor-offer-kind.primary {
+  background: #dcebd9;
+  color: var(--green);
+}
+
+.competitor-offer-empty {
+  display: grid;
+  gap: 5px;
+  padding: 14px;
+  border: 1px dashed #cbd8cf;
+  border-radius: 10px;
+  color: var(--muted);
+  font-size: 0.67rem;
+}
+
+.competitor-offer-empty strong {
+  color: var(--ink);
+  font-size: 0.72rem;
+}
+
+.competitor-status-footer {
+  padding-top: 2px;
+  color: var(--muted);
+  font-size: 0.63rem;
+  font-weight: 700;
+}
+
 .link-health-table tbody tr {
   cursor: default;
 }
@@ -4669,6 +4931,18 @@ button {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
+  .competitor-status-summary {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .competitor-offer-row {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .competitor-offer-identity {
+    grid-column: 1 / -1;
+  }
+
   .competitor-date-range {
     grid-template-columns: 1fr;
     align-items: stretch;
@@ -4814,6 +5088,36 @@ button {
 
   .competitor-list-filters {
     grid-template-columns: 1fr;
+  }
+
+  .competitor-status-card {
+    padding: 14px;
+  }
+
+  .competitor-status-header,
+  .competitor-status-footer,
+  .competitor-offer-roster-heading {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .competitor-status-identity {
+    align-items: flex-start;
+  }
+
+  .competitor-status-image {
+    flex-basis: 60px;
+    width: 60px;
+    height: 60px;
+  }
+
+  .competitor-status-summary,
+  .competitor-offer-row {
+    grid-template-columns: 1fr;
+  }
+
+  .competitor-offer-identity {
+    grid-column: auto;
   }
 
   .competitor-date-range-controls {
