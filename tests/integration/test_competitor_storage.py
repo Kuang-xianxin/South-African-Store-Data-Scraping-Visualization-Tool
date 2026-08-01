@@ -257,12 +257,17 @@ def test_competitor_signals_recompute_from_oldest_and_latest_in_date_range(
         ),
     )
     observations = (
-        (datetime(2026, 7, 22, 8, tzinfo=UTC), 10, 10),
-        (datetime(2026, 7, 23, 8, tzinfo=UTC), 8, 11),
-        (datetime(2026, 7, 24, 8, tzinfo=UTC), 4, 13),
+        (datetime(2026, 7, 22, 8, tzinfo=UTC), 10, 10, 220.0),
+        (datetime(2026, 7, 23, 8, tzinfo=UTC), 8, 11, 210.0),
+        (datetime(2026, 7, 24, 8, tzinfo=UTC), 4, 13, 200.0),
     )
-    for collected_at, quantity, review_count in observations:
-        product = replace(base_product, review_count=review_count)
+    for collected_at, quantity, review_count, price in observations:
+        product = replace(
+            base_product,
+            review_count=review_count,
+            price=price,
+            variants=(replace(base_product.variants[0], price=price),),
+        )
         stock = StockProbeResult(
             quantity=quantity,
             exact=True,
@@ -308,6 +313,9 @@ def test_competitor_signals_recompute_from_oldest_and_latest_in_date_range(
     assert all_signal["趋势判断"] == "两个独立正向信号"
     assert all_signal["观察期销量信号"] == "60–150"
     assert all_signal["区间快照数"] == 3
+    assert all_signal["区间起始价格"] == 220.0
+    assert all_signal["价格变化"] == -20.0
+    assert all_signal["价格信号"] == "降价"
     assert bool(all_signal["库存可比"])
     assert all_range.available_start_date == date(2026, 7, 22)
     assert all_range.available_end_date == date(2026, 7, 24)
@@ -320,8 +328,42 @@ def test_competitor_signals_recompute_from_oldest_and_latest_in_date_range(
     assert recent_signal["新增评论"] == 2
     assert recent_signal["观察期销量信号"] == "40–100"
     assert recent_signal["区间快照数"] == 2
+    assert recent_signal["区间起始价格"] == 210.0
+    assert recent_signal["价格变化"] == -10.0
+    assert recent_signal["价格信号"] == "降价"
     assert recent_range.selected_start_date == date(2026, 7, 23)
     assert recent_range.selected_end_date == date(2026, 7, 24)
+
+
+def test_schema_upgrade_backfills_competitor_offer_groups(tmp_path: Path) -> None:
+    engine = create_engine(f"sqlite:///{(tmp_path / 'legacy-targets.db').as_posix()}")
+    with engine.begin() as connection:
+        connection.exec_driver_sql(
+            "CREATE TABLE competitor_targets ("
+            "plid VARCHAR(30) PRIMARY KEY, url TEXT NOT NULL, title TEXT NULL, "
+            "active BOOLEAN NOT NULL, created_at DATETIME NOT NULL, "
+            "updated_at DATETIME NOT NULL)"
+        )
+        connection.exec_driver_sql(
+            "INSERT INTO competitor_targets "
+            "(plid, url, title, active, created_at, updated_at) VALUES "
+            "('123', 'https://www.takealot.com/example/PLID123', NULL, 1, "
+            "'2026-08-01 00:00:00', '2026-08-01 00:00:00')"
+        )
+
+    create_schema(engine)
+
+    with engine.connect() as connection:
+        group_plid = connection.exec_driver_sql(
+            "SELECT offer_group_plid FROM competitor_targets WHERE plid = '123'"
+        ).scalar_one()
+        indexes = connection.exec_driver_sql(
+            "PRAGMA index_list('competitor_targets')"
+        ).fetchall()
+    engine.dispose()
+
+    assert group_plid == "123"
+    assert any(row[1] == "ix_competitor_targets_offer_group_plid" for row in indexes)
 
 
 def test_competitor_api_reads_the_shared_sqlite(

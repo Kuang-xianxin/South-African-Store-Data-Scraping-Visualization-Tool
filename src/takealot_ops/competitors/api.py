@@ -267,21 +267,33 @@ class CompetitorPublicClient:
             )
         selected_detail = variant_details[selected_index]
         selected_variant = variants[selected_index]
-        offer = _selected_offer(selected_detail)
-        seller = _mapping(selected_detail.get("seller_detail"))
         compact_offers: list[CompetitorOffer] = []
-        if offer:
-            compact_offers.append(_offer_record(offer, seller, selected=True))
-        other_offers = _mapping(selected_detail.get("other_offers"))
-        for condition in _mapping_list(other_offers.get("conditions")):
-            for other_offer in _mapping_list(condition.get("items")):
+        for detail_index, offer_detail in enumerate(variant_details):
+            variant_offer = _selected_offer(offer_detail)
+            variant_seller = _mapping(offer_detail.get("seller_detail"))
+            if variant_offer:
                 compact_offers.append(
                     _offer_record(
-                        other_offer,
-                        _mapping(other_offer.get("seller")),
-                        selected=False,
+                        variant_offer,
+                        variant_seller,
+                        selected=detail_index == selected_index,
+                        fallback_url=str(
+                            offer_detail.get("desktop_href")
+                            or detail.get("desktop_href")
+                            or url
+                        ),
                     )
                 )
+            other_offers = _mapping(offer_detail.get("other_offers"))
+            for condition in _mapping_list(other_offers.get("conditions")):
+                for other_offer in _mapping_list(condition.get("items")):
+                    compact_offers.append(
+                        _offer_record(
+                            other_offer,
+                            _mapping(other_offer.get("seller")),
+                            selected=False,
+                        )
+                    )
         core = _mapping(detail.get("core"))
         reviews = _mapping(detail.get("reviews"))
         image_url = _product_image_url(selected_detail)
@@ -503,8 +515,10 @@ def _offer_record(
     seller: Mapping[str, Any],
     *,
     selected: bool,
+    fallback_url: str | None = None,
 ) -> CompetitorOffer:
     stock = _mapping(offer.get("stock_availability"))
+    offer_url, offer_plid = _offer_target(offer, fallback_url=fallback_url)
     return CompetitorOffer(
         selected=selected,
         sku=str(offer.get("sku") or offer.get("product_id") or ""),
@@ -512,7 +526,50 @@ def _offer_record(
         seller_name=str(seller.get("display_name") or "未知卖家"),
         price=_number(offer.get("price")),
         stock_status=str(stock.get("status") or "未知"),
+        plid=offer_plid,
+        url=offer_url,
     )
+
+
+def _offer_target(
+    offer: Mapping[str, Any],
+    *,
+    fallback_url: str | None = None,
+) -> tuple[str | None, str | None]:
+    """Return only an explicitly identifiable Takealot target for an offer."""
+    product = _mapping(offer.get("product"))
+    candidates = [
+        offer.get("desktop_href"),
+        offer.get("href"),
+        offer.get("url"),
+        offer.get("product_url"),
+        product.get("desktop_href"),
+        product.get("href"),
+        product.get("url"),
+        product.get("product_url"),
+        offer.get("plid"),
+        offer.get("productline_id"),
+        offer.get("product_id"),
+        product.get("plid"),
+        product.get("productline_id"),
+        product.get("product_id"),
+        fallback_url,
+    ]
+    for candidate in candidates:
+        value = str(candidate or "").strip()
+        if not value:
+            continue
+        match = PLID_PATTERN.search(value)
+        if match is None:
+            continue
+        plid = match.group(1)
+        if value.casefold().startswith(("http://", "https://")):
+            hostname = (urlsplit(value).hostname or "").casefold()
+            if hostname != "takealot.com" and not hostname.endswith(".takealot.com"):
+                continue
+            return value, plid
+        return f"https://www.takealot.com/product/PLID{plid}", plid
+    return None, None
 
 
 def _selected_offer(detail: Mapping[str, Any]) -> Mapping[str, Any]:

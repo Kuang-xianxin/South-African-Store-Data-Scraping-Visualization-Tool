@@ -69,6 +69,7 @@ def create_schema(engine: Engine) -> None:
     _add_erp_user_permissions_column(engine)
     _add_erp_user_store_access_column(engine)
     _ensure_default_erp_store(engine)
+    _add_competitor_target_group_column(engine)
     _add_competitor_variant_observation_columns(engine)
     if engine.dialect.name == "sqlite":
         _add_sqlite_offer_stock_columns(engine)
@@ -181,6 +182,38 @@ def _add_competitor_variant_observation_columns(engine: Engine) -> None:
                 continue
             column = preparer.quote(column_name)
             connection.exec_driver_sql(f"ALTER TABLE {table} ADD COLUMN {column} {column_type}")
+
+
+def _add_competitor_target_group_column(engine: Engine) -> None:
+    """Group an original target and its crawlable public offer targets."""
+    with engine.begin() as connection:
+        if not inspect(connection).has_table("competitor_targets"):
+            return
+        existing = {
+            str(column["name"])
+            for column in inspect(connection).get_columns("competitor_targets")
+        }
+        preparer = connection.dialect.identifier_preparer
+        table = preparer.quote("competitor_targets")
+        group_column = preparer.quote("offer_group_plid")
+        plid_column = preparer.quote("plid")
+        if "offer_group_plid" not in existing:
+            connection.exec_driver_sql(
+                f"ALTER TABLE {table} ADD COLUMN {group_column} VARCHAR(30) NULL"
+            )
+        connection.exec_driver_sql(
+            f"UPDATE {table} SET {group_column} = {plid_column} "
+            f"WHERE {group_column} IS NULL OR {group_column} = ''"
+        )
+        existing_indexes = inspect(connection).get_indexes("competitor_targets")
+        if not any(
+            index.get("column_names") == ["offer_group_plid"]
+            for index in existing_indexes
+        ):
+            index_name = preparer.quote("ix_competitor_targets_offer_group_plid")
+            connection.exec_driver_sql(
+                f"CREATE INDEX {index_name} ON {table} ({group_column})"
+            )
 
 
 def _add_sqlite_offer_stock_columns(engine: Engine) -> None:

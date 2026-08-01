@@ -208,6 +208,7 @@ class CompetitorTarget(Base):
     __tablename__ = "competitor_targets"
 
     plid: Mapped[str] = mapped_column(String(30), primary_key=True)
+    offer_group_plid: Mapped[str | None] = mapped_column(String(30), index=True)
     url: Mapped[str] = mapped_column(Text, nullable=False)
     title: Mapped[str | None] = mapped_column(Text)
     active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)

@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import asyncio
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import pytest
@@ -31,6 +33,7 @@ from takealot_ops.competitors.domain import (
 from takealot_ops.competitors.repository import CompetitorRepository
 from takealot_ops.competitors.service import (
     CompetitorCollector,
+    _interval_price_signal,
     load_competitor_link_health,
     parse_competitor_urls,
 )
@@ -587,6 +590,31 @@ def test_sales_signal_requires_comparable_snapshots_and_labels_single_signal() -
     assert combined.period_sales_max == 50
 
 
+@pytest.mark.parametrize(
+    ("old_price", "new_price", "expected_change", "expected_label"),
+    [
+        (Decimal("200.00"), Decimal("180.00"), -20.0, "降价"),
+        (Decimal("180.00"), Decimal("200.00"), 20.0, "涨价"),
+        (Decimal("200.00"), Decimal("200.00"), 0.0, "价格不变"),
+        (None, Decimal("200.00"), None, "价格不可比"),
+    ],
+)
+def test_interval_price_signal_labels_selected_range_endpoints(
+    old_price: Decimal | None,
+    new_price: Decimal | None,
+    expected_change: float | None,
+    expected_label: str,
+) -> None:
+    oldest = SimpleNamespace(id=1, price=old_price)
+    latest = SimpleNamespace(id=2, price=new_price)
+
+    start, change, label = _interval_price_signal(oldest, latest)
+
+    assert start == (float(old_price) if old_price is not None else None)
+    assert change == expected_change
+    assert label == expected_label
+
+
 async def test_public_client_parses_product_offers_and_all_review_pages() -> None:
     canned: dict[str, dict[str, object]] = {
         "https://api.takealot.com/rest/v-1-10-0/product-details/PLID123": {
@@ -619,6 +647,9 @@ async def test_public_client_parses_product_offers_and_all_review_pages() -> Non
                             {
                                 "sku": "SKU-2",
                                 "price": 205,
+                                "product": {
+                                    "desktop_href": "https://www.takealot.com/other/PLID456"
+                                },
                                 "seller": {
                                     "seller_id": "seller-2",
                                     "display_name": "Seller Two",
@@ -675,6 +706,10 @@ async def test_public_client_parses_product_offers_and_all_review_pages() -> Non
     assert product.is_leadtime is True
     assert product.stock_status == "没货（非平台仓/供应商调货）"
     assert len(product.offers) == 2
+    assert product.offers[0].plid == "123"
+    assert product.offers[0].url == "https://www.takealot.com/example/PLID123"
+    assert product.offers[1].plid == "456"
+    assert product.offers[1].url == "https://www.takealot.com/other/PLID456"
     assert len(product.variants) == 1
     assert product.variants[0].label == "默认款"
     assert product.image_url == "https://img/zoom.jpg"

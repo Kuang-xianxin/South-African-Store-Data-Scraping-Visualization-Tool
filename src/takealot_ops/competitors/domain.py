@@ -21,6 +21,8 @@ class CompetitorOffer:
     seller_name: str
     price: float
     stock_status: str
+    plid: str | None = None
+    url: str | None = None
 
 
 @dataclass(frozen=True)

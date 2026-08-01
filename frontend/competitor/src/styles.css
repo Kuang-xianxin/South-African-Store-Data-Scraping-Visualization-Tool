@@ -202,13 +202,60 @@ h2 {
   margin-top: 14px;
 }
 
+.target-group {
+  overflow: hidden;
+  border: 1px solid rgba(24, 37, 31, 0.11);
+  border-radius: 14px;
+  background: #fff;
+}
+
+.target-group-toggle {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  padding: 14px 16px;
+  border: 0;
+  background: #f7faf5;
+  color: var(--ink);
+  cursor: pointer;
+  text-align: left;
+}
+
+.target-group-toggle > span:first-child {
+  display: grid;
+  min-width: 0;
+  gap: 4px;
+}
+
+.target-group-toggle strong,
+.target-group-toggle small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.target-group-toggle small,
+.target-group-toggle > span:last-child {
+  color: var(--muted);
+  font-size: 0.72rem;
+}
+
+.target-group-members {
+  display: grid;
+  gap: 8px;
+  padding: 8px;
+  border-top: 1px solid rgba(24, 37, 31, 0.08);
+}
+
 .target-row {
   display: grid;
   grid-template-columns: minmax(150px, 0.7fr) minmax(260px, 2fr) auto;
   align-items: center;
   gap: 14px;
   padding: 12px 14px;
-  border: 1px solid rgba(24, 37, 31, 0.09);
+  border: 1px solid rgba(24, 37, 31, 0.08);
   border-radius: 12px;
   background: #fff;
 }
@@ -1817,6 +1864,48 @@ td small {
 
 .variant-table td:last-child {
   min-width: 260px;
+}
+
+.signal-labels {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.price-signal {
+  display: block;
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 0.7rem;
+  font-weight: 700;
+}
+
+.signal-label.price-signal {
+  display: inline-block;
+  margin-top: 0;
+  padding: 2px 7px;
+  border-radius: 999px;
+  background: rgba(75, 92, 83, 0.08);
+}
+
+.price-signal.price-down {
+  color: #16724d;
+}
+
+.signal-label.price-signal.price-down {
+  background: rgba(22, 114, 77, 0.12);
+}
+
+.price-signal.price-up {
+  color: #b24b38;
+}
+
+.signal-label.price-signal.price-up {
+  background: rgba(178, 75, 56, 0.12);
+}
+
+.price-signal.price-flat {
+  color: #6f6654;
 }
 
 .purchase-limit-note {
@@ -4654,6 +4743,10 @@ button {
 
   .target-list-toolbar > span {
     flex-basis: 100%;
+  }
+
+  .target-group-toggle {
+    align-items: flex-start;
   }
 
   .target-audit-filters label {

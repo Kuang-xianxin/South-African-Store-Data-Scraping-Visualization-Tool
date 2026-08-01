@@ -10,6 +10,7 @@ import time
 from collections import defaultdict
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
+from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from threading import Lock
@@ -49,6 +50,7 @@ from takealot_ops.competitors.service import (
     CompetitorCollectionResult,
     CompetitorCollector,
     CompetitorDataset,
+    CompetitorDiscoveredTarget,
     load_competitor_dataset,
     load_competitor_link_health,
 )
@@ -1293,6 +1295,7 @@ def create_app(project_root: Path | None = None) -> FastAPI:
                 if target is None:
                     target = CompetitorTarget(
                         plid=plid,
+                        offer_group_plid=plid,
                         url=url,
                         title=None,
                         active=True,
@@ -1301,6 +1304,8 @@ def create_app(project_root: Path | None = None) -> FastAPI:
                     )
                     session.add(target)
                 else:
+                    if not target.offer_group_plid:
+                        target.offer_group_plid = target.plid
                     target.url = url
                     target.active = True
                     target.updated_at = now
@@ -1639,6 +1644,35 @@ def create_app(project_root: Path | None = None) -> FastAPI:
                                 with_stock_probe=payload.with_stock_probe,
                                 visible_browser=payload.visible_browser,
                             )
+                        added_targets = _sync_discovered_competitor_targets(
+                            engine,
+                            origin_plid=plid,
+                            discovered_targets=result.discovered_targets,
+                            user=user,
+                        )
+                        queued_target_count = sum(
+                            collection_registry.enqueue_target(
+                                plid=target.plid,
+                                url=target.url,
+                            )
+                            for target in added_targets
+                        )
+                        if added_targets:
+                            addition_note = (
+                                f"另发现并加入 {len(added_targets)} 条跟卖链接"
+                            )
+                            result = replace(
+                                result,
+                                message=f"{result.message}；{addition_note}",
+                                added_target_count=len(added_targets),
+                            )
+                            competitor_logger.info(
+                                "offer_targets_discovered origin_plid=%s added=%s queued=%s user=%s",
+                                plid,
+                                len(added_targets),
+                                queued_target_count,
+                                user.username,
+                            )
                         if result.failure_kind in {"network", "other"}:
                             public_client_lease.invalidate()
                 except CompetitorNetworkError as exc:
@@ -1722,6 +1756,7 @@ def create_app(project_root: Path | None = None) -> FastAPI:
             "plid": result.plid,
             "title": result.title,
             "message": result.message,
+            "added_target_count": result.added_target_count,
         }
 
     @app.post("/api/competitors/batch-events")
@@ -1824,12 +1859,106 @@ def _competitor_target_payload(
 ) -> dict[str, object]:
     return {
         "plid": target.plid,
+        "offer_group_plid": target.offer_group_plid or target.plid,
         "url": target.url,
         "title": target.title,
         "created_at": target.created_at.isoformat(),
         "updated_at": target.updated_at.isoformat(),
         "has_history": has_history,
     }
+
+
+def _sync_discovered_competitor_targets(
+    engine: Engine,
+    *,
+    origin_plid: str,
+    discovered_targets: tuple[CompetitorDiscoveredTarget, ...],
+    user: UserIdentity,
+) -> tuple[CompetitorDiscoveredTarget, ...]:
+    """Persist only new/reactivated crawlable offers and merge their target groups."""
+    if not discovered_targets:
+        return ()
+    unique_targets = {target.plid: target for target in discovered_targets}
+    origin = unique_targets.get(origin_plid)
+    if origin is None:
+        return ()
+    now = datetime.now(UTC)
+    added: list[CompetitorDiscoveredTarget] = []
+    with Session(engine) as session:
+        origin_row = session.get(CompetitorTarget, origin_plid)
+        if origin_row is None:
+            origin_row = CompetitorTarget(
+                plid=origin.plid,
+                offer_group_plid=origin.plid,
+                url=origin.url,
+                title=origin.title,
+                active=True,
+                created_at=now,
+                updated_at=now,
+            )
+            session.add(origin_row)
+            session.flush()
+        group_plid = origin_row.offer_group_plid or origin_row.plid
+        origin_row.offer_group_plid = group_plid
+
+        existing_rows = {
+            target_plid: session.get(CompetitorTarget, target_plid)
+            for target_plid in unique_targets
+        }
+        merged_group_ids = {
+            row.offer_group_plid or row.plid
+            for row in existing_rows.values()
+            if row is not None
+        }
+        if merged_group_ids:
+            for group_member in session.scalars(
+                select(CompetitorTarget).where(
+                    CompetitorTarget.offer_group_plid.in_(merged_group_ids)
+                )
+            ):
+                group_member.offer_group_plid = group_plid
+
+        for target_plid, discovered in unique_targets.items():
+            target_row = existing_rows.get(target_plid)
+            added_now = False
+            if target_row is None:
+                target_row = CompetitorTarget(
+                    plid=target_plid,
+                    offer_group_plid=group_plid,
+                    url=discovered.url,
+                    title=discovered.title,
+                    active=True,
+                    created_at=now,
+                    updated_at=now,
+                )
+                session.add(target_row)
+                if target_plid != origin_plid:
+                    added.append(discovered)
+                    added_now = True
+            else:
+                target_row.offer_group_plid = group_plid
+                if not target_row.title:
+                    target_row.title = discovered.title
+                if not target_row.active:
+                    target_row.url = discovered.url
+                    target_row.active = True
+                    target_row.updated_at = now
+                    if target_plid != origin_plid:
+                        added.append(discovered)
+                        added_now = True
+            if added_now:
+                session.add(
+                    _competitor_target_audit(
+                        plid=target_plid,
+                        action="auto_discover",
+                        old_url=None,
+                        new_url=discovered.url,
+                        user=user,
+                        changed_at=now,
+                    )
+                )
+        session.commit()
+    return tuple(added)
 
 
 def _target_has_history(session: Session, plid: str) -> bool:

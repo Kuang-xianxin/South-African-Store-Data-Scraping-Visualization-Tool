@@ -12,7 +12,10 @@ from sqlalchemy.orm import Session
 
 from takealot_ops.competitors.api import CompetitorNetworkError
 from takealot_ops.competitors.batch import CollectionBatchBusyError
-from takealot_ops.competitors.service import CompetitorCollectionResult
+from takealot_ops.competitors.service import (
+    CompetitorCollectionResult,
+    CompetitorDiscoveredTarget,
+)
 from takealot_ops.erp.daily_report import capture_daily_report
 from takealot_ops.erp.web import create_app
 from takealot_ops.storage.models import CompetitorSnapshot, ErpSession, OfferCurrent
@@ -1122,6 +1125,112 @@ def test_only_kxx_controls_batch_while_other_admin_can_add_and_prioritize(
         )
         assert completed.status_code == 200
         assert completed.json()["status"]["active"] is False
+
+
+def test_collect_auto_adds_and_groups_new_offer_targets_once(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    origin_url = "https://www.takealot.com/example/PLID12345678"
+    offer_url = "https://www.takealot.com/example-offer/PLID87654321"
+
+    class OfferCollector:
+        def __init__(self, **_: object) -> None:
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_: object) -> None:
+            pass
+
+        async def collect(self, *_: object, **__: object) -> CompetitorCollectionResult:
+            return CompetitorCollectionResult(
+                plid="12345678",
+                title="Grouped product",
+                succeeded=True,
+                message="采集成功",
+                discovered_targets=(
+                    CompetitorDiscoveredTarget(
+                        plid="12345678",
+                        url=origin_url,
+                        title="Grouped product",
+                        seller_name="Seller One",
+                        price=100.0,
+                        selected=True,
+                    ),
+                    CompetitorDiscoveredTarget(
+                        plid="87654321",
+                        url=offer_url,
+                        title="Grouped product",
+                        seller_name="Seller Two",
+                        price=110.0,
+                        selected=False,
+                    ),
+                ),
+            )
+
+    database_path = tmp_path / "offer-targets.db"
+    monkeypatch.setenv(
+        "TAKEALOT_DATABASE_URL",
+        f"sqlite:///{database_path.as_posix()}",
+    )
+    monkeypatch.setattr("takealot_ops.erp.web.CompetitorCollector", OfferCollector)
+    app = create_app(tmp_path)
+
+    with TestClient(app, client=("127.0.0.1", 50000)) as client:
+        session = _bootstrap(client)
+        headers = {"X-CSRF-Token": str(session["csrf_token"])}
+        started = client.post(
+            "/api/competitors/batch-events",
+            headers=headers,
+            json={
+                "batch_id": "offer-batch",
+                "client_id": "offer-client",
+                "event": "start",
+                "completed": 0,
+                "total": 1,
+                "pending": 1,
+            },
+        )
+        assert started.status_code == 200
+        first = client.post(
+            "/api/competitors/collect",
+            headers=headers,
+            json={
+                "url": origin_url,
+                "batch_id": "offer-batch",
+                "client_id": "offer-client",
+                "request_id": "offer-request-1",
+                "item_index": 0,
+                "total_items": 1,
+            },
+        )
+        second = client.post(
+            "/api/competitors/collect",
+            headers=headers,
+            json={
+                "url": origin_url,
+                "batch_id": "offer-batch",
+                "client_id": "offer-client",
+                "request_id": "offer-request-2",
+                "item_index": 0,
+                "total_items": 2,
+            },
+        )
+
+        assert first.status_code == 200
+        assert first.json()["added_target_count"] == 1
+        assert "加入 1 条跟卖链接" in first.json()["message"]
+        assert second.status_code == 200
+        assert second.json()["added_target_count"] == 0
+        listed = client.get("/api/competitors/targets").json()["items"]
+        assert {item["plid"] for item in listed} == {"12345678", "87654321"}
+        assert {item["offer_group_plid"] for item in listed} == {"12345678"}
+        queued = client.get("/api/competitors/batch-status").json()["queued_targets"]
+        assert [item["plid"] for item in queued] == ["87654321"]
+        audits = client.get("/api/competitors/target-audits").json()["items"]
+        assert [item["action"] for item in audits] == ["auto_discover"]
 
 
 def test_competitor_target_crud_audit_and_active_batch_head(

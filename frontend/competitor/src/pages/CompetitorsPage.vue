@@ -53,6 +53,11 @@ interface CollectionErrorItem {
   message: string;
 }
 
+interface CompetitorTargetGroup {
+  groupPlid: string;
+  members: CompetitorTargetItem[];
+}
+
 interface CollectionCheckpoint {
   version: 1 | 2 | 3 | 4 | 5 | 6 | 7;
   rawUrls: string;
@@ -92,6 +97,7 @@ const targetPage = ref(1);
 const targetPageSize = ref(20);
 const targetPageSizeOptions = [20, 50, 100] as const;
 const targetListOpen = ref(false);
+const expandedTargetGroupPlids = ref<Set<string>>(new Set());
 const targetListTrigger = ref<HTMLButtonElement | null>(null);
 const targetActionOpen = ref(false);
 const targetActionPlid = ref("");
@@ -204,6 +210,9 @@ const failedCompetitorImages = ref<Set<string>>(new Set());
 const selected = computed(
   () => competitors.value.find((item) => item.plid === selectedPlid.value) ?? null,
 );
+const competitorsByPlid = computed(
+  () => new Map(competitors.value.map((item) => [item.plid, item])),
+);
 const selectedTarget = computed(
   () => targets.value.find((target) => target.plid === selectedPlid.value) ?? null,
 );
@@ -216,21 +225,36 @@ const targetsWithHistoryCount = computed(
 const targetsPendingFirstCaptureCount = computed(
   () => targets.value.length - targetsWithHistoryCount.value,
 );
-const filteredTargets = computed(() => {
+const targetGroups = computed<CompetitorTargetGroup[]>(() => {
+  const groups = new Map<string, CompetitorTargetItem[]>();
+  for (const target of targets.value) {
+    const groupPlid = target.offer_group_plid || target.plid;
+    const members = groups.get(groupPlid) ?? [];
+    members.push(target);
+    groups.set(groupPlid, members);
+  }
+  return [...groups.entries()].map(([groupPlid, members]) => ({
+    groupPlid,
+    members,
+  }));
+});
+const filteredTargetGroups = computed(() => {
   const query = competitorSearchTerm(targetQuery.value);
-  if (!query) return targets.value;
-  return targets.value.filter((target) =>
-    [target.plid, target.title ?? "", target.url].some((value) =>
-      value.toLocaleLowerCase().includes(query),
+  if (!query) return targetGroups.value;
+  return targetGroups.value.filter((group) =>
+    group.members.some((target) =>
+      [target.plid, target.title ?? "", target.url].some((value) =>
+        value.toLocaleLowerCase().includes(query),
+      ),
     ),
   );
 });
 const targetPageCount = computed(() =>
-  Math.max(1, Math.ceil(filteredTargets.value.length / targetPageSize.value)),
+  Math.max(1, Math.ceil(filteredTargetGroups.value.length / targetPageSize.value)),
 );
-const pagedTargets = computed(() => {
+const pagedTargetGroups = computed(() => {
   const start = (targetPage.value - 1) * targetPageSize.value;
-  return filteredTargets.value.slice(start, start + targetPageSize.value);
+  return filteredTargetGroups.value.slice(start, start + targetPageSize.value);
 });
 const targetAuditPageCount = computed(() =>
   Math.max(1, Math.ceil(targetAuditTotal.value / targetAuditPageSize)),
@@ -272,7 +296,11 @@ const targetActionIsManualRetry = computed(
   () => targetActionSource.value === "manual_retry",
 );
 const competitorSignalOptions = computed(() =>
-  [...new Set(competitors.value.map((item) => item.趋势判断).filter(Boolean))].sort(
+  [
+    ...new Set(
+      competitors.value.flatMap((item) => [item.趋势判断, item.价格信号]).filter(Boolean),
+    ),
+  ].sort(
     (first, second) => first.localeCompare(second, "zh-CN"),
   ),
 );
@@ -287,6 +315,7 @@ const filteredCompetitors = computed(() => {
         item.当前卖家 ?? "",
         item.库存上限,
         item.趋势判断,
+        item.价格信号,
       ].some((value) => value.toLocaleLowerCase().includes(query))
     ) {
       return false;
@@ -300,6 +329,7 @@ const filteredCompetitors = computed(() => {
     return (
       competitorSignalFilter.value === "全部"
       || item.趋势判断 === competitorSignalFilter.value
+      || item.价格信号 === competitorSignalFilter.value
     );
   });
 });
@@ -1332,6 +1362,7 @@ function targetAuditActionLabel(action: CompetitorTargetAuditItem["action"]) {
     update: "修改",
     delete: "删除",
     manual_retry: "人工重试",
+    auto_discover: "自动发现跟卖",
   }[action];
 }
 
@@ -1865,6 +1896,12 @@ async function runCollection(
             ...collectionResults.value.filter((item) => item.plid !== result.plid),
             resultWithUrl,
           ];
+          if ((result.added_target_count ?? 0) > 0) {
+            await loadTargets();
+            showCollectionActivityNotice(
+              `PLID${result.plid} 自动发现并加入 ${result.added_target_count} 条跟卖链接；已合并到同一下拉组。`,
+            );
+          }
           markFailed(index, false);
           markTerminal(index, false);
           markStockUnprobed(index, false);
@@ -1997,7 +2034,7 @@ async function runCollection(
       applyPriorityTargetsToRunQueue(queue, cursor, knownIndexes);
       if (cursor >= queue.length) break;
     }
-    await loadOverview();
+    await Promise.all([loadOverview(), loadTargets()]);
   } finally {
     if (batchLeaseConflict) {
       await loadSharedBatchStatus();
@@ -2042,6 +2079,50 @@ function formatCurrency(value: number | null) {
         currency: "ZAR",
         maximumFractionDigits: 2,
       }).format(value);
+}
+
+function formatSignedCurrency(value: number | null) {
+  if (value === null) return "—";
+  return `${value > 0 ? "+" : ""}${formatCurrency(value)}`;
+}
+
+function priceSignalClass(signal: string) {
+  return {
+    "price-down": signal === "降价",
+    "price-up": signal === "涨价",
+    "price-flat": signal === "价格不变",
+  };
+}
+
+function targetSnapshot(target: CompetitorTargetItem) {
+  return competitorsByPlid.value.get(target.plid) ?? null;
+}
+
+function targetGroupTitle(group: CompetitorTargetGroup) {
+  const primary =
+    group.members.find((target) => target.plid === group.groupPlid)
+    ?? group.members[0];
+  return primary?.title || `PLID${primary?.plid ?? group.groupPlid}`;
+}
+
+function targetGroupPriceSummary(group: CompetitorTargetGroup) {
+  const prices = group.members
+    .map((target) => targetSnapshot(target)?.价格 ?? null)
+    .filter((price): price is number => price !== null)
+    .sort((first, second) => first - second);
+  if (!prices.length) return "价格待采集";
+  const lowest = prices[0]!;
+  const highest = prices[prices.length - 1]!;
+  return lowest === highest
+    ? formatCurrency(lowest)
+    : `${formatCurrency(lowest)} – ${formatCurrency(highest)}`;
+}
+
+function toggleTargetGroup(groupPlid: string) {
+  const next = new Set(expandedTargetGroupPlids.value);
+  if (next.has(groupPlid)) next.delete(groupPlid);
+  else next.add(groupPlid);
+  expandedTargetGroupPlids.value = next;
 }
 
 function reviewTone(stars: number) {
@@ -2137,7 +2218,7 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
             <span>
               <strong>监控链接汇总</strong>
               <small>
-                共 {{ targets.length }} 条 · 已有历史 {{ targetsWithHistoryCount }} 条 ·
+                共 {{ targetGroups.length }} 组、{{ targets.length }} 条链接 · 已有历史 {{ targetsWithHistoryCount }} 条 ·
                 待首次采集 {{ targetsPendingFirstCaptureCount }} 条
               </small>
             </span>
@@ -2161,7 +2242,7 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
                   <p class="section-kicker">MONITORING LINKS</p>
                   <h2 id="target-list-modal-title">管理监控链接</h2>
                   <span>
-                    共 {{ targets.length }} 条 · 已有历史
+                    共 {{ targetGroups.length }} 组、{{ targets.length }} 条链接 · 已有历史
                     {{ targetsWithHistoryCount }} 条 · 待首次采集
                     {{ targetsPendingFirstCaptureCount }} 条
                   </span>
@@ -2193,105 +2274,130 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
                         :key="size"
                         :value="size"
                       >
-                        {{ size }} 条
+                        {{ size }} 组
                       </option>
                     </select>
                   </label>
                   <span>
-                    显示 {{ filteredTargets.length }} 条，每页
-                    {{ targetPageSize }} 条
+                    显示 {{ filteredTargetGroups.length }} 组、{{ targets.length }} 条链接，
+                    每页 {{ targetPageSize }} 组
                   </span>
                 </div>
-                <div v-if="pagedTargets.length" class="target-list">
-                  <article
-                    v-for="target in pagedTargets"
-                    :key="target.plid"
-                    class="target-row"
+                <div v-if="pagedTargetGroups.length" class="target-list">
+                  <section
+                    v-for="group in pagedTargetGroups"
+                    :key="group.groupPlid"
+                    class="target-group"
                   >
-                    <div class="target-identity">
-                      <strong>{{ target.title || `PLID${target.plid}` }}</strong>
-                      <span>PLID{{ target.plid }}</span>
+                    <button
+                      class="target-group-toggle"
+                      type="button"
+                      :aria-expanded="expandedTargetGroupPlids.has(group.groupPlid)"
+                      @click="toggleTargetGroup(group.groupPlid)"
+                    >
+                      <span>
+                        <strong>{{ targetGroupTitle(group) }}</strong>
+                        <small>
+                          原链接和跟卖链接共 {{ group.members.length }} 条 ·
+                          {{ targetGroupPriceSummary(group) }}
+                        </small>
+                      </span>
+                      <span aria-hidden="true">
+                        {{ expandedTargetGroupPlids.has(group.groupPlid) ? "收起" : "展开" }}
+                        {{ expandedTargetGroupPlids.has(group.groupPlid) ? "▴" : "▾" }}
+                      </span>
+                    </button>
+                    <div
+                      v-if="expandedTargetGroupPlids.has(group.groupPlid)"
+                      class="target-group-members"
+                    >
+                      <article
+                        v-for="target in group.members"
+                        :key="target.plid"
+                        class="target-row"
+                      >
+                        <div class="target-identity">
+                          <strong>PLID{{ target.plid }}</strong>
+                          <span v-if="targetSnapshot(target)">
+                            {{ targetSnapshot(target)?.当前卖家 || "未知卖家" }} ·
+                            {{ formatCurrency(targetSnapshot(target)?.价格 ?? null) }}
+                          </span>
+                          <span v-else>待首次采集价格</span>
+                        </div>
+                        <template v-if="editingTargetPlid === target.plid">
+                          <input
+                            v-model="editingTargetUrl"
+                            class="target-edit-input"
+                            type="url"
+                            :aria-label="`修改 PLID${target.plid} 链接`"
+                            :disabled="targetManagerBusy === target.plid"
+                          />
+                          <div class="target-row-actions">
+                            <button
+                              class="secondary-button"
+                              type="button"
+                              :disabled="targetManagerBusy === target.plid"
+                              @click="saveTargetEdit(target.plid)"
+                            >保存</button>
+                            <button
+                              class="secondary-button"
+                              type="button"
+                              :disabled="targetManagerBusy === target.plid"
+                              @click="cancelEditTarget"
+                            >取消</button>
+                          </div>
+                        </template>
+                        <template v-else>
+                          <a :href="target.url" target="_blank" rel="noreferrer">
+                            {{ target.url }}
+                          </a>
+                          <div class="target-row-actions">
+                            <button
+                              class="secondary-button priority"
+                              type="button"
+                              :disabled="
+                                Boolean(targetManagerBusy)
+                                || !props.canOperate
+                                || !sharedBatchStatus.active
+                                || sharedBatchStatus.current_plid === target.plid
+                                || prioritizedTargetStates.has(target.plid)
+                              "
+                              :title="
+                                prioritizedTargetStates.has(target.plid)
+                                  ? targetPriorityLabel(target.plid)
+                                  : sharedBatchStatus.active
+                                    ? '额外插到当前商品之后，原队列位置继续保留'
+                                    : '当前没有运行中的竞品批次'
+                              "
+                              @click="prioritizeTarget(target)"
+                            >
+                              {{
+                                targetManagerBusy === `priority:${target.plid}`
+                                  ? "插队中…"
+                                  : targetPriorityLabel(target.plid)
+                              }}
+                            </button>
+                            <button
+                              class="secondary-button"
+                              type="button"
+                              :disabled="Boolean(targetManagerBusy) || !props.canOperate"
+                              @click="beginEditTarget(target)"
+                            >修改</button>
+                            <button
+                              class="secondary-button danger"
+                              type="button"
+                              :disabled="Boolean(targetManagerBusy) || !props.canOperate"
+                              @click="removeTarget(target)"
+                            >删除</button>
+                          </div>
+                        </template>
+                      </article>
                     </div>
-                    <template v-if="editingTargetPlid === target.plid">
-                      <input
-                        v-model="editingTargetUrl"
-                        class="target-edit-input"
-                        type="url"
-                        :aria-label="`修改 PLID${target.plid} 链接`"
-                        :disabled="targetManagerBusy === target.plid"
-                      />
-                      <div class="target-row-actions">
-                        <button
-                          class="secondary-button"
-                          type="button"
-                          :disabled="targetManagerBusy === target.plid"
-                          @click="saveTargetEdit(target.plid)"
-                        >
-                          保存
-                        </button>
-                        <button
-                          class="secondary-button"
-                          type="button"
-                          :disabled="targetManagerBusy === target.plid"
-                          @click="cancelEditTarget"
-                        >
-                          取消
-                        </button>
-                      </div>
-                    </template>
-                    <template v-else>
-                      <a :href="target.url" target="_blank" rel="noreferrer">
-                        {{ target.url }}
-                      </a>
-                      <div class="target-row-actions">
-                        <button
-                          class="secondary-button priority"
-                          type="button"
-                          :disabled="
-                            Boolean(targetManagerBusy)
-                            || !props.canOperate
-                            || !sharedBatchStatus.active
-                            || sharedBatchStatus.current_plid === target.plid
-                            || prioritizedTargetStates.has(target.plid)
-                          "
-                          :title="
-                            prioritizedTargetStates.has(target.plid)
-                              ? targetPriorityLabel(target.plid)
-                              : sharedBatchStatus.active
-                                ? '额外插到当前商品之后，原队列位置继续保留'
-                                : '当前没有运行中的竞品批次'
-                          "
-                          @click="prioritizeTarget(target)"
-                        >
-                          {{
-                            targetManagerBusy === `priority:${target.plid}`
-                              ? "插队中…"
-                              : targetPriorityLabel(target.plid)
-                          }}
-                        </button>
-                        <button
-                          class="secondary-button"
-                          type="button"
-                          :disabled="Boolean(targetManagerBusy) || !props.canOperate"
-                          @click="beginEditTarget(target)"
-                        >
-                          修改
-                        </button>
-                        <button
-                          class="secondary-button danger"
-                          type="button"
-                          :disabled="Boolean(targetManagerBusy) || !props.canOperate"
-                          @click="removeTarget(target)"
-                        >
-                          删除
-                        </button>
-                      </div>
-                    </template>
-                  </article>
+                  </section>
                 </div>
                 <p v-else class="target-empty">没有匹配的监控链接。</p>
                 <div
-                  v-if="filteredTargets.length > targetPageSize"
+                  v-if="filteredTargetGroups.length > targetPageSize"
                   class="compact-pagination"
                 >
                   <button
@@ -3105,8 +3211,8 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
           </div>
         </div>
         <p class="method-note">
-          日期按北京时间自然日筛选。每个商品使用区间内最旧快照和最新快照重算库存净变化、
-          新增评论与经营信号；只有首尾变体键、SKU、卖家集合一致且库存均为精确值时才比较库存。
+          日期按北京时间自然日筛选。每个商品使用区间内最旧快照和最新快照重算价格涨跌、
+          库存净变化、新增评论与经营信号；只有首尾变体键、SKU、卖家集合一致且库存均为精确值时才比较库存。
         </p>
         <div v-if="!filteredCompetitors.length" class="empty-state competitor-filter-empty">
           <strong>没有符合条件的竞品</strong>
@@ -3160,7 +3266,18 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
                     </div>
                   </div>
                 </td>
-                <td>{{ formatCurrency(item.价格) }}</td>
+                <td>
+                  <strong>{{ formatCurrency(item.价格) }}</strong>
+                  <small
+                    class="price-signal"
+                    :class="priceSignalClass(item.价格信号)"
+                  >
+                    {{ item.价格信号 }}
+                    <template v-if="item.价格变化 !== null">
+                      · {{ formatSignedCurrency(item.价格变化) }}
+                    </template>
+                  </small>
+                </td>
                 <td>
                   <span
                     class="stock-pill"
@@ -3178,7 +3295,13 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
                 </td>
                 <td>{{ item.评论数 }} 条 · {{ item.评分 ?? "—" }}</td>
                 <td>
-                  <span class="signal-label">{{ item.趋势判断 }}</span>
+                  <div class="signal-labels">
+                    <span class="signal-label">{{ item.趋势判断 }}</span>
+                    <span
+                      class="signal-label price-signal"
+                      :class="priceSignalClass(item.价格信号)"
+                    >{{ item.价格信号 }}</span>
+                  </div>
                   <small>{{ item.观察期销量信号 }}</small>
                 </td>
               </tr>
@@ -3265,6 +3388,12 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
               <article>
                 <small>当前价格</small>
                 <strong>{{ formatCurrency(selected.价格) }}</strong>
+                <span>
+                  {{ selected.价格信号 }}
+                  <template v-if="selected.价格变化 !== null">
+                    · {{ formatSignedCurrency(selected.价格变化) }}
+                  </template>
+                </span>
               </article>
               <article>
                 <small>平台仓库存</small>
@@ -3403,7 +3532,7 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
               <section class="detail-grid modal-detail-grid">
                 <article class="panel decision-card">
                   <p class="section-kicker">OPERATING SIGNAL</p>
-                  <h2>{{ selected.趋势判断 }}</h2>
+                  <h2>{{ selected.趋势判断 }} · {{ selected.价格信号 }}</h2>
                   <p>{{ selected.判断说明 }}</p>
                   <p class="method-note">
                     实际比较：
@@ -3441,6 +3570,16 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
                     <span>
                       <small>观察期估算</small>
                       <strong>{{ selected.观察期销量信号 }}</strong>
+                    </span>
+                    <span>
+                      <small>区间价格变化</small>
+                      <strong>
+                        {{ formatCurrency(selected.区间起始价格) }} →
+                        {{ formatCurrency(selected.价格) }}
+                        <template v-if="selected.价格变化 !== null">
+                          （{{ formatSignedCurrency(selected.价格变化) }}）
+                        </template>
+                      </strong>
                     </span>
                   </div>
                   <a :href="selected.链接" target="_blank" rel="noreferrer">

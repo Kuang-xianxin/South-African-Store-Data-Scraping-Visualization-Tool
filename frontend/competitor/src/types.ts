@@ -6,6 +6,9 @@ export interface CompetitorItem {
   采集时间: string;
   当前卖家: string | null;
   价格: number | null;
+  区间起始价格: number | null;
+  价格变化: number | null;
+  价格信号: string;
   库存上限: string;
   库存数量: number | null;
   库存精确: boolean;
@@ -50,6 +53,7 @@ export interface CompetitorOverview {
 
 export interface CompetitorTargetItem {
   plid: string;
+  offer_group_plid: string;
   url: string;
   title: string | null;
   created_at: string;
@@ -60,7 +64,7 @@ export interface CompetitorTargetItem {
 export interface CompetitorTargetAuditItem {
   id: number;
   plid: string;
-  action: "add" | "update" | "delete" | "manual_retry";
+  action: "add" | "update" | "delete" | "manual_retry" | "auto_discover";
   old_url: string | null;
   new_url: string | null;
   actor_username: string;
@@ -116,6 +120,7 @@ export interface CollectResult {
   title: string;
   message: string;
   url?: string;
+  added_target_count?: number;
 }
 
 export interface CompetitorLinkHealthItem {

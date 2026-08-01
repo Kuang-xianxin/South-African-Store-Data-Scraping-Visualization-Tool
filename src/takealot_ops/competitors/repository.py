@@ -220,6 +220,7 @@ class CompetitorRepository:
         if target is None:
             target = CompetitorTarget(
                 plid=product.plid,
+                offer_group_plid=product.plid,
                 url=product.url,
                 title=product.title,
                 active=True,
@@ -228,6 +229,8 @@ class CompetitorRepository:
             )
             self._session.add(target)
         else:
+            if not target.offer_group_plid:
+                target.offer_group_plid = target.plid
             target.url = product.url
             target.title = product.title
             target.active = True
@@ -276,6 +279,8 @@ class CompetitorRepository:
                     "seller_name": offer.seller_name,
                     "price": offer.price,
                     "stock_status": offer.stock_status,
+                    "plid": offer.plid,
+                    "url": offer.url,
                 }
                 for offer in product.offers
             ],

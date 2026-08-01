@@ -59,6 +59,20 @@ class CompetitorCollectionResult:
     message: str
     retryable: bool = False
     failure_kind: str | None = None
+    discovered_targets: tuple[CompetitorDiscoveredTarget, ...] = ()
+    added_target_count: int = 0
+
+
+@dataclass(frozen=True)
+class CompetitorDiscoveredTarget:
+    """One crawlable public offer target found while collecting a product."""
+
+    plid: str
+    url: str
+    title: str
+    seller_name: str | None
+    price: float | None
+    selected: bool
 
 
 @dataclass(frozen=True)
@@ -94,6 +108,36 @@ class CompetitorDataset:
                 self.selected_end_date.isoformat() if self.selected_end_date is not None else None
             ),
         }
+
+
+def _discovered_offer_targets(
+    product: CompetitorProduct,
+    *,
+    submitted_url: str,
+) -> tuple[CompetitorDiscoveredTarget, ...]:
+    """Keep the submitted product plus every offer with an explicit public target."""
+    targets: dict[str, CompetitorDiscoveredTarget] = {
+        product.plid: CompetitorDiscoveredTarget(
+            plid=product.plid,
+            url=product.url or submitted_url,
+            title=product.title,
+            seller_name=product.seller_name or None,
+            price=product.price,
+            selected=True,
+        )
+    }
+    for offer in product.offers:
+        if not offer.plid or not offer.url or offer.plid in targets:
+            continue
+        targets[offer.plid] = CompetitorDiscoveredTarget(
+            plid=offer.plid,
+            url=offer.url,
+            title=product.title,
+            seller_name=offer.seller_name or None,
+            price=offer.price,
+            selected=offer.selected,
+        )
+    return tuple(targets.values())
 
 
 class CompetitorCollector:
@@ -144,6 +188,7 @@ class CompetitorCollector:
         try:
             self._report_stage("正在读取商品与变体")
             product = await self._client.fetch_product(url)
+            discovered_targets = _discovered_offer_targets(product, submitted_url=url)
             self._report_stage("正在读取全部评论")
             reviews = await self._client.fetch_all_reviews(product.plid)
             self._report_stage(
@@ -198,12 +243,14 @@ class CompetitorCollector:
                     ),
                     retryable=True,
                     failure_kind="stock-unprobed",
+                    discovered_targets=discovered_targets,
                 )
             return CompetitorCollectionResult(
                 plid=plid,
                 title=product.title,
                 succeeded=True,
                 message=_collection_message(stock, len(variant_stocks)),
+                discovered_targets=discovered_targets,
             )
         except CompetitorNotFoundError:
             self._report_stage("正在复核疑似失效链接")
@@ -589,6 +636,7 @@ def load_competitor_dataset(
             latest,
             variant_signatures=variant_signatures,
         )
+        price_start, price_change, price_signal = _interval_price_signal(oldest, latest)
         current_rows.append(
             _snapshot_row(
                 latest,
@@ -599,6 +647,9 @@ def load_competitor_dataset(
                 interval_snapshot_count=len(interval),
                 stock_change=stock_change,
                 stock_comparable=stock_comparable,
+                price_start=price_start,
+                price_change=price_change,
+                price_signal=price_signal,
             )
         )
     current = pd.DataFrame(current_rows)
@@ -729,6 +780,26 @@ def _stock_text(row: CompetitorSnapshot) -> str:
     return stock_text
 
 
+def _interval_price_signal(
+    oldest: CompetitorSnapshot,
+    latest: CompetitorSnapshot,
+) -> tuple[float | None, float | None, str]:
+    """Compare price only across the selected interval's oldest/latest snapshots."""
+    start_price = float(oldest.price) if oldest.price is not None else None
+    if oldest.id == latest.id:
+        return start_price, None, "待建立价格基线"
+    if oldest.price is None or latest.price is None:
+        return start_price, None, "价格不可比"
+    change = latest.price - oldest.price
+    if change < 0:
+        label = "降价"
+    elif change > 0:
+        label = "涨价"
+    else:
+        label = "价格不变"
+    return start_price, float(change), label
+
+
 def _snapshot_row(
     row: CompetitorSnapshot,
     *,
@@ -739,6 +810,9 @@ def _snapshot_row(
     interval_snapshot_count: int | None = None,
     stock_change: int | None = None,
     stock_comparable: bool | None = None,
+    price_start: float | None = None,
+    price_change: float | None = None,
+    price_signal: str | None = None,
     raw_history: bool = False,
 ) -> dict[str, object]:
     stock_text = _stock_text(row)
@@ -749,6 +823,7 @@ def _snapshot_row(
         period_sales_max = None
         trend_label = "原始快照"
         trend_note = "历史快照只展示当时原始值；经营信号按所选区间首尾统一重算。"
+        price_signal = "原始快照"
     elif signal is not None:
         observed_stock_outflow = signal.observed_stock_outflow
         review_delta = signal.review_delta
@@ -778,6 +853,9 @@ def _snapshot_row(
         "采集时间": row.collected_at,
         "当前卖家": row.seller_name,
         "价格": float(row.price) if row.price is not None else None,
+        "区间起始价格": price_start,
+        "价格变化": price_change,
+        "价格信号": price_signal or "待建立价格基线",
         "库存上限": stock_text,
         "库存数量": row.stock_quantity,
         "库存精确": row.stock_exact,
