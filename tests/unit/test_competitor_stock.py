@@ -5,14 +5,22 @@ from unittest.mock import AsyncMock, Mock, call
 
 import pytest
 
+from takealot_ops.competitors.domain import (
+    CompetitorOffer,
+    CompetitorProduct,
+    CompetitorVariant,
+)
 from takealot_ops.competitors.stock import (
     _add_main_product_to_cart,
+    _add_other_offer_to_cart,
     _choose_quantity,
     _dismiss_marketing_overlay,
     _find_main_add_to_cart_button,
+    _find_other_offer_add_to_cart_button,
     _find_product_quantity_combo,
     _open_quantity_menu_with_retry,
     _parse_customer_purchase_limit,
+    _probe_page_offer_stock,
     _probe_above_quick_menu,
     _probe_custom_quantity_with_retry,
     _read_visible_numeric_quantity_options,
@@ -420,6 +428,170 @@ async def test_add_to_cart_waits_for_takealot_to_persist_the_request() -> None:
 
     button.click.assert_awaited_once_with()
     page.wait_for_timeout.assert_awaited_once_with(1500)
+
+
+@pytest.mark.asyncio
+async def test_other_offer_button_is_scoped_by_sku_and_verified_seller() -> None:
+    offer = CompetitorOffer(
+        selected=False,
+        sku="237580845",
+        seller_id="29866597",
+        seller_name="GOnline",
+        price=2499.0,
+        stock_status="In stock",
+        offer_id="other-buying-option-237580845",
+    )
+    page = Mock()
+    card = page.locator.return_value
+    card.count = AsyncMock(return_value=1)
+    card.inner_text = AsyncMock(return_value="R 2,499 Sold by GOnline")
+    button = card.get_by_role.return_value
+    button.count = AsyncMock(return_value=1)
+    button.is_visible = AsyncMock(return_value=True)
+
+    selected = await _find_other_offer_add_to_cart_button(page, offer)
+
+    assert selected is button
+    page.locator.assert_called_once_with(
+        '[id="other-buying-option-237580845"]:visible'
+    )
+    card.get_by_role.assert_called_once_with(
+        "button",
+        name="Add to Cart",
+        exact=True,
+    )
+
+
+@pytest.mark.asyncio
+async def test_other_offer_button_rejects_a_different_seller() -> None:
+    offer = CompetitorOffer(
+        selected=False,
+        sku="237580845",
+        seller_id="29866597",
+        seller_name="GOnline",
+        price=2499.0,
+        stock_status="In stock",
+    )
+    page = Mock()
+    card = page.locator.return_value
+    card.count = AsyncMock(return_value=1)
+    card.inner_text = AsyncMock(return_value="Sold by Another Seller")
+
+    with pytest.raises(RuntimeError, match="未显示预期卖家 GOnline"):
+        await _find_other_offer_add_to_cart_button(page, offer)
+
+
+@pytest.mark.asyncio
+async def test_add_other_offer_waits_for_cart_persistence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    offer = CompetitorOffer(
+        selected=False,
+        sku="237580845",
+        seller_id="29866597",
+        seller_name="GOnline",
+        price=2499.0,
+        stock_status="In stock",
+    )
+    page = Mock()
+    page.wait_for_timeout = AsyncMock()
+    button = Mock(click=AsyncMock())
+    find_button = AsyncMock(return_value=button)
+    dismiss_overlay = AsyncMock()
+    monkeypatch.setattr(
+        "takealot_ops.competitors.stock._find_other_offer_add_to_cart_button",
+        find_button,
+    )
+    monkeypatch.setattr(
+        "takealot_ops.competitors.stock._dismiss_marketing_overlay",
+        dismiss_overlay,
+    )
+
+    await _add_other_offer_to_cart(page, offer)
+
+    dismiss_overlay.assert_awaited_once_with(page)
+    find_button.assert_awaited_once_with(page, offer)
+    button.click.assert_awaited_once_with()
+    page.wait_for_timeout.assert_awaited_once_with(1500)
+
+
+@pytest.mark.asyncio
+async def test_follower_probe_reads_quantity_from_verified_seller_cart(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    url = "https://www.takealot.com/example/PLID98055738"
+    offer = CompetitorOffer(
+        selected=False,
+        sku="237580845",
+        seller_id="29866597",
+        seller_name="GOnline",
+        price=2499.0,
+        stock_status="In stock",
+        offer_id="other-buying-option-237580845",
+        url=url,
+    )
+    variant = CompetitorVariant(
+        key="default",
+        label="默认款",
+        url=url,
+        title="Camping Trolley",
+        sku="222378247",
+        seller_id="29864263",
+        seller_name="Main Seller",
+        price=2489.0,
+        stock_status="In stock",
+        is_leadtime=False,
+        is_add_to_cart_available=True,
+    )
+    product = CompetitorProduct(
+        plid="98055738",
+        url=url,
+        title="Camping Trolley",
+        image_url=None,
+        sku=variant.sku,
+        seller_id=variant.seller_id,
+        seller_name=variant.seller_name,
+        price=variant.price,
+        stock_status=variant.stock_status,
+        is_leadtime=False,
+        review_count=0,
+        rating=0.0,
+        offers=(offer,),
+        variants=(variant,),
+    )
+    page = Mock()
+    clear_cart = AsyncMock()
+    goto = AsyncMock()
+    wait_for_product = AsyncMock()
+    add_offer = AsyncMock()
+    find_quantity = AsyncMock(return_value=(4, True, "精确库存", None))
+    monkeypatch.setattr("takealot_ops.competitors.stock._clear_isolated_cart", clear_cart)
+    monkeypatch.setattr("takealot_ops.competitors.stock._goto", goto)
+    monkeypatch.setattr(
+        "takealot_ops.competitors.stock._wait_for_product",
+        wait_for_product,
+    )
+    monkeypatch.setattr(
+        "takealot_ops.competitors.stock._add_other_offer_to_cart",
+        add_offer,
+    )
+    monkeypatch.setattr(
+        "takealot_ops.competitors.stock._find_exact_quantity",
+        find_quantity,
+    )
+
+    result = await _probe_page_offer_stock(page, product=product, offer=offer)
+
+    assert result.quantity == 4
+    assert result.exact is True
+    assert result.method == "anonymous-cart-limit"
+    assert result.note == "跟卖卖家 GOnline：精确库存"
+    add_offer.assert_awaited_once_with(page, offer)
+    find_quantity.assert_awaited_once_with(
+        page,
+        "98055738",
+        seller_name="GOnline",
+    )
 
 
 @pytest.mark.asyncio

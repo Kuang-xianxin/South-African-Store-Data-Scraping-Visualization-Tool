@@ -182,6 +182,14 @@ class VariantStockObservation:
 
 
 @dataclass(frozen=True)
+class OfferStockObservation:
+    """One seller offer and the stock result collected in its own buying context."""
+
+    offer: CompetitorOffer
+    stock: StockProbeResult
+
+
+@dataclass(frozen=True)
 class PreviousObservation:
     """Comparable fields read from the latest prior snapshot."""
 

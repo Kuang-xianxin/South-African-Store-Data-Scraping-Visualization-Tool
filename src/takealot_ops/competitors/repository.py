@@ -13,6 +13,7 @@ from takealot_ops.competitors.domain import (
     CompetitorOffer,
     CompetitorProduct,
     CompetitorReviewRecord,
+    OfferStockObservation,
     PreviousObservation,
     ReviewSummary,
     SalesSignal,
@@ -74,11 +75,34 @@ def _matching_buybox_stock(
     return None
 
 
+def _matching_offer_stock(
+    offer: CompetitorOffer,
+    observations: list[OfferStockObservation],
+) -> StockProbeResult | None:
+    """Bind only a probe collected from this exact follower-offer record."""
+
+    for observation in observations:
+        observed_offer = observation.offer
+        if observed_offer == offer:
+            return observation.stock
+        if offer.identity_key and observed_offer.identity_key:
+            if _normalized_offer_scope(offer.identity_key) == _normalized_offer_scope(
+                observed_offer.identity_key
+            ):
+                return observation.stock
+    return None
+
+
 def _offer_stock_payload(
     offer: CompetitorOffer,
-    observations: list[VariantStockObservation],
+    variant_observations: list[VariantStockObservation],
+    offer_observations: list[OfferStockObservation],
 ) -> dict[str, object]:
-    probe = _matching_buybox_stock(offer, observations)
+    probe = (
+        _matching_buybox_stock(offer, variant_observations)
+        if offer.is_buybox
+        else _matching_offer_stock(offer, offer_observations)
+    )
     if probe is None:
         return {
             "stock_state": competitor_offer_stock_state(
@@ -286,6 +310,7 @@ class CompetitorRepository:
         lifetime_sales: tuple[int, int],
         signal: SalesSignal,
         collected_at: datetime,
+        offer_stocks: list[OfferStockObservation] | None = None,
     ) -> CompetitorSnapshot:
         now = collected_at.astimezone(UTC)
         target = self._session.get(CompetitorTarget, product.plid)
@@ -361,7 +386,7 @@ class CompetitorRepository:
                     "variant_key": offer.variant_key,
                     "variant_label": offer.variant_label,
                     "identity_key": offer.identity_key,
-                    **_offer_stock_payload(offer, variant_stocks),
+                    **_offer_stock_payload(offer, variant_stocks, offer_stocks or []),
                 }
                 for offer in product.offers
             ],

@@ -200,6 +200,7 @@ async def test_collector_retries_after_persisting_failed_stock_probe(
                 seller_name="Seller",
                 price=100.0,
                 stock_status="In stock",
+                is_buybox=True,
             ),
         ),
         variants=(variant,),
@@ -222,11 +223,12 @@ async def test_collector_retries_after_persisting_failed_stock_probe(
     )
 
     with patch(
-        "takealot_ops.competitors.service.probe_variant_stocks",
+        "takealot_ops.competitors.service.probe_product_stocks",
         AsyncMock(
-            return_value=[
-                VariantStockObservation(variant=variant, stock=failed_stock),
-            ]
+            return_value=(
+                [VariantStockObservation(variant=variant, stock=failed_stock)],
+                [],
+            )
         ),
     ):
         result = await collector.collect(url, with_stock_probe=True)
@@ -678,7 +680,7 @@ async def test_public_client_parses_product_offers_and_all_review_pages() -> Non
                         "display_name": "New",
                         "items": [
                             {
-                                "offer_id": "offer-2",
+                                "id": "other-buying-option-SKU-2",
                                 "sku": "SKU-2",
                                 "price": 205,
                                 "product": {
@@ -688,7 +690,10 @@ async def test_public_client_parses_product_offers_and_all_review_pages() -> Non
                                     "seller_id": "seller-2",
                                     "display_name": "Seller Two",
                                 },
-                                "stock_availability": {"status": "In stock"},
+                                "stock_availability": {
+                                    "status": "In stock",
+                                    "is_in_stock": True,
+                                },
                             }
                         ]
                     }
@@ -747,11 +752,12 @@ async def test_public_client_parses_product_offers_and_all_review_pages() -> Non
     assert product.offers[0].is_leadtime is True
     assert product.offers[1].plid == "123"
     assert product.offers[1].url == "https://www.takealot.com/example/PLID123"
-    assert product.offers[1].offer_id == "offer-2"
+    assert product.offers[1].offer_id == "other-buying-option-SKU-2"
     assert product.offers[1].is_buybox is False
+    assert product.offers[1].is_add_to_cart_available is True
     assert product.offers[1].condition == "New"
     assert product.offers[0].identity_key == "offer:offer-1"
-    assert product.offers[1].identity_key == "offer:offer-2"
+    assert product.offers[1].identity_key == "offer:other-buying-option-sku-2"
     discovered = _discovered_offer_targets(
         product,
         submitted_url="https://www.takealot.com/example/PLID123",

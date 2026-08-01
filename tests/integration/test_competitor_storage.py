@@ -14,6 +14,7 @@ from takealot_ops.competitors.domain import (
     CompetitorProduct,
     CompetitorReviewRecord,
     CompetitorVariant,
+    OfferStockObservation,
     StockProbeResult,
     VariantStockObservation,
     analyze_sales_signal,
@@ -221,6 +222,118 @@ def test_competitor_observation_persists_snapshot_and_deduplicated_reviews(
     assert {variant["图片"] for variant in detail["variants"]} == {
         "https://example.invalid/laser-lipo-black.jpg"
     }
+
+
+def test_follower_offer_stock_is_bound_to_its_exact_seller_offer(tmp_path: Path) -> None:
+    engine = create_engine(f"sqlite:///{(tmp_path / 'offer-stock.db').as_posix()}")
+    create_schema(engine)
+    url = "https://www.takealot.com/example/PLID12345678"
+    variant = CompetitorVariant(
+        key="default",
+        label="默认款",
+        url=url,
+        title="Offer Stock",
+        sku="SKU-MAIN",
+        seller_id="seller-main",
+        seller_name="Main Seller",
+        price=100.0,
+        stock_status="In stock",
+        is_leadtime=False,
+        is_add_to_cart_available=True,
+    )
+    main_offer = CompetitorOffer(
+        selected=True,
+        sku="SKU-MAIN",
+        seller_id="seller-main",
+        seller_name="Main Seller",
+        price=100.0,
+        stock_status="In stock",
+        is_buybox=True,
+        is_add_to_cart_available=True,
+        plid="12345678",
+        url=url,
+        offer_id="main-offer",
+    )
+    follower_one = CompetitorOffer(
+        selected=False,
+        sku="SKU-ONE",
+        seller_id="seller-one",
+        seller_name="Seller One",
+        price=105.0,
+        stock_status="In stock",
+        is_add_to_cart_available=True,
+        plid="12345678",
+        url=url,
+        offer_id="other-buying-option-SKU-ONE",
+        identity_key="offer:other-buying-option-sku-one",
+    )
+    follower_two = replace(
+        follower_one,
+        sku="SKU-TWO",
+        seller_id="seller-two",
+        seller_name="Seller Two",
+        price=110.0,
+        offer_id="other-buying-option-SKU-TWO",
+        identity_key="offer:other-buying-option-sku-two",
+    )
+    product = CompetitorProduct(
+        plid="12345678",
+        url=url,
+        title="Offer Stock",
+        image_url=None,
+        sku=variant.sku,
+        seller_id=variant.seller_id,
+        seller_name=variant.seller_name,
+        price=variant.price,
+        stock_status=variant.stock_status,
+        is_leadtime=False,
+        review_count=0,
+        rating=0.0,
+        offers=(main_offer, follower_one, follower_two),
+        variants=(variant,),
+    )
+    main_stock = StockProbeResult(7, True, "anonymous-cart-limit", "主报价库存")
+    follower_one_stock = StockProbeResult(
+        4,
+        True,
+        "anonymous-cart-limit",
+        "卖家一库存",
+    )
+    follower_two_stock = StockProbeResult(
+        2,
+        True,
+        "anonymous-cart-limit",
+        "卖家二库存",
+    )
+
+    with Session(engine) as session, session.begin():
+        snapshot = CompetitorRepository(session).save_observation(
+            product=product,
+            reviews=[],
+            review_summary=summarize_reviews([]),
+            stock=main_stock,
+            variant_stocks=[VariantStockObservation(variant, main_stock)],
+            offer_stocks=[
+                OfferStockObservation(follower_one, follower_one_stock),
+                OfferStockObservation(follower_two, follower_two_stock),
+            ],
+            lifetime_sales=estimate_lifetime_sales(0),
+            signal=analyze_sales_signal(
+                None,
+                current_stock_quantity=main_stock.quantity,
+                current_stock_exact=main_stock.exact,
+                current_review_count=0,
+            ),
+            collected_at=datetime(2026, 8, 1, 8, tzinfo=UTC),
+        )
+        offers = {offer["offer_id"]: offer for offer in snapshot.offers or []}
+
+    engine.dispose()
+    assert offers["main-offer"]["stock_quantity"] == 7
+    assert offers["other-buying-option-SKU-ONE"]["stock_quantity"] == 4
+    assert offers["other-buying-option-SKU-TWO"]["stock_quantity"] == 2
+    assert offers["other-buying-option-SKU-ONE"]["stock_note"] == "卖家一库存"
+    assert offers["other-buying-option-SKU-TWO"]["stock_note"] == "卖家二库存"
 
 
 def test_competitor_signals_recompute_from_oldest_and_latest_in_date_range(

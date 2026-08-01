@@ -11,10 +11,13 @@ from playwright.async_api import Error as PlaywrightError
 from playwright.async_api import Locator, Page, async_playwright
 
 from takealot_ops.competitors.domain import (
+    CompetitorOffer,
     CompetitorProduct,
     CompetitorVariant,
+    OfferStockObservation,
     StockProbeResult,
     VariantStockObservation,
+    competitor_offer_stock_state,
 )
 
 
@@ -112,7 +115,22 @@ async def probe_variant_stocks(
     profile_dir: Path,
     visible: bool = False,
 ) -> list[VariantStockObservation]:
-    """Probe every purchasable variant in one isolated browser session."""
+    """Backward-compatible wrapper returning the main offer of every variant."""
+    variant_stocks, _ = await probe_product_stocks(
+        product,
+        profile_dir=profile_dir,
+        visible=visible,
+    )
+    return variant_stocks
+
+
+async def probe_product_stocks(
+    product: CompetitorProduct,
+    *,
+    profile_dir: Path,
+    visible: bool = False,
+) -> tuple[list[VariantStockObservation], list[OfferStockObservation]]:
+    """Probe variant buyboxes and follower offers in one isolated product session."""
     results: dict[str, StockProbeResult] = {}
     purchasable: list[CompetitorVariant] = []
     for variant in product.variants:
@@ -123,7 +141,32 @@ async def probe_variant_stocks(
         else:
             purchasable.append(variant)
 
-    if purchasable:
+    offer_results: dict[int, StockProbeResult] = {}
+    purchasable_offers: list[tuple[int, CompetitorOffer]] = []
+    for index, offer in enumerate(product.offers):
+        if offer.is_buybox:
+            continue
+        if offer.is_leadtime:
+            offer_results[index] = non_platform_stock_probe()
+        elif (
+            offer.is_add_to_cart_available is False
+            or competitor_offer_stock_state(offer.stock_status) == "没货"
+        ):
+            offer_results[index] = unavailable_stock_probe()
+        elif not offer.sku or not offer.seller_name or offer.seller_name == "未知卖家":
+            offer_results[index] = StockProbeResult(
+                quantity=None,
+                exact=False,
+                method="failed",
+                note=(
+                    "跟卖报价缺少可核验的 SKU 或卖家身份，"
+                    "已拒绝把其他报价的购物车数量绑定到该卖家。"
+                ),
+            )
+        else:
+            purchasable_offers.append((index, offer))
+
+    if purchasable or purchasable_offers:
         executable = _find_browser_executable()
         profile_dir.mkdir(parents=True, exist_ok=True)
         async with async_playwright() as playwright:
@@ -160,13 +203,38 @@ async def probe_variant_stocks(
                             await _clear_isolated_cart(page)
                         except Exception:
                             pass
+                for index, offer in purchasable_offers:
+                    try:
+                        offer_results[index] = await _probe_page_offer_stock(
+                            page,
+                            product=product,
+                            offer=offer,
+                        )
+                    except (OSError, RuntimeError, PlaywrightError) as exc:
+                        offer_results[index] = StockProbeResult(
+                            quantity=None,
+                            exact=False,
+                            method="failed",
+                            note=str(exc),
+                        )
+                    finally:
+                        try:
+                            await _clear_isolated_cart(page)
+                        except Exception:
+                            pass
             finally:
                 await context.close()
 
-    return [
+    variant_observations = [
         VariantStockObservation(variant=variant, stock=results[variant.key])
         for variant in product.variants
     ]
+    offer_observations = [
+        OfferStockObservation(offer=offer, stock=offer_results[index])
+        for index, offer in enumerate(product.offers)
+        if not offer.is_buybox
+    ]
+    return variant_observations, offer_observations
 
 
 async def _probe_page_stock(
@@ -200,6 +268,41 @@ async def _probe_page_stock(
         exact=exact,
         method="anonymous-cart-limit",
         note=note,
+        customer_purchase_limit=customer_purchase_limit,
+    )
+
+
+async def _probe_page_offer_stock(
+    page: Page,
+    *,
+    product: CompetitorProduct,
+    offer: CompetitorOffer,
+) -> StockProbeResult:
+    """Probe one follower offer after selecting its exact seller/SKU buying card."""
+    stage = "清理隔离购物车"
+    try:
+        await _clear_isolated_cart(page)
+        stage = f"打开跟卖卖家 {offer.seller_name} 的商品页"
+        await _goto(page, offer.url or product.url)
+        stage = "等待主商品购买区"
+        await _wait_for_product(page, product.plid, product.title)
+        stage = f"定位跟卖卖家 {offer.seller_name}（SKU {offer.sku}）"
+        await _add_other_offer_to_cart(page, offer)
+        stage = "打开购物车"
+        await _goto(page, "https://www.takealot.com/cart")
+        stage = f"校验跟卖卖家 {offer.seller_name} 的购物车库存上限"
+        quantity, exact, note, customer_purchase_limit = await _find_exact_quantity(
+            page,
+            product.plid,
+            seller_name=offer.seller_name,
+        )
+    except (OSError, RuntimeError, ValueError, PlaywrightError) as exc:
+        raise RuntimeError(_stock_probe_failure_note(stage, exc)) from exc
+    return StockProbeResult(
+        quantity=quantity,
+        exact=exact,
+        method="anonymous-cart-limit",
+        note=f"跟卖卖家 {offer.seller_name}：{note}",
         customer_purchase_limit=customer_purchase_limit,
     )
 
@@ -286,6 +389,54 @@ async def _add_main_product_to_cart(page: Page) -> None:
     """Click the verified target button and let Takealot persist the async cart add."""
     await _dismiss_marketing_overlay(page)
     button = await _find_main_add_to_cart_button(page)
+    await button.click()
+    await page.wait_for_timeout(1500)
+
+
+def _offer_card_ids(offer: CompetitorOffer) -> tuple[str, ...]:
+    candidates = []
+    if offer.offer_id and offer.offer_id.startswith("other-buying-option-"):
+        candidates.append(offer.offer_id)
+    if offer.sku:
+        candidates.append(f"other-buying-option-{offer.sku}")
+    return tuple(dict.fromkeys(candidates))
+
+
+async def _find_other_offer_add_to_cart_button(
+    page: Page,
+    offer: CompetitorOffer,
+) -> Locator:
+    """Locate one exact other-buying-option card by SKU and verify its seller."""
+    card_ids = _offer_card_ids(offer)
+    if not card_ids:
+        raise RuntimeError("跟卖报价没有可用于定位购买卡片的 SKU/Offer ID")
+
+    deadline = time.monotonic() + 20
+    while time.monotonic() < deadline:
+        for card_id in card_ids:
+            safe_card_id = card_id.replace("\\", "\\\\").replace('"', '\\"')
+            card = page.locator(f'[id="{safe_card_id}"]:visible')
+            if await card.count() != 1:
+                continue
+            card_text = " ".join((await card.inner_text()).casefold().split())
+            seller_name = " ".join(offer.seller_name.casefold().split())
+            if not seller_name or seller_name not in card_text:
+                raise RuntimeError(
+                    f"跟卖购买卡片 {card_id} 未显示预期卖家 {offer.seller_name}"
+                )
+            button = card.get_by_role("button", name="Add to Cart", exact=True)
+            if await button.count() == 1 and await button.is_visible():
+                return button
+        await page.wait_for_timeout(random.randint(1200, 2500))
+    raise RuntimeError(
+        f"未找到跟卖卖家 {offer.seller_name}（SKU {offer.sku}）的唯一 Add to Cart 按钮"
+    )
+
+
+async def _add_other_offer_to_cart(page: Page, offer: CompetitorOffer) -> None:
+    """Click only the seller/SKU-scoped follower card and await cart persistence."""
+    await _dismiss_marketing_overlay(page)
+    button = await _find_other_offer_add_to_cart_button(page, offer)
     await button.click()
     await page.wait_for_timeout(1500)
 
@@ -413,10 +564,16 @@ async def _read_visible_numeric_quantity_options(page: Page) -> list[int]:
 async def _open_quantity_menu_with_retry(
     page: Page,
     plid: str,
+    *,
+    seller_name: str | None = None,
 ) -> tuple[Locator, list[int]]:
     """Wait for the initial menu, then reload once and re-identify the PLID."""
     for page_attempt in range(2):
-        combo = await _find_product_quantity_combo(page, plid)
+        combo = (
+            await _find_product_quantity_combo(page, plid, seller_name=seller_name)
+            if seller_name
+            else await _find_product_quantity_combo(page, plid)
+        )
         for _ in range(3):
             await _dismiss_marketing_overlay(page)
             await page.wait_for_timeout(random.randint(800, 1500))
@@ -436,7 +593,12 @@ async def _open_quantity_menu_with_retry(
     raise RuntimeError("购物车数量菜单在3次重开和1次页面刷新后仍没有可识别的数字选项")
 
 
-async def _find_product_quantity_combo(page: Page, plid: str) -> Locator:
+async def _find_product_quantity_combo(
+    page: Page,
+    plid: str,
+    *,
+    seller_name: str | None = None,
+) -> Locator:
     deadline = time.monotonic() + 15
     while time.monotonic() < deadline:
         product_link = page.locator(f'a[href*="/PLID{plid}"]:visible')
@@ -446,6 +608,14 @@ async def _find_product_quantity_combo(page: Page, plid: str) -> Locator:
             )
             scoped_combo = product_row.locator('button[role="combobox"]:visible')
             if await scoped_combo.count() == 1:
+                if seller_name:
+                    row_text = " ".join((await product_row.inner_text()).casefold().split())
+                    expected_seller = " ".join(seller_name.casefold().split())
+                    if expected_seller not in row_text:
+                        raise RuntimeError(
+                            f"购物车 PLID{plid} 未显示预期跟卖卖家 {seller_name}；"
+                            "已拒绝读取其他卖家的库存"
+                        )
                 return scoped_combo
         await page.wait_for_timeout(random.randint(1200, 2500))
     raise RuntimeError(f"购物车中未找到目标竞品 PLID{plid}；已拒绝把其他商品当作目标库存")
@@ -698,8 +868,17 @@ async def _submit_custom_quantity(
     return None, None, customer_limit
 
 
-async def _find_exact_quantity(page: Page, plid: str) -> tuple[int, bool, str, int | None]:
-    combo, numeric_options = await _open_quantity_menu_with_retry(page, plid)
+async def _find_exact_quantity(
+    page: Page,
+    plid: str,
+    *,
+    seller_name: str | None = None,
+) -> tuple[int, bool, str, int | None]:
+    combo, numeric_options = await _open_quantity_menu_with_retry(
+        page,
+        plid,
+        seller_name=seller_name,
+    )
     if 9 not in numeric_options:
         maximum = max(numeric_options)
         accepted, explicit_quantity = await _choose_quantity(page, combo, maximum)

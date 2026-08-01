@@ -539,11 +539,13 @@ def _offer_record(
 ) -> CompetitorOffer:
     stock = _mapping(offer.get("stock_availability"))
     offer_url, offer_plid = _offer_target(offer, fallback_url=fallback_url)
-    offer_id = str(offer.get("offer_id") or "").strip() or None
+    offer_id = str(offer.get("offer_id") or offer.get("id") or "").strip() or None
     seller_id = str(seller.get("seller_id") or "").strip()
     seller_name = str(seller.get("display_name") or "未知卖家")
     sku = str(offer.get("sku") or offer.get("product_id") or "").strip()
     add_to_cart_value = offer.get("is_add_to_cart_available")
+    if not isinstance(add_to_cart_value, bool):
+        add_to_cart_value = stock.get("is_in_stock")
     is_add_to_cart_available = (
         add_to_cart_value if isinstance(add_to_cart_value, bool) else None
     )

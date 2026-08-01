@@ -24,6 +24,7 @@ from takealot_ops.competitors.api import (
 )
 from takealot_ops.competitors.domain import (
     CompetitorProduct,
+    OfferStockObservation,
     PreviousObservation,
     SalesSignal,
     StockProbeResult,
@@ -39,7 +40,7 @@ from takealot_ops.competitors.repository import (
     CompetitorRepository,
 )
 from takealot_ops.competitors.stock import (
-    probe_variant_stocks,
+    probe_product_stocks,
     skipped_stock_probe,
 )
 from takealot_ops.storage.models import (
@@ -198,7 +199,7 @@ class CompetitorCollector:
                 if with_stock_probe
                 else "本条未启用库存探测"
             )
-            variant_stocks = await self._collect_variant_stocks(
+            variant_stocks, offer_stocks = await self._collect_product_stocks(
                 product,
                 enabled=with_stock_probe,
                 visible_browser=visible_browser,
@@ -224,22 +225,29 @@ class CompetitorCollector:
                         review_summary=summary,
                         stock=stock,
                         variant_stocks=variant_stocks,
+                        offer_stocks=offer_stocks,
                         lifetime_sales=lifetime_sales,
                         signal=signal,
                         collected_at=collected_at,
                     )
             failed_stock_count = sum(
                 observation.stock.method == "failed" for observation in variant_stocks
+            ) + sum(
+                observation.stock.method == "failed" for observation in offer_stocks
             )
             if with_stock_probe and failed_stock_count:
-                failure_summary = _stock_probe_failure_summary(variant_stocks)
+                failure_summary = _stock_probe_failure_summary(
+                    variant_stocks,
+                    offer_stocks,
+                )
+                stock_scope_count = len(variant_stocks) + len(offer_stocks)
                 return CompetitorCollectionResult(
                     plid=plid,
                     title=product.title,
                     succeeded=False,
                     message=(
                         f"商品与评论快照已保存，但 {failed_stock_count}/"
-                        f"{len(variant_stocks)} 个变体库存仍未探测；"
+                        f"{stock_scope_count} 个变体/卖家报价库存仍未探测；"
                         f"失败原因：{failure_summary}；"
                         "已加入本轮其他链接结束后的库存复探"
                     ),
@@ -251,7 +259,11 @@ class CompetitorCollector:
                 plid=plid,
                 title=product.title,
                 succeeded=True,
-                message=_collection_message(stock, len(variant_stocks)),
+                message=_collection_message(
+                    stock,
+                    len(variant_stocks),
+                    len(offer_stocks),
+                ),
                 discovered_targets=discovered_targets,
             )
         except CompetitorNotFoundError:
@@ -346,30 +358,42 @@ class CompetitorCollector:
         with Session(self._engine) as session:
             return CompetitorRepository(session).is_confirmed_invalid(plid)
 
-    async def _collect_variant_stocks(
+    async def _collect_product_stocks(
         self,
         product: CompetitorProduct,
         *,
         enabled: bool,
         visible_browser: bool,
-    ) -> list[VariantStockObservation]:
+    ) -> tuple[list[VariantStockObservation], list[OfferStockObservation]]:
         if not enabled:
-            return [
+            variant_stocks = [
                 VariantStockObservation(variant=variant, stock=skipped_stock_probe())
                 for variant in product.variants
             ]
+            offer_stocks = [
+                OfferStockObservation(offer=offer, stock=skipped_stock_probe())
+                for offer in product.offers
+                if not offer.is_buybox
+            ]
+            return variant_stocks, offer_stocks
         try:
-            return await probe_variant_stocks(
+            return await probe_product_stocks(
                 product,
                 profile_dir=self._project_root / "data" / "competitor-browser-profile",
                 visible=visible_browser,
             )
         except (OSError, RuntimeError) as exc:
             failed = StockProbeResult(quantity=None, exact=False, method="failed", note=str(exc))
-            return [
+            variant_stocks = [
                 VariantStockObservation(variant=variant, stock=failed)
                 for variant in product.variants
             ]
+            offer_stocks = [
+                OfferStockObservation(offer=offer, stock=failed)
+                for offer in product.offers
+                if not offer.is_buybox
+            ]
+            return variant_stocks, offer_stocks
 
 
 def parse_competitor_urls(raw: str) -> list[str]:
@@ -424,6 +448,7 @@ def _aggregate_variant_stock(
 
 def _stock_probe_failure_summary(
     observations: list[VariantStockObservation],
+    offer_observations: list[OfferStockObservation],
 ) -> str:
     failed = [item for item in observations if item.stock.method == "failed"]
     details: list[str] = []
@@ -434,16 +459,34 @@ def _stock_probe_failure_summary(
         note = " ".join(observation.stock.note.split())
         note = note.split("Call log:", 1)[0].strip() or "未返回具体原因"
         details.append(f"{identity}：{note[:240]}")
-    remaining = len(failed) - len(details)
+    failed_offers = [
+        item for item in offer_observations if item.stock.method == "failed"
+    ]
+    for offer_observation in failed_offers[: max(0, 3 - len(details))]:
+        seller = offer_observation.offer.seller_name.strip() or "未知卖家"
+        sku = offer_observation.offer.sku.strip()
+        offer_id = offer_observation.offer.offer_id or "无 Offer ID"
+        identity = f"跟卖 {seller}（SKU {sku or '未知'}，{offer_id}）"
+        note = " ".join(offer_observation.stock.note.split())
+        note = note.split("Call log:", 1)[0].strip() or "未返回具体原因"
+        details.append(f"{identity}：{note[:240]}")
+    remaining = len(failed) + len(failed_offers) - len(details)
     if remaining > 0:
-        details.append(f"另 {remaining} 个失败变体详见库存说明")
+        details.append(f"另 {remaining} 个失败库存项详见库存说明")
     return "；".join(details) or "未返回具体原因"
 
 
-def _collection_message(stock: StockProbeResult, variant_count: int) -> str:
+def _collection_message(
+    stock: StockProbeResult,
+    variant_count: int,
+    follower_offer_count: int,
+) -> str:
     if stock.method == "failed":
         return f"公开数据已保存；库存探测未取得：{stock.note}"
-    return f"采集成功；已记录 {variant_count} 个变体，评论按商品共用一份"
+    return (
+        f"采集成功；已记录 {variant_count} 个变体和 {follower_offer_count} 个跟卖报价，"
+        "评论按商品共用一份"
+    )
 
 
 def _not_found_message(
