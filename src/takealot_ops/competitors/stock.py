@@ -295,6 +295,7 @@ async def _probe_page_offer_stock(
             page,
             product.plid,
             seller_name=offer.seller_name,
+            expected_price=offer.price,
         )
     except (OSError, RuntimeError, ValueError, PlaywrightError) as exc:
         raise RuntimeError(_stock_probe_failure_note(stage, exc)) from exc
@@ -302,7 +303,10 @@ async def _probe_page_offer_stock(
         quantity=quantity,
         exact=exact,
         method="anonymous-cart-limit",
-        note=f"跟卖卖家 {offer.seller_name}：{note}",
+        note=(
+            f"跟卖卖家 {offer.seller_name}：已核验卖家报价行、"
+            f"购物车PLID和价格；{note}"
+        ),
         customer_purchase_limit=customer_purchase_limit,
     )
 
@@ -406,13 +410,17 @@ async def _find_other_offer_add_to_cart_button(
     page: Page,
     offer: CompetitorOffer,
 ) -> Locator:
-    """Locate one exact other-buying-option card by SKU and verify its seller."""
+    """Locate one exact follower row by seller identity, retaining the old-ID fallback."""
     card_ids = _offer_card_ids(offer)
-    if not card_ids:
-        raise RuntimeError("跟卖报价没有可用于定位购买卡片的 SKU/Offer ID")
+    seller_name = _normalise_offer_text(offer.seller_name)
+    if not card_ids or not offer.sku or not seller_name:
+        raise RuntimeError("跟卖报价没有可核验的 SKU 或卖家身份")
 
-    deadline = time.monotonic() + 20
+    reloaded = False
+    deadline = time.monotonic() + 30
+    reload_after = time.monotonic() + 12
     while time.monotonic() < deadline:
+        await _dismiss_terms_modal(page)
         for card_id in card_ids:
             safe_card_id = card_id.replace("\\", "\\\\").replace('"', '\\"')
             card = page.locator(f'[id="{safe_card_id}"]:visible')
@@ -427,18 +435,146 @@ async def _find_other_offer_add_to_cart_button(
             button = card.get_by_role("button", name="Add to Cart", exact=True)
             if await button.count() == 1 and await button.is_visible():
                 return button
+
+        seller_button = await _find_other_offer_button_by_seller_row(page, offer)
+        if seller_button is not None:
+            return seller_button
+
+        await _expand_other_offers(page)
+        if not reloaded and time.monotonic() >= reload_after:
+            await page.reload(wait_until="domcontentloaded", timeout=45_000)
+            await page.wait_for_timeout(3500)
+            await _dismiss_cookie(page)
+            reloaded = True
+            continue
         await page.wait_for_timeout(random.randint(1200, 2500))
     raise RuntimeError(
-        f"未找到跟卖卖家 {offer.seller_name}（SKU {offer.sku}）的唯一 Add to Cart 按钮"
+        f"未找到跟卖卖家 {offer.seller_name}（SKU {offer.sku}）的唯一报价行购买按钮"
     )
+
+
+def _normalise_offer_text(value: str | None) -> str:
+    return " ".join((value or "").casefold().split())
+
+
+def _rand_price_matches(text: str, expected_price: float) -> bool:
+    for raw_price in re.findall(
+        r"\bR\s*(\d[\d,]*(?:\.\d{1,2})?)\b",
+        text,
+        re.IGNORECASE,
+    ):
+        if abs(float(raw_price.replace(",", "")) - expected_price) < 0.005:
+            return True
+    return False
+
+
+async def _find_other_offer_button_by_seller_row(
+    page: Page,
+    offer: CompetitorOffer,
+) -> Locator | None:
+    """Use Takealot's current seller link and its closest quote row."""
+    seller_links = page.locator('a[href*="sellers="]:visible')
+    matching_links: list[Locator] = []
+    expected_name = _normalise_offer_text(offer.seller_name)
+    expected_id = (offer.seller_id or "").strip()
+    for index in range(await seller_links.count()):
+        link = seller_links.nth(index)
+        if _normalise_offer_text(await link.inner_text()) != expected_name:
+            continue
+        href = await link.get_attribute("href") or ""
+        if expected_id and re.search(
+            rf"(?:[?&])sellers={re.escape(expected_id)}(?:[&#]|$)",
+            href,
+            re.IGNORECASE,
+        ) is None:
+            continue
+        matching_links.append(link)
+
+    if len(matching_links) != 1:
+        return None
+    row = matching_links[0].locator(
+        "xpath=ancestor::div["
+        "contains(concat(' ', normalize-space(@class), ' '), "
+        "' buying-choice-list-item ')][1]"
+    )
+    if await row.count() != 1:
+        return None
+    if not _rand_price_matches(await row.inner_text(), offer.price):
+        return None
+    button = row.locator('button[data-ref="buying-choice-atc"]:visible')
+    if await button.count() != 1 or not await button.is_visible():
+        return None
+    return button
+
+
+async def _expand_other_offers(page: Page) -> bool:
+    """Open the lazy follower-offer list once without toggling an open list closed."""
+    trigger = page.locator("button:visible").filter(
+        has_text=re.compile(r"\boffers?\s+from\b", re.IGNORECASE)
+    )
+    if await trigger.count() != 1 or not await trigger.is_visible():
+        return False
+    classes = (await trigger.get_attribute("class") or "").split()
+    if "is-open" in classes:
+        return False
+    await _dismiss_marketing_overlay(page)
+    await _dismiss_terms_modal(page)
+    await trigger.click()
+    await page.wait_for_timeout(700)
+    return True
 
 
 async def _add_other_offer_to_cart(page: Page, offer: CompetitorOffer) -> None:
     """Click only the seller/SKU-scoped follower card and await cart persistence."""
     await _dismiss_marketing_overlay(page)
+    await _dismiss_terms_modal(page)
     button = await _find_other_offer_add_to_cart_button(page, offer)
-    await button.click()
+    # The Braze blocker can appear while the lazy quote list is loading, so clean it
+    # again immediately before the verified click instead of relying on the earlier pass.
+    await _dismiss_marketing_overlay(page)
+    await _dismiss_terms_modal(page)
+    await button.click(timeout=10_000)
+    await page.wait_for_timeout(600)
+    if await _dismiss_terms_modal(page):
+        button = await _find_other_offer_add_to_cart_button(page, offer)
+        await _dismiss_marketing_overlay(page)
+        await button.click(timeout=10_000)
     await page.wait_for_timeout(1500)
+
+
+async def _dismiss_terms_modal(page: Page) -> bool:
+    """Close only a currently visible terms dialog, never its T&Cs trigger."""
+    dialogs = page.locator(
+        '[role="dialog"]:visible, [aria-modal="true"]:visible, '
+        'dialog[open]:visible, div[class*="modal" i]:visible:not([role="button"])'
+    )
+    terms_pattern = re.compile(
+        r"\b(?:terms?|conditions?|t\s*&\s*cs?|carefully|please\s+read)\b",
+        re.IGNORECASE,
+    )
+    for index in range(await dialogs.count()):
+        dialog = dialogs.nth(index)
+        if not terms_pattern.search(await dialog.inner_text()):
+            continue
+        close_button = dialog.locator(
+            'button[aria-label*="close" i]:visible, '
+            '[role="button"][aria-label*="close" i]:visible, '
+            'button[data-ref*="close" i]:visible, '
+            'button[class*="close" i]:visible'
+        )
+        if await close_button.count() == 0:
+            close_button = dialog.get_by_role(
+                "button",
+                name=re.compile(r"^(?:close|x|×|✕)$", re.IGNORECASE),
+            )
+        for button_index in range(await close_button.count()):
+            candidate = close_button.nth(button_index)
+            if not await candidate.is_visible():
+                continue
+            await candidate.click()
+            await page.wait_for_timeout(300)
+            return True
+    return False
 
 
 async def _dismiss_marketing_overlay(page: Page) -> None:
@@ -566,14 +702,19 @@ async def _open_quantity_menu_with_retry(
     plid: str,
     *,
     seller_name: str | None = None,
+    expected_price: float | None = None,
 ) -> tuple[Locator, list[int]]:
     """Wait for the initial menu, then reload once and re-identify the PLID."""
     for page_attempt in range(2):
-        combo = (
-            await _find_product_quantity_combo(page, plid, seller_name=seller_name)
-            if seller_name
-            else await _find_product_quantity_combo(page, plid)
-        )
+        if seller_name or expected_price is not None:
+            combo = await _find_product_quantity_combo(
+                page,
+                plid,
+                seller_name=seller_name,
+                expected_price=expected_price,
+            )
+        else:
+            combo = await _find_product_quantity_combo(page, plid)
         for _ in range(3):
             await _dismiss_marketing_overlay(page)
             await page.wait_for_timeout(random.randint(800, 1500))
@@ -598,6 +739,7 @@ async def _find_product_quantity_combo(
     plid: str,
     *,
     seller_name: str | None = None,
+    expected_price: float | None = None,
 ) -> Locator:
     deadline = time.monotonic() + 15
     while time.monotonic() < deadline:
@@ -608,14 +750,34 @@ async def _find_product_quantity_combo(
             )
             scoped_combo = product_row.locator('button[role="combobox"]:visible')
             if await scoped_combo.count() == 1:
+                price_matches = True
+                if expected_price is not None:
+                    price = product_row.locator(
+                        '[data-ref="product-card-price"]:visible'
+                    )
+                    price_matches = (
+                        await price.count() == 1
+                        and _rand_price_matches(await price.inner_text(), expected_price)
+                    )
+                    if not price_matches:
+                        raise RuntimeError(
+                            f"购物车 PLID{plid} 未显示预期跟卖价格 "
+                            f"R {expected_price:,.2f}；已拒绝读取其他报价的库存"
+                        )
                 if seller_name:
                     row_text = " ".join((await product_row.inner_text()).casefold().split())
                     expected_seller = " ".join(seller_name.casefold().split())
                     if expected_seller not in row_text:
-                        raise RuntimeError(
-                            f"购物车 PLID{plid} 未显示预期跟卖卖家 {seller_name}；"
-                            "已拒绝读取其他卖家的库存"
+                        has_seller_label = re.search(
+                            r"\b(?:sold\s+by|seller)\b",
+                            row_text,
+                            re.IGNORECASE,
                         )
+                        if has_seller_label or expected_price is None:
+                            raise RuntimeError(
+                                f"购物车 PLID{plid} 未显示预期跟卖卖家 "
+                                f"{seller_name}；已拒绝读取其他卖家的库存"
+                            )
                 return scoped_combo
         await page.wait_for_timeout(random.randint(1200, 2500))
     raise RuntimeError(f"购物车中未找到目标竞品 PLID{plid}；已拒绝把其他商品当作目标库存")
@@ -873,11 +1035,13 @@ async def _find_exact_quantity(
     plid: str,
     *,
     seller_name: str | None = None,
+    expected_price: float | None = None,
 ) -> tuple[int, bool, str, int | None]:
     combo, numeric_options = await _open_quantity_menu_with_retry(
         page,
         plid,
         seller_name=seller_name,
+        expected_price=expected_price,
     )
     if 9 not in numeric_options:
         maximum = max(numeric_options)

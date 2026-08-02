@@ -15,8 +15,11 @@ from takealot_ops.competitors.stock import (
     _add_other_offer_to_cart,
     _choose_quantity,
     _dismiss_marketing_overlay,
+    _dismiss_terms_modal,
+    _expand_other_offers,
     _find_main_add_to_cart_button,
     _find_other_offer_add_to_cart_button,
+    _find_other_offer_button_by_seller_row,
     _find_product_quantity_combo,
     _open_quantity_menu_with_retry,
     _parse_customer_purchase_limit,
@@ -431,7 +434,9 @@ async def test_add_to_cart_waits_for_takealot_to_persist_the_request() -> None:
 
 
 @pytest.mark.asyncio
-async def test_other_offer_button_is_scoped_by_sku_and_verified_seller() -> None:
+async def test_other_offer_button_is_scoped_by_sku_and_verified_seller(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     offer = CompetitorOffer(
         selected=False,
         sku="237580845",
@@ -448,6 +453,10 @@ async def test_other_offer_button_is_scoped_by_sku_and_verified_seller() -> None
     button = card.get_by_role.return_value
     button.count = AsyncMock(return_value=1)
     button.is_visible = AsyncMock(return_value=True)
+    monkeypatch.setattr(
+        "takealot_ops.competitors.stock._dismiss_terms_modal",
+        AsyncMock(return_value=False),
+    )
 
     selected = await _find_other_offer_add_to_cart_button(page, offer)
 
@@ -463,7 +472,100 @@ async def test_other_offer_button_is_scoped_by_sku_and_verified_seller() -> None
 
 
 @pytest.mark.asyncio
-async def test_other_offer_button_rejects_a_different_seller() -> None:
+async def test_current_other_offer_button_uses_exact_seller_row() -> None:
+    offer = CompetitorOffer(
+        selected=False,
+        sku="69484211",
+        seller_id="29823500",
+        seller_name="Station Vibration",
+        price=4595.0,
+        stock_status="In stock",
+    )
+    page = Mock()
+    seller_links = Mock()
+    seller_link = Mock()
+    row = Mock()
+    button = Mock()
+    page.locator.return_value = seller_links
+    seller_links.count = AsyncMock(return_value=1)
+    seller_links.nth.return_value = seller_link
+    seller_link.inner_text = AsyncMock(return_value=" Station Vibration ")
+    seller_link.get_attribute = AsyncMock(
+        return_value="/seller/station-vibration?sellers=29823500"
+    )
+    seller_link.locator.return_value = row
+    row.count = AsyncMock(return_value=1)
+    row.inner_text = AsyncMock(
+        return_value="R 4,595 Estimated Delivery Station Vibration"
+    )
+    row.locator.return_value = button
+    button.count = AsyncMock(return_value=1)
+    button.is_visible = AsyncMock(return_value=True)
+
+    selected = await _find_other_offer_button_by_seller_row(page, offer)
+
+    assert selected is button
+    page.locator.assert_called_once_with('a[href*="sellers="]:visible')
+    row.locator.assert_called_once_with(
+        'button[data-ref="buying-choice-atc"]:visible'
+    )
+
+
+@pytest.mark.asyncio
+async def test_current_other_offer_button_rejects_wrong_seller_id() -> None:
+    offer = CompetitorOffer(
+        selected=False,
+        sku="69484211",
+        seller_id="29823500",
+        seller_name="Station Vibration",
+        price=4595.0,
+        stock_status="In stock",
+    )
+    page = Mock()
+    seller_links = page.locator.return_value
+    seller_link = Mock()
+    seller_links.count = AsyncMock(return_value=1)
+    seller_links.nth.return_value = seller_link
+    seller_link.inner_text = AsyncMock(return_value="Station Vibration")
+    seller_link.get_attribute = AsyncMock(
+        return_value="/seller/station-vibration?sellers=99999999"
+    )
+
+    assert await _find_other_offer_button_by_seller_row(page, offer) is None
+    seller_link.locator.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_other_offer_list_expands_only_when_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    page = Mock()
+    trigger = page.locator.return_value.filter.return_value
+    trigger.count = AsyncMock(return_value=1)
+    trigger.is_visible = AsyncMock(return_value=True)
+    trigger.get_attribute = AsyncMock(side_effect=["trigger", "trigger is-open"])
+    trigger.click = AsyncMock()
+    page.wait_for_timeout = AsyncMock()
+    monkeypatch.setattr(
+        "takealot_ops.competitors.stock._dismiss_marketing_overlay",
+        AsyncMock(),
+    )
+    monkeypatch.setattr(
+        "takealot_ops.competitors.stock._dismiss_terms_modal",
+        AsyncMock(return_value=False),
+    )
+
+    assert await _expand_other_offers(page) is True
+    assert await _expand_other_offers(page) is False
+
+    trigger.click.assert_awaited_once_with()
+    page.wait_for_timeout.assert_awaited_once_with(700)
+
+
+@pytest.mark.asyncio
+async def test_other_offer_button_rejects_a_different_seller(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     offer = CompetitorOffer(
         selected=False,
         sku="237580845",
@@ -476,6 +578,10 @@ async def test_other_offer_button_rejects_a_different_seller() -> None:
     card = page.locator.return_value
     card.count = AsyncMock(return_value=1)
     card.inner_text = AsyncMock(return_value="Sold by Another Seller")
+    monkeypatch.setattr(
+        "takealot_ops.competitors.stock._dismiss_terms_modal",
+        AsyncMock(return_value=False),
+    )
 
     with pytest.raises(RuntimeError, match="未显示预期卖家 GOnline"):
         await _find_other_offer_add_to_cart_button(page, offer)
@@ -498,6 +604,7 @@ async def test_add_other_offer_waits_for_cart_persistence(
     button = Mock(click=AsyncMock())
     find_button = AsyncMock(return_value=button)
     dismiss_overlay = AsyncMock()
+    dismiss_terms = AsyncMock(side_effect=[False, False, False])
     monkeypatch.setattr(
         "takealot_ops.competitors.stock._find_other_offer_add_to_cart_button",
         find_button,
@@ -506,13 +613,81 @@ async def test_add_other_offer_waits_for_cart_persistence(
         "takealot_ops.competitors.stock._dismiss_marketing_overlay",
         dismiss_overlay,
     )
+    monkeypatch.setattr(
+        "takealot_ops.competitors.stock._dismiss_terms_modal",
+        dismiss_terms,
+    )
 
     await _add_other_offer_to_cart(page, offer)
 
-    dismiss_overlay.assert_awaited_once_with(page)
+    assert dismiss_overlay.await_count == 2
+    assert dismiss_terms.await_count == 3
     find_button.assert_awaited_once_with(page, offer)
-    button.click.assert_awaited_once_with()
-    page.wait_for_timeout.assert_awaited_once_with(1500)
+    button.click.assert_awaited_once_with(timeout=10_000)
+    assert page.wait_for_timeout.await_args_list == [call(600), call(1500)]
+
+
+@pytest.mark.asyncio
+async def test_add_other_offer_retries_after_terms_modal_is_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    offer = CompetitorOffer(
+        selected=False,
+        sku="69484211",
+        seller_id="29823500",
+        seller_name="Station Vibration",
+        price=4595.0,
+        stock_status="In stock",
+    )
+    page = Mock(wait_for_timeout=AsyncMock())
+    button = Mock(click=AsyncMock())
+    find_button = AsyncMock(return_value=button)
+    monkeypatch.setattr(
+        "takealot_ops.competitors.stock._find_other_offer_add_to_cart_button",
+        find_button,
+    )
+    monkeypatch.setattr(
+        "takealot_ops.competitors.stock._dismiss_marketing_overlay",
+        AsyncMock(),
+    )
+    monkeypatch.setattr(
+        "takealot_ops.competitors.stock._dismiss_terms_modal",
+        AsyncMock(side_effect=[False, False, True]),
+    )
+
+    await _add_other_offer_to_cart(page, offer)
+
+    assert find_button.await_count == 2
+    assert button.click.await_count == 2
+    assert button.click.await_args_list == [
+        call(timeout=10_000),
+        call(timeout=10_000),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_terms_modal_close_is_scoped_to_a_visible_terms_dialog() -> None:
+    page = Mock()
+    dialogs = page.locator.return_value
+    dialog = Mock()
+    close_buttons = Mock()
+    close_button = Mock()
+    dialogs.count = AsyncMock(return_value=1)
+    dialogs.nth.return_value = dialog
+    dialog.inner_text = AsyncMock(
+        return_value="Please read these terms and conditions carefully"
+    )
+    dialog.locator.return_value = close_buttons
+    close_buttons.count = AsyncMock(return_value=1)
+    close_buttons.nth.return_value = close_button
+    close_button.is_visible = AsyncMock(return_value=True)
+    close_button.click = AsyncMock()
+    page.wait_for_timeout = AsyncMock()
+
+    assert await _dismiss_terms_modal(page) is True
+
+    close_button.click.assert_awaited_once_with()
+    page.wait_for_timeout.assert_awaited_once_with(300)
 
 
 @pytest.mark.asyncio
@@ -585,12 +760,16 @@ async def test_follower_probe_reads_quantity_from_verified_seller_cart(
     assert result.quantity == 4
     assert result.exact is True
     assert result.method == "anonymous-cart-limit"
-    assert result.note == "跟卖卖家 GOnline：精确库存"
+    assert result.note == (
+        "跟卖卖家 GOnline：已核验卖家报价行、购物车PLID和价格；"
+        "精确库存"
+    )
     add_offer.assert_awaited_once_with(page, offer)
     find_quantity.assert_awaited_once_with(
         page,
         "98055738",
         seller_name="GOnline",
+        expected_price=2499.0,
     )
 
 
@@ -624,6 +803,90 @@ async def test_cart_never_falls_back_to_an_unrelated_single_item(
         await _find_product_quantity_combo(page, "72189176")
 
     page.locator.assert_called_once_with('a[href*="/PLID72189176"]:visible')
+
+
+@pytest.mark.asyncio
+async def test_cart_accepts_hidden_seller_only_with_the_exact_offer_price() -> None:
+    page = Mock()
+    product_link = page.locator.return_value
+    product_row = Mock()
+    combo = Mock()
+    price = Mock()
+    product_link.count = AsyncMock(return_value=1)
+    product_link.first.locator.return_value = product_row
+
+    def row_locator(selector: str) -> Mock:
+        if selector == 'button[role="combobox"]:visible':
+            return combo
+        if selector == '[data-ref="product-card-price"]:visible':
+            return price
+        raise AssertionError(selector)
+
+    product_row.locator.side_effect = row_locator
+    product_row.inner_text = AsyncMock(
+        return_value="Hybrid M1202UBTX Band Mixer In stock Qty: 1"
+    )
+    combo.count = AsyncMock(return_value=1)
+    price.count = AsyncMock(return_value=1)
+    price.inner_text = AsyncMock(return_value="R 4,595")
+
+    selected = await _find_product_quantity_combo(
+        page,
+        "50067762",
+        seller_name="Station Vibration",
+        expected_price=4595.0,
+    )
+
+    assert selected is combo
+
+
+@pytest.mark.asyncio
+async def test_cart_rejects_a_different_offer_price_when_seller_is_hidden() -> None:
+    page = Mock()
+    product_link = page.locator.return_value
+    product_row = Mock()
+    combo = Mock()
+    price = Mock()
+    product_link.count = AsyncMock(return_value=1)
+    product_link.first.locator.return_value = product_row
+    product_row.locator.side_effect = [combo, price]
+    combo.count = AsyncMock(return_value=1)
+    price.count = AsyncMock(return_value=1)
+    price.inner_text = AsyncMock(return_value="R 4,568")
+
+    with pytest.raises(RuntimeError, match="未显示预期跟卖价格"):
+        await _find_product_quantity_combo(
+            page,
+            "50067762",
+            seller_name="Station Vibration",
+            expected_price=4595.0,
+        )
+
+
+@pytest.mark.asyncio
+async def test_cart_rejects_an_explicitly_different_seller_even_at_same_price() -> None:
+    page = Mock()
+    product_link = page.locator.return_value
+    product_row = Mock()
+    combo = Mock()
+    price = Mock()
+    product_link.count = AsyncMock(return_value=1)
+    product_link.first.locator.return_value = product_row
+    product_row.locator.side_effect = [combo, price]
+    product_row.inner_text = AsyncMock(
+        return_value="Sold by Main Seller R 4,595 Qty: 1"
+    )
+    combo.count = AsyncMock(return_value=1)
+    price.count = AsyncMock(return_value=1)
+    price.inner_text = AsyncMock(return_value="R 4,595")
+
+    with pytest.raises(RuntimeError, match="未显示预期跟卖卖家"):
+        await _find_product_quantity_combo(
+            page,
+            "50067762",
+            seller_name="Station Vibration",
+            expected_price=4595.0,
+        )
 
 
 @pytest.mark.asyncio
