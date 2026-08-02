@@ -30,6 +30,7 @@ from takealot_ops.competitors.service import (
 from takealot_ops.competitors.stock import skipped_stock_probe
 from takealot_ops.competitors.web import create_app
 from takealot_ops.storage.migrations import create_schema
+from takealot_ops.storage.models import CompetitorTarget, OfferCurrent, StoreOfferBaseline
 
 
 def test_only_default_variant_falls_back_to_snapshot_product_image() -> None:
@@ -334,6 +335,137 @@ def test_follower_offer_stock_is_bound_to_its_exact_seller_offer(tmp_path: Path)
     assert offers["other-buying-option-SKU-TWO"]["stock_quantity"] == 2
     assert offers["other-buying-option-SKU-ONE"]["stock_note"] == "卖家一库存"
     assert offers["other-buying-option-SKU-TWO"]["stock_note"] == "卖家二库存"
+
+
+def test_own_store_product_is_separated_and_only_exposes_follower_offers(
+    tmp_path: Path,
+) -> None:
+    engine = create_engine(f"sqlite:///{(tmp_path / 'store-radar.db').as_posix()}")
+    create_schema(engine)
+    plid = "12345678"
+    url = f"https://www.takealot.com/p/PLID{plid}"
+    captured_at = datetime(2026, 8, 2, 1, tzinfo=UTC)
+    buybox = CompetitorOffer(
+        selected=True,
+        sku="BUYBOX",
+        seller_id="seller-main",
+        seller_name="Main Seller",
+        price=120.0,
+        stock_status="In stock",
+        is_buybox=True,
+        plid=plid,
+        url=url,
+        offer_id="main-offer",
+    )
+    follower = CompetitorOffer(
+        selected=False,
+        sku="FOLLOWER",
+        seller_id="seller-follower",
+        seller_name="Follower Seller",
+        price=110.0,
+        stock_status="In stock",
+        is_buybox=False,
+        plid=plid,
+        url=url,
+        offer_id="follower-offer",
+        identity_key="offer:follower-offer",
+    )
+    product = CompetitorProduct(
+        plid=plid,
+        url=url,
+        title="Own Store Product",
+        image_url="https://example.invalid/own.jpg",
+        sku="BUYBOX",
+        seller_id="seller-main",
+        seller_name="Main Seller",
+        price=120.0,
+        stock_status="In stock",
+        is_leadtime=False,
+        review_count=8,
+        rating=4.0,
+        offers=(buybox, follower),
+        variants=(),
+    )
+    stock = skipped_stock_probe()
+    with Session(engine) as session, session.begin():
+        session.add(
+            OfferCurrent(
+                offer_id="own-offer",
+                productline_id=plid,
+                title="Own Store Product",
+                selling_price=100,
+                total_stock=7,
+                captured_at=captured_at,
+            )
+        )
+        session.add(
+            StoreOfferBaseline(
+                display_date=date(2026, 8, 2),
+                offer_id="own-offer",
+                productline_id=plid,
+                sku="OWN-SKU",
+                title="Own Store Product",
+                image_url="https://example.invalid/own.jpg",
+                selling_price=100,
+                status="buyable",
+                total_stock=7,
+                captured_at=captured_at,
+            )
+        )
+        session.add(
+            StoreOfferBaseline(
+                display_date=date(2026, 8, 2),
+                offer_id="removed-own-offer",
+                productline_id="99999999",
+                sku="REMOVED-SKU",
+                title="Removed Own Product",
+                selling_price=80,
+                status="disabled",
+                total_stock=0,
+                captured_at=captured_at,
+            )
+        )
+        session.add(
+            CompetitorTarget(
+                plid=plid,
+                offer_group_plid=plid,
+                url=url,
+                title="Legacy mixed target",
+                active=True,
+                created_at=captured_at,
+                updated_at=captured_at,
+            )
+        )
+        CompetitorRepository(session).save_observation(
+            product=product,
+            reviews=[],
+            review_summary=summarize_reviews([]),
+            stock=stock,
+            variant_stocks=[],
+            offer_stocks=[OfferStockObservation(follower, stock)],
+            lifetime_sales=estimate_lifetime_sales(product.review_count),
+            signal=analyze_sales_signal(
+                None,
+                current_stock_quantity=None,
+                current_stock_exact=False,
+                current_review_count=product.review_count,
+            ),
+            collected_at=captured_at,
+            register_target=False,
+        )
+
+    dataset = load_competitor_dataset(engine)
+    engine.dispose()
+
+    assert dataset.current.empty
+    assert len(dataset.store_current) == 1
+    item = dataset.store_current.iloc[0]
+    assert item["来源"] == "own_store"
+    assert item["价格"] == 100.0
+    assert item["库存数量"] == 7
+    assert [offer["offer_id"] for offer in item["跟卖报价"]] == [
+        "follower-offer"
+    ]
 
 
 def test_competitor_signals_recompute_from_oldest_and_latest_in_date_range(

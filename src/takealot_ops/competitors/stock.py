@@ -129,11 +129,13 @@ async def probe_product_stocks(
     *,
     profile_dir: Path,
     visible: bool = False,
+    probe_buyboxes: bool = True,
 ) -> tuple[list[VariantStockObservation], list[OfferStockObservation]]:
     """Probe variant buyboxes and follower offers in one isolated product session."""
     results: dict[str, StockProbeResult] = {}
     purchasable: list[CompetitorVariant] = []
-    for variant in product.variants:
+    variants = product.variants if probe_buyboxes else ()
+    for variant in variants:
         if variant.is_leadtime:
             results[variant.key] = non_platform_stock_probe()
         elif not variant.is_add_to_cart_available:
@@ -227,7 +229,7 @@ async def probe_product_stocks(
 
     variant_observations = [
         VariantStockObservation(variant=variant, stock=results[variant.key])
-        for variant in product.variants
+        for variant in variants
     ]
     offer_observations = [
         OfferStockObservation(offer=offer, stock=offer_results[index])

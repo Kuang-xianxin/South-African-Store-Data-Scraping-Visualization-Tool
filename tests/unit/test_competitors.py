@@ -41,7 +41,12 @@ from takealot_ops.competitors.service import (
     parse_competitor_urls,
 )
 from takealot_ops.competitors.stock import _parse_warehouse_stock_message
-from takealot_ops.storage.models import Base, CompetitorLinkHealth, CompetitorSnapshot
+from takealot_ops.storage.models import (
+    Base,
+    CompetitorLinkHealth,
+    CompetitorSnapshot,
+    CompetitorTarget,
+)
 
 
 async def _fake_delay(self: object, a: float, b: float) -> None:
@@ -249,6 +254,77 @@ async def test_collector_retries_after_persisting_failed_stock_probe(
         assert snapshot is not None
         assert snapshot.plid == "12345678"
         assert snapshot.stock_quantity is None
+    engine.dispose()
+
+
+async def test_own_store_collection_skips_buybox_stock_and_reviews_without_followers(
+    tmp_path: Path,
+) -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    url = "https://www.takealot.com/p/PLID12345678"
+    buybox = CompetitorOffer(
+        selected=True,
+        sku="PUBLIC-SKU",
+        seller_id="seller-main",
+        seller_name="Main Seller",
+        price=99.0,
+        stock_status="In stock",
+        is_buybox=True,
+        is_add_to_cart_available=True,
+        plid="12345678",
+        url=url,
+    )
+    product = CompetitorProduct(
+        plid="12345678",
+        url=url,
+        title="Own Product",
+        image_url=None,
+        sku="PUBLIC-SKU",
+        seller_id="seller-main",
+        seller_name="Main Seller",
+        price=99.0,
+        stock_status="In stock",
+        is_leadtime=False,
+        review_count=12,
+        rating=4.5,
+        offers=(buybox,),
+        variants=(
+            CompetitorVariant(
+                key="default",
+                label="默认款",
+                url=url,
+                title="Own Product",
+                sku="PUBLIC-SKU",
+                seller_id="seller-main",
+                seller_name="Main Seller",
+                price=99.0,
+                stock_status="In stock",
+                is_leadtime=False,
+                is_add_to_cart_available=True,
+            ),
+        ),
+    )
+    client = MagicMock()
+    client.fetch_product = AsyncMock(return_value=product)
+    client.fetch_all_reviews = AsyncMock(return_value=[])
+    collector = CompetitorCollector(engine=engine, project_root=tmp_path, client=client)
+
+    result = await collector.collect(
+        url,
+        with_stock_probe=True,
+        followers_only=True,
+    )
+
+    assert result.succeeded is True
+    assert "未发现跟卖报价" in result.message
+    client.fetch_all_reviews.assert_not_awaited()
+    with Session(engine) as session:
+        snapshot = session.scalar(select(CompetitorSnapshot))
+        assert snapshot is not None
+        assert snapshot.offers == []
+        assert snapshot.review_count == 0
+        assert session.scalar(select(CompetitorTarget)) is None
     engine.dispose()
 
 

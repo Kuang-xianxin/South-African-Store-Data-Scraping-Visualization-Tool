@@ -311,32 +311,34 @@ class CompetitorRepository:
         signal: SalesSignal,
         collected_at: datetime,
         offer_stocks: list[OfferStockObservation] | None = None,
+        register_target: bool = True,
     ) -> CompetitorSnapshot:
         now = collected_at.astimezone(UTC)
-        target = self._session.get(CompetitorTarget, product.plid)
-        if target is None:
-            target = CompetitorTarget(
+        if register_target:
+            target = self._session.get(CompetitorTarget, product.plid)
+            if target is None:
+                target = CompetitorTarget(
+                    plid=product.plid,
+                    offer_group_plid=product.plid,
+                    url=product.url,
+                    title=product.title,
+                    active=True,
+                    created_at=now,
+                    updated_at=now,
+                )
+                self._session.add(target)
+            else:
+                if not target.offer_group_plid:
+                    target.offer_group_plid = target.plid
+                target.url = product.url
+                target.title = product.title
+                target.active = True
+                target.updated_at = now
+            self.mark_link_healthy(
                 plid=product.plid,
-                offer_group_plid=product.plid,
                 url=product.url,
-                title=product.title,
-                active=True,
-                created_at=now,
-                updated_at=now,
+                checked_at=now,
             )
-            self._session.add(target)
-        else:
-            if not target.offer_group_plid:
-                target.offer_group_plid = target.plid
-            target.url = product.url
-            target.title = product.title
-            target.active = True
-            target.updated_at = now
-        self.mark_link_healthy(
-            plid=product.plid,
-            url=product.url,
-            checked_at=now,
-        )
 
         snapshot = CompetitorSnapshot(
             plid=product.plid,

@@ -7,6 +7,7 @@ from contextlib import contextmanager
 from datetime import UTC, date, datetime
 from typing import Any
 from uuid import uuid4
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
@@ -20,7 +21,11 @@ from takealot_ops.storage.models import (
     OfferCurrent,
     OfferSnapshot,
     SaleItem,
+    StoreOfferBaseline,
 )
+
+
+STORE_DISPLAY_TIMEZONE = ZoneInfo("Asia/Shanghai")
 
 
 class Repository:
@@ -57,6 +62,7 @@ class Repository:
         values = _offer_values(record)
         self._upsert_offer_current(values)
         self._upsert_offer_snapshot(values, snapshot_date)
+        self._insert_store_offer_baseline(values)
 
     def prune_offer_snapshot(self, snapshot_date: date, retained_offer_ids: Sequence[str]) -> None:
         """Stage removal of offers absent from a complete current-offer response."""
@@ -229,6 +235,40 @@ class Repository:
             self._session.add(OfferSnapshot(**snapshot_values))
             return
         _set_values(existing, snapshot_values)
+
+    def _insert_store_offer_baseline(self, values: dict[str, Any]) -> None:
+        """Keep the first available Seller API pull for each Beijing display day."""
+        productline_id = str(values.get("productline_id") or "").strip()
+        if not productline_id:
+            return
+        captured_at = values["captured_at"]
+        if captured_at.tzinfo is None:
+            captured_at = captured_at.replace(tzinfo=UTC)
+        display_date = captured_at.astimezone(STORE_DISPLAY_TIMEZONE).date()
+        existing = self._session.scalar(
+            select(StoreOfferBaseline.id).where(
+                StoreOfferBaseline.display_date == display_date,
+                StoreOfferBaseline.offer_id == values["offer_id"],
+            )
+        )
+        if existing is not None:
+            return
+        self._session.add(
+            StoreOfferBaseline(
+                display_date=display_date,
+                offer_id=values["offer_id"],
+                productline_id=productline_id,
+                sku=values.get("sku"),
+                title=values.get("title"),
+                image_url=values.get("image_url"),
+                selling_price=values.get("selling_price"),
+                status=values.get("status"),
+                total_stock=values.get("total_stock"),
+                takealot_available_stock=values.get("takealot_available_stock"),
+                seller_available_stock=values.get("seller_available_stock"),
+                captured_at=captured_at,
+            )
+        )
 
 
 def _offer_values(record: OfferRecord) -> dict[str, Any]:

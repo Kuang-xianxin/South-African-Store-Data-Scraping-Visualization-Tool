@@ -29,6 +29,7 @@ export interface CompetitorOfferItem {
 }
 
 export interface CompetitorItem {
+  来源: "competitor" | "own_store";
   快照ID: number;
   plid: string;
   商品: string;
@@ -68,6 +69,18 @@ export interface CompetitorItem {
   库存可比: boolean | null;
   链接: string;
   跟卖报价: CompetitorOfferItem[];
+  自有报价: OwnStoreOfferItem[];
+  共享评论说明: string | null;
+}
+
+export interface OwnStoreOfferItem {
+  offer_id: string;
+  SKU: string | null;
+  价格: number | null;
+  库存: number | null;
+  状态: string | null;
+  基准日: string;
+  拉取时间: string;
 }
 
 export interface CompetitorDateRange {
@@ -79,7 +92,16 @@ export interface CompetitorDateRange {
 
 export interface CompetitorOverview {
   items: CompetitorItem[];
+  store_items: CompetitorItem[];
   date_range: CompetitorDateRange;
+}
+
+export interface CompetitorStoreTargetItem {
+  plid: string;
+  url: string;
+  title: string;
+  offer_count: number;
+  captured_at: string;
 }
 
 export interface CompetitorTargetItem {

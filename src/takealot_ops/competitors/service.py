@@ -5,7 +5,7 @@ from __future__ import annotations
 import ast
 import re
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import UTC, date, datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -49,6 +49,8 @@ from takealot_ops.storage.models import (
     CompetitorSnapshot,
     CompetitorTarget,
     CompetitorVariantSnapshot,
+    OfferCurrent,
+    StoreOfferBaseline,
 )
 
 
@@ -86,6 +88,7 @@ class CompetitorDataset:
     history: pd.DataFrame
     reviews: pd.DataFrame
     variants: pd.DataFrame
+    store_current: pd.DataFrame = field(default_factory=pd.DataFrame)
     available_start_date: date | None = None
     available_end_date: date | None = None
     selected_start_date: date | None = None
@@ -186,14 +189,35 @@ class CompetitorCollector:
         *,
         with_stock_probe: bool,
         visible_browser: bool = False,
+        followers_only: bool = False,
     ) -> CompetitorCollectionResult:
         plid = extract_plid(url)
         try:
             self._report_stage("正在读取商品与变体")
             product = await self._client.fetch_product(url)
-            discovered_targets = _discovered_offer_targets(product, submitted_url=url)
-            self._report_stage("正在读取全部评论")
-            reviews = await self._client.fetch_all_reviews(product.plid)
+            follower_offers = tuple(offer for offer in product.offers if not offer.is_buybox)
+            discovered_targets = (
+                ()
+                if followers_only
+                else _discovered_offer_targets(product, submitted_url=url)
+            )
+            product_for_storage = (
+                replace(
+                    product,
+                    offers=follower_offers,
+                    variants=(),
+                    review_count=(product.review_count if follower_offers else 0),
+                    rating=(product.rating if follower_offers else 0.0),
+                )
+                if followers_only
+                else product
+            )
+            if followers_only and not follower_offers:
+                self._report_stage("本次未发现跟卖报价")
+                reviews = []
+            else:
+                self._report_stage("正在读取全部评论")
+                reviews = await self._client.fetch_all_reviews(product.plid)
             self._report_stage(
                 "正在启动库存探测浏览器"
                 if with_stock_probe
@@ -203,24 +227,29 @@ class CompetitorCollector:
                 product,
                 enabled=with_stock_probe,
                 visible_browser=visible_browser,
+                followers_only=followers_only,
             )
-            stock = _aggregate_variant_stock(variant_stocks)
+            stock = (
+                skipped_stock_probe()
+                if followers_only
+                else _aggregate_variant_stock(variant_stocks)
+            )
             self._report_stage("正在保存商品快照")
             collected_at = datetime.now(UTC)
             with Session(self._engine) as session:
                 repository = CompetitorRepository(session)
                 with session.begin():
-                    previous = repository.latest_compatible_snapshot(product)
+                    previous = repository.latest_compatible_snapshot(product_for_storage)
                     summary = summarize_reviews(reviews)
-                    lifetime_sales = estimate_lifetime_sales(product.review_count)
+                    lifetime_sales = estimate_lifetime_sales(product_for_storage.review_count)
                     signal = analyze_sales_signal(
                         previous,
                         current_stock_quantity=stock.quantity,
                         current_stock_exact=stock.exact,
-                        current_review_count=product.review_count,
+                        current_review_count=product_for_storage.review_count,
                     )
                     repository.save_observation(
-                        product=product,
+                        product=product_for_storage,
                         reviews=reviews,
                         review_summary=summary,
                         stock=stock,
@@ -229,6 +258,7 @@ class CompetitorCollector:
                         lifetime_sales=lifetime_sales,
                         signal=signal,
                         collected_at=collected_at,
+                        register_target=not followers_only,
                     )
             failed_stock_count = sum(
                 observation.stock.method == "failed" for observation in variant_stocks
@@ -259,10 +289,15 @@ class CompetitorCollector:
                 plid=plid,
                 title=product.title,
                 succeeded=True,
-                message=_collection_message(
-                    stock,
-                    len(variant_stocks),
-                    len(offer_stocks),
+                message=(
+                    "自有商品已检查，本次未发现跟卖报价，"
+                    "未拉取商品评论或探测主报价库存。"
+                    if followers_only and not follower_offers
+                    else _collection_message(
+                        stock,
+                        len(variant_stocks),
+                        len(offer_stocks),
+                    )
                 ),
                 discovered_targets=discovered_targets,
             )
@@ -364,11 +399,12 @@ class CompetitorCollector:
         *,
         enabled: bool,
         visible_browser: bool,
+        followers_only: bool = False,
     ) -> tuple[list[VariantStockObservation], list[OfferStockObservation]]:
         if not enabled:
             variant_stocks = [
                 VariantStockObservation(variant=variant, stock=skipped_stock_probe())
-                for variant in product.variants
+                for variant in (() if followers_only else product.variants)
             ]
             offer_stocks = [
                 OfferStockObservation(offer=offer, stock=skipped_stock_probe())
@@ -381,12 +417,13 @@ class CompetitorCollector:
                 product,
                 profile_dir=self._project_root / "data" / "competitor-browser-profile",
                 visible=visible_browser,
+                probe_buyboxes=not followers_only,
             )
         except (OSError, RuntimeError) as exc:
             failed = StockProbeResult(quantity=None, exact=False, method="failed", note=str(exc))
             variant_stocks = [
                 VariantStockObservation(variant=variant, stock=failed)
-                for variant in product.variants
+                for variant in (() if followers_only else product.variants)
             ]
             offer_stocks = [
                 OfferStockObservation(offer=offer, stock=failed)
@@ -529,10 +566,22 @@ def load_competitor_link_health(engine: Engine) -> list[dict[str, object]]:
     latest_snapshots: dict[str, CompetitorSnapshot] = {}
     try:
         with Session(engine) as session:
+            store_plids = {
+                str(value).strip()
+                for value in session.scalars(
+                    select(OfferCurrent.productline_id).where(
+                        OfferCurrent.productline_id.is_not(None)
+                    )
+                )
+                if str(value or "").strip()
+            }
             rows = list(
                 session.scalars(
                     select(CompetitorLinkHealth)
-                    .where(CompetitorLinkHealth.status != "healthy")
+                    .where(
+                        CompetitorLinkHealth.status != "healthy",
+                        CompetitorLinkHealth.plid.not_in(store_plids),
+                    )
                     .order_by(
                         CompetitorLinkHealth.status.desc(),
                         CompetitorLinkHealth.last_checked_at.desc(),
@@ -609,6 +658,16 @@ def load_competitor_dataset(
                     )
                 )
             )
+            store_offers = list(session.scalars(select(OfferCurrent)))
+            store_baselines = list(
+                session.scalars(
+                    select(StoreOfferBaseline).order_by(
+                        StoreOfferBaseline.display_date.desc(),
+                        StoreOfferBaseline.captured_at.asc(),
+                        StoreOfferBaseline.offer_id.asc(),
+                    )
+                )
+            )
     except SQLAlchemyError:
         return CompetitorDataset(
             current=pd.DataFrame(),
@@ -619,9 +678,23 @@ def load_competitor_dataset(
             selected_end_date=end_date,
         )
 
-    active_plids = {target.plid for target in targets}
+    store_plids = {
+        str(row.productline_id).strip()
+        for row in store_offers
+        if str(row.productline_id or "").strip()
+    }
+    store_baselines = [
+        row
+        for row in store_baselines
+        if str(row.productline_id or "").strip() in store_plids
+    ]
+    active_plids = {target.plid for target in targets} - store_plids
     active_snapshots = [row for row in snapshots if row.plid in active_plids]
-    snapshot_dates = [_competitor_display_date(row.collected_at) for row in active_snapshots]
+    store_snapshots = [row for row in snapshots if row.plid in store_plids]
+    snapshot_dates = [
+        *(_competitor_display_date(row.collected_at) for row in active_snapshots),
+        *(row.display_date for row in store_baselines),
+    ]
     available_start_date = min(snapshot_dates, default=None)
     available_end_date = max(snapshot_dates, default=None)
     selected_start_date = start_date or available_start_date
@@ -629,6 +702,18 @@ def load_competitor_dataset(
     interval_snapshots = [
         row
         for row in active_snapshots
+        if (
+            selected_start_date is None
+            or _competitor_display_date(row.collected_at) >= selected_start_date
+        )
+        and (
+            selected_end_date is None
+            or _competitor_display_date(row.collected_at) <= selected_end_date
+        )
+    ]
+    interval_store_snapshots = [
+        row
+        for row in store_snapshots
         if (
             selected_start_date is None
             or _competitor_display_date(row.collected_at) >= selected_start_date
@@ -735,11 +820,20 @@ def load_competitor_dataset(
             if row.snapshot_id in interval_snapshot_ids
         ]
     )
+    store_current = pd.DataFrame(
+        _store_snapshot_rows(
+            store_baselines,
+            interval_store_snapshots,
+            selected_start_date=selected_start_date,
+            selected_end_date=selected_end_date,
+        )
+    )
     return CompetitorDataset(
         current=current,
         history=history,
         reviews=review_frame,
         variants=variant_frame,
+        store_current=store_current,
         available_start_date=available_start_date,
         available_end_date=available_end_date,
         selected_start_date=selected_start_date,
@@ -1159,6 +1253,7 @@ def _snapshot_row(
             else f"{period_sales_min}–{period_sales_max}"
         )
     return {
+        "来源": "competitor",
         "快照ID": row.id,
         "plid": row.plid,
         "商品": row.title,
@@ -1198,7 +1293,163 @@ def _snapshot_row(
         "库存可比": stock_comparable,
         "链接": row.url,
         "跟卖报价": offer_rows or [],
+        "自有报价": [],
+        "共享评论说明": None,
     }
+
+
+def _store_snapshot_rows(
+    baselines: list[StoreOfferBaseline],
+    follower_snapshots: list[CompetitorSnapshot],
+    *,
+    selected_start_date: date | None,
+    selected_end_date: date | None,
+) -> list[dict[str, object]]:
+    """Build own-store cards from daily Seller API baselines plus follower offers."""
+    selected_baselines = [
+        row
+        for row in baselines
+        if (selected_start_date is None or row.display_date >= selected_start_date)
+        and (selected_end_date is None or row.display_date <= selected_end_date)
+        and str(row.productline_id or "").strip()
+    ]
+    baselines_by_plid: dict[str, list[StoreOfferBaseline]] = {}
+    for baseline_row in selected_baselines:
+        baselines_by_plid.setdefault(str(baseline_row.productline_id), []).append(
+            baseline_row
+        )
+
+    followers_by_plid: dict[str, list[CompetitorSnapshot]] = {}
+    for follower_snapshot in follower_snapshots:
+        followers_by_plid.setdefault(follower_snapshot.plid, []).append(
+            follower_snapshot
+        )
+
+    result: list[dict[str, object]] = []
+    for plid, plid_baselines in baselines_by_plid.items():
+        latest_date = max(row.display_date for row in plid_baselines)
+        own_offers = sorted(
+            (row for row in plid_baselines if row.display_date == latest_date),
+            key=lambda row: row.offer_id,
+        )
+        representative = next(
+            (row for row in own_offers if row.selling_price is not None),
+            own_offers[0],
+        )
+        prices = [float(row.selling_price) for row in own_offers if row.selling_price is not None]
+        stock_values = [row.total_stock for row in own_offers]
+        stock_exact = bool(stock_values) and all(value is not None for value in stock_values)
+        total_stock = (
+            sum(value for value in stock_values if value is not None)
+            if stock_exact
+            else None
+        )
+
+        observations = followers_by_plid.get(plid, [])
+        observations.sort(key=lambda row: row.collected_at, reverse=True)
+        latest_observation = observations[0] if observations else None
+        oldest_observation = observations[-1] if observations else None
+        follower_rows = (
+            [
+                item
+                for item in _interval_offer_rows(oldest_observation, latest_observation)
+                if not item["是否变体主报价"]
+            ]
+            if latest_observation is not None and oldest_observation is not None
+            else []
+        )
+        has_followers = bool(follower_rows)
+        captured_at = min(row.captured_at for row in own_offers)
+        public_collected_at = (
+            latest_observation.collected_at if latest_observation is not None else None
+        )
+        if has_followers:
+            assert latest_observation is not None
+            review_count = latest_observation.review_count
+            positive_reviews = latest_observation.positive_reviews
+            neutral_reviews = latest_observation.neutral_reviews
+            negative_reviews = latest_observation.negative_reviews
+        else:
+            review_count = 0
+            positive_reviews = 0
+            neutral_reviews = 0
+            negative_reviews = 0
+        result.append(
+            {
+                "来源": "own_store",
+                "快照ID": -representative.id,
+                "plid": plid,
+                "商品": representative.title or f"PLID{plid}",
+                "图片": representative.image_url,
+                "采集时间": captured_at,
+                "当前卖家": "自有店铺（Seller API）",
+                "价格": min(prices) if prices else None,
+                "区间起始价格": None,
+                "价格变化": None,
+                "价格信号": "当日首拉基准",
+                "库存上限": str(total_stock) if total_stock is not None else "接口未提供",
+                "库存数量": total_stock,
+                "库存精确": stock_exact,
+                "库存说明": "Seller API 当日最早一次完整刷新基准，未执行公开页主报价库存探测。",
+                "库存参考过期": False,
+                "上次成功库存": None,
+                "上次成功库存数量": None,
+                "上次成功库存精确": False,
+                "上次成功库存时间": None,
+                "评论数": review_count,
+                "评分": (
+                    float(latest_observation.rating)
+                    if has_followers
+                    and latest_observation is not None
+                    and latest_observation.rating is not None
+                    else None
+                ),
+                "好评": positive_reviews,
+                "中评": neutral_reviews,
+                "差评": negative_reviews,
+                "观察期销量信号": "只看跟卖报价",
+                "观察期估算下限": None,
+                "观察期估算上限": None,
+                "库存净变化": None,
+                "库存净流入": None,
+                "库存净流出": None,
+                "新增评论": None,
+                "趋势判断": "跟卖监控中" if has_followers else "暂未发现跟卖",
+                "判断说明": (
+                    f"已记录 {len(follower_rows)} 个跟卖报价；自有链接只使用 Seller API 首拉基准。"
+                    if has_followers
+                    else "已检查公开商品数据，未发现非主报价的跟卖卖家。"
+                ),
+                "信号区间开始": (
+                    oldest_observation.collected_at if oldest_observation is not None else None
+                ),
+                "信号区间结束": public_collected_at,
+                "区间快照数": len(observations),
+                "库存可比": None,
+                "链接": f"https://www.takealot.com/p/PLID{plid}",
+                "跟卖报价": follower_rows,
+                "自有报价": [
+                    {
+                        "offer_id": row.offer_id,
+                        "SKU": row.sku,
+                        "价格": float(row.selling_price) if row.selling_price is not None else None,
+                        "库存": row.total_stock,
+                        "状态": row.status,
+                        "基准日": row.display_date,
+                        "拉取时间": row.captured_at,
+                    }
+                    for row in own_offers
+                ],
+                "共享评论说明": (
+                    "Takealot 评论属于整个 PLID 商品，不能归属到某个跟卖卖家；"
+                    "只在发现跟卖时拉取，并作为商品共享信号展示。"
+                    if has_followers
+                    else None
+                ),
+            }
+        )
+    result.sort(key=lambda item: (str(item["趋势判断"]), str(item["商品"])))
+    return result
 
 
 def _variant_row(

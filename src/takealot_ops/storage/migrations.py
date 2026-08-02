@@ -2,14 +2,16 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Protocol
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import Engine, create_engine, event, insert, inspect, select, update
 from sqlalchemy.engine import make_url
+from sqlalchemy.orm import Session
 
-from takealot_ops.storage.models import Base, ErpStore
+from takealot_ops.storage.models import Base, ErpStore, OfferCurrent, StoreOfferBaseline
 
 
 class DatabaseSettings(Protocol):
@@ -73,6 +75,47 @@ def create_schema(engine: Engine) -> None:
     _add_competitor_variant_observation_columns(engine)
     if engine.dialect.name == "sqlite":
         _add_sqlite_offer_stock_columns(engine)
+    _seed_store_offer_baselines(engine)
+
+
+def _seed_store_offer_baselines(engine: Engine) -> None:
+    """Seed the feature's first retained baseline from the current Seller API state."""
+    display_timezone = ZoneInfo("Asia/Shanghai")
+    with Session(engine) as session, session.begin():
+        if session.scalar(select(StoreOfferBaseline.id).limit(1)) is not None:
+            return
+        for offer in session.scalars(select(OfferCurrent)):
+            productline_id = str(offer.productline_id or "").strip()
+            if not productline_id:
+                continue
+            captured_at = offer.captured_at
+            if captured_at.tzinfo is None:
+                captured_at = captured_at.replace(tzinfo=UTC)
+            display_date = captured_at.astimezone(display_timezone).date()
+            exists = session.scalar(
+                select(StoreOfferBaseline.id).where(
+                    StoreOfferBaseline.display_date == display_date,
+                    StoreOfferBaseline.offer_id == offer.offer_id,
+                )
+            )
+            if exists is not None:
+                continue
+            session.add(
+                StoreOfferBaseline(
+                    display_date=display_date,
+                    offer_id=offer.offer_id,
+                    productline_id=productline_id,
+                    sku=offer.sku,
+                    title=offer.title,
+                    image_url=offer.image_url,
+                    selling_price=offer.selling_price,
+                    status=offer.status,
+                    total_stock=offer.total_stock,
+                    takealot_available_stock=offer.takealot_available_stock,
+                    seller_available_stock=offer.seller_available_stock,
+                    captured_at=captured_at,
+                )
+            )
 
 
 def _add_offer_created_at_columns(engine: Engine) -> None:

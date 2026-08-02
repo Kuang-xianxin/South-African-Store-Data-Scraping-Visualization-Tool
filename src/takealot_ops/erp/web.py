@@ -132,6 +132,7 @@ from takealot_ops.storage.models import (
     CompetitorTarget,
     CompetitorTargetAudit,
     DailyProductMetric,
+    OfferCurrent,
 )
 
 
@@ -1267,6 +1268,7 @@ def create_app(project_root: Path | None = None) -> FastAPI:
         )
         return {
             "items": frame_records(dataset.current),
+            "store_items": frame_records(dataset.store_current),
             "date_range": dataset.date_range_payload(),
         }
 
@@ -1343,7 +1345,12 @@ def create_app(project_root: Path | None = None) -> FastAPI:
                 )
                 target_rows = session.execute(
                     select(CompetitorTarget, has_history.label("has_history"))
-                    .where(CompetitorTarget.active.is_(True))
+                    .where(
+                        CompetitorTarget.active.is_(True),
+                        ~select(OfferCurrent.offer_id)
+                        .where(OfferCurrent.productline_id == CompetitorTarget.plid)
+                        .exists(),
+                    )
                     .order_by(
                         CompetitorTarget.created_at.asc(),
                         CompetitorTarget.plid.asc(),
@@ -1534,6 +1541,7 @@ def create_app(project_root: Path | None = None) -> FastAPI:
                 url = target.url
         finally:
             engine.dispose()
+
         try:
             status, accepted = collection_registry.prioritize_target(
                 plid=plid,
@@ -1570,6 +1578,44 @@ def create_app(project_root: Path | None = None) -> FastAPI:
             accepted,
         )
         return {"ok": True, "accepted": accepted, "status": status}
+
+    @app.get("/api/competitors/store-targets")
+    def competitor_store_targets() -> dict[str, list[dict[str, object]]]:
+        """Return every current own-store PLID as an automatic follower target."""
+        settings = DashboardSettings.from_env(root)
+        engine = create_read_only_erp_engine(settings.database_url)
+        try:
+            with Session(engine) as session:
+                rows = list(
+                    session.scalars(
+                        select(OfferCurrent).order_by(
+                            OfferCurrent.productline_id,
+                            OfferCurrent.offer_id,
+                        )
+                    )
+                )
+            grouped: dict[str, list[OfferCurrent]] = defaultdict(list)
+            for row in rows:
+                plid = str(row.productline_id or "").strip()
+                if plid:
+                    grouped[plid].append(row)
+            return {
+                "items": [
+                    {
+                        "plid": plid,
+                        "url": f"https://www.takealot.com/p/PLID{plid}",
+                        "title": next(
+                            (row.title for row in offers if row.title),
+                            f"PLID{plid}",
+                        ),
+                        "offer_count": len(offers),
+                        "captured_at": min(row.captured_at for row in offers).isoformat(),
+                    }
+                    for plid, offers in grouped.items()
+                ]
+            }
+        finally:
+            engine.dispose()
 
     @app.get("/api/competitors/target-audits")
     def competitor_target_audits(
@@ -1645,12 +1691,24 @@ def create_app(project_root: Path | None = None) -> FastAPI:
         history = dataset.history
         reviews = dataset.reviews
         variants = dataset.variants
+        store_item = None
+        if not dataset.store_current.empty:
+            matching_store_items = dataset.store_current.loc[
+                dataset.store_current["plid"].astype(str) == plid
+            ]
+            if not matching_store_items.empty:
+                store_item = matching_store_items.iloc[0]
         if not history.empty:
             history = history.loc[history["plid"].astype(str) == plid]
         if not reviews.empty:
             reviews = reviews.loc[reviews["plid"].astype(str) == plid]
         if not variants.empty:
             variants = variants.loc[variants["plid"].astype(str) == plid]
+        if store_item is not None:
+            history = history.iloc[0:0]
+            variants = variants.iloc[0:0]
+            if not store_item["跟卖报价"]:
+                reviews = reviews.iloc[0:0]
         return {
             "history": frame_records(history),
             "reviews": frame_records(reviews),
@@ -1724,6 +1782,15 @@ def create_app(project_root: Path | None = None) -> FastAPI:
             engine = create_engine_for_settings(settings)
             try:
                 create_schema(engine)
+                with Session(engine) as session:
+                    followers_only = (
+                        session.scalar(
+                            select(OfferCurrent.offer_id)
+                            .where(OfferCurrent.productline_id == plid)
+                            .limit(1)
+                        )
+                        is not None
+                    )
                 try:
                     async with competitor_public_client.lease(
                         wait_callback=lambda delay_seconds: report_stage(
@@ -1740,12 +1807,17 @@ def create_app(project_root: Path | None = None) -> FastAPI:
                                 payload.url,
                                 with_stock_probe=effective_with_stock_probe,
                                 visible_browser=effective_visible_browser,
+                                followers_only=followers_only,
                             )
-                        added_targets = _sync_discovered_competitor_targets(
-                            engine,
-                            origin_plid=plid,
-                            discovered_targets=result.discovered_targets,
-                            user=user,
+                        added_targets = (
+                            ()
+                            if followers_only
+                            else _sync_discovered_competitor_targets(
+                                engine,
+                                origin_plid=plid,
+                                discovered_targets=result.discovered_targets,
+                                user=user,
+                            )
                         )
                         queued_target_count = sum(
                             collection_registry.enqueue_target(
@@ -1977,13 +2049,26 @@ def _sync_discovered_competitor_targets(
     """Persist only new/reactivated crawlable offers and merge their target groups."""
     if not discovered_targets:
         return ()
-    unique_targets = {target.plid: target for target in discovered_targets}
-    origin = unique_targets.get(origin_plid)
-    if origin is None:
-        return ()
     now = datetime.now(UTC)
     added: list[CompetitorDiscoveredTarget] = []
     with Session(engine) as session:
+        store_plids = {
+            str(value).strip()
+            for value in session.scalars(
+                select(OfferCurrent.productline_id).where(
+                    OfferCurrent.productline_id.is_not(None)
+                )
+            )
+            if str(value or "").strip()
+        }
+        unique_targets = {
+            target.plid: target
+            for target in discovered_targets
+            if target.plid not in store_plids
+        }
+        origin = unique_targets.get(origin_plid)
+        if origin is None:
+            return ()
         origin_row = session.get(CompetitorTarget, origin_plid)
         if origin_row is None:
             origin_row = CompetitorTarget(

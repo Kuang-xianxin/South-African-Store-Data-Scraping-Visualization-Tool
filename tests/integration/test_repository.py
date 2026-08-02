@@ -13,7 +13,12 @@ from sqlalchemy.orm import Session
 from takealot_ops.domain import OfferRecord, SaleRecord
 from takealot_ops.settings import Settings
 from takealot_ops.storage.migrations import create_engine_for_settings, create_schema
-from takealot_ops.storage.models import OfferCurrent, OfferSnapshot, SaleItem
+from takealot_ops.storage.models import (
+    OfferCurrent,
+    OfferSnapshot,
+    SaleItem,
+    StoreOfferBaseline,
+)
 from takealot_ops.storage.repository import Repository
 
 
@@ -96,11 +101,16 @@ def test_offer_snapshot_is_unique_by_day_and_offer_id(engine: Engine, offer: Off
 
     with Session(engine) as session:
         snapshots = session.scalars(select(OfferSnapshot)).all()
+        store_baselines = session.scalars(select(StoreOfferBaseline)).all()
 
     assert len(snapshots) == 1
     assert snapshots[0].title == "Updated title"
     assert snapshots[0].selling_price == Decimal("189.99")
     assert snapshots[0].created_at == datetime(2026, 1, 15, 10, 34, 56)
+    assert len(store_baselines) == 1
+    assert store_baselines[0].title == offer.title
+    assert store_baselines[0].selling_price == offer.selling_price
+    assert store_baselines[0].captured_at == offer.captured_at.replace(tzinfo=None)
 
 
 def test_repeated_sale_updates_status_without_duplicate_order_item(

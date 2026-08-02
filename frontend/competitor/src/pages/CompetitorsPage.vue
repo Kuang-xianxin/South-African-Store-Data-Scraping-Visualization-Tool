@@ -11,6 +11,7 @@ import {
   fetchCompetitorLinkHealth,
   fetchCompetitorTargetAudits,
   fetchCompetitorTargets,
+  fetchCompetitorStoreTargets,
   fetchCompetitors,
   logCompetitorBatchEvent,
   prioritizeCompetitorTarget,
@@ -33,6 +34,7 @@ import type {
   CompetitorOfferItem,
   CompetitorTargetAuditItem,
   CompetitorTargetItem,
+  CompetitorStoreTargetItem,
   CompetitorVariantItem,
 } from "../types";
 import { formatChinaDateTime } from "../time";
@@ -109,6 +111,7 @@ const collectionClientInstanceId = collectionId("client");
 let collectionClientChannel: BroadcastChannel | null = null;
 const rawUrls = ref("");
 const targets = ref<CompetitorTargetItem[]>([]);
+const storeTargets = ref<CompetitorStoreTargetItem[]>([]);
 const targetQuery = ref("");
 const targetPage = ref(1);
 const targetPageSize = ref(20);
@@ -144,6 +147,7 @@ const targetAuditEndDate = ref(localDateInput(0));
 const withStockProbe = ref(true);
 const visibleBrowser = ref(false);
 const competitors = ref<CompetitorItem[]>([]);
+const storeCompetitors = ref<CompetitorItem[]>([]);
 const selectedPlid = ref("");
 const selectedOfferKey = ref("");
 const detail = ref<CompetitorDetail>({ history: [], reviews: [], variants: [] });
@@ -218,6 +222,7 @@ const competitorQuery = ref("");
 const competitorStockFilter = ref<"全部" | "有货" | "没货" | "未探测">("全部");
 const competitorSignalFilter = ref("全部");
 const competitorPage = ref(1);
+const storeCompetitorPage = ref(1);
 const competitorPageSize = ref(20);
 const competitorPageSizeOptions = [20, 50, 100] as const;
 const rangeStartDate = ref("");
@@ -232,8 +237,12 @@ const competitorDateRange = ref<CompetitorDateRange>({
 });
 const failedCompetitorImages = ref<Set<string>>(new Set());
 
+const allCompetitorItems = computed(() => [
+  ...storeCompetitors.value,
+  ...competitors.value,
+]);
 const selected = computed(
-  () => competitors.value.find((item) => item.plid === selectedPlid.value) ?? null,
+  () => allCompetitorItems.value.find((item) => item.plid === selectedPlid.value) ?? null,
 );
 const selectedOffer = computed(() => {
   const offers = selected.value?.跟卖报价 ?? [];
@@ -246,7 +255,7 @@ const selectedOfferLink = computed(
   () => selectedOffer.value?.链接 || selected.value?.链接 || "#",
 );
 const competitorsByPlid = computed(
-  () => new Map(competitors.value.map((item) => [item.plid, item])),
+  () => new Map(allCompetitorItems.value.map((item) => [item.plid, item])),
 );
 const selectedTarget = computed(
   () => targets.value.find((target) => target.plid === selectedPlid.value) ?? null,
@@ -398,7 +407,7 @@ const targetActionIsManualRetry = computed(
 const competitorSignalOptions = computed(() =>
   [
     ...new Set(
-      competitors.value
+      allCompetitorItems.value
         .flatMap((item) => [
           item.趋势判断,
           item.价格信号,
@@ -411,9 +420,15 @@ const competitorSignalOptions = computed(() =>
   ),
 );
 const filteredCompetitors = computed(() => {
+  return competitors.value.filter(matchesCompetitorFilters);
+});
+const filteredStoreCompetitors = computed(() => {
+  return storeCompetitors.value.filter(matchesCompetitorFilters);
+});
+
+function matchesCompetitorFilters(item: CompetitorItem) {
   const query = competitorSearchTerm(competitorQuery.value);
-  return competitors.value.filter((item) => {
-    if (
+  if (
       query
       && ![
         item.商品,
@@ -422,6 +437,11 @@ const filteredCompetitors = computed(() => {
         item.库存上限,
         item.趋势判断,
         item.价格信号,
+        ...item.自有报价.flatMap((offer) => [
+          offer.offer_id,
+          offer.SKU ?? "",
+          offer.状态 ?? "",
+        ]),
         ...item.跟卖报价.flatMap((offer) => [
           offer.offer_id ?? "",
           offer.卖家ID ?? "",
@@ -433,33 +453,42 @@ const filteredCompetitors = computed(() => {
           offer.库存信号,
         ]),
       ].some((value) => value.toLocaleLowerCase().includes(query))
-    ) {
-      return false;
-    }
-    if (
-      competitorStockFilter.value !== "全部"
-      && competitorStockState(item) !== competitorStockFilter.value
-    ) {
-      return false;
-    }
-    return (
-      competitorSignalFilter.value === "全部"
-      || item.趋势判断 === competitorSignalFilter.value
-      || item.价格信号 === competitorSignalFilter.value
-      || item.跟卖报价.some(
-        (offer) =>
-          offer.价格信号 === competitorSignalFilter.value
-          || offer.库存信号 === competitorSignalFilter.value,
-      )
-    );
-  });
-});
+  ) {
+    return false;
+  }
+  if (
+    competitorStockFilter.value !== "全部"
+    && competitorStockState(item) !== competitorStockFilter.value
+  ) {
+    return false;
+  }
+  return (
+    competitorSignalFilter.value === "全部"
+    || item.趋势判断 === competitorSignalFilter.value
+    || item.价格信号 === competitorSignalFilter.value
+    || item.跟卖报价.some(
+      (offer) =>
+        offer.价格信号 === competitorSignalFilter.value
+        || offer.库存信号 === competitorSignalFilter.value,
+    )
+  );
+}
 const competitorPageCount = computed(() =>
   Math.max(1, Math.ceil(filteredCompetitors.value.length / competitorPageSize.value)),
 );
 const pagedCompetitors = computed(() => {
   const start = (competitorPage.value - 1) * competitorPageSize.value;
   return filteredCompetitors.value.slice(start, start + competitorPageSize.value);
+});
+const storeCompetitorPageCount = computed(() =>
+  Math.max(
+    1,
+    Math.ceil(filteredStoreCompetitors.value.length / competitorPageSize.value),
+  ),
+);
+const pagedStoreCompetitors = computed(() => {
+  const start = (storeCompetitorPage.value - 1) * competitorPageSize.value;
+  return filteredStoreCompetitors.value.slice(start, start + competitorPageSize.value);
 });
 const competitorFiltersActive = computed(
   () =>
@@ -478,8 +507,13 @@ const averageRating = computed(() => {
   return (ratings.reduce((sum, value) => sum + value, 0) / ratings.length).toFixed(2);
 });
 const latestCollection = computed(() => {
-  if (!competitors.value.length) return "尚未采集";
-  return formatChinaDateTime(competitors.value[0].采集时间);
+  if (!allCompetitorItems.value.length) return "尚未采集";
+  const latest = allCompetitorItems.value.reduce((candidate, item) =>
+    new Date(item.采集时间).getTime() > new Date(candidate.采集时间).getTime()
+      ? item
+      : candidate,
+  );
+  return formatChinaDateTime(latest.采集时间);
 });
 const activeRangeLabel = computed(() => {
   if (!appliedStartDate.value || !appliedEndDate.value) return "全部可用快照";
@@ -756,11 +790,15 @@ watch(
   ],
   () => {
     competitorPage.value = 1;
+    storeCompetitorPage.value = 1;
   },
 );
 
 watch(competitorPageCount, (pageCount) => {
   if (competitorPage.value > pageCount) competitorPage.value = pageCount;
+});
+watch(storeCompetitorPageCount, (pageCount) => {
+  if (storeCompetitorPage.value > pageCount) storeCompetitorPage.value = pageCount;
 });
 
 let detailRequestId = 0;
@@ -1055,6 +1093,7 @@ async function loadOverview() {
       fetchCompetitorLinkHealth(),
     ]);
     competitors.value = overview.items;
+    storeCompetitors.value = overview.store_items;
     competitorDateRange.value = overview.date_range;
     if (!appliedStartDate.value && overview.date_range.selected_start) {
       appliedStartDate.value = overview.date_range.selected_start;
@@ -1065,8 +1104,8 @@ async function loadOverview() {
     if (!rangeStartDate.value) rangeStartDate.value = appliedStartDate.value;
     if (!rangeEndDate.value) rangeEndDate.value = appliedEndDate.value;
     linkHealth.value = healthItems;
-    if (!competitors.value.some((item) => item.plid === selectedPlid.value)) {
-      selectedPlid.value = competitors.value[0]?.plid ?? "";
+    if (!allCompetitorItems.value.some((item) => item.plid === selectedPlid.value)) {
+      selectedPlid.value = allCompetitorItems.value[0]?.plid ?? "";
     }
   } catch (error) {
     pageError.value = error instanceof Error ? error.message : "读取竞品数据失败";
@@ -1108,7 +1147,10 @@ async function loadSharedBatchStatus() {
 
 async function loadTargets() {
   try {
-    targets.value = await fetchCompetitorTargets();
+    [targets.value, storeTargets.value] = await Promise.all([
+      fetchCompetitorTargets(),
+      fetchCompetitorStoreTargets(),
+    ]);
     if (!batchUrls.value.length) {
       rawUrls.value = targets.value.map((target) => target.url).join("\n");
     }
@@ -1873,7 +1915,14 @@ async function startCollection() {
     return;
   }
   try {
-    const urls = targets.value.map((target) => target.url);
+    const urls = [
+      ...new Map(
+        [...targets.value, ...storeTargets.value].map((target) => [
+          target.plid,
+          target.url,
+        ]),
+      ).values(),
+    ];
     if (!urls.length) throw new Error("请先在监控链接清单中新增至少一个商品");
     collectionResults.value = [];
     collectionErrors.value = [];
@@ -3113,7 +3162,10 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
           <p class="section-kicker">建立与刷新观察样本</p>
           <h3>批量采集当前监控清单</h3>
         </div>
-        <span>共 {{ targets.length }} 条活跃链接</span>
+        <span>
+          共 {{ targets.length + storeTargets.length }} 条链接 · 自有店铺自动
+          {{ storeTargets.length }} 条 · 真实竞品 {{ targets.length }} 条
+        </span>
       </div>
       <div
         v-if="sharedBatchStatus.active"
@@ -3377,9 +3429,14 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
 
     <section class="metrics">
       <article>
-        <span>已监控竞品</span>
+        <span>自有店铺链接</span>
+        <strong>{{ storeCompetitors.length }}</strong>
+        <small>自动识别，只追踪跟卖</small>
+      </article>
+      <article>
+        <span>真正竞品</span>
         <strong>{{ competitors.length }}</strong>
-        <small>当前活跃链接</small>
+        <small>与自有店铺分区</small>
       </article>
       <article>
         <span>精确库存样本</span>
@@ -3679,14 +3736,14 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
       <div class="section-heading">
         <div>
           <p class="section-kicker">LATEST SNAPSHOT</p>
-          <h2>竞品最新状态</h2>
+          <h2>自有店铺与真正竞品</h2>
         </div>
         <button class="quiet-button" @click="loadOverview">刷新页面数据</button>
       </div>
       <div v-if="loading" class="empty-state">正在读取本机数据……</div>
-      <div v-else-if="!competitors.length" class="empty-state">
-        <strong>还没有竞品快照</strong>
-        <span>上方 4 个样本链接已经填好，点击“开始采集”即可建立第一条基线。</span>
+      <div v-else-if="!allCompetitorItems.length" class="empty-state">
+        <strong>还没有可展示快照</strong>
+        <span>先执行一次全量刷新建立自有店铺首拉基准，再开始跟卖采集。</span>
       </div>
       <div v-else>
         <div class="competitor-list-filters" role="search" aria-label="筛选竞品最新状态">
@@ -3733,7 +3790,8 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
               <strong>观察区间（北京时间）</strong>
               <span>
                 {{ activeRangeLabel }} · 显示
-                {{ filteredCompetitors.length }} / {{ competitors.length }} 个商品
+                自有 {{ filteredStoreCompetitors.length }} / {{ storeCompetitors.length }} ·
+                竞品 {{ filteredCompetitors.length }} / {{ competitors.length }}
               </span>
             </div>
             <div class="competitor-date-range-controls">
@@ -3773,7 +3831,129 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
         <p class="method-note">
           日期按北京时间自然日筛选。每个商品使用区间内最旧快照和最新快照重算价格涨跌、
           库存净变化、新增评论与经营信号；只有首尾变体键、SKU、卖家集合一致且库存均为精确值时才比较库存。
+          自有店铺另行使用 Seller API 每个北京日最早一次完整刷新作基准，
+          公开页只探测非主报价的跟卖；评论属于整个 PLID，不归属某个卖家。
         </p>
+        <section class="competitor-source-section own-store-source-section">
+          <div class="competitor-source-heading">
+            <div>
+              <p class="section-kicker">OWN STORE FOLLOWERS</p>
+              <h3>自有店铺链接</h3>
+            </div>
+            <span>共 {{ filteredStoreCompetitors.length }} 条 · 自有基准与跟卖观察分开</span>
+          </div>
+          <div v-if="!filteredStoreCompetitors.length" class="empty-state competitor-filter-empty">
+            <strong>没有符合条件的自有店铺链接</strong>
+            <span>可以调整筛选，或先执行一次全量刷新建立首拉基准。</span>
+          </div>
+          <div v-else class="competitor-status-list">
+            <article
+              v-for="item in pagedStoreCompetitors"
+              :key="`store-${item.plid}`"
+              :id="`store-row-${item.plid}`"
+              class="competitor-status-card own-store-card"
+              :class="{ selected: selectedPlid === item.plid }"
+              tabindex="0"
+              role="button"
+              aria-haspopup="dialog"
+              :aria-label="`查看 ${item.商品} 及 ${item.跟卖报价.length} 个跟卖报价`"
+              @click="openProductModal(item)"
+              @keydown.enter="openProductModal(item)"
+              @keydown.space.prevent="openProductModal(item)"
+            >
+              <header class="competitor-status-header">
+                <div class="competitor-status-identity">
+                  <div class="competitor-product-image competitor-status-image">
+                    <img
+                      v-if="canShowCompetitorImage(item.图片)"
+                      :src="competitorImageUrl(item.图片)"
+                      :alt="`${item.商品} 商品图片`"
+                      width="192"
+                      height="192"
+                      loading="lazy"
+                      decoding="async"
+                      @error="markCompetitorImageFailed(item.图片)"
+                    />
+                    <span v-else>暂无图片</span>
+                  </div>
+                  <div class="competitor-status-title">
+                    <div class="competitor-status-eyebrow">
+                      <span>自有 · PLID{{ item.plid }}</span>
+                      <span>首拉 {{ formatChinaDateTime(item.采集时间) }}</span>
+                    </div>
+                    <h3>{{ item.商品 }}</h3>
+                    <p>
+                      {{ item.自有报价.length }} 个自有 Offer ·
+                      {{ item.跟卖报价.length }} 个跟卖报价
+                    </p>
+                  </div>
+                </div>
+                <span class="competitor-status-open">查看跟卖库存 →</span>
+              </header>
+              <div class="competitor-status-summary">
+                <div>
+                  <span>跟卖报价 / 自有首拉价</span>
+                  <strong>{{ competitorOfferPriceRange(item) }}</strong>
+                  <small>自有 {{ formatCurrency(item.价格) }}</small>
+                </div>
+                <div>
+                  <span>Seller API 首拉库存</span>
+                  <strong class="stock-pill" :class="{ exact: item.库存精确 }">
+                    {{ item.库存上限 }}
+                  </strong>
+                  <small>不执行公开页主报价探测</small>
+                </div>
+                <div>
+                  <span>跟卖状态</span>
+                  <div class="signal-labels">
+                    <strong class="signal-label">{{ item.趋势判断 }}</strong>
+                    <strong class="signal-label price-signal">{{ item.价格信号 }}</strong>
+                  </div>
+                  <small>{{ item.区间快照数 ?? 0 }} 次跟卖观察</small>
+                </div>
+                <div>
+                  <span>商品共享评论 / 评分</span>
+                  <strong>{{ item.评论数 }} 条 · {{ item.评分 ?? "—" }}</strong>
+                  <small>{{ item.跟卖报价.length ? "发现跟卖时才拉取" : "未发现跟卖，未拉取" }}</small>
+                </div>
+              </div>
+            </article>
+          </div>
+          <div
+            v-if="filteredStoreCompetitors.length"
+            class="compact-pagination competitor-pagination"
+          >
+            <button
+              class="secondary-button"
+              type="button"
+              :disabled="storeCompetitorPage <= 1"
+              @click="storeCompetitorPage -= 1"
+            >
+              上一页
+            </button>
+            <span>
+              第 {{ storeCompetitorPage }} / {{ storeCompetitorPageCount }} 页 · 本页
+              {{ pagedStoreCompetitors.length }} 条 · 共 {{ filteredStoreCompetitors.length }} 条
+            </span>
+            <button
+              class="secondary-button"
+              type="button"
+              :disabled="storeCompetitorPage >= storeCompetitorPageCount"
+              @click="storeCompetitorPage += 1"
+            >
+              下一页
+            </button>
+          </div>
+        </section>
+
+        <section class="competitor-source-section true-competitor-source-section">
+          <div class="competitor-source-heading">
+            <div>
+              <p class="section-kicker">TRUE COMPETITORS</p>
+              <h3>真正竞品</h3>
+            </div>
+            <span>共 {{ filteredCompetitors.length }} 条 · 仅来自人工监控清单</span>
+          </div>
         <div v-if="!filteredCompetitors.length" class="empty-state competitor-filter-empty">
           <strong>没有符合条件的竞品</strong>
           <span>可以调整关键词、库存状态或经营信号。</span>
@@ -3888,6 +4068,7 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
             下一页
           </button>
         </div>
+        </section>
       </div>
     </section>
 
@@ -3919,7 +4100,9 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
                 <span v-else>暂无图片</span>
               </div>
               <div>
-                <p class="section-kicker">COMPETITOR DETAIL</p>
+                <p class="section-kicker">
+                  {{ selected.来源 === "own_store" ? "OWN STORE FOLLOWERS" : "COMPETITOR DETAIL" }}
+                </p>
                 <h2>{{ selected.商品 }}</h2>
                 <span>
                   PLID{{ selected.plid }}
@@ -3979,11 +4162,50 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
             </div>
 
             <div class="competitor-modal-content">
+              <section
+                v-if="selected.来源 === 'own_store'"
+                class="panel competitor-offer-roster own-store-baseline-panel"
+                aria-label="自有店铺当日首拉基准"
+              >
+                <div class="competitor-offer-roster-heading">
+                  <div>
+                    <p class="section-kicker">SELLER API DAILY BASELINE</p>
+                    <h2>自有 Offer 当日首拉基准</h2>
+                    <span>每个北京自然日只保留最早一次完整刷新，不另外探测主报价库存。</span>
+                  </div>
+                  <span>{{ selected.自有报价.length }} 个 Offer</span>
+                </div>
+                <div class="competitor-offer-list">
+                  <div
+                    v-for="offer in selected.自有报价"
+                    :key="offer.offer_id"
+                    class="competitor-offer-row own-store-offer-row"
+                  >
+                    <div class="competitor-offer-identity">
+                      <div><strong>Offer ID {{ offer.offer_id }}</strong></div>
+                      <small>SKU {{ offer.SKU || "未返回" }} · {{ offer.状态 || "未返回" }}</small>
+                    </div>
+                    <div class="competitor-offer-metric">
+                      <span>首拉价格</span>
+                      <strong>{{ formatCurrency(offer.价格) }}</strong>
+                    </div>
+                    <div class="competitor-offer-metric">
+                      <span>Seller API 库存</span>
+                      <strong>{{ offer.库存 ?? "—" }}</strong>
+                    </div>
+                    <div class="competitor-offer-metric">
+                      <span>拉取时间</span>
+                      <strong>{{ formatChinaDateTime(offer.拉取时间) }}</strong>
+                    </div>
+                  </div>
+                </div>
+              </section>
+
               <section class="panel competitor-offer-roster" aria-label="全部卖家报价与库存">
                 <div class="competitor-offer-roster-heading">
                   <div>
                     <p class="section-kicker">SELLER OFFER INVENTORY</p>
-                    <h2>全部卖家报价与库存</h2>
+                    <h2>{{ selected.来源 === "own_store" ? "跟卖卖家报价与库存" : "全部卖家报价与库存" }}</h2>
                     <span>点击任一卖家报价，下方价格、库存、涨跌信号和商品链接会切换到该报价。</span>
                   </div>
                   <span>{{ selected.跟卖报价.length }} 个报价</span>
@@ -4059,7 +4281,7 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
                 </div>
               </section>
 
-              <section class="panel competitor-target-action-card">
+              <section v-if="selected.来源 === 'competitor'" class="panel competitor-target-action-card">
                 <div class="competitor-target-action-heading">
                   <div>
                     <p class="section-kicker">MONITORING LINK</p>
@@ -4177,6 +4399,20 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
                 </p>
               </section>
 
+              <section v-else class="panel competitor-target-action-card own-store-auto-target">
+                <div class="competitor-target-action-heading">
+                  <div>
+                    <p class="section-kicker">AUTOMATIC FOLLOWER TARGET</p>
+                    <h3>自有店铺自动追踪</h3>
+                  </div>
+                  <span>无需加入真实竞品清单</span>
+                </div>
+                <p class="method-note">
+                  该 PLID 来自 Seller API 当前 Offer，每次竞品批次会自动检查跟卖。
+                  删除或修改真实竞品清单不会影响这个自动目标。
+                </p>
+              </section>
+
               <section class="detail-grid modal-detail-grid">
                 <article v-if="selectedOffer" class="panel decision-card">
                   <p class="section-kicker">SELLER OFFER SIGNAL</p>
@@ -4248,6 +4484,9 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
                 <article class="panel review-balance">
                   <p class="section-kicker">REVIEW BALANCE</p>
                   <h2>评论结构（PLID 商品共用）</h2>
+                  <p v-if="selected.共享评论说明" class="method-note">
+                    {{ selected.共享评论说明 }}
+                  </p>
                   <div class="balance-row positive">
                     <span>好评 4–5 星</span><strong>{{ selected.好评 }}</strong>
                     <i

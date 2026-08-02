@@ -111,6 +111,27 @@ class OfferSnapshot(Base):
     takealot_stock_on_way: Mapped[int | None] = mapped_column(Integer)
 
 
+class StoreOfferBaseline(Base):
+    """Earliest Seller API offer pull retained for one Beijing display day."""
+
+    __tablename__ = "store_offer_baselines"
+    __table_args__ = (UniqueConstraint("display_date", "offer_id"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    display_date: Mapped[date] = mapped_column(Date, nullable=False, index=True)
+    offer_id: Mapped[str] = mapped_column(String(100), nullable=False)
+    productline_id: Mapped[str | None] = mapped_column(String(100), index=True)
+    sku: Mapped[str | None] = mapped_column(String(255))
+    title: Mapped[str | None] = mapped_column(Text)
+    image_url: Mapped[str | None] = mapped_column(Text)
+    selling_price: Mapped[Decimal | None] = mapped_column(Numeric(14, 2))
+    status: Mapped[str | None] = mapped_column(String(100))
+    total_stock: Mapped[int | None] = mapped_column(Integer)
+    takealot_available_stock: Mapped[int | None] = mapped_column(Integer)
+    seller_available_stock: Mapped[int | None] = mapped_column(Integer)
+    captured_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
 class SaleItem(Base):
     """A sale line item, kept current by order item identifier."""
 

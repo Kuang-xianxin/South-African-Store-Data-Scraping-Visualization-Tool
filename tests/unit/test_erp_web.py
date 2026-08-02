@@ -18,6 +18,7 @@ from takealot_ops.competitors.service import (
 )
 from takealot_ops.erp.daily_report import capture_daily_report
 from takealot_ops.erp.web import create_app
+from takealot_ops.storage.migrations import create_schema
 from takealot_ops.storage.models import CompetitorSnapshot, ErpSession, OfferCurrent
 
 
@@ -57,6 +58,51 @@ def _create_operator(
         },
     )
     assert response.status_code == 200
+
+
+def test_competitor_radar_returns_automatic_store_targets_and_separate_items(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    database_path = tmp_path / "erp-store-radar.db"
+    database_url = f"sqlite:///{database_path.as_posix()}"
+    monkeypatch.setenv("TAKEALOT_DATABASE_URL", database_url)
+    app = create_app(tmp_path)
+
+    with TestClient(app, client=("127.0.0.1", 50000)) as client:
+        _bootstrap(client)
+        engine = create_engine(database_url)
+        with Session(engine) as session, session.begin():
+            session.add(
+                OfferCurrent(
+                    offer_id="own-offer",
+                    productline_id="12345678",
+                    sku="OWN-SKU",
+                    title="Own Product",
+                    selling_price=99,
+                    total_stock=5,
+                    captured_at=datetime(2026, 8, 2, 1, tzinfo=UTC),
+                )
+            )
+        create_schema(engine)
+        engine.dispose()
+
+        automatic_targets = client.get("/api/competitors/store-targets")
+        overview = client.get("/api/competitors")
+
+    assert automatic_targets.status_code == 200
+    assert automatic_targets.json()["items"] == [
+        {
+            "plid": "12345678",
+            "url": "https://www.takealot.com/p/PLID12345678",
+            "title": "Own Product",
+            "offer_count": 1,
+            "captured_at": "2026-08-02T01:00:00",
+        }
+    ]
+    assert overview.status_code == 200
+    assert overview.json()["items"] == []
+    assert overview.json()["store_items"][0]["来源"] == "own_store"
 
 
 def test_product_thumbnail_is_authenticated_and_rejects_untrusted_hosts(
@@ -1156,6 +1202,7 @@ def test_collect_auto_adds_and_groups_new_offer_targets_once(
 ) -> None:
     origin_url = "https://www.takealot.com/example/PLID12345678"
     offer_url = "https://www.takealot.com/example-offer/PLID87654321"
+    own_offer_url = "https://www.takealot.com/own-offer/PLID55555555"
 
     class OfferCollector:
         def __init__(self, **_: object) -> None:
@@ -1190,6 +1237,14 @@ def test_collect_auto_adds_and_groups_new_offer_targets_once(
                         price=110.0,
                         selected=False,
                     ),
+                    CompetitorDiscoveredTarget(
+                        plid="55555555",
+                        url=own_offer_url,
+                        title="Own grouped product",
+                        seller_name="Our Store",
+                        price=90.0,
+                        selected=False,
+                    ),
                 ),
             )
 
@@ -1204,6 +1259,20 @@ def test_collect_auto_adds_and_groups_new_offer_targets_once(
     with TestClient(app, client=("127.0.0.1", 50000)) as client:
         session = _bootstrap(client)
         headers = {"X-CSRF-Token": str(session["csrf_token"])}
+        engine = create_engine(f"sqlite:///{database_path.as_posix()}")
+        with Session(engine) as database_session, database_session.begin():
+            database_session.add(
+                OfferCurrent(
+                    offer_id="own-discovered-offer",
+                    productline_id="55555555",
+                    sku="OWN-DISCOVERED-SKU",
+                    title="Own grouped product",
+                    selling_price=90,
+                    total_stock=5,
+                    captured_at=datetime(2026, 8, 2, 1, tzinfo=UTC),
+                )
+            )
+        engine.dispose()
         started = client.post(
             "/api/competitors/batch-events",
             headers=headers,
@@ -1249,6 +1318,7 @@ def test_collect_auto_adds_and_groups_new_offer_targets_once(
         assert second.json()["added_target_count"] == 0
         listed = client.get("/api/competitors/targets").json()["items"]
         assert {item["plid"] for item in listed} == {"12345678", "87654321"}
+        assert "55555555" not in {item["plid"] for item in listed}
         assert {item["offer_group_plid"] for item in listed} == {"12345678"}
         queued = client.get("/api/competitors/batch-status").json()["queued_targets"]
         assert [item["plid"] for item in queued] == ["87654321"]

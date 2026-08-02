@@ -5,6 +5,7 @@ import type {
   CompetitorOverview,
   CompetitorTargetAuditPayload,
   CompetitorTargetItem,
+  CompetitorStoreTargetItem,
   ExportPayload,
   FreshnessPayload,
   LogisticsOverviewPayload,
@@ -259,6 +260,15 @@ export async function fetchCompetitorLinkHealth(): Promise<
 export async function fetchCompetitorTargets(): Promise<CompetitorTargetItem[]> {
   const result = await request<{ items: CompetitorTargetItem[] }>(
     "/api/competitors/targets",
+  );
+  return result.items;
+}
+
+export async function fetchCompetitorStoreTargets(): Promise<
+  CompetitorStoreTargetItem[]
+> {
+  const result = await request<{ items: CompetitorStoreTargetItem[] }>(
+    "/api/competitors/store-targets",
   );
   return result.items;
 }
