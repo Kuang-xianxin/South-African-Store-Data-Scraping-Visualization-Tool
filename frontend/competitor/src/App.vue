@@ -15,6 +15,7 @@ import {
 } from "./api";
 import CompetitorsPage from "./pages/CompetitorsPage.vue";
 import DailyReportPage from "./pages/DailyReportPage.vue";
+import KeywordTrafficPage from "./pages/KeywordTrafficPage.vue";
 import LoginPage from "./pages/LoginPage.vue";
 import LogisticsPage from "./pages/LogisticsPage.vue";
 import OverviewPage from "./pages/OverviewPage.vue";
@@ -40,6 +41,7 @@ import type { PermissionKey } from "./types";
 type PageKey =
   | "overview"
   | "products"
+  | "keyword-traffic"
   | "quadrants"
   | "risks"
   | "logistics"
@@ -51,6 +53,7 @@ type PageKey =
 const storeScopedPages = new Set<PageKey>([
   "overview",
   "products",
+  "keyword-traffic",
   "quadrants",
   "risks",
   "logistics",
@@ -63,18 +66,19 @@ const competitorClientKey = "takealot-competitor-client-v1";
 const basePages = [
   { key: "overview", label: "经营总览", hint: "今日经营脉搏", mark: "01", permission: "store.view" },
   { key: "products", label: "商品中心", hint: "单品销售与流量", mark: "02", permission: "store.view" },
-  { key: "quadrants", label: "经营坐标", hint: "流量与下单分布", mark: "03", permission: "store.view" },
-  { key: "risks", label: "风险与质量", hint: "异常和数据质量", mark: "04", permission: "store.view" },
-  { key: "logistics", label: "物流管理", hint: "长睿与平台货件", mark: "05", permission: "store.view" },
-  { key: "competitors", label: "竞品雷达", hint: "库存评论与销量", mark: "06", permission: "competitors.view" },
-  { key: "daily-report", label: "运营日报", hint: "全周期核对与合并", mark: "07", permission: "daily_report.view" },
-  { key: "reports", label: "报表工作台", hint: "NFT102 续写", mark: "08", permission: "nft102.manage" },
+  { key: "keyword-traffic", label: "关键词流量", hint: "变更节点与趋势对比", mark: "03", permission: "store.view" },
+  { key: "quadrants", label: "经营坐标", hint: "流量与下单分布", mark: "04", permission: "store.view" },
+  { key: "risks", label: "风险与质量", hint: "异常和数据质量", mark: "05", permission: "store.view" },
+  { key: "logistics", label: "物流管理", hint: "长睿与平台货件", mark: "06", permission: "store.view" },
+  { key: "competitors", label: "竞品雷达", hint: "库存评论与销量", mark: "07", permission: "competitors.view" },
+  { key: "daily-report", label: "运营日报", hint: "全周期核对与合并", mark: "08", permission: "daily_report.view" },
+  { key: "reports", label: "报表工作台", hint: "NFT102 续写", mark: "09", permission: "nft102.manage" },
 ] as const;
 const adminPage = {
   key: "users",
   label: "用户权限",
   hint: "账号与权限管理",
-  mark: "09",
+  mark: "10",
   permission: "users.manage",
 } as const;
 
@@ -116,6 +120,7 @@ let dailyReportEvents: EventSource | null = null;
 const hasPermission = (permission: PermissionKey) =>
   userHasPermission(session.value?.user, permission);
 const canManageUsers = computed(() => hasPermission("users.manage"));
+const canManageKeywordTraffic = computed(() => hasPermission("keyword_traffic.manage"));
 const canRefresh = computed(() => hasPermission("refresh.run"));
 const canCollectCompetitors = computed(() => hasPermission("competitors.collect"));
 const canControlCompetitorCollection = computed(
@@ -189,6 +194,7 @@ const pageComponent = computed(() => {
   const components = {
     overview: OverviewPage,
     products: ProductsPage,
+    "keyword-traffic": KeywordTrafficPage,
     quadrants: QuadrantsPage,
     risks: RisksPage,
     logistics: LogisticsPage,
@@ -253,6 +259,13 @@ const activePageProps = computed(() => {
       ...common,
       canOperate: canManageDailyReport.value,
       canExport: canGenerateDailyReport.value,
+      onPermissionDenied: showPermissionDenied,
+    };
+  }
+  if (key === "keyword-traffic") {
+    return {
+      ...common,
+      canManage: canManageKeywordTraffic.value,
       onPermissionDenied: showPermissionDenied,
     };
   }

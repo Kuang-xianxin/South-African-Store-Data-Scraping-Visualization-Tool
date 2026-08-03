@@ -86,12 +86,20 @@ from takealot_ops.erp.daily_report import (
     update_operator_note,
 )
 from takealot_ops.erp.daily_report_live import daily_report_event_stream
+from takealot_ops.erp.keyword_traffic import (
+    KeywordTrafficConflictError,
+    KeywordTrafficInputError,
+    build_keyword_product_detail,
+    build_keyword_product_list,
+    record_keyword_snapshot,
+)
 from takealot_ops.erp.permissions import (
     COMPETITORS_COLLECT,
     COMPETITORS_VIEW,
     DAILY_REPORT_EXPORT,
     DAILY_REPORT_MANAGE,
     DAILY_REPORT_VIEW,
+    KEYWORD_TRAFFIC_MANAGE,
     NFT102_MANAGE,
     REFRESH_RUN,
     REPORTS_GENERATE,
@@ -238,6 +246,15 @@ class ExportRequest(BaseModel):
     """One explicit report export request."""
 
     as_of: date
+
+
+class KeywordSnapshotRequest(BaseModel):
+    """One complete keyword state at an operator-confirmed change date."""
+
+    offer_id: str = Field(min_length=1, max_length=100)
+    effective_date: date
+    keywords: list[str] = Field(min_length=1, max_length=50)
+    note: str | None = Field(default=None, max_length=500)
 
 
 def _default_operations_business_date() -> date:
@@ -753,6 +770,69 @@ def create_app(project_root: Path | None = None) -> FastAPI:
             as_of,
             offer_id,
         )
+
+    @app.get("/api/erp/keyword-traffic")
+    def keyword_traffic_products(
+        as_of: date = Query(default_factory=date.today),
+    ) -> dict[str, Any]:
+        settings = DashboardSettings.from_env(root)
+        engine = create_read_only_erp_engine(settings.database_url)
+        try:
+            with Session(engine) as session:
+                return build_keyword_product_list(session, as_of=as_of)
+        finally:
+            engine.dispose()
+
+    @app.post("/api/erp/keyword-traffic")
+    def save_keyword_snapshot(
+        payload: KeywordSnapshotRequest,
+        request: Request,
+    ) -> dict[str, Any]:
+        settings = DashboardSettings.from_env(root)
+        engine = create_engine_for_settings(settings)
+        user = request.state.erp_user
+        try:
+            create_schema(engine)
+            event = record_keyword_snapshot(
+                engine,
+                offer_id=payload.offer_id,
+                effective_date=payload.effective_date,
+                keywords=payload.keywords,
+                note=payload.note,
+                actor_user_id=user.id,
+                actor_username=user.username,
+            )
+        except KeywordTrafficConflictError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except KeywordTrafficInputError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        finally:
+            engine.dispose()
+        return {"event": event}
+
+    @app.get("/api/erp/keyword-traffic/{offer_id}")
+    def keyword_traffic_product_detail(
+        offer_id: str,
+        as_of: date = Query(default_factory=date.today),
+        history_days: int = Query(90, ge=30, le=365),
+        comparison_days: int = Query(7, ge=3, le=30),
+    ) -> dict[str, Any]:
+        settings = DashboardSettings.from_env(root)
+        engine = create_read_only_erp_engine(settings.database_url)
+        try:
+            with Session(engine) as session:
+                payload = build_keyword_product_detail(
+                    session,
+                    offer_id=offer_id,
+                    as_of=as_of,
+                    history_days=history_days,
+                    comparison_days=comparison_days,
+                )
+        finally:
+            engine.dispose()
+        if payload is None:
+            raise HTTPException(status_code=404, detail="没有找到对应的店铺商品")
+        return payload
 
     @app.get("/api/erp/quadrants")
     def quadrants(
@@ -2220,6 +2300,8 @@ def _required_permission(path: str, method: str) -> str | tuple[str, ...] | None
         return STORE_VIEW, COMPETITORS_VIEW, DAILY_REPORT_VIEW
     if path == "/api/erp/refresh":
         return REFRESH_RUN
+    if path.startswith("/api/erp/keyword-traffic"):
+        return STORE_VIEW if safe_method else KEYWORD_TRAFFIC_MANAGE
     if path.startswith("/api/erp/daily-report/export"):
         return DAILY_REPORT_VIEW if safe_method else DAILY_REPORT_EXPORT
     if path.startswith("/api/erp/daily-report"):
@@ -2234,6 +2316,7 @@ def _required_permission(path: str, method: str) -> str | tuple[str, ...] | None
         (
             "/api/erp/summary",
             "/api/erp/products",
+            "/api/erp/keyword-traffic",
             "/api/erp/quadrants",
             "/api/erp/risks",
             "/api/erp/logistics",
@@ -2256,6 +2339,7 @@ def _requires_connected_store_access(path: str) -> bool:
             (
                 "/api/erp/summary",
                 "/api/erp/products",
+                "/api/erp/keyword-traffic",
                 "/api/erp/quadrants",
                 "/api/erp/risks",
                 "/api/erp/logistics",
@@ -2286,6 +2370,8 @@ def _permission_denied_message(permission: str | tuple[str, ...]) -> str:
         return "当前账号不能采集竞品"
     if permission == REFRESH_RUN:
         return "当前账号不能刷新全部数据"
+    if permission == KEYWORD_TRAFFIC_MANAGE:
+        return "当前账号可以查看关键词流量，但不能记录关键词变更"
     if permission in {REPORTS_GENERATE, NFT102_MANAGE}:
         return "当前账号不能执行报表生成或续写"
     return "当前账号没有访问此模块的权限"

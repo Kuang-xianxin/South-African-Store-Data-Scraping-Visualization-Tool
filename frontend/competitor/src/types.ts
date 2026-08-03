@@ -252,6 +252,98 @@ export interface ProductDetailPayload {
   history: ProductItem[];
 }
 
+export type KeywordTrafficDirection = "up" | "down" | "flat" | "unavailable";
+export type KeywordTrendChange =
+  | "reversal_up"
+  | "reversal_down"
+  | "improving"
+  | "weakening"
+  | "stable"
+  | "insufficient";
+
+export interface KeywordTrafficProductSummary {
+  offer_id: string;
+  sku: string | null;
+  title: string | null;
+  image_url: string | null;
+  latest_page_views_30_days: number | null;
+  latest_snapshot_date: string | null;
+  keyword_event_count: number;
+  keyword_change_count: number;
+  last_keyword_change_date: string | null;
+  current_keywords: string[];
+}
+
+export interface KeywordTrafficListPayload {
+  as_of: string;
+  items: KeywordTrafficProductSummary[];
+  summary: {
+    product_count: number;
+    with_traffic_count: number;
+    tracked_keyword_count: number;
+    keyword_change_count: number;
+  };
+}
+
+export interface KeywordTrafficHistoryPoint {
+  date: string;
+  page_views_30_days: number | null;
+}
+
+export interface KeywordTrafficWindow {
+  start_date: string;
+  end_date: string;
+  available_days: number;
+  first_value: number | null;
+  last_value: number | null;
+  window_net_change: number | null;
+  slope_per_day: number | null;
+  trend_direction: KeywordTrafficDirection;
+}
+
+export interface KeywordTrafficComparison {
+  status: "waiting" | "collecting" | "data_missing" | "complete";
+  comparison_days: number;
+  observed_after_days: number;
+  before: KeywordTrafficWindow;
+  after: KeywordTrafficWindow;
+  traffic_direction: KeywordTrafficDirection;
+  traffic_delta: number | null;
+  traffic_delta_percent: number | null;
+  trend_change: KeywordTrendChange;
+  slope_change: number | null;
+}
+
+export interface KeywordTrafficEvent {
+  id: number;
+  effective_date: string;
+  event_kind: "baseline" | "change";
+  keywords: string[];
+  previous_keywords: string[];
+  added_keywords: string[];
+  removed_keywords: string[];
+  note: string | null;
+  recorded_by_username: string;
+  recorded_at: string;
+  comparison: KeywordTrafficComparison;
+}
+
+export interface KeywordTrafficDetailPayload {
+  as_of: string;
+  history_days: number;
+  comparison_days: number;
+  product: {
+    offer_id: string;
+    sku: string | null;
+    title: string | null;
+    image_url: string | null;
+    current_keywords: string[];
+  };
+  history: KeywordTrafficHistoryPoint[];
+  events: KeywordTrafficEvent[];
+  metric_notice: string;
+}
+
 export type QuadrantKey =
   | "star"
   | "conversion_issue"
@@ -274,6 +366,7 @@ export type UserRole = "viewer" | "operator" | "selection" | "admin";
 
 export type PermissionKey =
   | "store.view"
+  | "keyword_traffic.manage"
   | "competitors.view"
   | "competitors.collect"
   | "daily_report.view"

@@ -19,7 +19,12 @@ from takealot_ops.competitors.service import (
 from takealot_ops.erp.daily_report import capture_daily_report
 from takealot_ops.erp.web import create_app
 from takealot_ops.storage.migrations import create_schema
-from takealot_ops.storage.models import CompetitorSnapshot, ErpSession, OfferCurrent
+from takealot_ops.storage.models import (
+    CompetitorSnapshot,
+    ErpSession,
+    OfferCurrent,
+    OfferSnapshot,
+)
 
 
 PROJECT_ROOT = Path(__file__).parents[2]
@@ -700,7 +705,97 @@ def test_viewer_can_read_but_cannot_run_actions(
         )
         assert denied_export.status_code == 403
         assert denied_export.json()["detail"] == "当前账号不能生成运营日报 Excel"
+        assert viewer.get("/api/erp/keyword-traffic?as_of=2026-07-24").status_code == 200
+        denied_keyword_change = viewer.post(
+            "/api/erp/keyword-traffic",
+            headers={"X-CSRF-Token": csrf},
+            json={
+                "offer_id": "offer-a",
+                "effective_date": "2026-07-24",
+                "keywords": ["memory foam"],
+            },
+        )
+        assert denied_keyword_change.status_code == 403
+        assert denied_keyword_change.json()["detail"] == "当前账号可以查看关键词流量，但不能记录关键词变更"
         assert viewer.get("/api/auth/users").status_code == 403
+
+
+def test_keyword_traffic_routes_record_and_compare_change(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    database_path = tmp_path / "erp.db"
+    monkeypatch.setenv(
+        "TAKEALOT_DATABASE_URL",
+        f"sqlite:///{database_path.as_posix()}",
+    )
+    app = create_app(PROJECT_ROOT)
+
+    with TestClient(app, client=("127.0.0.1", 50000)) as client:
+        auth = _bootstrap(client)
+        csrf = str(auth["csrf_token"])
+        engine = create_engine(f"sqlite:///{database_path.as_posix()}")
+        try:
+            with Session(engine) as session, session.begin():
+                session.add(
+                    OfferCurrent(
+                        offer_id="offer-keyword",
+                        sku="SKU-KEYWORD",
+                        title="Keyword product",
+                        captured_at=datetime(2026, 8, 3, 1, tzinfo=UTC),
+                        page_views_30_days=160,
+                    )
+                )
+                for snapshot_date, page_views in (
+                    (date(2026, 7, 31), 100),
+                    (date(2026, 8, 1), 110),
+                    (date(2026, 8, 2), 135),
+                    (date(2026, 8, 3), 160),
+                ):
+                    session.add(
+                        OfferSnapshot(
+                            snapshot_date=snapshot_date,
+                            offer_id="offer-keyword",
+                            sku="SKU-KEYWORD",
+                            title="Keyword product",
+                            captured_at=datetime.combine(
+                                snapshot_date,
+                                datetime.min.time(),
+                                tzinfo=UTC,
+                            ),
+                            page_views_30_days=page_views,
+                        )
+                    )
+
+            recorded = client.post(
+                "/api/erp/keyword-traffic",
+                headers={"X-CSRF-Token": csrf},
+                json={
+                    "offer_id": "offer-keyword",
+                    "effective_date": "2026-08-01",
+                    "keywords": ["memory foam", "queen mattress"],
+                    "note": "建立关键词基线",
+                },
+            )
+            assert recorded.status_code == 200
+            assert recorded.json()["event"]["event_kind"] == "baseline"
+
+            listing = client.get("/api/erp/keyword-traffic?as_of=2026-08-03")
+            detail = client.get(
+                "/api/erp/keyword-traffic/offer-keyword"
+                "?as_of=2026-08-03&history_days=30&comparison_days=3"
+            )
+            assert listing.status_code == 200
+            assert detail.status_code == 200
+            assert listing.json()["summary"]["tracked_keyword_count"] == 1
+            assert listing.json()["items"][0]["latest_page_views_30_days"] == 160
+            assert detail.json()["product"]["current_keywords"] == [
+                "memory foam",
+                "queen mattress",
+            ]
+            assert detail.json()["history"][-1]["page_views_30_days"] == 160
+        finally:
+            engine.dispose()
 
 
 def test_selection_template_and_account_permission_overrides(
