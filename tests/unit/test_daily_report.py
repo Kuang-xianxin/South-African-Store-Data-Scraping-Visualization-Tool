@@ -467,6 +467,7 @@ def test_delayed_same_day_capture_fills_missing_morning_stock_and_marks_resolved
     assert context["missing_count"] == 0
     assert "早间库存漏爬已解决" in context["note"]
     assert "北京时间 2026-07-25 10:44:00" in context["note"]
+    assert "周期内首次完整库存" in context["note"]
     assert context["exception_note"] == context["note"]
 
     manual_run = next(run for run in payload["runs"] if run["slot"] == "manual")
@@ -475,7 +476,7 @@ def test_delayed_same_day_capture_fills_missing_morning_stock_and_marks_resolved
     assert manual_run["counts"]["reported_inventory_date"] == "2026-07-25"
 
 
-def test_latest_delayed_inventory_replaces_an_earlier_fallback() -> None:
+def test_first_complete_delayed_inventory_is_not_replaced_by_later_captures() -> None:
     engine = create_engine("sqlite://")
     create_schema(engine)
     _seed(engine)
@@ -508,12 +509,55 @@ def test_latest_delayed_inventory_replaces_an_earlier_fallback() -> None:
     product = next(row for row in payload["items"] if row["offer_id"] == "offer-a")
     context = payload["comparison_history"][-1]["inventory_context"]
 
-    assert product["current"]["platform_stock"] == 7
-    assert context["source_slot"] == "evening"
-    assert context["captured_at"] == "2026-07-25T10:00:00"
+    assert product["current"]["platform_stock"] == 9
+    assert [
+        version["values"]["platform_stock"]
+        for version in product["capture_versions"]
+    ] == [9, 9, 9]
+    assert context["source_slot"] == "manual"
+    assert context["captured_at"] == "2026-07-25T02:44:00"
     assert context["complete"] is True
-    assert "北京时间 2026-07-25 18:00:00" in context["note"]
+    assert "北京时间 2026-07-25 10:44:00" in context["note"]
     assert context["exception_note"] == context["note"]
+
+
+def test_incomplete_inventory_is_replaced_once_by_the_first_complete_capture() -> None:
+    engine = create_engine("sqlite://")
+    create_schema(engine)
+    _seed(engine)
+    with Session(engine) as session, session.begin():
+        session.get(OfferCurrent, "offer-b").takealot_available_stock = None
+    capture_daily_report(
+        engine,
+        business_date=REPORT_DATE,
+        slot="manual",
+        captured_at=_report_capture_time(REPORT_DATE, 2, 20),
+    )
+    with Session(engine) as session, session.begin():
+        session.get(OfferCurrent, "offer-a").takealot_available_stock = 8
+        session.get(OfferCurrent, "offer-b").takealot_available_stock = 4
+    capture_daily_report(
+        engine,
+        business_date=REPORT_DATE,
+        slot="manual",
+        captured_at=_report_capture_time(REPORT_DATE, 2, 40),
+    )
+    with Session(engine) as session, session.begin():
+        session.get(OfferCurrent, "offer-a").takealot_available_stock = 7
+    capture_daily_report(
+        engine,
+        business_date=REPORT_DATE,
+        slot="evening",
+        captured_at=_report_capture_time(REPORT_DATE, 10),
+    )
+
+    payload = daily_report_payload(engine, REPORT_DATE)
+    product = next(row for row in payload["items"] if row["offer_id"] == "offer-a")
+    context = payload["comparison_history"][-1]["inventory_context"]
+    assert product["current"]["platform_stock"] == 8
+    assert context["captured_at"] == "2026-07-25T02:40:00"
+    assert context["complete"] is True
+    assert context["missing_count"] == 0
 
 
 def test_current_stock_total_follows_latest_offer_inventory_and_preserves_missing() -> None:
@@ -1436,7 +1480,7 @@ def test_delayed_inventory_note_is_exported_in_the_remark_date_cell(
         report_sheet = workbook["运营日报"]
         assert report_sheet["B4"].value is None
         assert "早间库存漏爬已解决" in str(report_sheet["B5"].value)
-        assert "北京时间 2026-07-25 18:00:00" in str(report_sheet["B5"].value)
+        assert "北京时间 2026-07-25 10:44:00" in str(report_sheet["B5"].value)
     finally:
         workbook.close()
 

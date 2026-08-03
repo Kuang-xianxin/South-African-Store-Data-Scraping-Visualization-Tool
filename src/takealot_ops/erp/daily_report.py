@@ -1729,7 +1729,7 @@ def _freeze_inventory_snapshots(
     run: DailyReportRun,
     offers: list[OfferCurrent],
 ) -> tuple[date, int]:
-    """Keep morning stock immutable, or refresh a delayed same-day fallback."""
+    """Freeze the first complete stock captured after the planned Beijing pull."""
     inventory_date = _beijing_date(run.captured_at)
     reported_inventory_date = run.business_date + timedelta(days=1)
     if inventory_date != reported_inventory_date:
@@ -1756,10 +1756,6 @@ def _freeze_inventory_snapshots(
     incoming_stock = {
         offer.offer_id: _platform_stock(offer) for offer in offers
     }
-    incoming_complete = bool(offers) and all(
-        platform_stock is not None
-        for platform_stock, _ in incoming_stock.values()
-    )
     expected_existing_count = max(
         (
             int((source_run.counts or {}).get("products") or 0)
@@ -1771,20 +1767,7 @@ def _freeze_inventory_snapshots(
     existing_complete = bool(existing_rows) and all(
         row.platform_stock is not None for row in existing_rows
     ) and len(existing_rows) >= expected_existing_count
-    if existing_complete and not incoming_complete:
-        return inventory_date, 0
-    morning_source_runs = [
-        source_run
-        for source_run in source_runs.values()
-        if source_run is not None and source_run.slot == "morning"
-    ]
-    has_complete_morning_snapshot = bool(morning_source_runs) and all(
-        row.platform_stock is not None for row in existing_rows
-    ) and len(existing_rows) >= max(
-        int((source_run.counts or {}).get("products") or 0)
-        for source_run in morning_source_runs
-    )
-    if has_complete_morning_snapshot:
+    if existing_complete:
         return inventory_date, 0
 
     existing_by_offer = {row.offer_id: row for row in existing_rows}
@@ -1865,12 +1848,22 @@ def _inventory_capture_context(
     ) + max(expected_count - len(snapshots), 0)
     complete = expected_count > 0 and missing_count == 0
     delayed = source_slot != "morning"
-    captured_label = _beijing_datetime_label(latest_snapshot.captured_at)
+    captured_aware = (
+        latest_snapshot.captured_at.replace(tzinfo=UTC)
+        if latest_snapshot.captured_at.tzinfo is None
+        else latest_snapshot.captured_at
+    ).astimezone(ZoneInfo("Asia/Shanghai"))
+    captured_label = captured_aware.strftime("%Y-%m-%d %H:%M:%S")
     if delayed and complete:
+        captured_clock = (captured_aware.hour, captured_aware.minute)
+        if captured_clock > (10, 5) or captured_aware.second:
+            planned_relation = "库存时间晚于原计划10:05"
+        else:
+            planned_relation = "库存时间与原计划10:05一致"
         note = (
             "早间库存漏爬已解决："
             f"已用{source_label or '后续完整拉取'}于北京时间 {captured_label} "
-            "取得的最新库存补齐；库存时间晚于原计划10:05"
+            f"取得的周期内首次完整库存补齐；{planned_relation}"
         )
     elif complete:
         note = f"库存实际采集时间：北京时间 {captured_label}"
@@ -1971,11 +1964,6 @@ def _refresh_successful_run_inventory_counts(
         counts = dict(report_run.counts or {})
         _apply_inventory_context_to_counts(counts, inventory_context)
         report_run.counts = counts
-
-
-def _beijing_datetime_label(value: datetime) -> str:
-    aware = value.replace(tzinfo=UTC) if value.tzinfo is None else value
-    return aware.astimezone(ZoneInfo("Asia/Shanghai")).strftime("%Y-%m-%d %H:%M:%S")
 
 
 def _daily_inventory_snapshot_map(
