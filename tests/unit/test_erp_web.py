@@ -105,6 +105,89 @@ def test_competitor_radar_returns_automatic_store_targets_and_separate_items(
     assert overview.json()["store_items"][0]["来源"] == "own_store"
 
 
+def test_collect_routes_own_store_plid_to_follower_only_collection(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    calls: list[dict[str, object]] = []
+
+    class RoutingCollector:
+        def __init__(self, **_: object) -> None:
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_: object) -> None:
+            pass
+
+        async def collect(
+            self,
+            url: str,
+            *,
+            with_stock_probe: bool,
+            visible_browser: bool = False,
+            followers_only: bool = False,
+        ) -> CompetitorCollectionResult:
+            calls.append(
+                {
+                    "url": url,
+                    "with_stock_probe": with_stock_probe,
+                    "visible_browser": visible_browser,
+                    "followers_only": followers_only,
+                }
+            )
+            return CompetitorCollectionResult(
+                plid="12345678",
+                title="Own Product",
+                succeeded=True,
+                message="仅采集跟卖",
+            )
+
+    database_path = tmp_path / "erp-own-store-collect.db"
+    database_url = f"sqlite:///{database_path.as_posix()}"
+    monkeypatch.setenv("TAKEALOT_DATABASE_URL", database_url)
+    monkeypatch.setattr("takealot_ops.erp.web.CompetitorCollector", RoutingCollector)
+    app = create_app(tmp_path)
+
+    with TestClient(app, client=("127.0.0.1", 50000)) as client:
+        session = _bootstrap(client)
+        engine = create_engine(database_url)
+        with Session(engine) as database_session, database_session.begin():
+            database_session.add(
+                OfferCurrent(
+                    offer_id="own-offer",
+                    productline_id="12345678",
+                    sku="OWN-SKU",
+                    title="Own Product",
+                    selling_price=99,
+                    total_stock=5,
+                    captured_at=datetime(2026, 8, 3, 1, tzinfo=UTC),
+                )
+            )
+        engine.dispose()
+
+        response = client.post(
+            "/api/competitors/collect",
+            headers={"X-CSRF-Token": str(session["csrf_token"])},
+            json={
+                "url": "https://www.takealot.com/own-product/PLID12345678",
+                "with_stock_probe": True,
+            },
+        )
+
+    assert response.status_code == 200
+    assert response.json()["added_target_count"] == 0
+    assert calls == [
+        {
+            "url": "https://www.takealot.com/own-product/PLID12345678",
+            "with_stock_probe": True,
+            "visible_browser": False,
+            "followers_only": True,
+        }
+    ]
+
+
 def test_product_thumbnail_is_authenticated_and_rejects_untrusted_hosts(
     tmp_path: Path,
     monkeypatch,

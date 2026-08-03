@@ -221,6 +221,7 @@ const reviewSort = ref<
 const competitorQuery = ref("");
 const competitorStockFilter = ref<"全部" | "有货" | "没货" | "未探测">("全部");
 const competitorSignalFilter = ref("全部");
+const competitorSourceView = ref<"competitor" | "own_store">("competitor");
 const competitorPage = ref(1);
 const storeCompetitorPage = ref(1);
 const competitorPageSize = ref(20);
@@ -425,6 +426,16 @@ const filteredCompetitors = computed(() => {
 const filteredStoreCompetitors = computed(() => {
   return storeCompetitors.value.filter(matchesCompetitorFilters);
 });
+const activeSourceFilteredCount = computed(() =>
+  competitorSourceView.value === "competitor"
+    ? filteredCompetitors.value.length
+    : filteredStoreCompetitors.value.length,
+);
+const activeSourceTotalCount = computed(() =>
+  competitorSourceView.value === "competitor"
+    ? competitors.value.length
+    : storeCompetitors.value.length,
+);
 
 function matchesCompetitorFilters(item: CompetitorItem) {
   const query = competitorSearchTerm(competitorQuery.value);
@@ -1224,6 +1235,7 @@ async function jumpToDuplicateTarget() {
   competitorQuery.value = "";
   competitorStockFilter.value = "全部";
   competitorSignalFilter.value = "全部";
+  competitorSourceView.value = "competitor";
   if (!competitors.value.some((item) => item.plid === duplicate.plid)) {
     const availableStart = competitorDateRange.value.available_start;
     const availableEnd = competitorDateRange.value.available_end;
@@ -3160,13 +3172,17 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
       <div class="collector-run-heading">
         <div>
           <p class="section-kicker">建立与刷新观察样本</p>
-          <h3>批量采集当前监控清单</h3>
+          <h3>批量采集真正竞品与自有商品跟卖</h3>
         </div>
         <span>
-          共 {{ targets.length + storeTargets.length }} 条链接 · 自有店铺自动
-          {{ storeTargets.length }} 条 · 真实竞品 {{ targets.length }} 条
+          共 {{ targets.length + storeTargets.length }} 个目标 · 自有跟卖检查
+          {{ storeTargets.length }} 个 · 真正竞品 {{ targets.length }} 个
         </span>
       </div>
+      <p class="method-note">
+        自有商品价格与库存直接使用 Seller API 首拉基准；
+        任务只读取公开报价清单来识别跟卖，不保存或探测自有主报价和变体库存。
+      </p>
       <div
         v-if="sharedBatchStatus.active"
         class="shared-collection-status"
@@ -3746,6 +3762,30 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
         <span>先执行一次全量刷新建立自有店铺首拉基准，再开始跟卖采集。</span>
       </div>
       <div v-else>
+        <div class="competitor-source-tabs" role="tablist" aria-label="竞品数据来源">
+          <button
+            type="button"
+            role="tab"
+            :aria-selected="competitorSourceView === 'competitor'"
+            aria-controls="true-competitor-panel"
+            :class="{ active: competitorSourceView === 'competitor' }"
+            @click="competitorSourceView = 'competitor'"
+          >
+            <strong>真正竞品</strong>
+            <span>{{ competitors.length }} 个商品 · 默认查看</span>
+          </button>
+          <button
+            type="button"
+            role="tab"
+            :aria-selected="competitorSourceView === 'own_store'"
+            aria-controls="own-store-follower-panel"
+            :class="{ active: competitorSourceView === 'own_store' }"
+            @click="competitorSourceView = 'own_store'"
+          >
+            <strong>自有商品跟卖</strong>
+            <span>{{ storeCompetitors.length }} 个商品 · 只看跟卖</span>
+          </button>
+        </div>
         <div class="competitor-list-filters" role="search" aria-label="筛选竞品最新状态">
           <label class="competitor-filter-field competitor-filter-search">
             <span>搜索商品</span>
@@ -3789,9 +3829,8 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
             <div class="competitor-date-range-copy">
               <strong>观察区间（北京时间）</strong>
               <span>
-                {{ activeRangeLabel }} · 显示
-                自有 {{ filteredStoreCompetitors.length }} / {{ storeCompetitors.length }} ·
-                竞品 {{ filteredCompetitors.length }} / {{ competitors.length }}
+                {{ activeRangeLabel }} · 当前分区显示
+                {{ activeSourceFilteredCount }} / {{ activeSourceTotalCount }}
               </span>
             </div>
             <div class="competitor-date-range-controls">
@@ -3834,7 +3873,12 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
           自有店铺另行使用 Seller API 每个北京日最早一次完整刷新作基准，
           公开页只探测非主报价的跟卖；评论属于整个 PLID，不归属某个卖家。
         </p>
-        <section class="competitor-source-section own-store-source-section">
+        <section
+          v-if="competitorSourceView === 'own_store'"
+          id="own-store-follower-panel"
+          class="competitor-source-section own-store-source-section"
+          role="tabpanel"
+        >
           <div class="competitor-source-heading">
             <div>
               <p class="section-kicker">OWN STORE FOLLOWERS</p>
@@ -3946,7 +3990,12 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
           </div>
         </section>
 
-        <section class="competitor-source-section true-competitor-source-section">
+        <section
+          v-else
+          id="true-competitor-panel"
+          class="competitor-source-section true-competitor-source-section"
+          role="tabpanel"
+        >
           <div class="competitor-source-heading">
             <div>
               <p class="section-kicker">TRUE COMPETITORS</p>

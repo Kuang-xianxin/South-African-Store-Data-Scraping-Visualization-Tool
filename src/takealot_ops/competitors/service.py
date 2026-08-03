@@ -193,7 +193,11 @@ class CompetitorCollector:
     ) -> CompetitorCollectionResult:
         plid = extract_plid(url)
         try:
-            self._report_stage("正在读取商品与变体")
+            self._report_stage(
+                "正在读取公开报价并识别跟卖"
+                if followers_only
+                else "正在读取商品与变体"
+            )
             product = await self._client.fetch_product(url)
             follower_offers = tuple(offer for offer in product.offers if not offer.is_buybox)
             discovered_targets = (
@@ -219,9 +223,17 @@ class CompetitorCollector:
                 self._report_stage("正在读取全部评论")
                 reviews = await self._client.fetch_all_reviews(product.plid)
             self._report_stage(
-                "正在启动库存探测浏览器"
-                if with_stock_probe
-                else "本条未启用库存探测"
+                (
+                    "正在探测跟卖报价库存"
+                    if with_stock_probe
+                    else "本条未启用跟卖库存探测"
+                )
+                if followers_only
+                else (
+                    "正在启动库存探测浏览器"
+                    if with_stock_probe
+                    else "本条未启用库存探测"
+                )
             )
             variant_stocks, offer_stocks = await self._collect_product_stocks(
                 product,
@@ -234,7 +246,11 @@ class CompetitorCollector:
                 if followers_only
                 else _aggregate_variant_stock(variant_stocks)
             )
-            self._report_stage("正在保存商品快照")
+            self._report_stage(
+                "正在保存跟卖观察快照"
+                if followers_only
+                else "正在保存商品快照"
+            )
             collected_at = datetime.now(UTC)
             with Session(self._engine) as session:
                 repository = CompetitorRepository(session)
@@ -293,6 +309,12 @@ class CompetitorCollector:
                     "自有商品已检查，本次未发现跟卖报价，"
                     "未拉取商品评论或探测主报价库存。"
                     if followers_only and not follower_offers
+                    else (
+                        "自有商品本身继续使用 Seller API 首拉基准；"
+                        f"已记录 {len(offer_stocks)} 个非主报价跟卖，"
+                        "库存只探测这些跟卖，评论按 PLID 商品共用。"
+                    )
+                    if followers_only
                     else _collection_message(
                         stock,
                         len(variant_stocks),
