@@ -673,6 +673,16 @@ h2 {
   font-size: 0.76rem;
 }
 
+.collection-scope-note {
+  display: block;
+  margin: 0 0 18px;
+  line-height: 1.7;
+}
+
+.collection-scope-note + .shared-collection-status {
+  margin-top: 0;
+}
+
 .shared-collection-status div {
   display: grid;
   gap: 4px;

@@ -3179,7 +3179,7 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
           {{ storeTargets.length }} 个 · 真正竞品 {{ targets.length }} 个
         </span>
       </div>
-      <p class="method-note">
+      <p class="method-note collection-scope-note">
         自有商品价格与库存直接使用 Seller API 首拉基准；
         任务只读取公开报价清单来识别跟卖，不保存或探测自有主报价和变体库存。
       </p>
