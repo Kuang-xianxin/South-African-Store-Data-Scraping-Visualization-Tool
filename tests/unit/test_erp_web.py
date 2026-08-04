@@ -706,21 +706,16 @@ def test_viewer_can_read_but_cannot_run_actions(
         assert denied_export.status_code == 403
         assert denied_export.json()["detail"] == "当前账号不能生成运营日报 Excel"
         assert viewer.get("/api/erp/keyword-traffic?as_of=2026-07-24").status_code == 200
-        denied_keyword_change = viewer.post(
+        removed_manual_route = viewer.post(
             "/api/erp/keyword-traffic",
             headers={"X-CSRF-Token": csrf},
-            json={
-                "offer_id": "offer-a",
-                "effective_date": "2026-07-24",
-                "keywords": ["memory foam"],
-            },
+            json={},
         )
-        assert denied_keyword_change.status_code == 403
-        assert denied_keyword_change.json()["detail"] == "当前账号可以查看关键词流量，但不能记录关键词变更"
+        assert removed_manual_route.status_code == 405
         assert viewer.get("/api/auth/users").status_code == 403
 
 
-def test_keyword_traffic_routes_record_and_compare_change(
+def test_keyword_traffic_routes_automatically_detect_title_change(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -732,8 +727,7 @@ def test_keyword_traffic_routes_record_and_compare_change(
     app = create_app(PROJECT_ROOT)
 
     with TestClient(app, client=("127.0.0.1", 50000)) as client:
-        auth = _bootstrap(client)
-        csrf = str(auth["csrf_token"])
+        _bootstrap(client)
         engine = create_engine(f"sqlite:///{database_path.as_posix()}")
         try:
             with Session(engine) as session, session.begin():
@@ -741,23 +735,23 @@ def test_keyword_traffic_routes_record_and_compare_change(
                     OfferCurrent(
                         offer_id="offer-keyword",
                         sku="SKU-KEYWORD",
-                        title="Keyword product",
+                        title="Memory Foam Queen Mattress",
                         captured_at=datetime(2026, 8, 3, 1, tzinfo=UTC),
                         page_views_30_days=160,
                     )
                 )
-                for snapshot_date, page_views in (
-                    (date(2026, 7, 31), 100),
-                    (date(2026, 8, 1), 110),
-                    (date(2026, 8, 2), 135),
-                    (date(2026, 8, 3), 160),
+                for snapshot_date, page_views, title in (
+                    (date(2026, 7, 31), 100, "Memory Foam Mattress"),
+                    (date(2026, 8, 1), 110, "Memory Foam Queen Mattress"),
+                    (date(2026, 8, 2), 135, "Memory Foam Queen Mattress"),
+                    (date(2026, 8, 3), 160, "Memory Foam Queen Mattress"),
                 ):
                     session.add(
                         OfferSnapshot(
                             snapshot_date=snapshot_date,
                             offer_id="offer-keyword",
                             sku="SKU-KEYWORD",
-                            title="Keyword product",
+                            title=title,
                             captured_at=datetime.combine(
                                 snapshot_date,
                                 datetime.min.time(),
@@ -767,19 +761,6 @@ def test_keyword_traffic_routes_record_and_compare_change(
                         )
                     )
 
-            recorded = client.post(
-                "/api/erp/keyword-traffic",
-                headers={"X-CSRF-Token": csrf},
-                json={
-                    "offer_id": "offer-keyword",
-                    "effective_date": "2026-08-01",
-                    "keywords": ["memory foam", "queen mattress"],
-                    "note": "建立关键词基线",
-                },
-            )
-            assert recorded.status_code == 200
-            assert recorded.json()["event"]["event_kind"] == "baseline"
-
             listing = client.get("/api/erp/keyword-traffic?as_of=2026-08-03")
             detail = client.get(
                 "/api/erp/keyword-traffic/offer-keyword"
@@ -787,12 +768,15 @@ def test_keyword_traffic_routes_record_and_compare_change(
             )
             assert listing.status_code == 200
             assert detail.status_code == 200
-            assert listing.json()["summary"]["tracked_keyword_count"] == 1
+            assert listing.json()["summary"]["archived_product_count"] == 1
             assert listing.json()["items"][0]["latest_page_views_30_days"] == 160
             assert detail.json()["product"]["current_keywords"] == [
-                "memory foam",
-                "queen mattress",
+                "Memory",
+                "Foam",
+                "Queen",
+                "Mattress",
             ]
+            assert detail.json()["events"][1]["change_label"] == "自动变化｜新增 1 词"
             assert detail.json()["history"][-1]["page_views_30_days"] == 160
         finally:
             engine.dispose()

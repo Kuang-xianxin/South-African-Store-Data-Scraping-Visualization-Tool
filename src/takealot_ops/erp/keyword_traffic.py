@@ -1,190 +1,62 @@
-"""Keyword change tracking over the platform's rolling 30-day page-view metric."""
+"""Automatic title-keyword change detection over rolling 30-day page views."""
 
 from __future__ import annotations
 
 from collections import defaultdict
 from collections.abc import Sequence
-from datetime import UTC, date, datetime, timedelta
+from datetime import date, timedelta
 from math import isfinite
+import re
 from typing import Any
-from zoneinfo import ZoneInfo
 
-from sqlalchemy import Engine, func, select
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from takealot_ops.storage.models import (
-    OfferCurrent,
-    OfferSnapshot,
-    ProductKeywordSnapshot,
-)
+from takealot_ops.storage.models import OfferCurrent, OfferSnapshot
 
 
-SAST = ZoneInfo("Africa/Johannesburg")
-MAX_KEYWORDS = 50
-MAX_KEYWORD_LENGTH = 100
 TREND_FLAT_THRESHOLD = 0.5
+TITLE_TERM_PATTERN = re.compile(r"[^\W_]+(?:['’.-][^\W_]+)*", re.UNICODE)
 
 
-class KeywordTrafficInputError(ValueError):
-    """Raised when a keyword snapshot cannot be recorded safely."""
-
-
-class KeywordTrafficConflictError(KeywordTrafficInputError):
-    """Raised when a new row would contradict an existing keyword timeline."""
-
-
-def normalize_keywords(values: Sequence[str]) -> list[str]:
-    """Trim and case-insensitively deduplicate a complete keyword set."""
-    normalized: list[str] = []
+def extract_title_keywords(title: str | None) -> list[str]:
+    """Return unique visible terms from the official Seller Offer title."""
+    keywords: list[str] = []
     seen: set[str] = set()
-    for raw in values:
-        value = " ".join(str(raw).strip().split())
-        if not value:
-            continue
-        if len(value) > MAX_KEYWORD_LENGTH:
-            raise KeywordTrafficInputError(
-                f"单个关键词不能超过 {MAX_KEYWORD_LENGTH} 个字符"
-            )
+    for match in TITLE_TERM_PATTERN.finditer(str(title or "")):
+        value = match.group(0).strip("-.'’")
         key = value.casefold()
-        if key in seen:
+        if not value or key in seen:
             continue
         seen.add(key)
-        normalized.append(value)
-    if not normalized:
-        raise KeywordTrafficInputError("请至少填写一个关键词")
-    if len(normalized) > MAX_KEYWORDS:
-        raise KeywordTrafficInputError(f"每次最多记录 {MAX_KEYWORDS} 个关键词")
-    return normalized
-
-
-def record_keyword_snapshot(
-    engine: Engine,
-    *,
-    offer_id: str,
-    effective_date: date,
-    keywords: Sequence[str],
-    note: str | None,
-    actor_user_id: int | None,
-    actor_username: str,
-    today: date | None = None,
-) -> dict[str, Any]:
-    """Append a daily keyword state without rewriting earlier operator evidence."""
-    normalized_offer_id = offer_id.strip()
-    if not normalized_offer_id:
-        raise KeywordTrafficInputError("商品编号不能为空")
-    normalized_keywords = normalize_keywords(keywords)
-    current_day = today or datetime.now(SAST).date()
-    if effective_date > current_day:
-        raise KeywordTrafficInputError("关键词生效日期不能晚于今天")
-    normalized_note = str(note or "").strip() or None
-    if normalized_note and len(normalized_note) > 500:
-        raise KeywordTrafficInputError("备注不能超过 500 个字符")
-
-    with Session(engine) as session, session.begin():
-        offer = session.get(OfferCurrent, normalized_offer_id)
-        if offer is None:
-            raise KeywordTrafficInputError("没有找到对应的店铺商品")
-        same_day = session.scalar(
-            select(ProductKeywordSnapshot.id).where(
-                ProductKeywordSnapshot.offer_id == normalized_offer_id,
-                ProductKeywordSnapshot.effective_date == effective_date,
-            )
-        )
-        if same_day is not None:
-            raise KeywordTrafficConflictError("该商品当天已经记录关键词，请选择实际变更日期")
-        latest = session.scalar(
-            select(ProductKeywordSnapshot)
-            .where(ProductKeywordSnapshot.offer_id == normalized_offer_id)
-            .order_by(
-                ProductKeywordSnapshot.effective_date.desc(),
-                ProductKeywordSnapshot.id.desc(),
-            )
-            .limit(1)
-        )
-        if latest is not None and effective_date < latest.effective_date:
-            raise KeywordTrafficConflictError(
-                "不能在已有后续节点之前插入记录，请按实际发生顺序追加关键词变更"
-            )
-        previous = session.scalar(
-            select(ProductKeywordSnapshot)
-            .where(
-                ProductKeywordSnapshot.offer_id == normalized_offer_id,
-                ProductKeywordSnapshot.effective_date < effective_date,
-            )
-            .order_by(
-                ProductKeywordSnapshot.effective_date.desc(),
-                ProductKeywordSnapshot.id.desc(),
-            )
-            .limit(1)
-        )
-        previous_keywords = list(previous.keywords) if previous is not None else []
-        if previous is not None and _keyword_key_set(previous_keywords) == _keyword_key_set(
-            normalized_keywords
-        ):
-            raise KeywordTrafficConflictError("关键词与上一次记录一致，没有形成变更节点")
-
-        snapshot = ProductKeywordSnapshot(
-            offer_id=normalized_offer_id,
-            effective_date=effective_date,
-            keywords=normalized_keywords,
-            note=normalized_note,
-            recorded_by_user_id=actor_user_id,
-            recorded_by_username=actor_username.strip() or "unknown",
-            recorded_at=datetime.now(UTC).replace(tzinfo=None),
-        )
-        session.add(snapshot)
-        session.flush()
-        return _event_payload(
-            snapshot,
-            previous_keywords=previous_keywords,
-            history_by_date={},
-            comparison_days=7,
-            as_of=current_day,
-        )
+        keywords.append(value)
+    return keywords
 
 
 def build_keyword_product_list(session: Session, *, as_of: date) -> dict[str, Any]:
-    """Return one compact monitoring row for every current store offer."""
+    """Return automatic title-keyword archive status for every current offer."""
     offers = list(session.scalars(select(OfferCurrent).order_by(OfferCurrent.offer_id)))
-    latest_dates = (
-        select(
-            OfferSnapshot.offer_id.label("offer_id"),
-            func.max(OfferSnapshot.snapshot_date).label("snapshot_date"),
-        )
-        .where(OfferSnapshot.snapshot_date <= as_of)
-        .group_by(OfferSnapshot.offer_id)
-        .subquery()
-    )
-    latest_snapshots = list(
-        session.scalars(
-            select(OfferSnapshot).join(
-                latest_dates,
-                (OfferSnapshot.offer_id == latest_dates.c.offer_id)
-                & (OfferSnapshot.snapshot_date == latest_dates.c.snapshot_date),
-            )
-        )
-    )
-    latest_by_offer = {row.offer_id: row for row in latest_snapshots}
     snapshots = list(
         session.scalars(
-            select(ProductKeywordSnapshot)
-            .where(ProductKeywordSnapshot.effective_date <= as_of)
+            select(OfferSnapshot)
+            .where(OfferSnapshot.snapshot_date <= as_of)
             .order_by(
-                ProductKeywordSnapshot.offer_id,
-                ProductKeywordSnapshot.effective_date,
-                ProductKeywordSnapshot.id,
+                OfferSnapshot.offer_id,
+                OfferSnapshot.snapshot_date,
+                OfferSnapshot.id,
             )
         )
     )
-    events_by_offer: dict[str, list[ProductKeywordSnapshot]] = defaultdict(list)
+    snapshots_by_offer: dict[str, list[OfferSnapshot]] = defaultdict(list)
     for snapshot in snapshots:
-        events_by_offer[snapshot.offer_id].append(snapshot)
+        snapshots_by_offer[snapshot.offer_id].append(snapshot)
 
     items: list[dict[str, Any]] = []
     for offer in offers:
-        latest = latest_by_offer.get(offer.offer_id)
-        keyword_events = events_by_offer.get(offer.offer_id, [])
-        last_event = keyword_events[-1] if keyword_events else None
+        offer_snapshots = snapshots_by_offer.get(offer.offer_id, [])
+        latest = offer_snapshots[-1] if offer_snapshots else None
+        title_states = _title_states(offer_snapshots)
+        latest_state = title_states[-1] if title_states else None
         items.append(
             {
                 "offer_id": offer.offer_id,
@@ -197,12 +69,16 @@ def build_keyword_product_list(session: Session, *, as_of: date) -> dict[str, An
                 "latest_snapshot_date": (
                     latest.snapshot_date.isoformat() if latest is not None else None
                 ),
-                "keyword_event_count": len(keyword_events),
-                "keyword_change_count": max(0, len(keyword_events) - 1),
+                "keyword_event_count": len(title_states),
+                "keyword_change_count": max(0, len(title_states) - 1),
                 "last_keyword_change_date": (
-                    last_event.effective_date.isoformat() if last_event is not None else None
+                    title_states[-1]["snapshot"].snapshot_date.isoformat()
+                    if len(title_states) > 1
+                    else None
                 ),
-                "current_keywords": list(last_event.keywords) if last_event is not None else [],
+                "current_keywords": (
+                    list(latest_state["keywords"]) if latest_state is not None else []
+                ),
             }
         )
 
@@ -226,7 +102,9 @@ def build_keyword_product_list(session: Session, *, as_of: date) -> dict[str, An
             "with_traffic_count": sum(
                 item["latest_page_views_30_days"] is not None for item in items
             ),
-            "tracked_keyword_count": sum(item["keyword_event_count"] > 0 for item in items),
+            "archived_product_count": sum(
+                item["keyword_event_count"] > 0 for item in items
+            ),
             "keyword_change_count": sum(item["keyword_change_count"] for item in items),
         },
     }
@@ -240,23 +118,22 @@ def build_keyword_product_detail(
     history_days: int,
     comparison_days: int,
 ) -> dict[str, Any] | None:
-    """Build a gap-preserving history and event-centered traffic comparison."""
+    """Build gap-preserving traffic history and automatic title change events."""
     offer = session.get(OfferCurrent, offer_id)
     if offer is None:
         return None
-    start = as_of - timedelta(days=history_days - 1)
-    rows = list(
+    all_rows = list(
         session.scalars(
             select(OfferSnapshot)
             .where(
                 OfferSnapshot.offer_id == offer_id,
-                OfferSnapshot.snapshot_date >= start,
                 OfferSnapshot.snapshot_date <= as_of,
             )
-            .order_by(OfferSnapshot.snapshot_date)
+            .order_by(OfferSnapshot.snapshot_date, OfferSnapshot.id)
         )
     )
-    observed = {row.snapshot_date: row.page_views_30_days for row in rows}
+    observed = {row.snapshot_date: row.page_views_30_days for row in all_rows}
+    start = as_of - timedelta(days=history_days - 1)
     history: list[dict[str, Any]] = []
     cursor = start
     while cursor <= as_of:
@@ -268,33 +145,24 @@ def build_keyword_product_detail(
         )
         cursor += timedelta(days=1)
 
-    keyword_rows = list(
-        session.scalars(
-            select(ProductKeywordSnapshot)
-            .where(
-                ProductKeywordSnapshot.offer_id == offer_id,
-                ProductKeywordSnapshot.effective_date <= as_of,
-            )
-            .order_by(
-                ProductKeywordSnapshot.effective_date,
-                ProductKeywordSnapshot.id,
-            )
-        )
-    )
+    title_states = _title_states(all_rows)
     events: list[dict[str, Any]] = []
-    previous_keywords: list[str] = []
-    for keyword_row in keyword_rows:
+    previous_state: dict[str, Any] | None = None
+    for state in title_states:
         events.append(
             _event_payload(
-                keyword_row,
-                previous_keywords=previous_keywords,
+                state,
+                previous_state=previous_state,
                 history_by_date=observed,
                 comparison_days=comparison_days,
                 as_of=as_of,
             )
         )
-        previous_keywords = list(keyword_row.keywords)
+        previous_state = state
 
+    current_keywords = (
+        list(title_states[-1]["keywords"]) if title_states else extract_title_keywords(offer.title)
+    )
     return {
         "as_of": as_of.isoformat(),
         "history_days": history_days,
@@ -304,48 +172,98 @@ def build_keyword_product_detail(
             "sku": offer.sku,
             "title": offer.title,
             "image_url": offer.image_url,
-            "current_keywords": previous_keywords,
+            "current_keywords": current_keywords,
         },
         "history": history,
         "events": events,
         "metric_notice": (
-            "曲线记录平台返回的近30天浏览量滚动窗口；相邻变化是窗口净变化，"
-            "不是精确当天流量或独立访客数。"
+            "Seller Offers 当前没有独立 keyword/search-term 字段；关键词节点来自每日完整"
+            " Offer 快照中的官方商品标题词。曲线是近30天浏览量滚动窗口，不是精确"
+            "当天流量或独立访客数；节点附近变化只表示观察关联，不证明因果。"
         ),
     }
 
 
+def _title_states(rows: Sequence[OfferSnapshot]) -> list[dict[str, Any]]:
+    states: list[dict[str, Any]] = []
+    previous_signature: tuple[str, ...] | None = None
+    for snapshot in rows:
+        signature = _title_signature(snapshot.title)
+        if not signature:
+            continue
+        if previous_signature is None or signature != previous_signature:
+            states.append(
+                {
+                    "snapshot": snapshot,
+                    "title": " ".join(str(snapshot.title or "").split()),
+                    "signature": signature,
+                    "keywords": extract_title_keywords(snapshot.title),
+                }
+            )
+        previous_signature = signature
+    return states
+
+
+def _title_signature(title: str | None) -> tuple[str, ...]:
+    return tuple(
+        match.group(0).strip("-.'’").casefold()
+        for match in TITLE_TERM_PATTERN.finditer(str(title or ""))
+        if match.group(0).strip("-.'’")
+    )
+
+
 def _event_payload(
-    snapshot: ProductKeywordSnapshot,
+    state: dict[str, Any],
     *,
-    previous_keywords: Sequence[str],
+    previous_state: dict[str, Any] | None,
     history_by_date: dict[date, int | None],
     comparison_days: int,
     as_of: date,
 ) -> dict[str, Any]:
-    current_keywords = list(snapshot.keywords)
+    snapshot = state["snapshot"]
+    current_keywords = list(state["keywords"])
+    previous_keywords = (
+        list(previous_state["keywords"]) if previous_state is not None else []
+    )
     previous_by_key = {value.casefold(): value for value in previous_keywords}
     current_by_key = {value.casefold(): value for value in current_keywords}
     added = [value for key, value in current_by_key.items() if key not in previous_by_key]
     removed = [value for key, value in previous_by_key.items() if key not in current_by_key]
+    event_kind = "change" if previous_state is not None else "baseline"
     return {
         "id": snapshot.id,
-        "effective_date": snapshot.effective_date.isoformat(),
-        "event_kind": "change" if previous_keywords else "baseline",
+        "effective_date": snapshot.snapshot_date.isoformat(),
+        "event_kind": event_kind,
+        "event_source": "offer_title",
+        "change_label": _change_label(event_kind, added, removed),
         "keywords": current_keywords,
-        "previous_keywords": list(previous_keywords),
+        "previous_keywords": previous_keywords,
         "added_keywords": added,
         "removed_keywords": removed,
-        "note": snapshot.note,
-        "recorded_by_username": snapshot.recorded_by_username,
-        "recorded_at": snapshot.recorded_at.isoformat(),
+        "source_title": state["title"],
+        "previous_source_title": (
+            previous_state["title"] if previous_state is not None else None
+        ),
+        "detected_at": snapshot.captured_at.isoformat(),
         "comparison": _comparison_payload(
-            effective_date=snapshot.effective_date,
+            effective_date=snapshot.snapshot_date,
             history_by_date=history_by_date,
             comparison_days=comparison_days,
             as_of=as_of,
         ),
     }
+
+
+def _change_label(event_kind: str, added: Sequence[str], removed: Sequence[str]) -> str:
+    if event_kind == "baseline":
+        return "自动基线｜首次完整标题快照"
+    if added and removed:
+        return f"自动变化｜新增 {len(added)} 词，移除 {len(removed)} 词"
+    if added:
+        return f"自动变化｜新增 {len(added)} 词"
+    if removed:
+        return f"自动变化｜移除 {len(removed)} 词"
+    return "自动变化｜标题词顺序或写法变化"
 
 
 def _comparison_payload(
@@ -475,7 +393,3 @@ def _trend_direction(slope: float | None) -> str:
     if slope < -TREND_FLAT_THRESHOLD:
         return "down"
     return "flat"
-
-
-def _keyword_key_set(values: Sequence[str]) -> set[str]:
-    return {value.casefold() for value in values}

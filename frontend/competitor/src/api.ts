@@ -9,7 +9,6 @@ import type {
   ExportPayload,
   FreshnessPayload,
   KeywordTrafficDetailPayload,
-  KeywordTrafficEvent,
   KeywordTrafficListPayload,
   LogisticsOverviewPayload,
   NftGeneration,
@@ -565,19 +564,6 @@ export function fetchKeywordTrafficDetail(
     `/api/erp/keyword-traffic/${encodeURIComponent(offerId)}`
       + `?${query(asOf)}&history_days=${historyDays}&comparison_days=${comparisonDays}`,
   );
-}
-
-export function recordKeywordSnapshot(input: {
-  offer_id: string;
-  effective_date: string;
-  keywords: string[];
-  note?: string | null;
-}): Promise<{ event: KeywordTrafficEvent }> {
-  return request<{ event: KeywordTrafficEvent }>("/api/erp/keyword-traffic", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(input),
-  });
 }
 
 export async function fetchQuadrants(

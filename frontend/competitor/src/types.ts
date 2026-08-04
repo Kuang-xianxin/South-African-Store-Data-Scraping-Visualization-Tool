@@ -280,7 +280,7 @@ export interface KeywordTrafficListPayload {
   summary: {
     product_count: number;
     with_traffic_count: number;
-    tracked_keyword_count: number;
+    archived_product_count: number;
     keyword_change_count: number;
   };
 }
@@ -318,13 +318,15 @@ export interface KeywordTrafficEvent {
   id: number;
   effective_date: string;
   event_kind: "baseline" | "change";
+  event_source: "offer_title";
+  change_label: string;
   keywords: string[];
   previous_keywords: string[];
   added_keywords: string[];
   removed_keywords: string[];
-  note: string | null;
-  recorded_by_username: string;
-  recorded_at: string;
+  source_title: string;
+  previous_source_title: string | null;
+  detected_at: string;
   comparison: KeywordTrafficComparison;
 }
 

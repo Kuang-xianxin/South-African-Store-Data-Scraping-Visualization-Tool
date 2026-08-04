@@ -2,22 +2,16 @@ from __future__ import annotations
 
 from datetime import UTC, date, datetime, timedelta
 
-import pytest
-from sqlalchemy import create_engine, select
+from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
 from takealot_ops.erp.keyword_traffic import (
-    KeywordTrafficConflictError,
     build_keyword_product_detail,
     build_keyword_product_list,
-    record_keyword_snapshot,
+    extract_title_keywords,
 )
 from takealot_ops.storage.migrations import create_schema
-from takealot_ops.storage.models import (
-    OfferCurrent,
-    OfferSnapshot,
-    ProductKeywordSnapshot,
-)
+from takealot_ops.storage.models import OfferCurrent, OfferSnapshot
 
 
 def _engine():
@@ -28,7 +22,7 @@ def _engine():
             OfferCurrent(
                 offer_id="offer-1",
                 sku="SKU-1",
-                title="Tracked product",
+                title="Memory Foam Queen Mattress",
                 image_url="https://takealot.s3.amazonaws.com/covers_images/example/s.file",
                 captured_at=datetime(2026, 8, 3, 1, tzinfo=UTC),
                 page_views_30_days=210,
@@ -37,15 +31,18 @@ def _engine():
     return engine
 
 
-def _add_history(engine, values: dict[date, int | None]) -> None:
+def _add_history(
+    engine,
+    values: dict[date, tuple[int | None, str | None]],
+) -> None:
     with Session(engine) as session, session.begin():
-        for snapshot_date, page_views in values.items():
+        for snapshot_date, (page_views, title) in values.items():
             session.add(
                 OfferSnapshot(
                     snapshot_date=snapshot_date,
                     offer_id="offer-1",
                     sku="SKU-1",
-                    title="Tracked product",
+                    title=title,
                     captured_at=datetime.combine(
                         snapshot_date,
                         datetime.min.time(),
@@ -56,12 +53,15 @@ def _add_history(engine, values: dict[date, int | None]) -> None:
             )
 
 
-def test_keyword_change_comparison_exposes_level_and_trend_change() -> None:
+def test_title_change_is_automatically_labeled_and_compared() -> None:
     engine = _engine()
     change_day = date(2026, 7, 20)
     values = {
-        change_day + timedelta(days=offset): value
-        for offset, value in {
+        change_day + timedelta(days=offset): (
+            page_views,
+            "Memory Foam Mattress" if offset < 0 else "Memory Foam Queen Mattress",
+        )
+        for offset, page_views in {
             -3: 100,
             -2: 110,
             -1: 120,
@@ -73,27 +73,6 @@ def test_keyword_change_comparison_exposes_level_and_trend_change() -> None:
     }
     _add_history(engine, values)
 
-    record_keyword_snapshot(
-        engine,
-        offer_id="offer-1",
-        effective_date=date(2026, 7, 10),
-        keywords=["memory foam", "mattress"],
-        note="首次建立基线",
-        actor_user_id=None,
-        actor_username="operator",
-        today=date(2026, 8, 3),
-    )
-    record_keyword_snapshot(
-        engine,
-        offer_id="offer-1",
-        effective_date=change_day,
-        keywords=["memory foam", "queen mattress"],
-        note="替换核心词",
-        actor_user_id=None,
-        actor_username="operator",
-        today=date(2026, 8, 3),
-    )
-
     with Session(engine) as session:
         payload = build_keyword_product_detail(
             session,
@@ -104,10 +83,16 @@ def test_keyword_change_comparison_exposes_level_and_trend_change() -> None:
         )
 
     assert payload is not None
-    change = payload["events"][1]
+    assert len(payload["events"]) == 2
+    baseline, change = payload["events"]
+    assert baseline["event_kind"] == "baseline"
+    assert baseline["change_label"] == "自动基线｜首次完整标题快照"
     assert change["event_kind"] == "change"
-    assert change["added_keywords"] == ["queen mattress"]
-    assert change["removed_keywords"] == ["mattress"]
+    assert change["event_source"] == "offer_title"
+    assert change["change_label"] == "自动变化｜新增 1 词"
+    assert change["added_keywords"] == ["Queen"]
+    assert change["removed_keywords"] == []
+    assert change["source_title"] == "Memory Foam Queen Mattress"
     comparison = change["comparison"]
     assert comparison["traffic_direction"] == "up"
     assert comparison["traffic_delta"] == 90
@@ -119,26 +104,16 @@ def test_keyword_change_comparison_exposes_level_and_trend_change() -> None:
     engine.dispose()
 
 
-def test_missing_traffic_stays_missing_and_breaks_comparison() -> None:
+def test_missing_traffic_stays_missing_after_automatic_change() -> None:
     engine = _engine()
     change_day = date(2026, 7, 20)
     _add_history(
         engine,
         {
-            change_day - timedelta(days=1): 100,
-            change_day: 105,
-            change_day + timedelta(days=1): None,
+            change_day - timedelta(days=1): (100, "Memory Foam Mattress"),
+            change_day: (105, "Memory Foam Queen Mattress"),
+            change_day + timedelta(days=1): (None, "Memory Foam Queen Mattress"),
         },
-    )
-    record_keyword_snapshot(
-        engine,
-        offer_id="offer-1",
-        effective_date=change_day,
-        keywords=["first keyword"],
-        note=None,
-        actor_user_id=None,
-        actor_username="operator",
-        today=date(2026, 8, 3),
     )
 
     with Session(engine) as session:
@@ -154,7 +129,7 @@ def test_missing_traffic_stays_missing_and_breaks_comparison() -> None:
     history = {row["date"]: row["page_views_30_days"] for row in payload["history"]}
     assert history[(change_day + timedelta(days=1)).isoformat()] is None
     assert history[(change_day + timedelta(days=2)).isoformat()] is None
-    comparison = payload["events"][0]["comparison"]
+    comparison = payload["events"][1]["comparison"]
     assert comparison["traffic_direction"] == "unavailable"
     assert comparison["traffic_delta"] is None
     assert comparison["trend_change"] == "insufficient"
@@ -162,24 +137,14 @@ def test_missing_traffic_stays_missing_and_breaks_comparison() -> None:
     engine.dispose()
 
 
-def test_product_list_uses_latest_snapshot_on_or_before_selected_day() -> None:
+def test_product_list_automatically_archives_latest_title_snapshot() -> None:
     engine = _engine()
     _add_history(
         engine,
         {
-            date(2026, 8, 1): 180,
-            date(2026, 8, 2): 200,
+            date(2026, 8, 1): (180, "Memory Foam Mattress"),
+            date(2026, 8, 2): (200, "Memory Foam Queen Mattress"),
         },
-    )
-    record_keyword_snapshot(
-        engine,
-        offer_id="offer-1",
-        effective_date=date(2026, 8, 1),
-        keywords=["keyword"],
-        note=None,
-        actor_user_id=None,
-        actor_username="operator",
-        today=date(2026, 8, 3),
     )
 
     with Session(engine) as session:
@@ -190,46 +155,34 @@ def test_product_list_uses_latest_snapshot_on_or_before_selected_day() -> None:
     assert item["latest_snapshot_date"] == "2026-08-01"
     assert item["keyword_event_count"] == 1
     assert item["keyword_change_count"] == 0
+    assert item["current_keywords"] == ["Memory", "Foam", "Mattress"]
+    assert payload["summary"]["archived_product_count"] == 1
     engine.dispose()
 
 
-def test_keyword_timeline_rejects_same_day_and_unchanged_snapshots() -> None:
+def test_title_term_order_change_gets_an_automatic_change_label() -> None:
     engine = _engine()
-    record_keyword_snapshot(
+    _add_history(
         engine,
-        offer_id="offer-1",
-        effective_date=date(2026, 8, 1),
-        keywords=["Memory   Foam", "memory foam", "Mattress"],
-        note=None,
-        actor_user_id=None,
-        actor_username="operator",
-        today=date(2026, 8, 3),
+        {
+            date(2026, 8, 1): (180, "Memory Foam Mattress"),
+            date(2026, 8, 2): (200, "Mattress Memory Foam"),
+        },
     )
 
-    with pytest.raises(KeywordTrafficConflictError, match="当天已经记录"):
-        record_keyword_snapshot(
-            engine,
+    with Session(engine) as session:
+        payload = build_keyword_product_detail(
+            session,
             offer_id="offer-1",
-            effective_date=date(2026, 8, 1),
-            keywords=["different"],
-            note=None,
-            actor_user_id=None,
-            actor_username="operator",
-            today=date(2026, 8, 3),
-        )
-    with pytest.raises(KeywordTrafficConflictError, match="上一次记录一致"):
-        record_keyword_snapshot(
-            engine,
-            offer_id="offer-1",
-            effective_date=date(2026, 8, 2),
-            keywords=["memory foam", "mattress"],
-            note=None,
-            actor_user_id=None,
-            actor_username="operator",
-            today=date(2026, 8, 3),
+            as_of=date(2026, 8, 2),
+            history_days=30,
+            comparison_days=3,
         )
 
-    with Session(engine) as session:
-        rows = list(session.scalars(select(ProductKeywordSnapshot)))
-    assert rows[0].keywords == ["Memory Foam", "Mattress"]
+    assert payload is not None
+    change = payload["events"][1]
+    assert change["added_keywords"] == []
+    assert change["removed_keywords"] == []
+    assert change["change_label"] == "自动变化｜标题词顺序或写法变化"
+    assert extract_title_keywords("Memory foam, memory foam") == ["Memory", "foam"]
     engine.dispose()

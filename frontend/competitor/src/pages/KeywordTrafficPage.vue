@@ -5,7 +5,6 @@ import {
   ApiRequestError,
   fetchKeywordTrafficDetail,
   fetchKeywordTrafficProducts,
-  recordKeywordSnapshot,
 } from "../api";
 import { PRODUCT_IMAGE_SIZE, productThumbnailUrl } from "../productImages";
 import type {
@@ -19,8 +18,6 @@ import type {
 
 const props = defineProps<{
   asOf: string;
-  canManage: boolean;
-  onPermissionDenied?: (message: string) => void;
 }>();
 
 const listPayload = ref<KeywordTrafficListPayload | null>(null);
@@ -34,16 +31,8 @@ const comparisonDays = ref(7);
 const loadingProducts = ref(false);
 const loadingDetail = ref(false);
 const loadError = ref("");
-const actionMessage = ref("");
-const actionTone = ref<"success" | "error">("success");
 const failedImageUrls = ref(new Set<string>());
 const activePointIndex = ref<number | null>(null);
-const showRecordModal = ref(false);
-const saving = ref(false);
-const formError = ref("");
-const formDate = ref("");
-const formKeywords = ref("");
-const formNote = ref("");
 
 const products = computed(() => listPayload.value?.items ?? []);
 const filteredProducts = computed(() => {
@@ -231,62 +220,6 @@ async function loadDetail(offerId: string) {
   }
 }
 
-function openRecordModal() {
-  if (!props.canManage) {
-    props.onPermissionDenied?.("当前账号只能查看关键词流量，不能记录关键词变更。");
-    return;
-  }
-  if (!detail.value) return;
-  const today = sastDate();
-  formDate.value = props.asOf < today ? props.asOf : today;
-  formKeywords.value = currentKeywords.value.join("\n");
-  formNote.value = "";
-  formError.value = "";
-  showRecordModal.value = true;
-}
-
-function closeRecordModal() {
-  if (saving.value) return;
-  showRecordModal.value = false;
-}
-
-async function saveKeywordSnapshot() {
-  if (!detail.value || saving.value) return;
-  const keywords = formKeywords.value
-    .split(/[\n,，;；]+/)
-    .map((value) => value.trim())
-    .filter(Boolean);
-  if (!formDate.value) {
-    formError.value = "请选择关键词实际生效日期。";
-    return;
-  }
-  if (!keywords.length) {
-    formError.value = "请至少填写一个关键词。";
-    return;
-  }
-  saving.value = true;
-  formError.value = "";
-  try {
-    const result = await recordKeywordSnapshot({
-      offer_id: detail.value.product.offer_id,
-      effective_date: formDate.value,
-      keywords,
-      note: formNote.value.trim() || null,
-    });
-    showRecordModal.value = false;
-    selectedEventId.value = result.event.id;
-    actionMessage.value = result.event.event_kind === "baseline"
-      ? "关键词基线已建立，后续变更将自动生成前后对比。"
-      : "关键词变更节点已记录，流量与趋势对比已更新。";
-    actionTone.value = "success";
-    await loadProducts(detail.value.product.offer_id);
-  } catch (error) {
-    formError.value = errorMessage(error, "关键词变更记录失败");
-  } finally {
-    saving.value = false;
-  }
-}
-
 function chartX(index: number, count: number) {
   if (count <= 1) return chartLeft + chartInnerWidth / 2;
   return chartLeft + (index / (count - 1)) * chartInnerWidth;
@@ -370,7 +303,7 @@ function trendChangeLabel(event: KeywordTrafficEvent | null) {
 }
 
 function comparisonStatusLabel(event: KeywordTrafficEvent | null) {
-  if (!event) return "先记录关键词变更，系统才会建立对比。";
+  if (!event) return "等待每日完整 Offer 快照自动建立标题关键词档案。";
   const comparison = event.comparison;
   if (comparison.status === "waiting") return "变更后尚无可观察日期。";
   if (comparison.status === "collecting") {
@@ -381,27 +314,13 @@ function comparisonStatusLabel(event: KeywordTrafficEvent | null) {
 }
 
 function changeSummary(event: KeywordTrafficEvent) {
-  if (event.event_kind === "baseline") return "首次关键词基线";
-  const parts: string[] = [];
-  if (event.added_keywords.length) parts.push(`新增 ${event.added_keywords.length} 个`);
-  if (event.removed_keywords.length) parts.push(`移除 ${event.removed_keywords.length} 个`);
-  return parts.join(" · ") || "关键词集合已变更";
+  return event.change_label;
 }
 
 function errorMessage(error: unknown, fallback: string) {
   return error instanceof ApiRequestError ? error.message : fallback;
 }
 
-function sastDate() {
-  const parts = new Intl.DateTimeFormat("en-CA", {
-    timeZone: "Africa/Johannesburg",
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-  }).formatToParts(new Date());
-  const values = Object.fromEntries(parts.map((part) => [part.type, part.value]));
-  return `${values.year}-${values.month}-${values.day}`;
-}
 </script>
 
 <template>
@@ -409,9 +328,9 @@ function sastDate() {
     <header class="keyword-hero">
       <div>
         <p class="eyebrow">KEYWORD × TRAFFIC MONITOR</p>
-        <h2>关键词变更，流量结果一眼看清</h2>
+        <h2>标题关键词自动建档，流量结果一眼看清</h2>
         <span>
-          每日保留平台返回的近30天浏览量；关键词变更会固定为高对比节点，并自动比较变更前后的流量水平和趋势速度。
+          每次完整 Offer 采集都会自动归档官方商品标题；发现标题词或词序变化时，系统自动打标签、固定高对比节点，并比较前后的流量水平和趋势速度。
         </span>
       </div>
       <div class="metric-boundary">
@@ -421,8 +340,6 @@ function sastDate() {
     </header>
 
     <p v-if="loadError" class="page-message error" role="alert">{{ loadError }}</p>
-    <p v-if="actionMessage" class="page-message" :class="actionTone">{{ actionMessage }}</p>
-
     <div v-if="listPayload" class="overview-metrics">
       <article>
         <span>店铺商品</span>
@@ -435,9 +352,9 @@ function sastDate() {
         <small>缺失不补零</small>
       </article>
       <article>
-        <span>已建关键词档案</span>
-        <strong>{{ formatNumber(listPayload.summary.tracked_keyword_count) }}</strong>
-        <small>至少有一个基线</small>
+        <span>已自动建档</span>
+        <strong>{{ formatNumber(listPayload.summary.archived_product_count) }}</strong>
+        <small>来自每日标题快照</small>
       </article>
       <article class="accent">
         <span>关键词变更节点</span>
@@ -462,7 +379,7 @@ function sastDate() {
         <div class="filter-tabs" aria-label="商品筛选">
           <button :class="{ active: productFilter === 'all' }" @click="productFilter = 'all'">全部</button>
           <button :class="{ active: productFilter === 'changed' }" @click="productFilter = 'changed'">有变更</button>
-          <button :class="{ active: productFilter === 'untracked' }" @click="productFilter = 'untracked'">未建档</button>
+          <button :class="{ active: productFilter === 'untracked' }" @click="productFilter = 'untracked'">待首份快照</button>
         </div>
         <div class="product-list">
           <button
@@ -492,8 +409,8 @@ function sastDate() {
               <em v-if="item.keyword_change_count" class="changed-badge">
                 {{ item.keyword_change_count }} 次变更
               </em>
-              <em v-else-if="item.keyword_event_count" class="baseline-badge">已建基线</em>
-              <em v-else class="untracked-badge">未建档</em>
+              <em v-else-if="item.keyword_event_count" class="baseline-badge">自动基线</em>
+              <em v-else class="untracked-badge">待首份快照</em>
             </span>
             <span class="product-traffic">
               <small>近30天浏览量</small>
@@ -550,28 +467,25 @@ function sastDate() {
                   <option :value="30">前后30天</option>
                 </select>
               </label>
-              <button type="button" class="record-button" @click="openRecordModal">
-                {{ currentKeywords.length ? "记录关键词变更" : "建立关键词基线" }}
-              </button>
             </div>
           </header>
 
           <section class="current-keywords">
             <div>
-              <p>当前记录关键词</p>
+              <p>当前官方标题关键词</p>
               <span v-if="currentKeywords.length">共 {{ currentKeywords.length }} 个</span>
-              <span v-else>尚未建立关键词档案</span>
+              <span v-else>等待每日 Offer 快照</span>
             </div>
             <div class="keyword-chips">
               <span v-for="keyword in currentKeywords" :key="keyword">{{ keyword }}</span>
-              <em v-if="!currentKeywords.length">点击“建立关键词基线”，以后每次变更都会形成清晰节点。</em>
+              <em v-if="!currentKeywords.length">无需人工操作；下次完整采集会自动建立首份标题关键词档案。</em>
             </div>
           </section>
 
           <section v-if="selectedEvent" class="impact-section">
             <header>
               <div>
-                <p>{{ selectedEvent.event_kind === "change" ? "已选关键词变更节点" : "已选关键词基线节点" }}</p>
+                <p>{{ selectedEvent.event_kind === "change" ? "已选自动变化节点" : "已选自动基线节点" }}</p>
                 <h3>{{ selectedEvent.effective_date }} · {{ changeSummary(selectedEvent) }}</h3>
               </div>
               <span class="observation-status" :class="selectedEvent.comparison.status">
@@ -640,14 +554,14 @@ function sastDate() {
                 <span><i class="line"></i>近30天浏览量</span>
                 <span><i class="before"></i>变更前窗口</span>
                 <span><i class="after"></i>变更后窗口</span>
-                <span><i class="marker"></i>关键词变更</span>
+                <span><i class="marker"></i>自动检测变化</span>
               </div>
             </header>
             <div class="chart-wrap">
               <svg
                 :viewBox="`0 0 ${chartWidth} ${chartHeight}`"
                 role="img"
-                aria-label="近30天浏览量与关键词变更节点趋势图"
+                aria-label="近30天浏览量与标题关键词自动变化节点趋势图"
               >
                 <rect class="chart-background" :x="chartLeft" :y="chartTop" :width="chartInnerWidth" :height="chartInnerHeight" rx="14" />
                 <rect
@@ -688,7 +602,7 @@ function sastDate() {
                   <line :x1="marker.x" :x2="marker.x" :y1="chartTop - 8" :y2="chartTop + chartInnerHeight" />
                   <rect :x="marker.x - 34" :y="14" width="68" height="26" rx="13" />
                   <text :x="marker.x" y="32">
-                    {{ marker.event.event_kind === "change" ? `变更 ${marker.number}` : "基线" }}
+                    {{ marker.event.event_kind === "change" ? `自动 ${marker.number}` : "自动基线" }}
                   </text>
                   <circle v-if="marker.y !== null" :cx="marker.x" :cy="marker.y" r="8" />
                 </g>
@@ -720,8 +634,8 @@ function sastDate() {
           <section class="event-timeline">
             <header>
               <div>
-                <p>关键词变更时间线</p>
-                <h3>点击任一节点，立即切换前后对比</h3>
+                <p>标题关键词自动变化时间线</p>
+                <h3>系统自动打标签；点击任一节点切换前后对比</h3>
               </div>
               <span>{{ detail.events.length }} 个记录 · {{ Math.max(0, detail.events.length - 1) }} 次变更</span>
             </header>
@@ -739,14 +653,14 @@ function sastDate() {
               >
                 <span class="event-index">{{ detail.events.length - index }}</span>
                 <span class="event-body">
-                  <small>{{ event.effective_date }} · {{ event.recorded_by_username }}</small>
+                  <small>{{ event.effective_date }} · 系统自动检测</small>
                   <strong>{{ changeSummary(event) }}</strong>
                   <span class="event-diffs">
                     <em v-for="keyword in event.added_keywords" :key="`add-${keyword}`" class="added">+ {{ keyword }}</em>
                     <em v-for="keyword in event.removed_keywords" :key="`remove-${keyword}`" class="removed">− {{ keyword }}</em>
                     <em v-if="event.event_kind === 'baseline'" class="baseline">{{ event.keywords.join(" · ") }}</em>
                   </span>
-                  <p v-if="event.note">{{ event.note }}</p>
+                  <p class="source-title">标题：{{ event.source_title }}</p>
                 </span>
                 <span class="event-outcome" :class="event.comparison.traffic_direction">
                   <small>流量结果</small>
@@ -756,53 +670,14 @@ function sastDate() {
               </button>
             </div>
             <div v-else class="timeline-empty">
-              <strong>还没有关键词记录</strong>
-              <span>先建立当前关键词基线；以后变更时记录新集合，系统会自动标出新增、移除和流量影响。</span>
-              <button type="button" @click="openRecordModal">建立关键词基线</button>
+              <strong>等待首份完整 Offer 快照</strong>
+              <span>无需人工建档；采集成功后系统会自动提取标题词建立基线，以后发现变化自动打标签。</span>
             </div>
           </section>
         </template>
       </main>
     </div>
 
-    <div v-if="showRecordModal" class="modal-backdrop" @click.self="closeRecordModal">
-      <form class="keyword-modal" @submit.prevent="saveKeywordSnapshot">
-        <header>
-          <div>
-            <p>{{ currentKeywords.length ? "RECORD KEYWORD CHANGE" : "CREATE KEYWORD BASELINE" }}</p>
-            <h3>{{ currentKeywords.length ? "记录关键词变更节点" : "建立当前关键词基线" }}</h3>
-          </div>
-          <button type="button" aria-label="关闭" :disabled="saving" @click="closeRecordModal">×</button>
-        </header>
-        <p class="modal-product">{{ detail?.product.title || "未命名商品" }} · {{ detail?.product.sku || detail?.product.offer_id }}</p>
-        <label>
-          <span>实际生效日期（南非业务日）</span>
-          <input v-model="formDate" type="date" :max="sastDate()" required />
-          <small>流量按日记录，同一商品同一天只保留一个关键词状态节点。</small>
-        </label>
-        <label>
-          <span>生效后的完整关键词集合</span>
-          <textarea
-            v-model="formKeywords"
-            rows="8"
-            placeholder="每行一个关键词，也可以用逗号或分号分隔"
-            required
-          ></textarea>
-          <small>请填写变更后的完整集合；系统会与前一次记录自动识别新增和移除。</small>
-        </label>
-        <label>
-          <span>变更原因 / 运营备注（选填）</span>
-          <textarea v-model="formNote" rows="3" maxlength="500" placeholder="例如：替换低相关核心词，测试 queen mattress"></textarea>
-        </label>
-        <p v-if="formError" class="modal-error" role="alert">{{ formError }}</p>
-        <footer>
-          <button type="button" :disabled="saving" @click="closeRecordModal">取消</button>
-          <button type="submit" class="primary" :disabled="saving">
-            {{ saving ? "正在保存…" : currentKeywords.length ? "保存变更节点" : "保存关键词基线" }}
-          </button>
-        </footer>
-      </form>
-    </div>
   </section>
 </template>
 
@@ -876,8 +751,8 @@ function sastDate() {
 .loading-dot { color: var(--blue); font-size: 0.75rem; }
 .product-search { display: grid; gap: 6px; padding: 15px 16px 10px; }
 .product-search span { color: var(--muted); font-size: 0.72rem; }
-.product-search input, .focus-actions select, .keyword-modal input, .keyword-modal textarea { background: #f8fafc; border: 1px solid #cfd7e3; border-radius: 10px; color: var(--ink); font: inherit; outline: none; padding: 10px 11px; }
-.product-search input:focus, .focus-actions select:focus, .keyword-modal input:focus, .keyword-modal textarea:focus { border-color: #557db9; box-shadow: 0 0 0 3px rgba(75, 112, 169, 0.13); }
+.product-search input, .focus-actions select { background: #f8fafc; border: 1px solid #cfd7e3; border-radius: 10px; color: var(--ink); font: inherit; outline: none; padding: 10px 11px; }
+.product-search input:focus, .focus-actions select:focus { border-color: #557db9; box-shadow: 0 0 0 3px rgba(75, 112, 169, 0.13); }
 .filter-tabs { display: grid; gap: 6px; grid-template-columns: repeat(3, 1fr); padding: 0 16px 12px; }
 .filter-tabs button { background: #f2f5f8; border: 0; border-radius: 9px; color: var(--muted); cursor: pointer; font: inherit; font-size: 0.74rem; padding: 8px 4px; }
 .filter-tabs button.active { background: #203652; color: #fff; font-weight: 700; }
@@ -911,8 +786,6 @@ function sastDate() {
 .focus-actions label { display: grid; gap: 4px; }
 .focus-actions label span { color: var(--muted); font-size: 0.65rem; }
 .focus-actions select { font-size: 0.75rem; padding: 8px 9px; }
-.record-button, .timeline-empty button { background: #d95347; border: 1px solid #c7473e; border-radius: 10px; color: #fff; cursor: pointer; font: inherit; font-size: 0.78rem; font-weight: 750; padding: 9px 13px; }
-.record-button:hover, .timeline-empty button:hover { background: #c6463d; }
 
 .current-keywords { align-items: start; background: #f7f9fb; border: 1px solid #e1e5eb; border-radius: 14px; display: grid; gap: 16px; grid-template-columns: 145px minmax(0, 1fr); margin-top: 18px; padding: 14px 16px; }
 .current-keywords > div:first-child span { color: var(--muted); font-size: 0.72rem; }
@@ -1015,22 +888,6 @@ function sastDate() {
 .timeline-empty strong { color: var(--ink); }
 .timeline-empty span { font-size: 0.78rem; line-height: 1.6; max-width: 560px; }
 
-.modal-backdrop { align-items: center; background: rgba(18, 27, 42, 0.68); display: flex; inset: 0; justify-content: center; padding: 20px; position: fixed; z-index: 1200; }
-.keyword-modal { background: #fff; border-radius: 20px; box-shadow: 0 26px 70px rgba(11, 19, 32, 0.35); display: grid; gap: 14px; max-height: calc(100vh - 40px); max-width: 650px; overflow-y: auto; padding: 22px; width: 100%; }
-.keyword-modal header { align-items: start; display: flex; justify-content: space-between; }
-.keyword-modal header p { color: #c34b41; font-size: 0.68rem; font-weight: 800; letter-spacing: 0.13em; margin: 0 0 4px; }
-.keyword-modal h3 { font-size: 1.28rem; margin: 0; }
-.keyword-modal header button { background: #f0f2f5; border: 0; border-radius: 50%; color: #4a5568; cursor: pointer; font-size: 1.3rem; height: 34px; width: 34px; }
-.modal-product { background: #f6f8fa; border-radius: 10px; color: var(--muted); font-size: 0.76rem; margin: 0; padding: 10px 12px; }
-.keyword-modal label { display: grid; gap: 6px; }
-.keyword-modal label > span { font-size: 0.76rem; font-weight: 750; }
-.keyword-modal label > small { color: var(--muted); font-size: 0.67rem; line-height: 1.5; }
-.keyword-modal textarea { line-height: 1.55; resize: vertical; }
-.modal-error { background: #fff0ee; border: 1px solid #efbbb5; border-radius: 10px; color: #a23831; font-size: 0.75rem; margin: 0; padding: 10px; }
-.keyword-modal footer { display: flex; gap: 9px; justify-content: flex-end; }
-.keyword-modal footer button { background: #eef1f4; border: 1px solid #d7dde5; border-radius: 10px; color: var(--ink); cursor: pointer; font: inherit; padding: 9px 15px; }
-.keyword-modal footer button.primary { background: #d14c42; border-color: #c14239; color: #fff; font-weight: 750; }
-.keyword-modal button:disabled { cursor: wait; opacity: 0.62; }
 
 @media (max-width: 1180px) {
   .monitor-layout { grid-template-columns: 280px minmax(0, 1fr); }
@@ -1062,7 +919,6 @@ function sastDate() {
   .product-focus { grid-template-columns: 58px minmax(0, 1fr); }
   .focus-thumb { height: 58px; width: 58px; }
   .focus-actions { align-items: stretch; display: grid; grid-template-columns: 1fr 1fr; }
-  .record-button { grid-column: 1 / -1; }
   .value-flow { grid-template-columns: 1fr; }
   .value-flow > i { display: none; }
   .event-card { align-items: start; grid-template-columns: 30px minmax(0, 1fr); }

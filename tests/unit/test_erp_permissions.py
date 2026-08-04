@@ -9,7 +9,6 @@ from takealot_ops.erp.permissions import (
     DAILY_REPORT_VIEW,
     KEYWORD_TRAFFIC_MANAGE,
     ROLE_PERMISSIONS,
-    STORE_VIEW,
     normalize_permissions,
     permissions_from_storage,
     permissions_to_storage,
@@ -30,14 +29,14 @@ def test_selection_template_can_collect_competitors_but_not_manage_daily_report(
     assert KEYWORD_TRAFFIC_MANAGE not in selection
 
 
-def test_keyword_traffic_management_is_operator_admin_and_store_scoped() -> None:
+def test_legacy_manual_keyword_permission_is_not_in_active_templates() -> None:
     assert KEYWORD_TRAFFIC_MANAGE not in ROLE_PERMISSIONS["viewer"]
     assert KEYWORD_TRAFFIC_MANAGE not in ROLE_PERMISSIONS["selection"]
-    assert KEYWORD_TRAFFIC_MANAGE in ROLE_PERMISSIONS["operator"]
-    assert KEYWORD_TRAFFIC_MANAGE in ROLE_PERMISSIONS["admin"]
+    assert KEYWORD_TRAFFIC_MANAGE not in ROLE_PERMISSIONS["operator"]
+    assert KEYWORD_TRAFFIC_MANAGE not in ROLE_PERMISSIONS["admin"]
 
     customized = normalize_permissions("viewer", [KEYWORD_TRAFFIC_MANAGE])
-    assert customized == frozenset({STORE_VIEW, KEYWORD_TRAFFIC_MANAGE})
+    assert customized == frozenset({KEYWORD_TRAFFIC_MANAGE})
 
 
 def test_custom_permissions_add_dependencies_and_only_store_differences() -> None:
@@ -82,7 +81,7 @@ def test_create_schema_adds_permissions_and_store_scope_to_legacy_users(
         assert "store_access_all" in columns
         assert inspect(engine).has_table("erp_stores")
         assert inspect(engine).has_table("erp_user_stores")
-        assert inspect(engine).has_table("product_keyword_snapshots")
+        assert not inspect(engine).has_table("product_keyword_snapshots")
         with engine.connect() as connection:
             default_store = connection.exec_driver_sql(
                 "SELECT code, display_name, active, data_connected "

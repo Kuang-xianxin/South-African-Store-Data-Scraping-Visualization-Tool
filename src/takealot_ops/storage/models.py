@@ -448,30 +448,6 @@ class ErpRefreshState(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
 
 
-class ProductKeywordSnapshot(Base):
-    """One append-only product keyword state recorded by an operator."""
-
-    __tablename__ = "product_keyword_snapshots"
-    __table_args__ = (
-        UniqueConstraint(
-            "offer_id",
-            "effective_date",
-            name="uq_product_keyword_snapshot_day",
-        ),
-    )
-
-    id: Mapped[int] = mapped_column(primary_key=True)
-    offer_id: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
-    effective_date: Mapped[date] = mapped_column(Date, nullable=False, index=True)
-    keywords: Mapped[list[str]] = mapped_column(JSON, nullable=False)
-    note: Mapped[str | None] = mapped_column(Text)
-    recorded_by_user_id: Mapped[int | None] = mapped_column(
-        ForeignKey("erp_users.id", ondelete="SET NULL"),
-    )
-    recorded_by_username: Mapped[str] = mapped_column(String(64), nullable=False)
-    recorded_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, index=True)
-
-
 class DailyReportRun(Base):
     """One immutable scheduled or manual capture used by the operations daily report."""
 

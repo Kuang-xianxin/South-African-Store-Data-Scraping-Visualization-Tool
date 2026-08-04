@@ -37,6 +37,7 @@ PERMISSIONS = frozenset(
         USERS_MANAGE,
     }
 )
+ACTIVE_PERMISSIONS = PERMISSIONS - {KEYWORD_TRAFFIC_MANAGE}
 
 ROLE_PERMISSIONS: dict[str, frozenset[str]] = {
     "viewer": frozenset(
@@ -47,7 +48,7 @@ ROLE_PERMISSIONS: dict[str, frozenset[str]] = {
             REPORTS_VIEW,
         }
     ),
-    "operator": frozenset(PERMISSIONS - {USERS_MANAGE}),
+    "operator": frozenset(ACTIVE_PERMISSIONS - {USERS_MANAGE}),
     "selection": frozenset(
         {
             COMPETITORS_VIEW,
@@ -55,7 +56,7 @@ ROLE_PERMISSIONS: dict[str, frozenset[str]] = {
             DAILY_REPORT_VIEW,
         }
     ),
-    "admin": frozenset(PERMISSIONS),
+    "admin": frozenset(ACTIVE_PERMISSIONS),
 }
 
 PERMISSION_DEPENDENCIES: dict[str, frozenset[str]] = {
@@ -65,7 +66,6 @@ PERMISSION_DEPENDENCIES: dict[str, frozenset[str]] = {
     REPORTS_GENERATE: frozenset({REPORTS_VIEW}),
     NFT102_MANAGE: frozenset({REPORTS_VIEW}),
     REFRESH_RUN: frozenset({STORE_VIEW}),
-    KEYWORD_TRAFFIC_MANAGE: frozenset({STORE_VIEW}),
 }
 
 

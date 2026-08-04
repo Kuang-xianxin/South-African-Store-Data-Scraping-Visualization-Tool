@@ -120,7 +120,6 @@ let dailyReportEvents: EventSource | null = null;
 const hasPermission = (permission: PermissionKey) =>
   userHasPermission(session.value?.user, permission);
 const canManageUsers = computed(() => hasPermission("users.manage"));
-const canManageKeywordTraffic = computed(() => hasPermission("keyword_traffic.manage"));
 const canRefresh = computed(() => hasPermission("refresh.run"));
 const canCollectCompetitors = computed(() => hasPermission("competitors.collect"));
 const canControlCompetitorCollection = computed(
@@ -259,13 +258,6 @@ const activePageProps = computed(() => {
       ...common,
       canOperate: canManageDailyReport.value,
       canExport: canGenerateDailyReport.value,
-      onPermissionDenied: showPermissionDenied,
-    };
-  }
-  if (key === "keyword-traffic") {
-    return {
-      ...common,
-      canManage: canManageKeywordTraffic.value,
       onPermissionDenied: showPermissionDenied,
     };
   }
