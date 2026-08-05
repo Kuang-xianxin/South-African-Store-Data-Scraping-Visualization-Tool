@@ -34,6 +34,7 @@ from takealot_ops.storage.models import (
     OfferSnapshot,
     SaleItem,
 )
+from takealot_ops.storage.store_context import current_store_code
 
 
 SCHEDULED_SLOT_ORDER = ("morning", "evening", "pre_close")
@@ -176,6 +177,93 @@ def operations_business_date(captured_at: datetime) -> date:
     if china_time.time() < time(10, 0):
         cycle_start -= timedelta(days=1)
     return cycle_start - timedelta(days=1)
+
+
+def period_end_traffic_series(
+    engine: Engine,
+    *,
+    as_of: date,
+    days: int = 30,
+) -> list[dict[str, object]]:
+    """Aggregate the latest 09:00 period-end product snapshot for each business day."""
+    if days < 1:
+        raise ValueError("days must be at least 1")
+    window_start = as_of - timedelta(days=days - 1)
+    with Session(engine) as session:
+        runs = list(
+            session.scalars(
+                select(DailyReportRun)
+                .where(
+                    DailyReportRun.business_date.between(window_start, as_of),
+                    DailyReportRun.slot == "pre_close",
+                )
+                .order_by(
+                    DailyReportRun.business_date,
+                    DailyReportRun.captured_at.desc(),
+                    DailyReportRun.created_at.desc(),
+                )
+            )
+        )
+        runs_by_date: dict[date, list[DailyReportRun]] = {}
+        for run in runs:
+            runs_by_date.setdefault(run.business_date, []).append(run)
+
+        selected_runs = [
+            next(
+                (run for run in date_runs if run.status == "success"),
+                date_runs[0],
+            )
+            for date_runs in runs_by_date.values()
+        ]
+        successful_ids = [
+            run.run_id for run in selected_runs if run.status == "success"
+        ]
+        aggregates: dict[str, tuple[int, int, int | None]] = {}
+        if successful_ids:
+            rows = session.execute(
+                select(
+                    DailyReportObservation.run_id,
+                    func.count(DailyReportObservation.id),
+                    func.count(DailyReportObservation.page_views_30_days),
+                    func.sum(DailyReportObservation.page_views_30_days),
+                )
+                .where(DailyReportObservation.run_id.in_(successful_ids))
+                .group_by(DailyReportObservation.run_id)
+            ).all()
+            aggregates = {
+                str(run_id): (
+                    int(product_count or 0),
+                    int(available_count or 0),
+                    int(total) if total is not None else None,
+                )
+                for run_id, product_count, available_count, total in rows
+            }
+
+    points: list[dict[str, object]] = []
+    for run in selected_runs:
+        product_count, available_count, partial_total = aggregates.get(
+            run.run_id,
+            (0, 0, None),
+        )
+        missing_count = product_count - available_count
+        observed_total = (
+            partial_total
+            if run.status == "success"
+            and product_count > 0
+            and available_count > 0
+            else None
+        )
+        points.append(
+            {
+                "business_date": run.business_date.isoformat(),
+                "captured_at": run.captured_at.isoformat(),
+                "status": run.status,
+                "page_views_30_days_total": observed_total,
+                "product_count": product_count,
+                "missing_product_count": missing_count,
+            }
+        )
+    return points
 
 
 def capture_daily_report(
@@ -409,7 +497,10 @@ def daily_report_payload(
         ]
         comparison_items_by_date = {business_date: items}
         reminders = _reminders(session, before=business_date)
-        deadline = session.get(DailyReportDeadlineSnapshot, business_date)
+        deadline = session.get(
+            DailyReportDeadlineSnapshot,
+            (current_store_code(), business_date),
+        )
         comparison_history = _comparison_history(
             session,
             through=business_date,
@@ -1469,7 +1560,10 @@ def create_deadline_snapshot(
             {"offer_id": row.offer_id, "status": row.status}
             for row in unresolved
         ]
-        snapshot = session.get(DailyReportDeadlineSnapshot, business_date)
+        snapshot = session.get(
+            DailyReportDeadlineSnapshot,
+            (current_store_code(), business_date),
+        )
         if snapshot is None:
             snapshot = DailyReportDeadlineSnapshot(
                 business_date=business_date,
@@ -2472,7 +2566,10 @@ def _propagate_confirmation_stock_conflict(
         user_id,
         confirmed_at,
     )
-    deadline = session.get(DailyReportDeadlineSnapshot, next_date)
+    deadline = session.get(
+        DailyReportDeadlineSnapshot,
+        (current_store_code(), next_date),
+    )
     if deadline is not None:
         deadline.resolved_at = None
         deadline.unresolved_count = int(
@@ -2570,7 +2667,10 @@ def _queue_following_revert_impact(
         user_id,
         reverted_at,
     )
-    deadline = session.get(DailyReportDeadlineSnapshot, next_date)
+    deadline = session.get(
+        DailyReportDeadlineSnapshot,
+        (current_store_code(), next_date),
+    )
     if deadline is not None:
         deadline.resolved_at = None
         unresolved = list(
@@ -2649,7 +2749,10 @@ def _defer_following_stock_continuity(
             None,
             deferred_at,
         )
-        deadline = session.get(DailyReportDeadlineSnapshot, next_date)
+        deadline = session.get(
+            DailyReportDeadlineSnapshot,
+            (current_store_code(), next_date),
+        )
         if deadline is not None:
             unresolved = list(
                 session.scalars(
@@ -3893,7 +3996,10 @@ def _resolve_deadline_if_complete(
         )
         or 0
     )
-    snapshot = session.get(DailyReportDeadlineSnapshot, business_date)
+    snapshot = session.get(
+        DailyReportDeadlineSnapshot,
+        (current_store_code(), business_date),
+    )
     if snapshot is not None and remaining == 0:
         snapshot.resolved_at = now
 
@@ -3903,7 +4009,10 @@ def _refresh_deadline_snapshot(
     business_date: date,
     now: datetime,
 ) -> None:
-    snapshot = session.get(DailyReportDeadlineSnapshot, business_date)
+    snapshot = session.get(
+        DailyReportDeadlineSnapshot,
+        (current_store_code(), business_date),
+    )
     if snapshot is None:
         return
     unresolved = list(

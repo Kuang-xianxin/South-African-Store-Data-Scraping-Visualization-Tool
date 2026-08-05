@@ -31,6 +31,8 @@ class CompetitorOffer:
     variant_key: str = "default"
     variant_label: str = "默认款"
     identity_key: str | None = None
+    buybox_rank: int | None = None
+    is_follower_offer: bool = False
 
 
 def competitor_offer_stock_state(

@@ -20,11 +20,34 @@ import {
   updateCompetitorBatchOptions,
   type CompetitorBatchStatus,
 } from "../api";
+import {
+  buildCompetitorOfferTrend,
+  comparableOfferNetOutflow,
+  comparisonOffers,
+  followerOffers,
+  groupCompetitorOffersBySeller,
+  sortCompetitorOffers,
+  type CompetitorOfferSort,
+  type CompetitorOfferTrendPoint,
+} from "../competitorOfferHistory";
+import {
+  COMPETITOR_OPERATING_SIGNAL_OPTIONS,
+  competitorOperatingSignals,
+  matchesCompetitorOperatingSignal,
+  offerOperatingSignals,
+  offerPriceOperatingSignal,
+  offerStockOperatingSignal,
+  type CompetitorOperatingSignal,
+} from "../competitorOperatingSignals";
 import { PRODUCT_IMAGE_SIZE, productThumbnailUrl } from "../productImages";
 import {
   MAX_AUTOMATIC_RETRY_ATTEMPTS,
   scheduleRetryAfterGap,
 } from "../retryQueue";
+import {
+  hasPersistentCollectionClientPeer,
+  type CollectionClientMessage,
+} from "../collectionClientClaim";
 import type {
   CollectResult,
   CompetitorDateRange,
@@ -36,6 +59,7 @@ import type {
   CompetitorTargetItem,
   CompetitorStoreTargetItem,
   CompetitorVariantItem,
+  OwnStoreScope,
 } from "../types";
 import { formatChinaDateTime } from "../time";
 
@@ -44,6 +68,9 @@ const props = defineProps<{
   canOperate?: boolean;
   canControlCollection?: boolean;
   currentUsername?: string;
+  currentStoreName?: string;
+  accessibleConnectedStoreCount?: number;
+  ownStoreScope?: OwnStoreScope;
   onPermissionDenied?: () => void;
 }>();
 
@@ -66,8 +93,27 @@ interface CompetitorTargetGroup {
   members: CompetitorTargetItem[];
 }
 
+interface OfferTrendPanelPoint {
+  index: number;
+  x: number;
+  y: number;
+  value: number;
+}
+
+interface OfferTrendPanel {
+  key: "price" | "stock" | "reviews";
+  label: string;
+  note: string;
+  color: string;
+  top: number;
+  bottom: number;
+  segments: string[];
+  points: OfferTrendPanelPoint[];
+  ticks: Array<{ y: number; label: string }>;
+}
+
 interface CollectionCheckpoint {
-  version: 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8;
+  version: 9;
   rawUrls: string;
   batchUrls: string[];
   attemptedIndexes: number[];
@@ -88,13 +134,6 @@ interface CollectionCheckpoint {
   clientId?: string;
 }
 
-interface CollectionClientMessage {
-  type: "probe" | "occupied";
-  clientId: string;
-  instanceId: string;
-  probeId: string;
-}
-
 type CollectionRunMode =
   | "start"
   | "resume"
@@ -105,6 +144,7 @@ type TargetActionSource = "default" | "manual_retry";
 const collectionCheckpointKey = "takealot-competitor-collection-v1";
 const collectionClientKey = "takealot-competitor-client-v1";
 const collectionClientChannelName = "takealot-competitor-client-claims-v1";
+const collectionCheckpointVersion = 9;
 const automaticResumeDelayMs = 10 * 60 * 1_000;
 let collectionClientId = restoreCollectionClientId();
 const collectionClientInstanceId = collectionId("client");
@@ -112,6 +152,13 @@ let collectionClientChannel: BroadcastChannel | null = null;
 const rawUrls = ref("");
 const targets = ref<CompetitorTargetItem[]>([]);
 const storeTargets = ref<CompetitorStoreTargetItem[]>([]);
+const ownStoreScope = computed<OwnStoreScope>(
+  () => props.ownStoreScope ?? "current",
+);
+const storeTargetMembershipCount = ref(0);
+const allStoreTargetCount = ref(0);
+const allStoreTargetMembershipCount = ref(0);
+const allStoreTrackingStoreCount = ref(0);
 const targetQuery = ref("");
 const targetPage = ref(1);
 const targetPageSize = ref(20);
@@ -150,6 +197,8 @@ const competitors = ref<CompetitorItem[]>([]);
 const storeCompetitors = ref<CompetitorItem[]>([]);
 const selectedPlid = ref("");
 const selectedOfferKey = ref("");
+const offerSort = ref<CompetitorOfferSort>("net_outflow_desc");
+const hoveredOfferTrendIndex = ref<number | null>(null);
 const detail = ref<CompetitorDetail>({ history: [], reviews: [], variants: [] });
 const detailModalOpen = ref(false);
 const detailLoading = ref(false);
@@ -220,7 +269,8 @@ const reviewSort = ref<
 >("date_desc");
 const competitorQuery = ref("");
 const competitorStockFilter = ref<"全部" | "有货" | "没货" | "未探测">("全部");
-const competitorSignalFilter = ref("全部");
+const followerPresenceFilter = ref<"全部" | "有被跟卖" | "未发现跟卖">("全部");
+const competitorSignalFilter = ref<CompetitorOperatingSignal>("全部");
 const competitorSourceView = ref<"competitor" | "own_store">("competitor");
 const competitorPage = ref(1);
 const storeCompetitorPage = ref(1);
@@ -245,8 +295,11 @@ const allCompetitorItems = computed(() => [
 const selected = computed(
   () => allCompetitorItems.value.find((item) => item.plid === selectedPlid.value) ?? null,
 );
+const selectedComparisonOffers = computed(() =>
+  selected.value ? comparisonOffers(selected.value) : [],
+);
 const selectedOffer = computed(() => {
-  const offers = selected.value?.跟卖报价 ?? [];
+  const offers = selectedComparisonOffers.value;
   return offers.find((offer) => offer.报价键 === selectedOfferKey.value)
     ?? offers.find((offer) => offer.是否主报价)
     ?? offers[0]
@@ -255,6 +308,140 @@ const selectedOffer = computed(() => {
 const selectedOfferLink = computed(
   () => selectedOffer.value?.链接 || selected.value?.链接 || "#",
 );
+const selectedSellerGroups = computed(() =>
+  groupCompetitorOffersBySeller(selectedComparisonOffers.value, offerSort.value),
+);
+const selectedSellerGroup = computed(() =>
+  selectedSellerGroups.value.find((group) =>
+    group.offers.some((offer) => offer.报价键 === selectedOffer.value?.报价键),
+  ) ?? selectedSellerGroups.value[0] ?? null,
+);
+const selectedSellerGroupOffers = computed(() =>
+  selectedSellerGroup.value?.offers ?? [],
+);
+const selectedOfferPosition = computed(() =>
+  selectedSellerGroups.value.findIndex((group) => group.key === selectedSellerGroup.value?.key),
+);
+const selectedOfferTrend = computed(() =>
+  buildCompetitorOfferTrend(detail.value.history, selectedOffer.value),
+);
+const offerTrendChartWidth = 960;
+const offerTrendChartHeight = 380;
+const offerTrendPlotLeft = 86;
+const offerTrendPlotRight = 936;
+const offerTrendPlotWidth = offerTrendPlotRight - offerTrendPlotLeft;
+const offerTrendPanels = computed<OfferTrendPanel[]>(() => {
+  const definitions: Array<{
+    key: OfferTrendPanel["key"];
+    label: string;
+    note: string;
+    color: string;
+    value: (point: CompetitorOfferTrendPoint) => number | null;
+  }> = [
+    {
+      key: "price",
+      label: "价格",
+      note: "ZAR",
+      color: "#b7522e",
+      value: (point) => point.price,
+    },
+    {
+      key: "stock",
+      label: "库存",
+      note: "仅连精确数量",
+      color: "#236649",
+      value: (point) => point.exactStock,
+    },
+    {
+      key: "reviews",
+      label: "评论",
+      note: "PLID 商品共用",
+      color: "#66519a",
+      value: (point) => point.reviews,
+    },
+  ];
+  return definitions.map((definition, panelIndex) => {
+    const top = 20 + panelIndex * 112;
+    const bottom = top + 76;
+    const values = selectedOfferTrend.value.map(definition.value);
+    const numericValues = values.filter((value): value is number => value !== null);
+    const rawMinimum = numericValues.length ? Math.min(...numericValues) : 0;
+    const rawMaximum = numericValues.length ? Math.max(...numericValues) : 1;
+    const span = rawMaximum - rawMinimum;
+    const padding = span === 0
+      ? Math.max(1, Math.abs(rawMaximum) * 0.08)
+      : Math.max(1, span * 0.12);
+    const minimum = Math.max(0, rawMinimum - padding);
+    const maximum = Math.max(minimum + 1, rawMaximum + padding);
+    const yForValue = (value: number) =>
+      bottom - ((value - minimum) / (maximum - minimum)) * (bottom - top);
+    const points = values.flatMap((value, index) =>
+      value === null
+        ? []
+        : [{
+            index,
+            x: offerTrendX(index, selectedOfferTrend.value),
+            y: yForValue(value),
+            value,
+          }],
+    );
+    const segments: string[] = [];
+    let currentSegment = "";
+    for (let index = 0; index < values.length; index += 1) {
+      const value = values[index];
+      if (value === null) {
+        if (currentSegment) segments.push(currentSegment);
+        currentSegment = "";
+        continue;
+      }
+      const x = offerTrendX(index, selectedOfferTrend.value);
+      const y = yForValue(value);
+      currentSegment += `${currentSegment ? " L" : "M"} ${x.toFixed(2)} ${y.toFixed(2)}`;
+    }
+    if (currentSegment) segments.push(currentSegment);
+    const middle = (minimum + maximum) / 2;
+    return {
+      key: definition.key,
+      label: definition.label,
+      note: definition.note,
+      color: definition.color,
+      top,
+      bottom,
+      segments,
+      points,
+      ticks: [maximum, middle, minimum].map((value) => ({
+        y: yForValue(value),
+        label: formatOfferTrendAxisValue(definition.key, value),
+      })),
+    };
+  });
+});
+const activeOfferTrendIndex = computed(() => {
+  if (!selectedOfferTrend.value.length) return null;
+  if (hoveredOfferTrendIndex.value === null) return selectedOfferTrend.value.length - 1;
+  return Math.min(hoveredOfferTrendIndex.value, selectedOfferTrend.value.length - 1);
+});
+const activeOfferTrendPoint = computed(() => {
+  const index = activeOfferTrendIndex.value;
+  return index === null ? null : selectedOfferTrend.value[index] ?? null;
+});
+const activeOfferTrendX = computed(() => {
+  const index = activeOfferTrendIndex.value;
+  return index === null ? null : offerTrendX(index, selectedOfferTrend.value);
+});
+const offerTrendXAxisTicks = computed(() => {
+  const count = selectedOfferTrend.value.length;
+  if (!count) return [];
+  const indexes = count <= 3
+    ? Array.from({ length: count }, (_, index) => index)
+    : [0, Math.floor((count - 1) / 2), count - 1];
+  return [...new Set(indexes)].map((index) => ({
+    index,
+    x: offerTrendX(index, selectedOfferTrend.value),
+    label: formatChinaDateTime(selectedOfferTrend.value[index]?.snapshot.采集时间 ?? null),
+    anchor: index === 0 ? "start" : index === count - 1 ? "end" : "middle",
+  }));
+});
 const competitorsByPlid = computed(
   () => new Map(allCompetitorItems.value.map((item) => [item.plid, item])),
 );
@@ -405,27 +592,21 @@ const pendingPriorityTargetPlids = computed(
 const targetActionIsManualRetry = computed(
   () => targetActionSource.value === "manual_retry",
 );
-const competitorSignalOptions = computed(() =>
-  [
-    ...new Set(
-      allCompetitorItems.value
-        .flatMap((item) => [
-          item.趋势判断,
-          item.价格信号,
-          ...item.跟卖报价.flatMap((offer) => [offer.价格信号, offer.库存信号]),
-        ])
-        .filter(Boolean),
-    ),
-  ].sort(
-    (first, second) => first.localeCompare(second, "zh-CN"),
-  ),
-);
+const competitorSignalOptions = COMPETITOR_OPERATING_SIGNAL_OPTIONS;
 const filteredCompetitors = computed(() => {
   return competitors.value.filter(matchesCompetitorFilters);
 });
 const filteredStoreCompetitors = computed(() => {
   return storeCompetitors.value.filter(matchesCompetitorFilters);
 });
+const knownOwnFollowerUrls = computed(() => [
+  ...new Set(
+    storeCompetitors.value
+      .filter((item) => followerOffers(item).length > 0)
+      .map((item) => item.链接 || targetUrlForPlid(item.plid))
+      .filter(Boolean),
+  ),
+]);
 const activeSourceFilteredCount = computed(() =>
   competitorSourceView.value === "competitor"
     ? filteredCompetitors.value.length
@@ -435,6 +616,11 @@ const activeSourceTotalCount = computed(() =>
   competitorSourceView.value === "competitor"
     ? competitors.value.length
     : storeCompetitors.value.length,
+);
+const ownStoreScopeLabel = computed(() =>
+  ownStoreScope.value === "all"
+    ? `全部有权店铺（${allStoreTrackingStoreCount.value || props.accessibleConnectedStoreCount || 0} 个）`
+    : props.currentStoreName || "当前店铺",
 );
 
 function matchesCompetitorFilters(item: CompetitorItem) {
@@ -450,6 +636,7 @@ function matchesCompetitorFilters(item: CompetitorItem) {
         item.价格信号,
         ...item.自有报价.flatMap((offer) => [
           offer.offer_id,
+          offer.店铺,
           offer.SKU ?? "",
           offer.状态 ?? "",
         ]),
@@ -473,16 +660,12 @@ function matchesCompetitorFilters(item: CompetitorItem) {
   ) {
     return false;
   }
-  return (
-    competitorSignalFilter.value === "全部"
-    || item.趋势判断 === competitorSignalFilter.value
-    || item.价格信号 === competitorSignalFilter.value
-    || item.跟卖报价.some(
-      (offer) =>
-        offer.价格信号 === competitorSignalFilter.value
-        || offer.库存信号 === competitorSignalFilter.value,
-    )
-  );
+  if (followerPresenceFilter.value !== "全部") {
+    const hasFollowers = followerOffers(item).length > 0;
+    if (followerPresenceFilter.value === "有被跟卖" && !hasFollowers) return false;
+    if (followerPresenceFilter.value === "未发现跟卖" && hasFollowers) return false;
+  }
+  return matchesCompetitorOperatingSignal(item, competitorSignalFilter.value);
 }
 const competitorPageCount = computed(() =>
   Math.max(1, Math.ceil(filteredCompetitors.value.length / competitorPageSize.value)),
@@ -505,6 +688,7 @@ const competitorFiltersActive = computed(
   () =>
     Boolean(competitorQuery.value.trim())
     || competitorStockFilter.value !== "全部"
+    || followerPresenceFilter.value !== "全部"
     || competitorSignalFilter.value !== "全部",
 );
 const exactStockCount = computed(
@@ -744,8 +928,10 @@ const autoResumeCountdown = computed(() => {
 
 onMounted(async () => {
   window.addEventListener("keydown", handleWindowKeydown);
-  await ensureUniqueCollectionClientId();
+  window.addEventListener("beforeunload", closeCollectionClientChannel);
   const checkpoint = readCollectionCheckpoint();
+  restoreCheckpointCollectionClientId(checkpoint);
+  await ensureUniqueCollectionClientId();
   await Promise.all([
     loadOverview(),
     loadTargets(),
@@ -772,8 +958,8 @@ onMounted(async () => {
 
 onBeforeUnmount(() => {
   window.removeEventListener("keydown", handleWindowKeydown);
-  collectionClientChannel?.close();
-  collectionClientChannel = null;
+  window.removeEventListener("beforeunload", closeCollectionClientChannel);
+  closeCollectionClientChannel();
   if (sharedBatchTimer !== null) window.clearInterval(sharedBatchTimer);
   if (batchHeartbeatTimer !== null) window.clearInterval(batchHeartbeatTimer);
   if (collectionClockTimer !== null) window.clearInterval(collectionClockTimer);
@@ -796,6 +982,7 @@ watch(
   [
     competitorQuery,
     competitorStockFilter,
+    followerPresenceFilter,
     competitorSignalFilter,
     competitorPageSize,
   ],
@@ -813,26 +1000,39 @@ watch(storeCompetitorPageCount, (pageCount) => {
 });
 
 let detailRequestId = 0;
-watch([selectedPlid, appliedStartDate, appliedEndDate], async ([plid, start, end]) => {
-  const requestId = ++detailRequestId;
-  if (!plid) {
-    detail.value = { history: [], reviews: [], variants: [] };
-    detailLoading.value = false;
-    detailError.value = "";
-    return;
-  }
-  detailLoading.value = true;
-  detailError.value = "";
-  try {
-    const result = await fetchCompetitorDetail(plid, start, end);
-    if (requestId === detailRequestId) detail.value = result;
-  } catch (error) {
-    if (requestId === detailRequestId) {
-      detailError.value = error instanceof Error ? error.message : "读取商品详情失败";
+watch(
+  [selectedPlid, appliedStartDate, appliedEndDate, ownStoreScope],
+  async ([plid, start, end, scope]) => {
+    const requestId = ++detailRequestId;
+    if (!plid) {
+      detail.value = { history: [], reviews: [], variants: [] };
+      detailLoading.value = false;
+      detailError.value = "";
+      return;
     }
-  } finally {
-    if (requestId === detailRequestId) detailLoading.value = false;
-  }
+    detailLoading.value = true;
+    detailError.value = "";
+    try {
+      const result = await fetchCompetitorDetail(plid, start, end, scope);
+      if (requestId === detailRequestId) detail.value = result;
+    } catch (error) {
+      if (requestId === detailRequestId) {
+        detailError.value = error instanceof Error ? error.message : "读取商品详情失败";
+      }
+    } finally {
+      if (requestId === detailRequestId) detailLoading.value = false;
+    }
+  },
+);
+
+watch(ownStoreScope, async () => {
+  storeCompetitorPage.value = 1;
+  selectedPlid.value = "";
+  await Promise.all([loadOverview(), loadTargets()]);
+});
+
+watch([selectedOfferKey, () => selectedOfferTrend.value.length], () => {
+  hoveredOfferTrendIndex.value = null;
 });
 
 watch(
@@ -957,9 +1157,15 @@ function markCompetitorImageFailed(url: string | null | undefined): void {
   ]);
 }
 
+function ownStoreNames(item: CompetitorItem): string {
+  return [...new Set(item.自有报价.map((offer) => offer.店铺).filter(Boolean))].join("、")
+    || ownStoreScopeLabel.value;
+}
+
 function clearCompetitorFilters(): void {
   competitorQuery.value = "";
   competitorStockFilter.value = "全部";
+  followerPresenceFilter.value = "全部";
   competitorSignalFilter.value = "全部";
 }
 
@@ -979,9 +1185,12 @@ async function applyDateRange(): Promise<void> {
 
 function openProductModal(item: CompetitorItem) {
   selectedPlid.value = item.plid;
-  selectedOfferKey.value = item.跟卖报价.find((offer) => offer.是否主报价)?.报价键
-    ?? item.跟卖报价[0]?.报价键
+  const offers = comparisonOffers(item);
+  selectedOfferKey.value = sortCompetitorOffers(offers, offerSort.value)[0]?.报价键
+    ?? offers.find((offer) => offer.是否主报价)?.报价键
+    ?? offers[0]?.报价键
     ?? "";
+  hoveredOfferTrendIndex.value = null;
   if (editingTargetPlid.value && editingTargetPlid.value !== item.plid) {
     cancelEditTarget();
   }
@@ -992,12 +1201,24 @@ function openProductModal(item: CompetitorItem) {
 function closeProductModal() {
   detailModalOpen.value = false;
   selectedOfferKey.value = "";
+  hoveredOfferTrendIndex.value = null;
   if (editingTargetPlid.value === selectedPlid.value) cancelEditTarget();
   clearTargetManagerFeedback();
 }
 
 function selectCompetitorOffer(offer: CompetitorOfferItem) {
   selectedOfferKey.value = offer.报价键;
+  hoveredOfferTrendIndex.value = null;
+}
+
+function selectAdjacentCompetitorOffer(direction: -1 | 1) {
+  if (!selectedSellerGroups.value.length) return;
+  const currentIndex = selectedOfferPosition.value < 0 ? 0 : selectedOfferPosition.value;
+  const nextIndex = Math.min(
+    selectedSellerGroups.value.length - 1,
+    Math.max(0, currentIndex + direction),
+  );
+  selectCompetitorOffer(selectedSellerGroups.value[nextIndex]!.offers[0]!);
 }
 
 async function addSelectedTarget() {
@@ -1100,7 +1321,11 @@ async function loadOverview() {
   pageError.value = "";
   try {
     const [overview, healthItems] = await Promise.all([
-      fetchCompetitors(appliedStartDate.value, appliedEndDate.value),
+      fetchCompetitors(
+        appliedStartDate.value,
+        appliedEndDate.value,
+        ownStoreScope.value,
+      ),
       fetchCompetitorLinkHealth(),
     ]);
     competitors.value = overview.items;
@@ -1140,7 +1365,7 @@ async function loadSharedBatchStatus() {
     const checkpoint = readCollectionCheckpoint();
     if (
       checkpoint
-      && checkpoint.version >= 8
+      && checkpoint.version >= collectionCheckpointVersion
       && checkpoint.clientId !== collectionClientId
       && checkpointPendingCount(checkpoint) > 0
       && (
@@ -1158,10 +1383,16 @@ async function loadSharedBatchStatus() {
 
 async function loadTargets() {
   try {
-    [targets.value, storeTargets.value] = await Promise.all([
+    const [loadedTargets, storeTargetPayload] = await Promise.all([
       fetchCompetitorTargets(),
-      fetchCompetitorStoreTargets(),
+      fetchCompetitorStoreTargets(ownStoreScope.value),
     ]);
+    targets.value = loadedTargets;
+    storeTargets.value = storeTargetPayload.items;
+    storeTargetMembershipCount.value = storeTargetPayload.selected_membership_count;
+    allStoreTargetCount.value = storeTargetPayload.all_store_unique_count;
+    allStoreTargetMembershipCount.value = storeTargetPayload.all_store_membership_count;
+    allStoreTrackingStoreCount.value = storeTargetPayload.all_store_count;
     if (!batchUrls.value.length) {
       rawUrls.value = targets.value.map((target) => target.url).join("\n");
     }
@@ -1194,9 +1425,21 @@ async function addTarget() {
   try {
     const result = await createCompetitorTarget(url);
     newTargetUrl.value = "";
+    if (result.automatic_store_target) {
+      await Promise.all([loadTargets(), loadOverview()]);
+      const storeNames = result.store_names.join("、") || "已接入店铺";
+      targetManagerNotice.value = (
+        `PLID${plid} 属于自有店铺（${storeNames}），无需加入真正竞品；`
+        + `系统已自动纳入${allStoreTargetCount.value}条私有链接的每日全量跟卖巡检。`
+      );
+      return;
+    }
+    if (!result.item) {
+      throw new Error("新增接口未返回竞品记录，请刷新后重试");
+    }
     await Promise.all([loadTargets(), loadSharedBatchStatus()]);
     targetManagerNotice.value = result.queued_to_active_batch
-      ? `PLID${result.item.plid} 已保存，并加入当前运行批次队头；当前商品结束后优先探测。`
+      ? `PLID${result.item.plid} 已保存，并追加到当前运行批次队尾；断点中的原任务顺序保持不变。`
       : `PLID${result.item.plid} 已保存，将进入下一次采集清单。`;
   } catch (error) {
     if (error instanceof ApiRequestError && error.status === 409 && plid) {
@@ -1425,33 +1668,25 @@ function mergeQueuedTargetsIntoLocalBatch(status: CompetitorBatchStatus) {
   rawUrls.value = batchUrls.value.join("\n");
   total.value = batchUrls.value.length;
   showCollectionActivityNotice(
-    `监控清单新增了 ${appended} 个链接，已加入当前批次队头；当前商品结束后优先探测。`,
+    `监控清单新增了 ${appended} 个链接，已按新增顺序追加到当前批次队尾。`,
   );
   persistCollectionCheckpoint();
 }
 
 function applyQueuedTargetsToRunQueue(
   queue: CollectionQueueItem[],
-  cursor: number,
   knownIndexes: Set<number>,
 ) {
   if (activeIndex.value !== null && activeRequestId.value) return;
-  let insertionCursor = cursor;
   for (const target of sharedBatchStatus.value.queued_targets ?? []) {
     const index = batchUrls.value.findIndex(
       (url) => plidFromUrl(url) === target.plid,
     );
     if (index < 0) continue;
     const existingPosition = queue.findIndex(
-      (item, position) =>
-        position >= cursor && item.index === index && !item.priority,
+      (item) => item.index === index && !item.priority,
     );
     if (existingPosition >= 0) {
-      const [item] = queue.splice(existingPosition, 1);
-      if (item) {
-        queue.splice(insertionCursor, 0, item);
-        insertionCursor += 1;
-      }
       knownIndexes.add(index);
       continue;
     }
@@ -1460,8 +1695,7 @@ function applyQueuedTargetsToRunQueue(
     }
     const pendingItem = resumeQueue.value.find((item) => item.index === index);
     if (!pendingItem) continue;
-    queue.splice(insertionCursor, 0, pendingItem);
-    insertionCursor += 1;
+    queue.push(pendingItem);
     knownIndexes.add(index);
   }
 }
@@ -1598,41 +1832,42 @@ function restoreCollectionClientId(): string {
   }
 }
 
+function restoreCheckpointCollectionClientId(
+  checkpoint: CollectionCheckpoint | null,
+) {
+  if (
+    !checkpoint?.clientId
+    || checkpointPendingCount(checkpoint) === 0
+  ) {
+    return;
+  }
+  collectionClientId = checkpoint.clientId;
+  try {
+    sessionStorage.setItem(collectionClientKey, collectionClientId);
+  } catch {
+    // The in-memory identity is enough when browser storage is unavailable.
+  }
+}
+
+function closeCollectionClientChannel() {
+  collectionClientChannel?.close();
+  collectionClientChannel = null;
+}
+
 async function ensureUniqueCollectionClientId() {
   if (typeof BroadcastChannel === "undefined") return;
   try {
     const channel = new BroadcastChannel(collectionClientChannelName);
     collectionClientChannel = channel;
-    const probeId = collectionId("request");
-    let occupied = false;
-    channel.onmessage = (event: MessageEvent<CollectionClientMessage>) => {
-      const message = event.data;
-      if (!message || message.clientId !== collectionClientId) return;
-      if (
-        message.type === "probe"
-        && message.instanceId !== collectionClientInstanceId
-      ) {
-        channel.postMessage({
-          type: "occupied",
-          clientId: collectionClientId,
-          instanceId: collectionClientInstanceId,
-          probeId: message.probeId,
-        } satisfies CollectionClientMessage);
-      } else if (
-        message.type === "occupied"
-        && message.probeId === probeId
-        && message.instanceId !== collectionClientInstanceId
-      ) {
-        occupied = true;
-      }
-    };
-    channel.postMessage({
-      type: "probe",
+    const occupied = await hasPersistentCollectionClientPeer({
+      channel,
       clientId: collectionClientId,
       instanceId: collectionClientInstanceId,
-      probeId,
-    } satisfies CollectionClientMessage);
-    await delay(120);
+      createProbeId: () => collectionId("request"),
+      wait: async (milliseconds) => {
+        await delay(milliseconds);
+      },
+    });
     if (!occupied) return;
     collectionClientId = collectionId("client");
     sessionStorage.setItem(collectionClientKey, collectionClientId);
@@ -1719,7 +1954,7 @@ function normalizeCollectionError(
 function persistCollectionCheckpoint() {
   if (!batchUrls.value.length) return;
   const checkpoint: CollectionCheckpoint = {
-    version: 8,
+    version: collectionCheckpointVersion,
     rawUrls: rawUrls.value,
     batchUrls: batchUrls.value,
     attemptedIndexes: attemptedIndexes.value,
@@ -1764,7 +1999,7 @@ function readCollectionCheckpoint(): CollectionCheckpoint | null {
     return null;
   }
   if (
-    ![1, 2, 3, 4, 5, 6, 7, 8].includes(checkpoint.version)
+    checkpoint.version !== collectionCheckpointVersion
     || !Array.isArray(checkpoint.batchUrls)
     || !Array.isArray(checkpoint.attemptedIndexes)
     || !Array.isArray(checkpoint.failedIndexes)
@@ -1797,7 +2032,8 @@ async function restoreCollectionCheckpoint(
   forceAdopt = false,
 ) {
   const checkpointBelongsToThisPage =
-    checkpoint.version < 8 || checkpoint.clientId === collectionClientId;
+    checkpoint.version < collectionCheckpointVersion
+    || checkpoint.clientId === collectionClientId;
   const checkpointMatchesActiveBatch =
     sharedBatchStatus.value.active
     && Boolean(checkpoint.batchId)
@@ -1813,7 +2049,7 @@ async function restoreCollectionCheckpoint(
     return false;
   }
   if (
-    checkpoint.version < 8
+    checkpoint.version < collectionCheckpointVersion
     && checkpointMatchesActiveBatch
     && !(await confirmLegacyCheckpointOwnership(checkpoint))
   ) {
@@ -1870,7 +2106,7 @@ async function restoreCollectionCheckpoint(
     && checkpoint.running === true
     && !checkpoint.stopReason
     && resumeQueue.value.length > 0;
-  if (checkpoint.version < 8) {
+  if (checkpoint.version < collectionCheckpointVersion) {
     persistCollectionCheckpoint();
   }
   adoptableCheckpoint.value = null;
@@ -1916,6 +2152,26 @@ async function startCollection() {
     );
     return;
   }
+  await startNewCollection(
+    targets.value.map((target) => target.url),
+    "请先在监控链接清单中新增至少一个商品",
+  );
+}
+
+async function startKnownOwnFollowerCollection() {
+  if (!props.canControlCollection) {
+    showCollectionNotice(
+      "竞品批次的开始、继续和停止仅限 kxx 账号；当前账号仍可新增链接和插队。",
+    );
+    return;
+  }
+  await startNewCollection(
+    knownOwnFollowerUrls.value,
+    "当前店铺范围内还没有已识别到跟卖的自有链接",
+  );
+}
+
+async function startNewCollection(urls: string[], emptyMessage: string) {
   if (sharedBatchStatus.value.active && !collecting.value) {
     if (sharedBatchMatchesCheckpoint.value && pendingResumeCount.value) {
       collectionStopReason.value =
@@ -1927,15 +2183,7 @@ async function startCollection() {
     return;
   }
   try {
-    const urls = [
-      ...new Map(
-        [...targets.value, ...storeTargets.value].map((target) => [
-          target.plid,
-          target.url,
-        ]),
-      ).values(),
-    ];
-    if (!urls.length) throw new Error("请先在监控链接清单中新增至少一个商品");
+    if (!urls.length) throw new Error(emptyMessage);
     collectionResults.value = [];
     collectionErrors.value = [];
     collectionStopReason.value = "";
@@ -2299,11 +2547,11 @@ async function runCollection(
   }
   try {
     while (!controller.signal.aborted && !collectionStopReason.value) {
-      applyQueuedTargetsToRunQueue(queue, cursor, knownIndexes);
+      applyQueuedTargetsToRunQueue(queue, knownIndexes);
       applyPriorityTargetsToRunQueue(queue, cursor, knownIndexes);
       while (cursor < queue.length) {
         if (controller.signal.aborted) break;
-        applyQueuedTargetsToRunQueue(queue, cursor, knownIndexes);
+        applyQueuedTargetsToRunQueue(queue, knownIndexes);
         applyPriorityTargetsToRunQueue(queue, cursor, knownIndexes);
         const {
           index,
@@ -2490,7 +2738,7 @@ async function runCollection(
       ) break;
       await loadSharedBatchStatus();
       appendPendingItemsToRunQueue(queue, knownIndexes, cursor);
-      applyQueuedTargetsToRunQueue(queue, cursor, knownIndexes);
+      applyQueuedTargetsToRunQueue(queue, knownIndexes);
       applyPriorityTargetsToRunQueue(queue, cursor, knownIndexes);
       if (cursor >= queue.length) break;
     }
@@ -2559,6 +2807,69 @@ function formatSignedQuantity(value: number | null) {
   return `${value > 0 ? "+" : ""}${value} 件`;
 }
 
+function offerTrendX(index: number, trend: CompetitorOfferTrendPoint[]) {
+  const count = trend.length;
+  if (count <= 1) return offerTrendPlotLeft + offerTrendPlotWidth / 2;
+  const firstTime = trend[0]?.capturedAtMs;
+  const lastTime = trend[count - 1]?.capturedAtMs;
+  const currentTime = trend[index]?.capturedAtMs;
+  const ratio = firstTime !== undefined
+    && lastTime !== undefined
+    && currentTime !== undefined
+    && Number.isFinite(firstTime)
+    && Number.isFinite(lastTime)
+    && Number.isFinite(currentTime)
+    && lastTime > firstTime
+    ? (currentTime - firstTime) / (lastTime - firstTime)
+    : index / (count - 1);
+  return offerTrendPlotLeft + ratio * offerTrendPlotWidth;
+}
+
+function formatOfferTrendAxisValue(
+  key: OfferTrendPanel["key"],
+  value: number,
+) {
+  if (key === "price") return `R ${Math.round(value).toLocaleString("en-ZA")}`;
+  return Math.round(value).toLocaleString("zh-CN");
+}
+
+function handleOfferTrendPointer(event: PointerEvent) {
+  if (!selectedOfferTrend.value.length) return;
+  const svg = event.currentTarget as SVGSVGElement;
+  const bounds = svg.getBoundingClientRect();
+  if (!bounds.width) return;
+  const viewX = ((event.clientX - bounds.left) / bounds.width) * offerTrendChartWidth;
+  hoveredOfferTrendIndex.value = selectedOfferTrend.value.reduce(
+    (nearestIndex, _point, index) =>
+      Math.abs(offerTrendX(index, selectedOfferTrend.value) - viewX)
+        < Math.abs(offerTrendX(nearestIndex, selectedOfferTrend.value) - viewX)
+        ? index
+        : nearestIndex,
+    0,
+  );
+}
+
+function stepOfferTrendPoint(direction: -1 | 1) {
+  if (!selectedOfferTrend.value.length) return;
+  const current = activeOfferTrendIndex.value ?? selectedOfferTrend.value.length - 1;
+  hoveredOfferTrendIndex.value = Math.min(
+    selectedOfferTrend.value.length - 1,
+    Math.max(0, current + direction),
+  );
+}
+
+function offerIntervalMovementLabel(offer: CompetitorOfferItem) {
+  if (!offer.库存可比 || offer.库存数量变化 === null) return "区间库存不可比";
+  if (offer.库存数量变化 < 0) return `区间库存净流出 ${Math.abs(offer.库存数量变化)} 件`;
+  if (offer.库存数量变化 > 0) return `区间库存净补货 ${offer.库存数量变化} 件`;
+  return "区间库存数量不变";
+}
+
+function offerNetOutflowRankLabel(offer: CompetitorOfferItem) {
+  const outflow = comparableOfferNetOutflow(offer);
+  return outflow === null ? "净流出不可比" : `净流出 ${outflow} 件`;
+}
+
 function offerStockDisplay(offer: CompetitorOfferItem) {
   if (offer.库存数量 === null) {
     return `${offer.库存状态 || "未知"}（数量未返回）`;
@@ -2599,6 +2910,34 @@ function competitorOfferPriceRange(item: CompetitorItem) {
   return lowest === highest
     ? formatCurrency(lowest)
     : `${formatCurrency(lowest)} – ${formatCurrency(highest)}`;
+}
+
+function sellerGroupPriceRange(offers: CompetitorOfferItem[]) {
+  const prices = offers
+    .map((offer) => offer.价格)
+    .filter((price): price is number => price !== null)
+    .sort((first, second) => first - second);
+  if (!prices.length) return "价格待采集";
+  const lowest = prices[0]!;
+  const highest = prices[prices.length - 1]!;
+  return lowest === highest
+    ? formatCurrency(lowest)
+    : `${formatCurrency(lowest)} – ${formatCurrency(highest)}`;
+}
+
+function sellerGroupStockSummary(offers: CompetitorOfferItem[]) {
+  const inStock = offers.filter((offer) => offer.库存状态 === "有货").length;
+  const outOfStock = offers.filter((offer) => offer.库存状态 === "没货").length;
+  const unknown = offers.length - inStock - outOfStock;
+  return [
+    inStock ? `${inStock} 个有货` : "",
+    outOfStock ? `${outOfStock} 个没货` : "",
+    unknown ? `${unknown} 个未探测` : "",
+  ].filter(Boolean).join(" · ") || "库存待采集";
+}
+
+function followerSellerCount(item: CompetitorItem) {
+  return groupCompetitorOffersBySeller(followerOffers(item), "default").length;
 }
 
 function targetSnapshot(target: CompetitorTargetItem) {
@@ -2682,7 +3021,7 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
           <h2>竞品链接管理</h2>
         </div>
         <p class="section-note">
-          新增链接会自动加入当前运行批次队头；插队只增加优先探测，不移除原位置
+          新增链接会按新增顺序追加到当前运行批次队尾；需要提前检查时可另行点击插队
         </p>
       </div>
       <form class="target-add-row" @submit.prevent="addTarget">
@@ -2921,7 +3260,7 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
                         >
                           <p class="target-offer-list-heading">
                             <strong>原链接及跟卖报价</strong>
-                            <span>同一 PLID 只入队一次，价格和库存均按 Offer ID 区分</span>
+                            <span>同一 PLID 只入队一次，价格和库存按卖家报价身份区分</span>
                           </p>
                           <article
                             v-for="offer in targetOffers(target)"
@@ -2936,25 +3275,24 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
                                 </span>
                               </strong>
                               <small>
-                                {{
-                                  offer.offer_id
-                                    ? `Offer ${offer.offer_id}`
-                                    : "Offer ID 未公开（按卖家/SKU跟踪）"
-                                }}
-                                <template v-if="offer.SKU"> · SKU {{ offer.SKU }}</template>
+                                <template v-if="offer.SKU">SKU {{ offer.SKU }}</template>
                                 <template v-if="offer.变体 && offer.变体 !== '默认款'">
                                   · {{ offer.变体 }}
                                 </template>
                                 <template v-if="offer.条件"> · {{ offer.条件 }}</template>
                               </small>
+                              <small v-if="offer.offer_id" class="offer-id-secondary">
+                                Offer ID {{ offer.offer_id }}
+                              </small>
                             </div>
                             <div class="target-offer-price">
                               <strong>{{ formatCurrency(offer.价格) }}</strong>
                               <small
+                                v-if="offerPriceOperatingSignal(offer)"
                                 class="price-signal"
                                 :class="priceSignalClass(offer.价格信号)"
                               >
-                                {{ offer.价格信号 }}
+                                {{ offerPriceOperatingSignal(offer) }}
                                 <template v-if="offer.价格变化 !== null">
                                   · {{ formatSignedCurrency(offer.价格变化) }}
                                 </template>
@@ -2965,8 +3303,11 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
                               :title="offer.库存说明 || offer.库存原始状态"
                             >
                               <strong>{{ offerStockDisplay(offer) }}</strong>
-                              <small :class="offerStockSignalClass(offer.库存信号)">
-                                {{ offer.库存信号 }}
+                              <small
+                                v-if="offerStockOperatingSignal(offer)"
+                                :class="offerStockSignalClass(offer.库存信号)"
+                              >
+                                {{ offerStockOperatingSignal(offer) }}
                                 <template v-if="offer.库存数量变化 !== null">
                                   · {{ formatSignedQuantity(offer.库存数量变化) }}
                                 </template>
@@ -3172,16 +3513,19 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
       <div class="collector-run-heading">
         <div>
           <p class="section-kicker">建立与刷新观察样本</p>
-          <h3>批量采集真正竞品与自有商品跟卖</h3>
+          <h3>批量采集真正竞品</h3>
         </div>
         <span>
-          共 {{ targets.length + storeTargets.length }} 个目标 · 自有跟卖检查
-          {{ storeTargets.length }} 个 · 真正竞品 {{ targets.length }} 个
+          人工竞品批次 {{ targets.length }} 个 · 后台每日巡检
+          {{ allStoreTrackingStoreCount }} 店私有链接 {{ allStoreTargetCount }} 个
+          （店铺内合计 {{ allStoreTargetMembershipCount }} 个）
         </span>
       </div>
       <p class="method-note collection-scope-note">
-        自有商品价格与库存直接使用 Seller API 首拉基准；
-        任务只读取公开报价清单来识别跟卖，不保存或探测自有主报价和变体库存。
+        页面批次只处理真正竞品；{{ allStoreTrackingStoreCount }} 店私有链接由服务器每天00:30
+        跨店去重后全量巡检，不受当前页面店铺或范围选择影响。
+        自有商品价格与库存直接使用 Seller API 首拉基准；后台只读取公开报价清单来识别跟卖，
+        不保存或探测自有主报价和变体库存。
       </p>
       <div
         v-if="sharedBatchStatus.active"
@@ -3447,7 +3791,12 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
       <article>
         <span>自有店铺链接</span>
         <strong>{{ storeCompetitors.length }}</strong>
-        <small>自动识别，只追踪跟卖</small>
+        <small>
+          {{ ownStoreScopeLabel }} · 目标 {{ storeTargets.length }} 个
+          <template v-if="ownStoreScope === 'all'">
+            · 店铺内合计 {{ storeTargetMembershipCount }} 个
+          </template>
+        </small>
       </article>
       <article>
         <span>真正竞品</span>
@@ -3783,7 +4132,7 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
             @click="competitorSourceView = 'own_store'"
           >
             <strong>自有商品跟卖</strong>
-            <span>{{ storeCompetitors.length }} 个商品 · 只看跟卖</span>
+            <span>{{ storeCompetitors.length }} 个商品 · {{ ownStoreScopeLabel }}</span>
           </button>
         </div>
         <div class="competitor-list-filters" role="search" aria-label="筛选竞品最新状态">
@@ -3802,6 +4151,14 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
               <option value="有货">有货</option>
               <option value="没货">没货</option>
               <option value="未探测">未探测</option>
+            </select>
+          </label>
+          <label class="competitor-filter-field">
+            <span>跟卖状态</span>
+            <select v-model="followerPresenceFilter">
+              <option value="全部">全部跟卖状态</option>
+              <option value="有被跟卖">有被跟卖</option>
+              <option value="未发现跟卖">未发现跟卖</option>
             </select>
           </label>
           <label class="competitor-filter-field">
@@ -3870,8 +4227,9 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
         <p class="method-note">
           日期按北京时间自然日筛选。每个商品使用区间内最旧快照和最新快照重算价格涨跌、
           库存净变化、新增评论与经营信号；只有首尾变体键、SKU、卖家集合一致且库存均为精确值时才比较库存。
-          自有店铺另行使用 Seller API 每个北京日最早一次完整刷新作基准，
-          公开页只探测非主报价的跟卖；评论属于整个 PLID，不归属某个卖家。
+          自有店铺的 Seller API 每次完整刷新都会更新当前报价并追加历史点；公开页读取全部报价，
+          先按全部已接入店铺 Offer ID/SKU 排除自有报价，再探测其他卖家，因此竞争卖家抢到主报价时也不会漏掉。
+          商品变体本身不算跟卖；同一卖家的不同变体会归在同一个卖家组内。评论属于整个 PLID，不归属某个卖家。
         </p>
         <section
           v-if="competitorSourceView === 'own_store'"
@@ -3884,11 +4242,25 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
               <p class="section-kicker">OWN STORE FOLLOWERS</p>
               <h3>自有店铺链接</h3>
             </div>
-            <span>共 {{ filteredStoreCompetitors.length }} 条 · 自有基准与跟卖观察分开</span>
+            <div class="competitor-source-heading-actions">
+              <span>
+                {{ ownStoreScopeLabel }} · 共 {{ filteredStoreCompetitors.length }} 条 ·
+                Seller API 刷新与跟卖观察分开
+              </span>
+              <button
+                v-if="props.canControlCollection"
+                type="button"
+                class="primary-button"
+                :disabled="collecting || anotherBatchIsActive || !knownOwnFollowerUrls.length"
+                @click="startKnownOwnFollowerCollection"
+              >
+                手动采集有跟卖链接（{{ knownOwnFollowerUrls.length }}）
+              </button>
+            </div>
           </div>
           <div v-if="!filteredStoreCompetitors.length" class="empty-state competitor-filter-empty">
             <strong>没有符合条件的自有店铺链接</strong>
-            <span>可以调整筛选，或先执行一次全量刷新建立首拉基准。</span>
+            <span>可以调整筛选，或先执行一次完整刷新建立 Seller API 数据。</span>
           </div>
           <div v-else class="competitor-status-list">
             <article
@@ -3900,7 +4272,7 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
               tabindex="0"
               role="button"
               aria-haspopup="dialog"
-              :aria-label="`查看 ${item.商品} 及 ${item.跟卖报价.length} 个跟卖报价`"
+              :aria-label="`查看 ${item.商品} 及 ${followerSellerCount(item)} 个跟卖卖家`"
               @click="openProductModal(item)"
               @keydown.enter="openProductModal(item)"
               @keydown.space.prevent="openProductModal(item)"
@@ -3923,12 +4295,13 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
                   <div class="competitor-status-title">
                     <div class="competitor-status-eyebrow">
                       <span>自有 · PLID{{ item.plid }}</span>
-                      <span>首拉 {{ formatChinaDateTime(item.采集时间) }}</span>
+                      <span>{{ ownStoreNames(item) }} · 更新 {{ formatChinaDateTime(item.采集时间) }}</span>
                     </div>
                     <h3>{{ item.商品 }}</h3>
                     <p>
                       {{ item.自有报价.length }} 个自有 Offer ·
-                      {{ item.跟卖报价.length }} 个跟卖报价
+                      {{ followerSellerCount(item) }} 个跟卖卖家 ·
+                      {{ item.跟卖报价.length }} 个变体 / 报价
                     </p>
                   </div>
                 </div>
@@ -3936,12 +4309,12 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
               </header>
               <div class="competitor-status-summary">
                 <div>
-                  <span>跟卖报价 / 自有首拉价</span>
+                  <span>跟卖报价 / 自有最新价</span>
                   <strong>{{ competitorOfferPriceRange(item) }}</strong>
                   <small>自有 {{ formatCurrency(item.价格) }}</small>
                 </div>
                 <div>
-                  <span>Seller API 首拉库存</span>
+                  <span>Seller API 最新库存</span>
                   <strong class="stock-pill" :class="{ exact: item.库存精确 }">
                     {{ item.库存上限 }}
                   </strong>
@@ -3958,7 +4331,7 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
                 <div>
                   <span>商品共享评论 / 评分</span>
                   <strong>{{ item.评论数 }} 条 · {{ item.评分 ?? "—" }}</strong>
-                  <small>{{ item.跟卖报价.length ? "发现跟卖时才拉取" : "未发现跟卖，未拉取" }}</small>
+                  <small>评论按 PLID 商品维度单独同步</small>
                 </div>
               </div>
             </article>
@@ -4044,7 +4417,7 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
                     <span>{{ formatChinaDateTime(item.采集时间) }}</span>
                   </div>
                   <h3>{{ item.商品 }}</h3>
-                  <p>{{ item.跟卖报价.length }} 个卖家报价 · 主卖家 {{ item.当前卖家 || "未知" }}</p>
+                  <p>{{ followerSellerCount(item) }} 个卖家 · {{ item.跟卖报价.length }} 个变体 / 报价 · 主卖家 {{ item.当前卖家 || "未知" }}</p>
                 </div>
               </div>
               <span class="competitor-status-open">查看卖家库存 →</span>
@@ -4074,12 +4447,14 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
               <div>
                 <span>经营信号</span>
                 <div class="signal-labels">
-                  <strong class="signal-label">{{ item.趋势判断 }}</strong>
                   <strong
+                    v-for="signal in competitorOperatingSignals(item)"
+                    :key="signal"
                     class="signal-label price-signal"
-                    :class="priceSignalClass(item.价格信号)"
-                  >{{ item.价格信号 }}</strong>
+                    :class="priceSignalClass(signal)"
+                  >{{ signal }}</strong>
                 </div>
+                <small v-if="!competitorOperatingSignals(item).length">当前区间没有保留的经营信号</small>
                 <small v-if="item.价格变化 !== null">
                   价格变化 {{ formatSignedCurrency(item.价格变化) }}
                 </small>
@@ -4158,10 +4533,12 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
                   · 当前查看
                   {{ selectedOffer ? (selectedOffer.卖家 || "未知卖家") : (selected.当前卖家 || "未知卖家") }}
                   <template v-if="selectedOffer">
-                    · Offer ID {{ selectedOffer.offer_id || "未返回" }}
                     · SKU {{ selectedOffer.SKU || "未返回" }}
                   </template>
                 </span>
+                <small v-if="selectedOffer?.offer_id" class="offer-id-secondary">
+                  Offer ID {{ selectedOffer.offer_id }}
+                </small>
               </div>
             </div>
             <button
@@ -4181,8 +4558,12 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
               <article>
                 <small>当前价格</small>
                 <strong>{{ formatCurrency(selectedOffer ? selectedOffer.价格 : selected.价格) }}</strong>
-                <span>
-                  {{ selectedOffer ? selectedOffer.价格信号 : selected.价格信号 }}
+                <span
+                  v-if="selectedOffer
+                    ? offerPriceOperatingSignal(selectedOffer)
+                    : ['降价', '涨价', '价格不变'].includes(selected.价格信号)"
+                >
+                  {{ selectedOffer ? offerPriceOperatingSignal(selectedOffer) : selected.价格信号 }}
                   <template v-if="(selectedOffer ? selectedOffer.价格变化 : selected.价格变化) !== null">
                     · {{ formatSignedCurrency(selectedOffer ? selectedOffer.价格变化 : selected.价格变化) }}
                   </template>
@@ -4192,7 +4573,10 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
                 <small>当前卖家库存</small>
                 <strong>{{ selectedOffer ? offerStockDisplay(selectedOffer) : selected.库存上限 }}</strong>
                 <span v-if="selectedOffer">
-                  {{ selectedOffer.库存信号 }} · {{ offerStockEvidenceLabel(selectedOffer) }}
+                  <template v-if="offerStockOperatingSignal(selectedOffer)">
+                    {{ offerStockOperatingSignal(selectedOffer) }} ·
+                  </template>
+                  {{ offerStockEvidenceLabel(selectedOffer) }}
                 </span>
                 <span v-else-if="selected.库存参考过期 && selected.上次成功库存">
                   本次未探测；上次成功 {{ selected.上次成功库存 }}
@@ -4200,9 +4584,9 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
                 </span>
               </article>
               <article>
-                <small>PLID 共用评论 / 评分</small>
+                <small>PLID 商品共用评论 / 评分</small>
                 <strong>{{ selected.评论数 }} 条 · {{ selected.评分 ?? "—" }}</strong>
-                <span>不随卖家报价切换</span>
+                <span>同一 PLID 的主报价与跟卖共用</span>
               </article>
               <article>
                 <small>最近采集</small>
@@ -4214,13 +4598,13 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
               <section
                 v-if="selected.来源 === 'own_store'"
                 class="panel competitor-offer-roster own-store-baseline-panel"
-                aria-label="自有店铺当日首拉基准"
+                aria-label="自有店铺 Seller API 最新刷新"
               >
                 <div class="competitor-offer-roster-heading">
                   <div>
-                    <p class="section-kicker">SELLER API DAILY BASELINE</p>
-                    <h2>自有 Offer 当日首拉基准</h2>
-                    <span>每个北京自然日只保留最早一次完整刷新，不另外探测主报价库存。</span>
+                    <p class="section-kicker">SELLER API REFRESH</p>
+                    <h2>自有 Offer 最新完整刷新</h2>
+                    <span>手动或定时完整刷新都会更新当前值并写入历史；不另外探测主报价库存。</span>
                   </div>
                   <span>{{ selected.自有报价.length }} 个 Offer</span>
                 </div>
@@ -4232,15 +4616,22 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
                   >
                     <div class="competitor-offer-identity">
                       <div><strong>Offer ID {{ offer.offer_id }}</strong></div>
-                      <small>SKU {{ offer.SKU || "未返回" }} · {{ offer.状态 || "未返回" }}</small>
+                      <small>
+                        {{ offer.店铺 }} · SKU {{ offer.SKU || "未返回" }} ·
+                        {{ offer.状态 || "未返回" }}
+                      </small>
                     </div>
                     <div class="competitor-offer-metric">
-                      <span>首拉价格</span>
+                      <span>最新价格</span>
                       <strong>{{ formatCurrency(offer.价格) }}</strong>
                     </div>
                     <div class="competitor-offer-metric">
                       <span>Seller API 库存</span>
                       <strong>{{ offer.库存 ?? "—" }}</strong>
+                      <small>
+                        Takealot可售 {{ offer.Takealot可售库存 ?? "—" }} ·
+                        卖家可售 {{ offer.卖家可售库存 ?? "—" }}
+                      </small>
                     </div>
                     <div class="competitor-offer-metric">
                       <span>拉取时间</span>
@@ -4250,83 +4641,244 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
                 </div>
               </section>
 
-              <section class="panel competitor-offer-roster" aria-label="全部卖家报价与库存">
-                <div class="competitor-offer-roster-heading">
+              <section class="panel competitor-offer-workbench" aria-label="卖家报价连续对比台">
+                <div class="competitor-offer-workbench-heading">
                   <div>
-                    <p class="section-kicker">SELLER OFFER INVENTORY</p>
-                    <h2>{{ selected.来源 === "own_store" ? "跟卖卖家报价与库存" : "全部卖家报价与库存" }}</h2>
-                    <span>点击任一卖家报价，下方价格、库存、涨跌信号和商品链接会切换到该报价。</span>
+                    <p class="section-kicker">SELLER COMPARISON WORKBENCH</p>
+                    <h2>全部卖家连续对比</h2>
+                    <span>卖家名称去重；同一卖家的不同变体和报价归在一起，组内可继续切换具体报价。</span>
                   </div>
-                  <span>{{ selected.跟卖报价.length }} 个报价</span>
+                  <div class="competitor-offer-workbench-controls">
+                    <label>
+                      <span>卖家排序</span>
+                      <select v-model="offerSort">
+                        <option value="net_outflow_desc">区间库存净流出优先</option>
+                        <option value="price_asc">当前价格从低到高</option>
+                        <option value="stock_asc">当前精确库存从低到高</option>
+                        <option value="default">主报价与原始顺序</option>
+                      </select>
+                    </label>
+                    <div class="competitor-offer-stepper">
+                      <button
+                        type="button"
+                        class="quiet-button"
+                        :disabled="selectedOfferPosition <= 0"
+                        @click="selectAdjacentCompetitorOffer(-1)"
+                      >
+                        上一个卖家
+                      </button>
+                      <span>
+                        {{ selectedOfferPosition >= 0 ? selectedOfferPosition + 1 : 0 }}
+                        / {{ selectedSellerGroups.length }}
+                      </span>
+                      <button
+                        type="button"
+                        class="quiet-button"
+                        :disabled="selectedOfferPosition < 0 || selectedOfferPosition >= selectedSellerGroups.length - 1"
+                        @click="selectAdjacentCompetitorOffer(1)"
+                      >
+                        下一个卖家
+                      </button>
+                    </div>
+                  </div>
                 </div>
-                <div v-if="selected.跟卖报价.length" class="competitor-offer-list">
-                  <button
-                    v-for="offer in selected.跟卖报价"
-                    :key="offer.报价键"
-                    type="button"
-                    class="competitor-offer-row"
-                    :class="{ selected: selectedOffer?.报价键 === offer.报价键 }"
-                    :aria-pressed="selectedOffer?.报价键 === offer.报价键"
-                    @click="selectCompetitorOffer(offer)"
-                  >
-                    <div class="competitor-offer-identity">
+                <p class="method-note competitor-offer-sort-note">
+                  当前观察区间：{{ activeRangeLabel }}。默认按可比首尾精确库存的净流出排序；
+                  库存净流出是公开库存观察信号，不等于平台实际出货或订单，补货也会影响结果。
+                </p>
+
+                <div v-if="selectedSellerGroups.length" class="competitor-offer-workbench-grid">
+                  <div class="competitor-offer-navigator" role="listbox" aria-label="卖家报价列表">
+                    <button
+                      v-for="group in selectedSellerGroups"
+                      :key="group.key"
+                      type="button"
+                      class="competitor-offer-nav-item"
+                      :class="{ selected: selectedSellerGroup?.key === group.key }"
+                      role="option"
+                      :aria-selected="selectedSellerGroup?.key === group.key"
+                      @click="selectCompetitorOffer(group.offers[0]!)"
+                    >
+                      <span class="competitor-offer-nav-identity">
+                        <strong>{{ group.sellerName }}</strong>
+                        <small>{{ group.offers.length }} 个变体 / 报价</small>
+                        <small>
+                          {{ group.offers.some((offer) => offer.报价来源 === "seller_api") ? "含自有 Seller API" : "公开跟卖报价" }}
+                        </small>
+                      </span>
+                      <span class="competitor-offer-nav-values">
+                        <strong>{{ sellerGroupPriceRange(group.offers) }}</strong>
+                        <small>{{ sellerGroupStockSummary(group.offers) }}</small>
+                      </span>
+                      <span
+                        class="competitor-offer-nav-signal"
+                        :class="offerStockSignalClass(group.offers[0]!.库存信号)"
+                      >
+                        {{ offerSort === "net_outflow_desc" ? offerNetOutflowRankLabel(group.offers[0]!) : offerIntervalMovementLabel(group.offers[0]!) }}
+                      </span>
+                      <span v-if="selectedSellerGroup?.key === group.key" class="competitor-offer-selected">
+                        正在查看
+                      </span>
+                    </button>
+                  </div>
+
+                  <div class="competitor-offer-trend-pane">
+                    <div class="competitor-offer-trend-heading">
                       <div>
-                        <strong>{{ offer.卖家 || "未知卖家" }}</strong>
-                        <span
-                          class="competitor-offer-kind"
-                          :class="{ primary: offer.是否主报价 }"
-                        >{{ offer.是否主报价 ? "当前主报价" : "跟卖报价" }}</span>
-                        <span
-                          v-if="selectedOffer?.报价键 === offer.报价键"
-                          class="competitor-offer-selected"
-                        >正在查看</span>
+                        <strong>{{ selectedSellerGroup?.sellerName || "未知卖家" }}</strong>
+                        <span>
+                          {{ selectedSellerGroupOffers.length }} 个变体 / 报价 · 当前 {{ selectedOffer?.变体 || selectedOffer?.SKU || "默认款" }}
+                          · {{ selectedOfferTrend.length }} 个相关时间点
+                        </span>
                       </div>
-                      <small>
-                        Offer ID {{ offer.offer_id || "未返回" }}
-                        · SKU {{ offer.SKU || "未返回" }}
-                      </small>
-                      <small>
-                        {{ offer.变体 || "默认款" }}
-                        <template v-if="offer.条件"> · {{ offer.条件 }}</template>
-                      </small>
+                      <span>{{ selectedOffer ? offerIntervalMovementLabel(selectedOffer) : "—" }}</span>
                     </div>
-                    <div class="competitor-offer-metric">
-                      <span>该卖家价格</span>
-                      <strong>{{ formatCurrency(offer.价格) }}</strong>
-                      <small
-                        class="price-signal"
-                        :class="priceSignalClass(offer.价格信号)"
+
+                    <div class="competitor-seller-variant-list" aria-label="当前卖家的变体和报价">
+                      <button
+                        v-for="offer in selectedSellerGroupOffers"
+                        :key="offer.报价键"
+                        type="button"
+                        :class="{ selected: selectedOffer?.报价键 === offer.报价键 }"
+                        @click="selectCompetitorOffer(offer)"
                       >
-                        {{ offer.价格信号 }}
-                        <template v-if="offer.价格变化 !== null">
-                          · {{ formatSignedCurrency(offer.价格变化) }}
-                        </template>
-                      </small>
+                        <span>
+                          <strong>{{ offer.变体 || "默认款" }}</strong>
+                          <small>
+                            {{ offer.报价来源 === "seller_api" ? "自有 Seller API" : "公开跟卖" }}
+                            · SKU {{ offer.SKU || "未返回" }}
+                          </small>
+                        </span>
+                        <span>
+                          <strong>{{ formatCurrency(offer.价格) }}</strong>
+                          <small>{{ offerStockDisplay(offer) }}</small>
+                        </span>
+                      </button>
                     </div>
-                    <div class="competitor-offer-metric competitor-offer-stock-metric">
-                      <span>该卖家库存</span>
-                      <strong>{{ offerStockDisplay(offer) }}</strong>
-                      <small>{{ offerStockEvidenceLabel(offer) }}</small>
-                      <small
-                        class="offer-stock-signal"
-                        :class="offerStockSignalClass(offer.库存信号)"
+
+                    <div v-if="activeOfferTrendPoint" class="competitor-offer-trend-tooltip" aria-live="polite">
+                      <div>
+                        <small>北京时间</small>
+                        <strong>{{ formatChinaDateTime(activeOfferTrendPoint.snapshot.采集时间) }}</strong>
+                      </div>
+                      <div>
+                        <small>价格</small>
+                        <strong>{{ formatCurrency(activeOfferTrendPoint.offer.价格) }}</strong>
+                      </div>
+                      <div>
+                        <small>库存</small>
+                        <strong>{{ offerStockDisplay(activeOfferTrendPoint.offer) }}</strong>
+                        <span>{{ offerStockEvidenceLabel(activeOfferTrendPoint.offer) }}</span>
+                      </div>
+                      <div>
+                        <small>评论数</small>
+                        <strong>{{ activeOfferTrendPoint.reviews ?? "—" }}</strong>
+                        <span>{{ activeOfferTrendPoint.reviews === null ? "该Seller API时间点未同步评论" : "PLID 商品共用" }}</span>
+                      </div>
+                    </div>
+
+                    <div v-if="!selectedOfferTrend.length" class="empty-state slim">
+                      当前观察区间没有可安全识别为该卖家的历史报价，不使用其他卖家快照代替。
+                    </div>
+                    <div
+                      v-else
+                      class="competitor-offer-trend-chart"
+                      tabindex="0"
+                      aria-label="卖家报价历史折线图，使用左右方向键切换时间点"
+                      @keydown.left.prevent="stepOfferTrendPoint(-1)"
+                      @keydown.right.prevent="stepOfferTrendPoint(1)"
+                    >
+                      <svg
+                        :viewBox="`0 0 ${offerTrendChartWidth} ${offerTrendChartHeight}`"
+                        role="img"
+                        aria-label="价格、精确库存和商品共用评论数折线图"
+                        @pointermove="handleOfferTrendPointer"
+                        @pointerleave="hoveredOfferTrendIndex = null"
                       >
-                        {{ offer.库存信号 }}
-                        <template v-if="offer.库存数量变化 !== null">
-                          · {{ formatSignedQuantity(offer.库存数量变化) }}
-                        </template>
-                      </small>
+                        <g v-for="panel in offerTrendPanels" :key="panel.key">
+                          <rect
+                            class="offer-trend-panel-surface"
+                            :class="`offer-trend-panel-surface-${panel.key}`"
+                            x="4"
+                            :y="panel.top - 12"
+                            :width="offerTrendChartWidth - 8"
+                            height="100"
+                            rx="8"
+                          />
+                          <line
+                            v-if="panel.key !== 'price'"
+                            class="offer-trend-panel-divider"
+                            x1="4"
+                            :x2="offerTrendChartWidth - 4"
+                            :y1="panel.top - 18"
+                            :y2="panel.top - 18"
+                            vector-effect="non-scaling-stroke"
+                          />
+                          <text class="offer-trend-panel-label" x="8" :y="panel.top + 12">
+                            {{ panel.label }}
+                          </text>
+                          <text class="offer-trend-panel-note" x="8" :y="panel.top + 29">
+                            {{ panel.note }}
+                          </text>
+                          <g v-for="tick in panel.ticks" :key="`${panel.key}:${tick.y}`">
+                            <line
+                              class="offer-trend-grid-line"
+                              :x1="offerTrendPlotLeft"
+                              :x2="offerTrendPlotRight"
+                              :y1="tick.y"
+                              :y2="tick.y"
+                            />
+                            <text
+                              class="offer-trend-axis-label"
+                              :x="offerTrendPlotLeft - 8"
+                              :y="tick.y + 4"
+                            >{{ tick.label }}</text>
+                          </g>
+                          <path
+                            v-for="(segment, segmentIndex) in panel.segments"
+                            :key="`${panel.key}:${segmentIndex}`"
+                            class="offer-trend-line"
+                            :d="segment"
+                            :stroke="panel.color"
+                            vector-effect="non-scaling-stroke"
+                          />
+                          <circle
+                            v-for="point in panel.points"
+                            :key="`${panel.key}:${point.index}`"
+                            class="offer-trend-point"
+                            :class="{ active: point.index === activeOfferTrendIndex }"
+                            :cx="point.x"
+                            :cy="point.y"
+                            :r="point.index === activeOfferTrendIndex ? 5.5 : 3.5"
+                            :fill="panel.color"
+                            vector-effect="non-scaling-stroke"
+                          />
+                        </g>
+                        <line
+                          v-if="activeOfferTrendX !== null"
+                          class="offer-trend-cursor"
+                          :x1="activeOfferTrendX"
+                          :x2="activeOfferTrendX"
+                          y1="12"
+                          y2="330"
+                          vector-effect="non-scaling-stroke"
+                        />
+                        <text
+                          v-for="tick in offerTrendXAxisTicks"
+                          :key="`x:${tick.index}`"
+                          class="offer-trend-time-label"
+                          :x="tick.x"
+                          y="365"
+                          :text-anchor="tick.anchor"
+                        >{{ tick.label }}</text>
+                      </svg>
+                      <p>鼠标横向移动可查看最近时间点的具体价格、库存证据和评论数；键盘可用左右方向键切换。</p>
                     </div>
-                    <div class="competitor-offer-metric">
-                      <span>库存说明</span>
-                      <strong>{{ offer.是否变体主报价 ? "变体主报价" : "公开跟卖" }}</strong>
-                      <small>{{ offer.库存说明 || offer.库存原始状态 || "平台未返回更多说明" }}</small>
-                    </div>
-                  </button>
+                  </div>
                 </div>
                 <div v-else class="competitor-offer-empty">
                   <strong>当前快照未返回可区分的卖家报价</strong>
-                  <span>原链接和商品主报价仍然保留；系统不会猜测原始卖家或伪造 Offer ID、库存数量。</span>
+                  <span>原链接仍然保留；系统不会把变体本身猜成跟卖，也不会伪造卖家、Offer ID或库存数量。</span>
                 </div>
               </section>
 
@@ -4457,7 +5009,9 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
                   <span>无需加入真实竞品清单</span>
                 </div>
                 <p class="method-note">
-                  该 PLID 来自 Seller API 当前 Offer，每次竞品批次会自动检查跟卖。
+                  该 PLID 来自全部已接入店铺的 Seller API 当前 Offer，由服务器每天00:30全量检查跟卖；
+                  公开报价先排除全部自有 Offer ID/SKU，竞争卖家即使成为主报价也继续追踪。
+                  公开变体只作为商品选项展示，不直接算作跟卖；首次或评论数变化时单独读取PLID共用评论。
                   删除或修改真实竞品清单不会影响这个自动目标。
                 </p>
               </section>
@@ -4465,15 +5019,22 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
               <section class="detail-grid modal-detail-grid">
                 <article v-if="selectedOffer" class="panel decision-card">
                   <p class="section-kicker">SELLER OFFER SIGNAL</p>
-                  <h2>
-                    {{ selectedOffer.卖家 || "未知卖家" }}
-                    · {{ selectedOffer.价格信号 }}
-                    · {{ selectedOffer.库存信号 }}
-                  </h2>
+                  <h2>{{ selectedOffer.卖家 || "未知卖家" }}</h2>
+                  <div v-if="offerOperatingSignals(selectedOffer).length" class="signal-labels">
+                    <strong
+                      v-for="signal in offerOperatingSignals(selectedOffer)"
+                      :key="signal"
+                      class="signal-label price-signal"
+                      :class="priceSignalClass(signal)"
+                    >{{ signal }}</strong>
+                  </div>
                   <p>
                     当前只展示该报价身份的价格、库存与区间变化：
-                    Offer ID {{ selectedOffer.offer_id || "未返回" }}
+                    卖家 {{ selectedOffer.卖家 || "未知卖家" }}
                     · SKU {{ selectedOffer.SKU || "未返回" }}。
+                  </p>
+                  <p v-if="selectedOffer.offer_id" class="offer-id-secondary">
+                    辅助身份：Offer ID {{ selectedOffer.offer_id }}
                   </p>
                   <p class="method-note">
                     实际比较：
@@ -4523,7 +5084,7 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
 
                 <article v-else class="panel decision-card">
                   <p class="section-kicker">OPERATING SIGNAL</p>
-                  <h2>{{ selected.趋势判断 }} · {{ selected.价格信号 }}</h2>
+                  <h2>{{ competitorOperatingSignals(selected).join(" · ") || "当前区间无保留信号" }}</h2>
                   <p>{{ selected.判断说明 }}</p>
                   <a :href="selected.链接" target="_blank" rel="noreferrer">
                     打开 Takealot 商品页
@@ -4532,9 +5093,12 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
 
                 <article class="panel review-balance">
                   <p class="section-kicker">REVIEW BALANCE</p>
-                  <h2>评论结构（PLID 商品共用）</h2>
+                  <h2>评论结构（同一 PLID 商品共用）</h2>
                   <p v-if="selected.共享评论说明" class="method-note">
                     {{ selected.共享评论说明 }}
+                  </p>
+                  <p v-else class="method-note">
+                    Takealot 评论属于当前 PLID 商品，未区分卖家或 Offer ID，因此主报价与跟卖共用同一份评论结构。
                   </p>
                   <div class="balance-row positive">
                     <span>好评 4–5 星</span><strong>{{ selected.好评 }}</strong>
@@ -4645,93 +5209,19 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
                 </p>
               </section>
 
-              <section class="panel history-panel">
-                <div class="section-heading">
-                  <div>
-                    <p class="section-kicker">OBSERVATION HISTORY</p>
-                    <h2>PLID 区间原始快照（共用）</h2>
-                  </div>
-                  <span>{{ detail.history.length }} 个时间点</span>
-                </div>
-                <div v-if="detail.history.length < 2" class="empty-state slim">
-                  本区间不足两个快照，只能建立基线，不能计算首尾变化。
-                </div>
-                <div v-if="detail.history.length" class="timeline">
-                  <article
-                    v-for="item in detail.history"
-                    :key="item.快照ID"
-                  >
-                    <div class="timeline-product-head">
-                      <div class="competitor-product-image compact">
-                        <img
-                          v-if="canShowCompetitorImage(item.图片)"
-                          :src="competitorImageUrl(item.图片)"
-                          :alt="`${item.商品} 商品图片`"
-                          width="192"
-                          height="192"
-                          loading="lazy"
-                          decoding="async"
-                          @error="markCompetitorImageFailed(item.图片)"
-                        />
-                        <span v-else>暂无图片</span>
-                      </div>
-                      <div>
-                        <time>{{ formatChinaDateTime(item.采集时间) }}</time>
-                        <strong>原始观测值</strong>
-                      </div>
-                    </div>
-                    <span>库存 {{ item.库存上限 }} · 评论 {{ item.评论数 }}</span>
-                    <small>价格 {{ formatCurrency(item.价格) }} · 不在单个快照上重复判定区间信号</small>
-                    <div
-                      v-if="snapshotVariants(item.快照ID).length"
-                      class="snapshot-variant-list"
-                    >
-                      <div
-                        v-for="variant in snapshotVariants(item.快照ID)"
-                        :key="`${item.快照ID}:${variant.变体键}`"
-                        class="snapshot-variant-row"
-                      >
-                        <div class="competitor-product-image snapshot-variant-image">
-                          <img
-                            v-if="canShowCompetitorImage(variant.图片)"
-                            :src="competitorImageUrl(variant.图片)"
-                            :alt="`${variant.变体} 变体图片`"
-                            width="96"
-                            height="96"
-                            loading="lazy"
-                            decoding="async"
-                            @error="markCompetitorImageFailed(variant.图片)"
-                          />
-                          <span v-else>暂无图片</span>
-                        </div>
-                        <div>
-                          <strong>{{ variant.变体 }}</strong>
-                          <span>
-                            库存 {{ variant.库存 }}
-                            <template v-if="variant.每位客户限购 !== null">
-                              · 每位客户限购 {{ variant.每位客户限购 }} 件
-                            </template>
-                          </span>
-                        </div>
-                      </div>
-                    </div>
-                    <small v-else class="snapshot-variant-empty">
-                      此快照尚无变体明细
-                    </small>
-                  </article>
-                </div>
-              </section>
-
               <section class="panel reviews-panel">
                 <div class="section-heading">
                   <div>
                     <p class="section-kicker">VOICE OF CUSTOMER</p>
-                    <h2>公开评论（PLID 商品共用）</h2>
+                    <h2>公开评论（同一 PLID 商品共用）</h2>
                   </div>
                   <span class="review-result-count">
                     显示 {{ filteredReviews.length }} / {{ detail.reviews.length }} 条
                   </span>
                 </div>
+                <p class="method-note">
+                  同一 PLID 的主报价与跟卖共用这些商品评论；平台未返回卖家或 Offer ID 归属。
+                </p>
                 <div class="review-filter-bar">
                   <div class="filter-tabs">
                     <button
@@ -4816,7 +5306,7 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
     </Teleport>
 
     <footer class="module-footer">
-      库存是各变体在隔离匿名会话中的购物车可售上限；评论按商品共用。所有估算均需结合连续快照判断。
+      价格和库存按每个卖家报价分开展示；同一 PLID 的商品评论共用。所有观察信号均需结合连续快照判断。
     </footer>
   </div>
 </template>

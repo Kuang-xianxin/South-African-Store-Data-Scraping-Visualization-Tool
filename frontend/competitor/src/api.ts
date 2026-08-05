@@ -3,12 +3,14 @@ import type {
   CompetitorDetail,
   CompetitorLinkHealthItem,
   CompetitorOverview,
+  CompetitorStoreTargetPayload,
   CompetitorTargetAuditPayload,
   CompetitorTargetItem,
-  CompetitorStoreTargetItem,
   ExportPayload,
   FreshnessPayload,
   LogisticsOverviewPayload,
+  KeywordTrafficDetailPayload,
+  KeywordTrafficListPayload,
   NftGeneration,
   NftInspection,
   AuthSession,
@@ -25,10 +27,12 @@ import type {
   DailyReportExport,
   DailyReportPayload,
   DailyReportReminders,
+  OwnStoreScope,
 } from "./types";
 import { templatePermissions } from "./permissions";
 
 let csrfToken = "";
+let activeStoreCode = "current";
 
 export class ApiRequestError extends Error {
   constructor(
@@ -42,6 +46,15 @@ export class ApiRequestError extends Error {
 
 export function setAuthSession(session: AuthSession | null) {
   csrfToken = session?.csrf_token ?? "";
+}
+
+export function setActiveStoreCode(storeCode: string | null | undefined) {
+  activeStoreCode = storeCode?.trim().toLowerCase() || "current";
+}
+
+export function withStoreContext(url: string): string {
+  const separator = url.includes("?") ? "&" : "?";
+  return `${url}${separator}store_code=${encodeURIComponent(activeStoreCode)}`;
 }
 
 function normalizeAuthSession(session: AuthSession): AuthSession {
@@ -83,6 +96,7 @@ async function request<T>(url: string, init?: RequestInit & { signal?: AbortSign
   if (!["GET", "HEAD", "OPTIONS"].includes(method) && csrfToken) {
     headers.set("X-CSRF-Token", csrfToken);
   }
+  headers.set("X-Store-Code", activeStoreCode);
   let response: Response;
   try {
     response = await fetch(url, {
@@ -240,10 +254,12 @@ export async function updateUser(
 export function fetchCompetitors(
   startDate?: string,
   endDate?: string,
+  ownStoreScope: OwnStoreScope = "current",
 ): Promise<CompetitorOverview> {
   const query = new URLSearchParams();
   if (startDate) query.set("start_date", startDate);
   if (endDate) query.set("end_date", endDate);
+  query.set("own_store_scope", ownStoreScope);
   const suffix = query.size ? `?${query.toString()}` : "";
   return request<CompetitorOverview>(`/api/competitors${suffix}`);
 }
@@ -264,20 +280,22 @@ export async function fetchCompetitorTargets(): Promise<CompetitorTargetItem[]> 
   return result.items;
 }
 
-export async function fetchCompetitorStoreTargets(): Promise<
-  CompetitorStoreTargetItem[]
-> {
-  const result = await request<{ items: CompetitorStoreTargetItem[] }>(
-    "/api/competitors/store-targets",
+export async function fetchCompetitorStoreTargets(
+  ownStoreScope: OwnStoreScope = "current",
+): Promise<CompetitorStoreTargetPayload> {
+  const query = new URLSearchParams({ own_store_scope: ownStoreScope });
+  return request<CompetitorStoreTargetPayload>(
+    `/api/competitors/store-targets?${query.toString()}`,
   );
-  return result.items;
 }
 
 export async function createCompetitorTarget(
   url: string,
 ): Promise<{
-  item: CompetitorTargetItem;
+  item: CompetitorTargetItem | null;
   queued_to_active_batch: boolean;
+  automatic_store_target: boolean;
+  store_names: string[];
 }> {
   return request("/api/competitors/targets", {
     method: "POST",
@@ -344,10 +362,12 @@ export async function fetchCompetitorDetail(
   plid: string,
   startDate?: string,
   endDate?: string,
+  ownStoreScope: OwnStoreScope = "current",
 ): Promise<CompetitorDetail> {
   const query = new URLSearchParams();
   if (startDate) query.set("start_date", startDate);
   if (endDate) query.set("end_date", endDate);
+  query.set("own_store_scope", ownStoreScope);
   const suffix = query.size ? `?${query.toString()}` : "";
   return request<CompetitorDetail>(`/api/competitors/${plid}${suffix}`);
 }
@@ -557,11 +577,56 @@ export async function fetchRisks(asOf: string): Promise<RiskPayload> {
   return request<RiskPayload>(`/api/erp/risks?${query(asOf)}`);
 }
 
+export function fetchKeywordTrafficProducts(
+  asOf: string,
+): Promise<KeywordTrafficListPayload> {
+  return request<KeywordTrafficListPayload>(
+    `/api/erp/keyword-traffic?${query(asOf)}`,
+  );
+}
+
+export function fetchKeywordTrafficDetail(
+  offerId: string,
+  asOf: string,
+  historyDays: number,
+  comparisonDays: number,
+): Promise<KeywordTrafficDetailPayload> {
+  return request<KeywordTrafficDetailPayload>(
+    `/api/erp/keyword-traffic/${encodeURIComponent(offerId)}`
+      + `?${query(asOf)}&history_days=${historyDays}&comparison_days=${comparisonDays}`,
+  );
+}
+
 export async function fetchLogisticsOverview(
   refresh = false,
 ): Promise<LogisticsOverviewPayload> {
   const suffix = refresh ? "?refresh=true" : "";
   return request<LogisticsOverviewPayload>(`/api/erp/logistics${suffix}`);
+}
+
+export function confirmLogisticsLink(
+  w8OrderNo: string,
+  takealotShipmentId: number,
+): Promise<{ link: LogisticsOverviewPayload["matching"]["confirmed_links"][number] }> {
+  return request("/api/erp/logistics/links", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      w8_order_no: w8OrderNo,
+      takealot_shipment_id: takealotShipmentId,
+    }),
+  });
+}
+
+export function revokeLogisticsLink(
+  linkId: number,
+  note: string,
+): Promise<{ link: LogisticsOverviewPayload["matching"]["confirmed_links"][number] }> {
+  return request(`/api/erp/logistics/links/${linkId}/revoke`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ note }),
+  });
 }
 
 export interface RefreshStatus {

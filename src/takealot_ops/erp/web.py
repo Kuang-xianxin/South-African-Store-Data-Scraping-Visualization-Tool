@@ -77,6 +77,7 @@ from takealot_ops.erp.daily_report import (
     eliminate_stock_alert,
     export_operations_workbook,
     operations_business_date,
+    period_end_traffic_series,
     reminder_payload,
     revert_confirmation,
     reopen_stock_alert,
@@ -86,12 +87,22 @@ from takealot_ops.erp.daily_report import (
     update_operator_note,
 )
 from takealot_ops.erp.daily_report_live import daily_report_event_stream
+from takealot_ops.erp.keyword_traffic import (
+    build_keyword_product_detail,
+    build_keyword_product_list,
+)
+from takealot_ops.competitors.own_store import (
+    ConnectedStoreOffer,
+    connected_store_plids,
+    load_connected_store_offers,
+)
 from takealot_ops.erp.permissions import (
     COMPETITORS_COLLECT,
     COMPETITORS_VIEW,
     DAILY_REPORT_EXPORT,
     DAILY_REPORT_MANAGE,
     DAILY_REPORT_VIEW,
+    LOGISTICS_MANAGE,
     NFT102_MANAGE,
     REFRESH_RUN,
     REPORTS_GENERATE,
@@ -116,7 +127,7 @@ from takealot_ops.erp.service import (
     load_erp_dataset,
     sqlite_database_path,
 )
-from takealot_ops.logistics import LogisticsOverviewService
+from takealot_ops.logistics import LogisticsLinkError, LogisticsOverviewService
 from takealot_ops.nft102_portal import (
     generate_nft102_from_baseline,
     inspect_nft102_upload,
@@ -132,7 +143,11 @@ from takealot_ops.storage.models import (
     CompetitorTarget,
     CompetitorTargetAudit,
     DailyProductMetric,
-    OfferCurrent,
+)
+from takealot_ops.storage.store_context import (
+    STORE_CODE_HEADER,
+    current_store_code,
+    store_scope,
 )
 
 
@@ -238,6 +253,15 @@ class ExportRequest(BaseModel):
     """One explicit report export request."""
 
     as_of: date
+
+
+class LogisticsLinkConfirmRequest(BaseModel):
+    w8_order_no: str = Field(min_length=1, max_length=80)
+    takealot_shipment_id: int = Field(ge=1)
+
+
+class LogisticsLinkRevokeRequest(BaseModel):
+    note: str = Field(min_length=1, max_length=500)
 
 
 def _default_operations_business_date() -> date:
@@ -529,10 +553,21 @@ def create_app(project_root: Path | None = None) -> FastAPI:
                 session_token,
                 renewed=session.renewed,
             )
-        if (
-            _requires_connected_store_access(path)
-            and not session.user.can_access_connected_store()
-        ):
+        requested_store_code = (
+            request.headers.get(STORE_CODE_HEADER)
+            or request.query_params.get("store_code")
+            or "current"
+        ).strip().casefold()
+        accessible_store = next(
+            (
+                store
+                for store in session.user.accessible_stores
+                if store.code == requested_store_code
+            ),
+            None,
+        )
+        requires_store = _requires_connected_store_access(path)
+        if accessible_store is None and requires_store:
             response = JSONResponse(
                 status_code=403,
                 content={
@@ -545,7 +580,32 @@ def create_app(project_root: Path | None = None) -> FastAPI:
                 session_token,
                 renewed=session.renewed,
             )
-        downstream_response = await call_next(request)
+        if accessible_store is None and session.user.accessible_stores:
+            response = JSONResponse(
+                status_code=403,
+                content={"detail": "当前账号未获授权访问所选店铺"},
+            )
+            return _renew_session_cookie(
+                response,
+                request,
+                session_token,
+                renewed=session.renewed,
+            )
+        if requires_store and accessible_store is not None and not accessible_store.data_connected:
+            response = JSONResponse(
+                status_code=403,
+                content={"detail": "所选店铺尚未完成数据接入"},
+            )
+            return _renew_session_cookie(
+                response,
+                request,
+                session_token,
+                renewed=session.renewed,
+            )
+        request.state.erp_store = accessible_store
+        scoped_store_code = accessible_store.code if accessible_store is not None else "current"
+        with store_scope(scoped_store_code):
+            downstream_response = await call_next(request)
         return _renew_session_cookie(
             downstream_response,
             request,
@@ -735,7 +795,18 @@ def create_app(project_root: Path | None = None) -> FastAPI:
     @app.get("/api/erp/summary")
     def summary(as_of: date = Query(default_factory=date.today)) -> dict[str, Any]:
         settings = DashboardSettings.from_env(root)
-        return build_summary_payload(load_erp_dataset(settings, as_of), as_of)
+        payload = build_summary_payload(load_erp_dataset(settings, as_of), as_of)
+        engine = create_read_only_erp_engine(settings.database_url)
+        try:
+            payload["traffic_series"] = period_end_traffic_series(
+                engine,
+                as_of=as_of,
+            )
+        except SQLAlchemyError:
+            payload["traffic_series"] = []
+        finally:
+            engine.dispose()
+        return payload
 
     @app.get("/api/erp/products")
     def products(as_of: date = Query(default_factory=date.today)) -> dict[str, Any]:
@@ -753,6 +824,42 @@ def create_app(project_root: Path | None = None) -> FastAPI:
             as_of,
             offer_id,
         )
+
+    @app.get("/api/erp/keyword-traffic")
+    def keyword_traffic_products(
+        as_of: date = Query(default_factory=date.today),
+    ) -> dict[str, Any]:
+        settings = DashboardSettings.from_env(root)
+        engine = create_read_only_erp_engine(settings.database_url)
+        try:
+            with Session(engine) as session:
+                return build_keyword_product_list(session, as_of=as_of)
+        finally:
+            engine.dispose()
+
+    @app.get("/api/erp/keyword-traffic/{offer_id}")
+    def keyword_traffic_product_detail(
+        offer_id: str,
+        as_of: date = Query(default_factory=date.today),
+        history_days: int = Query(90, ge=30, le=365),
+        comparison_days: int = Query(7, ge=3, le=30),
+    ) -> dict[str, Any]:
+        settings = DashboardSettings.from_env(root)
+        engine = create_read_only_erp_engine(settings.database_url)
+        try:
+            with Session(engine) as session:
+                payload = build_keyword_product_detail(
+                    session,
+                    offer_id=offer_id,
+                    as_of=as_of,
+                    history_days=history_days,
+                    comparison_days=comparison_days,
+                )
+        finally:
+            engine.dispose()
+        if payload is None:
+            raise HTTPException(status_code=404, detail="没有找到对应的店铺商品")
+        return payload
 
     @app.get("/api/erp/quadrants")
     def quadrants(
@@ -801,6 +908,43 @@ def create_app(project_root: Path | None = None) -> FastAPI:
         """Return a cached, sanitized, read-only W8 and Takealot shipment overview."""
         return logistics_overview.load(force=refresh)
 
+    @app.post("/api/erp/logistics/links")
+    def confirm_logistics_link(
+        payload: LogisticsLinkConfirmRequest,
+        request: Request,
+    ) -> dict[str, Any]:
+        """Persist one current graded candidate after operator confirmation."""
+        user = request.state.erp_user
+        try:
+            link = logistics_overview.confirm_candidate(
+                w8_order_no=payload.w8_order_no.strip(),
+                takealot_shipment_id=payload.takealot_shipment_id,
+                actor_user_id=user.id,
+                actor_username=user.username,
+            )
+        except LogisticsLinkError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return {"link": link}
+
+    @app.post("/api/erp/logistics/links/{link_id}/revoke")
+    def revoke_logistics_link(
+        link_id: int,
+        payload: LogisticsLinkRevokeRequest,
+        request: Request,
+    ) -> dict[str, Any]:
+        """Revoke an operator-confirmed link while retaining its audit history."""
+        user = request.state.erp_user
+        try:
+            link = logistics_overview.revoke_link(
+                link_id,
+                actor_user_id=user.id,
+                actor_username=user.username,
+                note=payload.note,
+            )
+        except LogisticsLinkError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return {"link": link}
+
     @app.get("/api/erp/refresh-status")
     def refresh_status(request: Request) -> dict[str, object]:
         return refresh_coordinator.status(role=_refresh_coordination_role(request.state.erp_user))
@@ -818,7 +962,12 @@ def create_app(project_root: Path | None = None) -> FastAPI:
         except RefreshBusyError as exc:
             raise HTTPException(status_code=429, detail=str(exc)) from exc
         try:
-            result = run_dashboard_refresh(root)
+            selected_store_code = current_store_code()
+            result = (
+                run_dashboard_refresh(root)
+                if selected_store_code == "current"
+                else run_dashboard_refresh(root, store_code=selected_store_code)
+            )
         except BaseException:
             refresh_coordinator.finish(
                 username=user.username,
@@ -1258,13 +1407,16 @@ def create_app(project_root: Path | None = None) -> FastAPI:
 
     @app.get("/api/competitors")
     def competitors(
+        request: Request,
         start_date: date | None = Query(default=None),
         end_date: date | None = Query(default=None),
+        own_store_scope: Literal["current", "all"] = Query(default="current"),
     ) -> dict[str, object]:
         dataset = _load_competitor_dataset(
             root,
             start_date=start_date,
             end_date=end_date,
+            own_store_codes=_own_store_codes_for_request(request, own_store_scope),
         )
         return {
             "items": frame_records(dataset.current),
@@ -1338,19 +1490,20 @@ def create_app(project_root: Path | None = None) -> FastAPI:
         engine = create_read_only_erp_engine(settings.database_url)
         try:
             with Session(engine) as session:
+                store_plids = connected_store_plids(session)
                 has_history = (
                     select(CompetitorSnapshot.id)
                     .where(CompetitorSnapshot.plid == CompetitorTarget.plid)
                     .exists()
                 )
+                statement = select(
+                    CompetitorTarget,
+                    has_history.label("has_history"),
+                ).where(CompetitorTarget.active.is_(True))
+                if store_plids:
+                    statement = statement.where(CompetitorTarget.plid.not_in(store_plids))
                 target_rows = session.execute(
-                    select(CompetitorTarget, has_history.label("has_history"))
-                    .where(
-                        CompetitorTarget.active.is_(True),
-                        ~select(OfferCurrent.offer_id)
-                        .where(OfferCurrent.productline_id == CompetitorTarget.plid)
-                        .exists(),
-                    )
+                    statement
                     .order_by(
                         CompetitorTarget.created_at.asc(),
                         CompetitorTarget.plid.asc(),
@@ -1381,6 +1534,20 @@ def create_app(project_root: Path | None = None) -> FastAPI:
             create_schema(engine)
             now = datetime.now(UTC)
             with Session(engine) as session:
+                private_store_rows = [
+                    row
+                    for row in load_connected_store_offers(session)
+                    if str(row.offer.productline_id or "").strip() == plid
+                ]
+                if private_store_rows:
+                    return {
+                        "item": None,
+                        "queued_to_active_batch": False,
+                        "automatic_store_target": True,
+                        "store_names": sorted(
+                            {row.store_name for row in private_store_rows}
+                        ),
+                    }
                 target = session.get(CompetitorTarget, plid)
                 if target is not None and target.active:
                     raise HTTPException(status_code=409, detail=f"PLID{plid} 已在监控清单中")
@@ -1429,6 +1596,8 @@ def create_app(project_root: Path | None = None) -> FastAPI:
         return {
             "item": result,
             "queued_to_active_batch": queued,
+            "automatic_store_target": False,
+            "store_names": [],
         }
 
     @app.patch("/api/competitors/targets/{plid}")
@@ -1580,39 +1749,61 @@ def create_app(project_root: Path | None = None) -> FastAPI:
         return {"ok": True, "accepted": accepted, "status": status}
 
     @app.get("/api/competitors/store-targets")
-    def competitor_store_targets() -> dict[str, list[dict[str, object]]]:
-        """Return every current own-store PLID as an automatic follower target."""
+    def competitor_store_targets(
+        request: Request,
+        own_store_scope: Literal["current", "all"] = Query(default="current"),
+    ) -> dict[str, object]:
+        """Return private PLIDs for the selected store or authorized all-store view."""
         settings = DashboardSettings.from_env(root)
         engine = create_read_only_erp_engine(settings.database_url)
         try:
             with Session(engine) as session:
-                rows = list(
-                    session.scalars(
-                        select(OfferCurrent).order_by(
-                            OfferCurrent.productline_id,
-                            OfferCurrent.offer_id,
-                        )
-                    )
-                )
-            grouped: dict[str, list[OfferCurrent]] = defaultdict(list)
+                rows = load_connected_store_offers(session)
+            accessible_codes = _own_store_codes_for_request(request, "all")
+            accessible_rows = [row for row in rows if row.store_code in accessible_codes]
+            selected_codes = _own_store_codes_for_request(request, own_store_scope)
+            rows = [row for row in accessible_rows if row.store_code in selected_codes]
+            grouped: dict[str, list[ConnectedStoreOffer]] = defaultdict(list)
             for row in rows:
-                plid = str(row.productline_id or "").strip()
+                plid = str(row.offer.productline_id or "").strip()
                 if plid:
                     grouped[plid].append(row)
+            items = [
+                {
+                    "plid": plid,
+                    "url": f"https://www.takealot.com/p/PLID{plid}",
+                    "title": next(
+                        (row.offer.title for row in offers if row.offer.title),
+                        f"PLID{plid}",
+                    ),
+                    "offer_count": len(offers),
+                    "store_count": len({row.store_code for row in offers}),
+                    "store_names": sorted({row.store_name for row in offers}),
+                    "captured_at": min(
+                        row.offer.captured_at for row in offers
+                    ).isoformat(),
+                }
+                for plid, offers in sorted(grouped.items())
+            ]
+            accessible_memberships = {
+                (row.store_code, str(row.offer.productline_id).strip())
+                for row in accessible_rows
+                if str(row.offer.productline_id or "").strip()
+            }
+            selected_memberships = {
+                (row.store_code, str(row.offer.productline_id).strip())
+                for row in rows
+                if str(row.offer.productline_id or "").strip()
+            }
+            accessible_plids = {plid for _, plid in accessible_memberships}
             return {
-                "items": [
-                    {
-                        "plid": plid,
-                        "url": f"https://www.takealot.com/p/PLID{plid}",
-                        "title": next(
-                            (row.title for row in offers if row.title),
-                            f"PLID{plid}",
-                        ),
-                        "offer_count": len(offers),
-                        "captured_at": min(row.captured_at for row in offers).isoformat(),
-                    }
-                    for plid, offers in grouped.items()
-                ]
+                "items": items,
+                "scope": own_store_scope,
+                "selected_store_count": len(selected_codes),
+                "selected_membership_count": len(selected_memberships),
+                "all_store_count": len(accessible_codes),
+                "all_store_unique_count": len(accessible_plids),
+                "all_store_membership_count": len(accessible_memberships),
             }
         finally:
             engine.dispose()
@@ -1680,13 +1871,16 @@ def create_app(project_root: Path | None = None) -> FastAPI:
     @app.get("/api/competitors/{plid}")
     def competitor_detail(
         plid: str,
+        request: Request,
         start_date: date | None = Query(default=None),
         end_date: date | None = Query(default=None),
+        own_store_scope: Literal["current", "all"] = Query(default="current"),
     ) -> dict[str, list[dict[str, Any]]]:
         dataset = _load_competitor_dataset(
             root,
             start_date=start_date,
             end_date=end_date,
+            own_store_codes=_own_store_codes_for_request(request, own_store_scope),
         )
         history = dataset.history
         reviews = dataset.reviews
@@ -1705,10 +1899,9 @@ def create_app(project_root: Path | None = None) -> FastAPI:
         if not variants.empty:
             variants = variants.loc[variants["plid"].astype(str) == plid]
         if store_item is not None:
-            history = history.iloc[0:0]
-            variants = variants.iloc[0:0]
-            if not store_item["跟卖报价"]:
-                reviews = reviews.iloc[0:0]
+            history = dataset.store_history
+            if not history.empty:
+                history = history.loc[history["plid"].astype(str) == plid]
         return {
             "history": frame_records(history),
             "reviews": frame_records(reviews),
@@ -1783,14 +1976,7 @@ def create_app(project_root: Path | None = None) -> FastAPI:
             try:
                 create_schema(engine)
                 with Session(engine) as session:
-                    followers_only = (
-                        session.scalar(
-                            select(OfferCurrent.offer_id)
-                            .where(OfferCurrent.productline_id == plid)
-                            .limit(1)
-                        )
-                        is not None
-                    )
+                    followers_only = plid in connected_store_plids(session)
                 try:
                     async with competitor_public_client.lease(
                         wait_callback=lambda delay_seconds: report_stage(
@@ -2052,15 +2238,7 @@ def _sync_discovered_competitor_targets(
     now = datetime.now(UTC)
     added: list[CompetitorDiscoveredTarget] = []
     with Session(engine) as session:
-        store_plids = {
-            str(value).strip()
-            for value in session.scalars(
-                select(OfferCurrent.productline_id).where(
-                    OfferCurrent.productline_id.is_not(None)
-                )
-            )
-            if str(value or "").strip()
-        }
+        store_plids = connected_store_plids(session)
         unique_targets = {
             target.plid: target
             for target in discovered_targets
@@ -2220,6 +2398,10 @@ def _required_permission(path: str, method: str) -> str | tuple[str, ...] | None
         return STORE_VIEW, COMPETITORS_VIEW, DAILY_REPORT_VIEW
     if path == "/api/erp/refresh":
         return REFRESH_RUN
+    if path.startswith("/api/erp/logistics/links"):
+        return STORE_VIEW if safe_method else LOGISTICS_MANAGE
+    if path.startswith("/api/erp/keyword-traffic"):
+        return STORE_VIEW
     if path.startswith("/api/erp/daily-report/export"):
         return DAILY_REPORT_VIEW if safe_method else DAILY_REPORT_EXPORT
     if path.startswith("/api/erp/daily-report"):
@@ -2256,6 +2438,7 @@ def _requires_connected_store_access(path: str) -> bool:
             (
                 "/api/erp/summary",
                 "/api/erp/products",
+                "/api/erp/keyword-traffic",
                 "/api/erp/quadrants",
                 "/api/erp/risks",
                 "/api/erp/logistics",
@@ -2286,6 +2469,8 @@ def _permission_denied_message(permission: str | tuple[str, ...]) -> str:
         return "当前账号不能采集竞品"
     if permission == REFRESH_RUN:
         return "当前账号不能刷新全部数据"
+    if permission == LOGISTICS_MANAGE:
+        return "当前账号可以查看物流数据，但不能确认或撤销物流关联"
     if permission in {REPORTS_GENERATE, NFT102_MANAGE}:
         return "当前账号不能执行报表生成或续写"
     return "当前账号没有访问此模块的权限"
@@ -2328,6 +2513,7 @@ def _load_competitor_dataset(
     *,
     start_date: date | None = None,
     end_date: date | None = None,
+    own_store_codes: set[str] | None = None,
 ) -> CompetitorDataset:
     if start_date is not None and end_date is not None and start_date > end_date:
         raise HTTPException(status_code=422, detail="开始日期不能晚于结束日期")
@@ -2349,11 +2535,30 @@ def _load_competitor_dataset(
                 engine,
                 start_date=start_date,
                 end_date=end_date,
+                own_store_codes=own_store_codes,
             )
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
     finally:
         engine.dispose()
+
+
+def _own_store_codes_for_request(
+    request: Request,
+    own_store_scope: Literal["current", "all"],
+) -> set[str]:
+    """Resolve connected own-store visibility without exposing unauthorized stores."""
+    accessible_codes = {
+        store.code
+        for store in request.state.erp_user.accessible_stores
+        if store.active and store.data_connected
+    }
+    if own_store_scope == "all":
+        return accessible_codes
+    selected_store = getattr(request.state, "erp_store", None)
+    if selected_store is None or selected_store.code not in accessible_codes:
+        return set()
+    return {selected_store.code}
 
 
 def _write_daily_report(

@@ -14,12 +14,15 @@ from takealot_ops.domain import OfferRecord, SaleRecord
 from takealot_ops.settings import Settings
 from takealot_ops.storage.migrations import create_engine_for_settings, create_schema
 from takealot_ops.storage.models import (
+    ErpStore,
     OfferCurrent,
     OfferSnapshot,
     SaleItem,
     StoreOfferBaseline,
+    StoreOfferObservation,
 )
 from takealot_ops.storage.repository import Repository
+from takealot_ops.storage.store_context import store_scope
 
 
 @pytest.fixture
@@ -91,7 +94,12 @@ def sale() -> SaleRecord:
 
 def test_offer_snapshot_is_unique_by_day_and_offer_id(engine: Engine, offer: OfferRecord) -> None:
     snapshot_date = date(2026, 7, 20)
-    updated_offer = replace(offer, title="Updated title", selling_price=Decimal("189.99"))
+    updated_offer = replace(
+        offer,
+        title="Updated title",
+        selling_price=Decimal("189.99"),
+        captured_at=datetime(2026, 7, 20, 9, 0, tzinfo=UTC),
+    )
 
     with Session(engine) as session:
         with session.begin():
@@ -102,6 +110,9 @@ def test_offer_snapshot_is_unique_by_day_and_offer_id(engine: Engine, offer: Off
     with Session(engine) as session:
         snapshots = session.scalars(select(OfferSnapshot)).all()
         store_baselines = session.scalars(select(StoreOfferBaseline)).all()
+        store_observations = session.scalars(
+            select(StoreOfferObservation).order_by(StoreOfferObservation.captured_at)
+        ).all()
 
     assert len(snapshots) == 1
     assert snapshots[0].title == "Updated title"
@@ -111,6 +122,48 @@ def test_offer_snapshot_is_unique_by_day_and_offer_id(engine: Engine, offer: Off
     assert store_baselines[0].title == offer.title
     assert store_baselines[0].selling_price == offer.selling_price
     assert store_baselines[0].captured_at == offer.captured_at.replace(tzinfo=None)
+    assert [row.selling_price for row in store_observations] == [
+        offer.selling_price,
+        updated_offer.selling_price,
+    ]
+    assert store_observations[-1].captured_at == updated_offer.captured_at.replace(
+        tzinfo=None
+    )
+
+
+def test_observation_seed_preserves_each_connected_store_scope(engine: Engine) -> None:
+    now = datetime(2026, 8, 5, 2, tzinfo=UTC)
+    with Session(engine) as session, session.begin():
+        session.add(
+            ErpStore(
+                code="store-02",
+                display_name="Store Two",
+                active=True,
+                data_connected=True,
+                created_at=now.replace(tzinfo=None),
+                updated_at=now.replace(tzinfo=None),
+            )
+        )
+        for store_code, offer_id in (("current", "offer-a"), ("store-02", "offer-b")):
+            session.add(
+                StoreOfferBaseline(
+                    store_code=store_code,
+                    display_date=date(2026, 8, 5),
+                    offer_id=offer_id,
+                    productline_id=f"plid-{offer_id}",
+                    captured_at=now,
+                )
+            )
+
+    create_schema(engine)
+
+    with Session(engine) as session:
+        with store_scope("current"):
+            current = session.scalars(select(StoreOfferObservation.offer_id)).all()
+        with store_scope("store-02"):
+            second = session.scalars(select(StoreOfferObservation.offer_id)).all()
+    assert current == ["offer-a"]
+    assert second == ["offer-b"]
 
 
 def test_repeated_sale_updates_status_without_duplicate_order_item(

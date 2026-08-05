@@ -23,6 +23,7 @@ from takealot_ops.erp.daily_report import (
     eliminate_stock_alert,
     export_operations_workbook,
     operations_business_date,
+    period_end_traffic_series,
     record_daily_report_failure,
     reminder_payload,
     revert_confirmation,
@@ -76,6 +77,53 @@ def test_capture_business_date_uses_beijing_ten_to_ten_cycle() -> None:
     assert operations_business_date(
         datetime(2026, 7, 26, 2, 0, tzinfo=UTC)
     ) == date(2026, 7, 25)
+
+
+def test_period_end_traffic_series_uses_latest_success_and_keeps_gaps() -> None:
+    engine = _engine()
+    previous_date = REPORT_DATE - timedelta(days=1)
+    capture_daily_report(
+        engine,
+        business_date=previous_date,
+        slot="pre_close",
+        captured_at=_report_capture_time(previous_date, 1),
+    )
+    capture_daily_report(
+        engine,
+        business_date=REPORT_DATE,
+        slot="pre_close",
+        captured_at=_report_capture_time(REPORT_DATE, 1),
+    )
+    with Session(engine) as session, session.begin():
+        session.get(OfferCurrent, "offer-b").page_views_30_days = None
+    capture_daily_report(
+        engine,
+        business_date=REPORT_DATE,
+        slot="pre_close",
+        captured_at=_report_capture_time(REPORT_DATE, 1, 30),
+    )
+    failed_date = REPORT_DATE + timedelta(days=1)
+    record_daily_report_failure(
+        engine,
+        business_date=failed_date,
+        slot="pre_close",
+        captured_at=_report_capture_time(failed_date, 1),
+        reason="测试刷新失败",
+    )
+
+    series = period_end_traffic_series(engine, as_of=failed_date)
+
+    assert [point["business_date"] for point in series] == [
+        previous_date.isoformat(),
+        REPORT_DATE.isoformat(),
+        failed_date.isoformat(),
+    ]
+    assert series[0]["page_views_30_days_total"] == 70
+    assert series[0]["product_count"] == 2
+    assert series[1]["page_views_30_days_total"] == 50
+    assert series[1]["missing_product_count"] == 1
+    assert series[2]["status"] == "failed"
+    assert series[2]["page_views_30_days_total"] is None
 
 
 def _seed(engine) -> None:

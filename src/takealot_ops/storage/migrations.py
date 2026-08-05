@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Protocol
@@ -11,12 +12,28 @@ from sqlalchemy import Engine, create_engine, event, insert, inspect, select, up
 from sqlalchemy.engine import make_url
 from sqlalchemy.orm import Session
 
-from takealot_ops.storage.models import Base, ErpStore, OfferCurrent, StoreOfferBaseline
+from takealot_ops.storage.models import (
+    Base,
+    ErpStore,
+    ErpUser,
+    OfferCurrent,
+    StoreOfferBaseline,
+    StoreOfferObservation,
+)
+from takealot_ops.storage.store_context import store_scope
 
 
 class DatabaseSettings(Protocol):
     @property
     def database_url(self) -> str: ...
+
+
+class StoreSettings(Protocol):
+    @property
+    def code(self) -> str: ...
+
+    @property
+    def display_name(self) -> str: ...
 
 
 def create_engine_for_settings(settings: DatabaseSettings) -> Engine:
@@ -67,6 +84,7 @@ def create_read_only_engine(database_url: str) -> Engine:
 def create_schema(engine: Engine) -> None:
     """Create the current schema and apply retained in-place upgrades."""
     Base.metadata.create_all(engine)
+    _add_store_scope_columns_and_keys(engine)
     _add_offer_created_at_columns(engine)
     _add_erp_user_permissions_column(engine)
     _add_erp_user_store_access_column(engine)
@@ -76,6 +94,193 @@ def create_schema(engine: Engine) -> None:
     if engine.dialect.name == "sqlite":
         _add_sqlite_offer_stock_columns(engine)
     _seed_store_offer_baselines(engine)
+    _seed_store_offer_observations(engine)
+
+
+def sync_configured_erp_stores(
+    engine: Engine,
+    stores: Sequence[StoreSettings],
+) -> None:
+    """Register configured credentials as connected stores and widen administrators."""
+    now = datetime.utcnow()
+    with Session(engine) as session, session.begin():
+        existing = {
+            store.code: store
+            for store in session.scalars(select(ErpStore)).all()
+        }
+        configured_codes: set[str] = set()
+        for configured in stores:
+            configured_codes.add(configured.code)
+            store = existing.get(configured.code)
+            if store is None:
+                session.add(
+                    ErpStore(
+                        code=configured.code,
+                        display_name=configured.display_name,
+                        active=True,
+                        data_connected=True,
+                        created_at=now,
+                        updated_at=now,
+                    )
+                )
+                continue
+            store.display_name = configured.display_name
+            store.active = True
+            store.data_connected = True
+            store.updated_at = now
+        for store in existing.values():
+            if store.code not in configured_codes and store.code != "current":
+                store.data_connected = False
+                store.updated_at = now
+        for user in session.scalars(select(ErpUser).where(ErpUser.role == "admin")):
+            user.store_access_all = True
+
+
+_STORE_SCOPED_TABLES = (
+    "collection_runs",
+    "offer_current",
+    "offer_snapshots",
+    "store_offer_baselines",
+    "store_offer_observations",
+    "sale_items",
+    "return_items",
+    "daily_product_metrics",
+    "anomaly_events",
+    "data_quality_events",
+    "logistics_provider_snapshots",
+    "erp_refresh_state",
+    "daily_report_runs",
+    "daily_inventory_snapshots",
+    "daily_report_observations",
+    "daily_report_resolutions",
+    "daily_report_audits",
+    "daily_report_deadline_snapshots",
+)
+
+_STORE_UNIQUE_UPGRADES = {
+    "offer_snapshots": (
+        ("snapshot_date", "offer_id"),
+        ("store_code", "snapshot_date", "offer_id"),
+        "uq_offer_snapshots_store_date_offer",
+    ),
+    "store_offer_baselines": (
+        ("display_date", "offer_id"),
+        ("store_code", "display_date", "offer_id"),
+        "uq_store_offer_baselines_store_date_offer",
+    ),
+    "store_offer_observations": (
+        ("captured_at", "offer_id"),
+        ("store_code", "captured_at", "offer_id"),
+        "uq_store_offer_observations_store_time_offer",
+    ),
+    "daily_product_metrics": (
+        ("metric_date", "offer_id"),
+        ("store_code", "metric_date", "offer_id"),
+        "uq_daily_product_metrics_store_date_offer",
+    ),
+    "anomaly_events": (
+        ("event_date", "offer_id", "anomaly_type"),
+        ("store_code", "event_date", "offer_id", "anomaly_type"),
+        "uq_anomaly_events_store_date_offer_type",
+    ),
+    "daily_inventory_snapshots": (
+        ("inventory_date", "offer_id"),
+        ("store_code", "inventory_date", "offer_id"),
+        "uq_daily_inventory_store_date_offer",
+    ),
+    "daily_report_observations": (
+        ("run_id", "offer_id"),
+        ("store_code", "run_id", "offer_id"),
+        "uq_daily_report_observation_store_run_offer",
+    ),
+    "daily_report_resolutions": (
+        ("business_date", "offer_id"),
+        ("store_code", "business_date", "offer_id"),
+        "uq_daily_report_resolution_store_date_offer",
+    ),
+}
+
+_STORE_COMPOSITE_PRIMARY_KEYS = {
+    "logistics_provider_snapshots": ("store_code", "provider"),
+    "erp_refresh_state": ("store_code", "action_key"),
+    "daily_report_deadline_snapshots": ("store_code", "business_date"),
+}
+
+
+def _add_store_scope_columns_and_keys(engine: Engine) -> None:
+    """Backfill the original dataset as ``current`` and enable per-store records."""
+    with engine.begin() as connection:
+        schema = inspect(connection)
+        preparer = connection.dialect.identifier_preparer
+        for table_name in _STORE_SCOPED_TABLES:
+            if not schema.has_table(table_name):
+                continue
+            columns = {str(column["name"]) for column in schema.get_columns(table_name)}
+            table = preparer.quote(table_name)
+            store_column = preparer.quote("store_code")
+            if "store_code" not in columns:
+                connection.exec_driver_sql(
+                    f"ALTER TABLE {table} ADD COLUMN {store_column} "
+                    "VARCHAR(64) NOT NULL DEFAULT 'current'"
+                )
+            indexes = inspect(connection).get_indexes(table_name)
+            if not any(index.get("column_names") == ["store_code"] for index in indexes):
+                index_name = preparer.quote(f"ix_{table_name}_store_code")
+                connection.exec_driver_sql(
+                    f"CREATE INDEX {index_name} ON {table} ({store_column})"
+                )
+
+        if engine.dialect.name != "mysql":
+            return
+        for table_name, (old_columns, new_columns, new_name) in _STORE_UNIQUE_UPGRADES.items():
+            _replace_mysql_unique_constraint(
+                connection,
+                table_name=table_name,
+                old_columns=old_columns,
+                new_columns=new_columns,
+                new_name=new_name,
+            )
+        for table_name, primary_columns in _STORE_COMPOSITE_PRIMARY_KEYS.items():
+            primary_key = inspect(connection).get_pk_constraint(table_name)
+            if tuple(primary_key.get("constrained_columns") or ()) == primary_columns:
+                continue
+            table = preparer.quote(table_name)
+            quoted_columns = ", ".join(
+                preparer.quote(column) for column in primary_columns
+            )
+            connection.exec_driver_sql(
+                f"ALTER TABLE {table} DROP PRIMARY KEY, ADD PRIMARY KEY ({quoted_columns})"
+            )
+
+
+def _replace_mysql_unique_constraint(
+    connection: Any,
+    *,
+    table_name: str,
+    old_columns: tuple[str, ...],
+    new_columns: tuple[str, ...],
+    new_name: str,
+) -> None:
+    schema = inspect(connection)
+    constraints = schema.get_unique_constraints(table_name)
+    if any(tuple(item.get("column_names") or ()) == new_columns for item in constraints):
+        return
+    preparer = connection.dialect.identifier_preparer
+    table = preparer.quote(table_name)
+    for constraint in constraints:
+        if tuple(constraint.get("column_names") or ()) != old_columns:
+            continue
+        old_name = str(constraint.get("name") or "")
+        if old_name:
+            connection.exec_driver_sql(
+                f"ALTER TABLE {table} DROP INDEX {preparer.quote(old_name)}"
+            )
+        break
+    quoted_columns = ", ".join(preparer.quote(column) for column in new_columns)
+    connection.exec_driver_sql(
+        f"ALTER TABLE {table} ADD CONSTRAINT {preparer.quote(new_name)} "
+        f"UNIQUE ({quoted_columns})"
+    )
 
 
 def _seed_store_offer_baselines(engine: Engine) -> None:
@@ -116,6 +321,81 @@ def _seed_store_offer_baselines(engine: Engine) -> None:
                     captured_at=captured_at,
                 )
             )
+
+
+def _seed_store_offer_observations(engine: Engine) -> None:
+    """Seed retained baselines and the latest current Seller API state."""
+    display_timezone = ZoneInfo("Asia/Shanghai")
+    with Session(engine) as session, session.begin():
+        store_codes = list(
+            session.scalars(
+                select(ErpStore.code)
+                .where(ErpStore.active.is_(True), ErpStore.data_connected.is_(True))
+                .order_by(ErpStore.code)
+            )
+        ) or ["current"]
+        for store_code in store_codes:
+            with store_scope(store_code):
+                if session.scalar(select(StoreOfferObservation.id).limit(1)) is not None:
+                    continue
+                for baseline in session.scalars(select(StoreOfferBaseline)):
+                    exists = session.scalar(
+                        select(StoreOfferObservation.id).where(
+                            StoreOfferObservation.captured_at == baseline.captured_at,
+                            StoreOfferObservation.offer_id == baseline.offer_id,
+                        )
+                    )
+                    if exists is not None:
+                        continue
+                    session.add(
+                        StoreOfferObservation(
+                            store_code=store_code,
+                            display_date=baseline.display_date,
+                            offer_id=baseline.offer_id,
+                            productline_id=baseline.productline_id,
+                            sku=baseline.sku,
+                            title=baseline.title,
+                            image_url=baseline.image_url,
+                            selling_price=baseline.selling_price,
+                            status=baseline.status,
+                            total_stock=baseline.total_stock,
+                            takealot_available_stock=baseline.takealot_available_stock,
+                            seller_available_stock=baseline.seller_available_stock,
+                            captured_at=baseline.captured_at,
+                        )
+                    )
+                for offer in session.scalars(select(OfferCurrent)):
+                    productline_id = str(offer.productline_id or "").strip()
+                    if not productline_id:
+                        continue
+                    captured_at = offer.captured_at
+                    if captured_at.tzinfo is None:
+                        captured_at = captured_at.replace(tzinfo=UTC)
+                    exists = session.scalar(
+                        select(StoreOfferObservation.id).where(
+                            StoreOfferObservation.captured_at == captured_at,
+                            StoreOfferObservation.offer_id == offer.offer_id,
+                        )
+                    )
+                    if exists is not None:
+                        continue
+                    session.add(
+                        StoreOfferObservation(
+                            store_code=store_code,
+                            display_date=captured_at.astimezone(display_timezone).date(),
+                            offer_id=offer.offer_id,
+                            productline_id=productline_id,
+                            sku=offer.sku,
+                            title=offer.title,
+                            image_url=offer.image_url,
+                            selling_price=offer.selling_price,
+                            status=offer.status,
+                            total_stock=offer.total_stock,
+                            takealot_available_stock=offer.takealot_available_stock,
+                            seller_available_stock=offer.seller_available_stock,
+                            captured_at=captured_at,
+                        )
+                    )
 
 
 def _add_offer_created_at_columns(engine: Engine) -> None:

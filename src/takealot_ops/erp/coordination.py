@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 from takealot_ops.settings import DashboardSettings
 from takealot_ops.storage.migrations import create_engine_for_settings, create_schema
 from takealot_ops.storage.models import ErpRefreshState
+from takealot_ops.storage.store_context import current_store_code
 
 
 REFRESH_ACTION_KEY = "full_store_refresh"
@@ -81,7 +82,10 @@ class RefreshCoordinator:
             if succeeded:
                 now = _utc_now()
                 with Session(self._get_engine()) as session:
-                    state = session.get(ErpRefreshState, REFRESH_ACTION_KEY)
+                    state = session.get(
+                        ErpRefreshState,
+                        (current_store_code(), REFRESH_ACTION_KEY),
+                    )
                     if state is None:
                         state = ErpRefreshState(
                             action_key=REFRESH_ACTION_KEY,
@@ -102,7 +106,10 @@ class RefreshCoordinator:
     def _status_locked(self, *, role: str) -> dict[str, object]:
         now = _utc_now()
         with Session(self._get_engine()) as session:
-            state = session.get(ErpRefreshState, REFRESH_ACTION_KEY)
+            state = session.get(
+                ErpRefreshState,
+                (current_store_code(), REFRESH_ACTION_KEY),
+            )
             last_success_at = state.last_success_at if state is not None else None
             last_success_by = state.last_success_by if state is not None else None
             last_success_display_name = (

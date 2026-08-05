@@ -7,7 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
 from takealot_ops.competitors.api import CompetitorNetworkError
@@ -18,8 +18,18 @@ from takealot_ops.competitors.service import (
 )
 from takealot_ops.erp.daily_report import capture_daily_report
 from takealot_ops.erp.web import create_app
+from takealot_ops.logistics.service import LogisticsOverviewService
 from takealot_ops.storage.migrations import create_schema
-from takealot_ops.storage.models import CompetitorSnapshot, ErpSession, OfferCurrent
+from takealot_ops.storage.models import (
+    CompetitorTarget,
+    CompetitorSnapshot,
+    ErpStore,
+    ErpSession,
+    OfferCurrent,
+    OfferSnapshot,
+    StoreOfferBaseline,
+)
+from takealot_ops.storage.store_context import store_scope
 
 
 PROJECT_ROOT = Path(__file__).parents[2]
@@ -67,13 +77,39 @@ def test_competitor_radar_returns_automatic_store_targets_and_separate_items(
     database_path = tmp_path / "erp-store-radar.db"
     database_url = f"sqlite:///{database_path.as_posix()}"
     monkeypatch.setenv("TAKEALOT_DATABASE_URL", database_url)
+    monkeypatch.setenv(
+        "TAKEALOT_STORES",
+        "current|Alpha Store|STORE_KEY_ALPHA;store-02|Beta Store|STORE_KEY_BETA",
+    )
+    monkeypatch.setenv("STORE_KEY_ALPHA", "alpha-key")
+    monkeypatch.setenv("STORE_KEY_BETA", "beta-key")
     app = create_app(tmp_path)
 
     with TestClient(app, client=("127.0.0.1", 50000)) as client:
-        _bootstrap(client)
+        issued = _bootstrap(client)
         engine = create_engine(database_url)
+        now = datetime(2026, 8, 2, 1, tzinfo=UTC)
         with Session(engine) as session, session.begin():
+            current_store = session.scalar(
+                select(ErpStore).where(ErpStore.code == "current")
+            )
+            assert current_store is not None
+            current_store.display_name = "Alpha Store"
+            current_store.active = True
+            current_store.data_connected = True
             session.add(
+                ErpStore(
+                    code="store-02",
+                    display_name="Beta Store",
+                    active=True,
+                    data_connected=True,
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+        with store_scope("current"), Session(engine) as session, session.begin():
+            session.add_all(
+                [
                 OfferCurrent(
                     offer_id="own-offer",
                     productline_id="12345678",
@@ -81,28 +117,169 @@ def test_competitor_radar_returns_automatic_store_targets_and_separate_items(
                     title="Own Product",
                     selling_price=99,
                     total_stock=5,
-                    captured_at=datetime(2026, 8, 2, 1, tzinfo=UTC),
-                )
+                    captured_at=now,
+                ),
+                CompetitorTarget(
+                    plid="99999999",
+                    offer_group_plid="99999999",
+                    url="https://www.takealot.com/p/PLID99999999",
+                    title="True competitor",
+                    active=True,
+                    created_at=now,
+                    updated_at=now,
+                ),
+                CompetitorTarget(
+                    plid="87654321",
+                    offer_group_plid="87654321",
+                    url="https://www.takealot.com/p/PLID87654321",
+                    title="Should become own store",
+                    active=True,
+                    created_at=now,
+                    updated_at=now,
+                ),
+                ]
+            )
+        with store_scope("store-02"), Session(engine) as session, session.begin():
+            session.add_all(
+                [
+                    OfferCurrent(
+                        offer_id="shared-own-offer",
+                        productline_id="12345678",
+                        sku="SHARED-SKU",
+                        title="Shared Own Product",
+                        selling_price=101,
+                        total_stock=7,
+                        captured_at=now + timedelta(minutes=1),
+                    ),
+                    OfferCurrent(
+                        offer_id="beta-own-offer",
+                        productline_id="87654321",
+                        sku="BETA-SKU",
+                        title="Beta Own Product",
+                        selling_price=199,
+                        total_stock=3,
+                        captured_at=now + timedelta(minutes=2),
+                    ),
+                    StoreOfferBaseline(
+                        display_date=date(2026, 8, 2),
+                        offer_id="beta-own-offer",
+                        productline_id="87654321",
+                        sku="BETA-SKU",
+                        title="Beta Own Product",
+                        image_url=None,
+                        selling_price=199,
+                        status="buyable",
+                        total_stock=3,
+                        takealot_available_stock=3,
+                        seller_available_stock=0,
+                        captured_at=now + timedelta(minutes=2),
+                    ),
+                ]
             )
         create_schema(engine)
         engine.dispose()
 
         automatic_targets = client.get("/api/competitors/store-targets")
+        all_store_targets = client.get(
+            "/api/competitors/store-targets?own_store_scope=all"
+        )
+        beta_targets = client.get(
+            "/api/competitors/store-targets",
+            headers={"X-Store-Code": "store-02"},
+        )
+        competitor_targets = client.get("/api/competitors/targets")
         overview = client.get("/api/competitors")
+        all_store_overview = client.get("/api/competitors?own_store_scope=all")
+        private_add = client.post(
+            "/api/competitors/targets",
+            headers={"X-CSRF-Token": str(issued["csrf_token"])},
+            json={"url": "https://www.takealot.com/p/PLID87654321"},
+        )
+        competitor_add = client.post(
+            "/api/competitors/targets",
+            headers={"X-CSRF-Token": str(issued["csrf_token"])},
+            json={"url": "https://www.takealot.com/p/PLID77777777"},
+        )
 
     assert automatic_targets.status_code == 200
-    assert automatic_targets.json()["items"] == [
+    assert automatic_targets.json() == {
+        "items": [
+            {
+                "plid": "12345678",
+                "url": "https://www.takealot.com/p/PLID12345678",
+                "title": "Own Product",
+                "offer_count": 1,
+                "store_count": 1,
+                "store_names": ["Alpha Store"],
+                "captured_at": "2026-08-02T01:00:00",
+            },
+        ],
+        "scope": "current",
+        "selected_store_count": 1,
+        "selected_membership_count": 1,
+        "all_store_count": 2,
+        "all_store_unique_count": 2,
+        "all_store_membership_count": 3,
+    }
+    assert all_store_targets.status_code == 200
+    assert all_store_targets.json()["items"] == [
         {
             "plid": "12345678",
             "url": "https://www.takealot.com/p/PLID12345678",
             "title": "Own Product",
-            "offer_count": 1,
+            "offer_count": 2,
+            "store_count": 2,
+            "store_names": ["Alpha Store", "Beta Store"],
             "captured_at": "2026-08-02T01:00:00",
-        }
+        },
+        {
+            "plid": "87654321",
+            "url": "https://www.takealot.com/p/PLID87654321",
+            "title": "Beta Own Product",
+            "offer_count": 1,
+            "store_count": 1,
+            "store_names": ["Beta Store"],
+            "captured_at": "2026-08-02T01:02:00",
+        },
     ]
+    assert all_store_targets.json() | {"items": []} == {
+        "items": [],
+        "scope": "all",
+        "selected_store_count": 2,
+        "selected_membership_count": 3,
+        "all_store_count": 2,
+        "all_store_unique_count": 2,
+        "all_store_membership_count": 3,
+    }
+    assert beta_targets.status_code == 200
+    assert {item["plid"] for item in beta_targets.json()["items"]} == {
+        "12345678",
+        "87654321",
+    }
+    assert all(item["store_names"] == ["Beta Store"] for item in beta_targets.json()["items"])
+    assert competitor_targets.status_code == 200
+    assert [item["plid"] for item in competitor_targets.json()["items"]] == ["99999999"]
     assert overview.status_code == 200
-    assert overview.json()["items"] == []
-    assert overview.json()["store_items"][0]["来源"] == "own_store"
+    assert [item["plid"] for item in overview.json()["items"]] == []
+    assert {item["plid"] for item in overview.json()["store_items"]} == {
+        "12345678",
+    }
+    assert all_store_overview.status_code == 200
+    assert {item["plid"] for item in all_store_overview.json()["store_items"]} == {
+        "12345678",
+        "87654321",
+    }
+    assert all(item["来源"] == "own_store" for item in overview.json()["store_items"])
+    assert private_add.status_code == 200
+    assert private_add.json() == {
+        "item": None,
+        "queued_to_active_batch": False,
+        "automatic_store_target": True,
+        "store_names": ["Beta Store"],
+    }
+    assert competitor_add.status_code == 200
+    assert competitor_add.json()["item"]["plid"] == "77777777"
+    assert competitor_add.json()["automatic_store_target"] is False
 
 
 def test_collect_routes_own_store_plid_to_follower_only_collection(
@@ -147,13 +324,38 @@ def test_collect_routes_own_store_plid_to_follower_only_collection(
     database_path = tmp_path / "erp-own-store-collect.db"
     database_url = f"sqlite:///{database_path.as_posix()}"
     monkeypatch.setenv("TAKEALOT_DATABASE_URL", database_url)
+    monkeypatch.setenv(
+        "TAKEALOT_STORES",
+        "current|Alpha Store|STORE_KEY_ALPHA;store-02|Beta Store|STORE_KEY_BETA",
+    )
+    monkeypatch.setenv("STORE_KEY_ALPHA", "alpha-key")
+    monkeypatch.setenv("STORE_KEY_BETA", "beta-key")
     monkeypatch.setattr("takealot_ops.erp.web.CompetitorCollector", RoutingCollector)
     app = create_app(tmp_path)
 
     with TestClient(app, client=("127.0.0.1", 50000)) as client:
         session = _bootstrap(client)
         engine = create_engine(database_url)
+        now = datetime(2026, 8, 3, 1, tzinfo=UTC)
         with Session(engine) as database_session, database_session.begin():
+            current_store = database_session.scalar(
+                select(ErpStore).where(ErpStore.code == "current")
+            )
+            assert current_store is not None
+            current_store.display_name = "Alpha Store"
+            current_store.active = True
+            current_store.data_connected = True
+            database_session.add(
+                ErpStore(
+                    code="store-02",
+                    display_name="Beta Store",
+                    active=True,
+                    data_connected=True,
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+        with store_scope("store-02"), Session(engine) as database_session, database_session.begin():
             database_session.add(
                 OfferCurrent(
                     offer_id="own-offer",
@@ -162,7 +364,7 @@ def test_collect_routes_own_store_plid_to_follower_only_collection(
                     title="Own Product",
                     selling_price=99,
                     total_stock=5,
-                    captured_at=datetime(2026, 8, 3, 1, tzinfo=UTC),
+                    captured_at=now,
                 )
             )
         engine.dispose()
@@ -700,7 +902,168 @@ def test_viewer_can_read_but_cannot_run_actions(
         )
         assert denied_export.status_code == 403
         assert denied_export.json()["detail"] == "当前账号不能生成运营日报 Excel"
+        denied_logistics_link = viewer.post(
+            "/api/erp/logistics/links",
+            headers={"X-CSRF-Token": csrf},
+            json={"w8_order_no": "CR260716002374", "takealot_shipment_id": 8434254},
+        )
+        assert denied_logistics_link.status_code == 403
+        assert (
+            denied_logistics_link.json()["detail"]
+            == "当前账号可以查看物流数据，但不能确认或撤销物流关联"
+        )
+        assert viewer.get("/api/erp/keyword-traffic?as_of=2026-08-03").status_code == 200
+        removed_manual_route = viewer.post(
+            "/api/erp/keyword-traffic",
+            headers={"X-CSRF-Token": csrf},
+            json={},
+        )
+        assert removed_manual_route.status_code == 405
         assert viewer.get("/api/auth/users").status_code == 403
+
+
+def test_keyword_traffic_routes_automatically_detect_title_change(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    database_path = tmp_path / "erp-keyword-traffic.db"
+    database_url = f"sqlite:///{database_path.as_posix()}"
+    monkeypatch.setenv("TAKEALOT_DATABASE_URL", database_url)
+    app = create_app(PROJECT_ROOT)
+
+    with TestClient(app, client=("127.0.0.1", 50000)) as client:
+        _bootstrap(client)
+        engine = create_engine(database_url)
+        with Session(engine) as session, session.begin():
+            session.add(
+                OfferCurrent(
+                    offer_id="offer-keyword",
+                    sku="SKU-KEYWORD",
+                    title="Memory Foam Queen Mattress",
+                    captured_at=datetime(2026, 8, 3, 1, tzinfo=UTC),
+                    page_views_30_days=160,
+                )
+            )
+            for snapshot_date, page_views, title in (
+                (date(2026, 7, 31), 100, "Memory Foam Mattress"),
+                (date(2026, 8, 1), 110, "Memory Foam Queen Mattress"),
+                (date(2026, 8, 2), 135, "Memory Foam Queen Mattress"),
+                (date(2026, 8, 3), 160, "Memory Foam Queen Mattress"),
+            ):
+                session.add(
+                    OfferSnapshot(
+                        snapshot_date=snapshot_date,
+                        offer_id="offer-keyword",
+                        sku="SKU-KEYWORD",
+                        title=title,
+                        captured_at=datetime.combine(
+                            snapshot_date,
+                            datetime.min.time(),
+                            tzinfo=UTC,
+                        ),
+                        page_views_30_days=page_views,
+                    )
+                )
+        engine.dispose()
+
+        listing = client.get("/api/erp/keyword-traffic?as_of=2026-08-03")
+        detail = client.get(
+            "/api/erp/keyword-traffic/offer-keyword"
+            "?as_of=2026-08-03&history_days=30&comparison_days=3"
+        )
+
+    assert listing.status_code == 200
+    assert listing.json()["summary"]["archived_product_count"] == 1
+    assert listing.json()["items"][0]["latest_page_views_30_days"] == 160
+    assert detail.status_code == 200
+    assert detail.json()["product"]["current_keywords"] == [
+        "Memory",
+        "Foam",
+        "Queen",
+        "Mattress",
+    ]
+    assert detail.json()["events"][1]["change_label"] == "自动变化｜新增 1 词"
+    assert detail.json()["history"][-1] == {
+        "date": "2026-08-03",
+        "page_views_30_days": 160,
+    }
+
+
+def test_operator_can_confirm_and_revoke_logistics_links(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database_path = tmp_path / "erp.db"
+    monkeypatch.setenv(
+        "TAKEALOT_DATABASE_URL",
+        f"sqlite:///{database_path.as_posix()}",
+    )
+    calls: list[tuple[str, object]] = []
+
+    def confirm_candidate(
+        self: LogisticsOverviewService,
+        **values: object,
+    ) -> dict[str, object]:
+        del self
+        calls.append(("confirmed", values))
+        return {"id": 9, "active": True}
+
+    def revoke_link(
+        self: LogisticsOverviewService,
+        link_id: int,
+        **values: object,
+    ) -> dict[str, object]:
+        del self
+        calls.append(("revoked", {"link_id": link_id, **values}))
+        return {"id": link_id, "active": False}
+
+    monkeypatch.setattr(LogisticsOverviewService, "confirm_candidate", confirm_candidate)
+    monkeypatch.setattr(LogisticsOverviewService, "revoke_link", revoke_link)
+    app = create_app(PROJECT_ROOT)
+
+    with TestClient(app, client=("127.0.0.1", 50000)) as admin:
+        session = _bootstrap(admin)
+        _create_operator(admin, str(session["csrf_token"]), username="operator.logistics")
+
+    with TestClient(app, client=("192.168.1.8", 50001)) as operator:
+        login = operator.post(
+            "/api/auth/login",
+            json={
+                "username": "operator.logistics",
+                "password": "operator-password-123",
+            },
+        )
+        assert login.status_code == 200
+        csrf = login.json()["csrf_token"]
+        confirmed = operator.post(
+            "/api/erp/logistics/links",
+            headers={"X-CSRF-Token": csrf},
+            json={"w8_order_no": "CR260716002374", "takealot_shipment_id": 8434254},
+        )
+        assert confirmed.status_code == 200
+        assert confirmed.json()["link"] == {"id": 9, "active": True}
+        revoked = operator.post(
+            "/api/erp/logistics/links/9/revoke",
+            headers={"X-CSRF-Token": csrf},
+            json={"note": "人工核对后发现并非同一批货"},
+        )
+        assert revoked.status_code == 200
+        assert revoked.json()["link"] == {"id": 9, "active": False}
+
+    assert calls[0][0] == "confirmed"
+    assert calls[0][1] == {
+        "w8_order_no": "CR260716002374",
+        "takealot_shipment_id": 8434254,
+        "actor_user_id": 2,
+        "actor_username": "operator.logistics",
+    }
+    assert calls[1][0] == "revoked"
+    assert calls[1][1] == {
+        "link_id": 9,
+        "actor_user_id": 2,
+        "actor_username": "operator.logistics",
+        "note": "人工核对后发现并非同一批货",
+    }
 
 
 def test_selection_template_and_account_permission_overrides(
@@ -1409,7 +1772,7 @@ def test_collect_auto_adds_and_groups_new_offer_targets_once(
         assert [item["action"] for item in audits] == ["auto_discover"]
 
 
-def test_competitor_target_crud_audit_and_active_batch_head(
+def test_competitor_target_crud_audit_and_active_batch_tail(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -1458,12 +1821,12 @@ def test_competitor_target_crud_audit_and_active_batch_head(
         )
         assert prioritized.status_code == 200
         priority_status = prioritized.json()["status"]
-        assert priority_status["priority_targets"] == []
+        assert priority_status["priority_targets"][0]["plid"] == "12345678"
         assert priority_status["prioritized_targets"][0]["plid"] == "12345678"
-        assert priority_status["prioritized_targets"][0]["source"] == "automatic"
+        assert priority_status["prioritized_targets"][0]["source"] == "manual"
         assert (
             priority_status["prioritized_targets"][0]["requested_by"]
-            == "新增链接自动插队"
+            == "KXX Admin"
         )
 
         listed = client.get("/api/competitors/targets")

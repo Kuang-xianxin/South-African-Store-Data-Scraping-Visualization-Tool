@@ -130,6 +130,7 @@ async def probe_product_stocks(
     profile_dir: Path,
     visible: bool = False,
     probe_buyboxes: bool = True,
+    probe_offer_buyboxes: bool = False,
 ) -> tuple[list[VariantStockObservation], list[OfferStockObservation]]:
     """Probe variant buyboxes and follower offers in one isolated product session."""
     results: dict[str, StockProbeResult] = {}
@@ -146,7 +147,7 @@ async def probe_product_stocks(
     offer_results: dict[int, StockProbeResult] = {}
     purchasable_offers: list[tuple[int, CompetitorOffer]] = []
     for index, offer in enumerate(product.offers):
-        if offer.is_buybox:
+        if offer.is_buybox and not (probe_offer_buyboxes or offer.is_follower_offer):
             continue
         if offer.is_leadtime:
             offer_results[index] = non_platform_stock_probe()
@@ -155,7 +156,10 @@ async def probe_product_stocks(
             or competitor_offer_stock_state(offer.stock_status) == "没货"
         ):
             offer_results[index] = unavailable_stock_probe()
-        elif not offer.sku or not offer.seller_name or offer.seller_name == "未知卖家":
+        elif not offer.sku or (
+            not offer.seller_id
+            and (not offer.seller_name or offer.seller_name == "未知卖家")
+        ):
             offer_results[index] = StockProbeResult(
                 quantity=None,
                 exact=False,
@@ -207,10 +211,18 @@ async def probe_product_stocks(
                             pass
                 for index, offer in purchasable_offers:
                     try:
-                        offer_results[index] = await _probe_page_offer_stock(
-                            page,
-                            product=product,
-                            offer=offer,
+                        offer_results[index] = await (
+                            _probe_page_buybox_offer_stock(
+                                page,
+                                product=product,
+                                offer=offer,
+                            )
+                            if offer.is_buybox
+                            else _probe_page_offer_stock(
+                                page,
+                                product=product,
+                                offer=offer,
+                            )
                         )
                     except (OSError, RuntimeError, PlaywrightError) as exc:
                         offer_results[index] = StockProbeResult(
@@ -234,7 +246,7 @@ async def probe_product_stocks(
     offer_observations = [
         OfferStockObservation(offer=offer, stock=offer_results[index])
         for index, offer in enumerate(product.offers)
-        if not offer.is_buybox
+        if probe_offer_buyboxes or offer.is_follower_offer
     ]
     return variant_observations, offer_observations
 
@@ -296,7 +308,11 @@ async def _probe_page_offer_stock(
         quantity, exact, note, customer_purchase_limit = await _find_exact_quantity(
             page,
             product.plid,
-            seller_name=offer.seller_name,
+            seller_name=(
+                None
+                if offer.seller_name.startswith("卖家ID ")
+                else offer.seller_name
+            ),
             expected_price=offer.price,
         )
     except (OSError, RuntimeError, ValueError, PlaywrightError) as exc:
@@ -310,6 +326,73 @@ async def _probe_page_offer_stock(
             f"购物车PLID和价格；{note}"
         ),
         customer_purchase_limit=customer_purchase_limit,
+    )
+
+
+async def _probe_page_buybox_offer_stock(
+    page: Page,
+    *,
+    product: CompetitorProduct,
+    offer: CompetitorOffer,
+) -> StockProbeResult:
+    """Probe a competing seller that currently owns a variant's Buy Box."""
+    stage = "清理隔离购物车"
+    try:
+        await _clear_isolated_cart(page)
+        stage = f"打开主报价卖家 {offer.seller_name} 的商品变体"
+        await _goto(page, offer.url or product.url)
+        stage = "等待主商品购买区"
+        await _wait_for_product(page, product.plid, product.title)
+        stage = f"切换到主购买区报价 {offer.offer_id or offer.sku}"
+        await _select_buybox_offer(page, offer)
+        stage = f"将主报价卖家 {offer.seller_name} 的商品加入购物车"
+        await _add_main_product_to_cart(page)
+        stage = "打开购物车"
+        await _goto(page, "https://www.takealot.com/cart")
+        stage = f"校验主报价卖家 {offer.seller_name} 的购物车库存上限"
+        quantity, exact, note, customer_purchase_limit = await _find_exact_quantity(
+            page,
+            product.plid,
+            seller_name=(
+                None
+                if offer.seller_name.startswith("卖家ID ")
+                else offer.seller_name
+            ),
+            expected_price=offer.price,
+        )
+    except (OSError, RuntimeError, ValueError, PlaywrightError) as exc:
+        raise RuntimeError(_stock_probe_failure_note(stage, exc)) from exc
+    return StockProbeResult(
+        quantity=quantity,
+        exact=exact,
+        method="anonymous-cart-limit",
+        note=(
+            f"主报价卖家 {offer.seller_name}：已核验商品变体、"
+            f"购物车PLID、卖家和价格；{note}"
+        ),
+        customer_purchase_limit=customer_purchase_limit,
+    )
+
+
+async def _select_buybox_offer(page: Page, offer: CompetitorOffer) -> None:
+    """Select one exact radio option from Takealot's multi-offer main buy box."""
+    if offer.selected:
+        return
+    if offer.buybox_rank is None:
+        raise RuntimeError("主购买区备选报价缺少可核验的选项位置")
+    radios = page.locator('main aside input[type="radio"]:visible')
+    deadline = time.monotonic() + 15
+    while time.monotonic() < deadline:
+        if await radios.count() > offer.buybox_rank:
+            radio = radios.nth(offer.buybox_rank)
+            if not await radio.is_checked():
+                await radio.click()
+                await page.wait_for_timeout(1200)
+            if await radio.is_checked():
+                return
+        await page.wait_for_timeout(500)
+    raise RuntimeError(
+        f"无法切换到主购买区第 {offer.buybox_rank + 1} 个报价（{offer.offer_id or offer.sku}）"
     )
 
 

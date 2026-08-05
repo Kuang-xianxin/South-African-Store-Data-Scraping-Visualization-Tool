@@ -16,7 +16,11 @@ param(
 
     [Parameter(Mandatory = $false)]
     [ValidatePattern('^(?:[01]\d|2[0-3]):[0-5]\d$')]
-    [string]$DeadlineAt = '18:30'
+    [string]$DeadlineAt = '18:30',
+
+    [Parameter(Mandatory = $false)]
+    [ValidatePattern('^(?:[01]\d|2[0-3]):[0-5]\d$')]
+    [string]$FollowerTrackingAt = '00:30'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -56,31 +60,41 @@ $ChinesePreCloseUpdate = -join [char[]](
 $ChineseDeadline = -join [char[]](
     0x8FD0, 0x8425, 0x65E5, 0x62A5, 0x5F85, 0x529E, 0x5FEB, 0x7167
 )
+$ChineseFollowerTracking = -join [char[]](
+    0x81EA, 0x6709, 0x5546, 0x54C1, 0x8DDF,
+    0x5356, 0x81EA, 0x52A8, 0x8FFD, 0x8E2A
+)
 
 $TaskDefinitions = @(
     @{
         Name = "Takealot $ChineseDailyUpdate"
         At = $MorningAt
-        Arguments = 'daily-report-run --slot morning'
+        Arguments = 'daily-report-run --slot morning --all-stores'
         Description = 'Morning collection and immutable operations report capture.'
     },
     @{
         Name = "Takealot $ChineseEveningReview"
         At = $EveningAt
-        Arguments = 'daily-report-run --slot evening'
+        Arguments = 'daily-report-run --slot evening --all-stores'
         Description = 'Evening collection and immutable operations report capture.'
     },
     @{
         Name = "Takealot $ChinesePreCloseUpdate"
         At = $PreCloseAt
-        Arguments = 'daily-report-run --slot pre_close'
+        Arguments = 'daily-report-run --slot pre_close --all-stores'
         Description = 'Pre-close collection near the end of the operations report cycle.'
     },
     @{
         Name = "Takealot $ChineseDeadline"
         At = $DeadlineAt
-        Arguments = 'daily-report-deadline'
+        Arguments = 'daily-report-deadline --all-stores'
         Description = 'Snapshot unresolved report items and export confirmed work.'
+    },
+    @{
+        Name = "Takealot $ChineseFollowerTracking"
+        At = $FollowerTrackingAt
+        Arguments = 'track-own-store-followers --max-targets 0'
+        Description = 'Check every current cross-store deduplicated own-store PLID and record follower offers.'
     }
 )
 

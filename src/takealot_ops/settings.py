@@ -11,6 +11,12 @@ from dotenv import load_dotenv
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import SQLAlchemyError
 
+from takealot_ops.storage.store_context import (
+    DEFAULT_STORE_CODE,
+    current_store_code,
+    normalize_store_code,
+)
+
 
 DEFAULT_BASE_URL = "https://marketplace-api.takealot.com/v1"
 DEFAULT_DATABASE_URL = (
@@ -28,6 +34,16 @@ class SettingsError(ValueError):
 
 
 @dataclass(frozen=True)
+class StoreConfiguration:
+    """One configured seller account without exposing its credential."""
+
+    code: str
+    display_name: str
+    api_key_env: str
+    api_key: str
+
+
+@dataclass(frozen=True)
 class Settings:
     project_root: Path
     api_key: str
@@ -36,17 +52,24 @@ class Settings:
     request_timeout_seconds: float
     dashboard_host: str
     dashboard_port: int
+    store_code: str = DEFAULT_STORE_CODE
     backup_root: Path | None = None
     backup_database_url: str | None = None
 
     @classmethod
-    def from_env(cls, project_root: Path) -> Settings:
+    def from_env(
+        cls,
+        project_root: Path,
+        store_code: str | None = None,
+    ) -> Settings:
         """Build validated settings from the current process environment."""
         resolved_root = project_root.resolve()
         load_dotenv(resolved_root / ".env", override=False)
-        api_key = os.environ.get("TAKEALOT_API_KEY", "").strip()
-        if not api_key:
-            raise SettingsError("接口密钥不能为空")
+        stores = configured_stores(resolved_root)
+        selected_code = normalize_store_code(store_code or current_store_code())
+        selected = next((store for store in stores if store.code == selected_code), None)
+        if selected is None:
+            raise SettingsError(f"店铺 {selected_code} 未配置 API 凭据")
 
         database_url = _resolve_database_url(
             os.environ.get("TAKEALOT_DATABASE_URL", DEFAULT_DATABASE_URL), resolved_root
@@ -64,7 +87,7 @@ class Settings:
                 raise SettingsError("备份账号必须指向与正式库相同的 MySQL 数据库")
         return cls(
             project_root=resolved_root,
-            api_key=api_key,
+            api_key=selected.api_key,
             base_url=os.environ.get("TAKEALOT_BASE_URL", DEFAULT_BASE_URL),
             database_url=database_url,
             request_timeout_seconds=float(
@@ -72,9 +95,52 @@ class Settings:
             ),
             dashboard_host=os.environ.get("TAKEALOT_DASHBOARD_HOST", DEFAULT_DASHBOARD_HOST),
             dashboard_port=int(os.environ.get("TAKEALOT_DASHBOARD_PORT", DEFAULT_DASHBOARD_PORT)),
+            store_code=selected.code,
             backup_root=_backup_root_from_env(resolved_root),
             backup_database_url=backup_database_url or None,
         )
+
+
+def configured_stores(project_root: Path) -> tuple[StoreConfiguration, ...]:
+    """Load the deduplicated store credential registry from the ignored environment."""
+    resolved_root = project_root.resolve()
+    load_dotenv(resolved_root / ".env", override=False)
+    raw_registry = os.environ.get("TAKEALOT_STORES", "").strip()
+    entries = (
+        [entry.strip() for entry in raw_registry.split(";") if entry.strip()]
+        if raw_registry
+        else [f"{DEFAULT_STORE_CODE}|当前店铺|TAKEALOT_API_KEY"]
+    )
+    stores: list[StoreConfiguration] = []
+    seen_codes: set[str] = set()
+    seen_keys: set[str] = set()
+    for entry in entries:
+        parts = [part.strip() for part in entry.split("|")]
+        if len(parts) != 3:
+            raise SettingsError("TAKEALOT_STORES 每项必须是 店铺代码|显示名称|密钥变量名")
+        code = normalize_store_code(parts[0])
+        display_name = parts[1]
+        api_key_env = parts[2]
+        if not display_name or not api_key_env:
+            raise SettingsError("店铺显示名称和密钥变量名不能为空")
+        if code in seen_codes:
+            raise SettingsError(f"店铺代码重复：{code}")
+        api_key = os.environ.get(api_key_env, "").strip()
+        if not api_key:
+            raise SettingsError(f"接口密钥未配置：店铺 {code}")
+        if api_key in seen_keys:
+            raise SettingsError(f"店铺 {code} 使用了重复的 API 凭据")
+        seen_codes.add(code)
+        seen_keys.add(api_key)
+        stores.append(
+            StoreConfiguration(
+                code=code,
+                display_name=display_name,
+                api_key_env=api_key_env,
+                api_key=api_key,
+            )
+        )
+    return tuple(stores)
 
 
 @dataclass(frozen=True)

@@ -24,8 +24,12 @@ from takealot_ops.erp.permissions import (
     permissions_to_storage,
     validate_role,
 )
-from takealot_ops.settings import DashboardSettings
-from takealot_ops.storage.migrations import create_engine_for_settings, create_schema
+from takealot_ops.settings import DashboardSettings, configured_stores
+from takealot_ops.storage.migrations import (
+    create_engine_for_settings,
+    create_schema,
+    sync_configured_erp_stores,
+)
 from takealot_ops.storage.models import ErpSession, ErpStore, ErpUser, ErpUserStore
 
 
@@ -426,6 +430,11 @@ class AuthManager:
                 engine = create_engine_for_settings(settings)
                 try:
                     create_schema(engine)
+                    if not settings.database_url.startswith("sqlite"):
+                        sync_configured_erp_stores(
+                            engine,
+                            configured_stores(self.project_root),
+                        )
                 except BaseException:
                     engine.dispose()
                     raise

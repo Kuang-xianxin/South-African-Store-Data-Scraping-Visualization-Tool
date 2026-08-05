@@ -8,7 +8,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import pytest
-from sqlalchemy import create_engine, select
+from sqlalchemy import create_engine, func, select
 from sqlalchemy.orm import Session
 
 from takealot_ops.competitors.api import (
@@ -44,8 +44,11 @@ from takealot_ops.competitors.stock import _parse_warehouse_stock_message
 from takealot_ops.storage.models import (
     Base,
     CompetitorLinkHealth,
+    CompetitorReview,
     CompetitorSnapshot,
     CompetitorTarget,
+    CompetitorVariantSnapshot,
+    OfferCurrent,
 )
 
 
@@ -257,7 +260,7 @@ async def test_collector_retries_after_persisting_failed_stock_probe(
     engine.dispose()
 
 
-async def test_own_store_collection_skips_buybox_stock_and_reviews_without_followers(
+async def test_own_store_collection_keeps_variants_and_reviews_without_followers(
     tmp_path: Path,
 ) -> None:
     engine = create_engine("sqlite+pysqlite:///:memory:")
@@ -307,8 +310,22 @@ async def test_own_store_collection_skips_buybox_stock_and_reviews_without_follo
     )
     client = MagicMock()
     client.fetch_product = AsyncMock(return_value=product)
-    client.fetch_all_reviews = AsyncMock(return_value=[])
+    client.fetch_all_reviews = AsyncMock(
+        return_value=[
+            _review("review-one", 5),
+            _review("review-two", 3),
+        ]
+    )
     collector = CompetitorCollector(engine=engine, project_root=tmp_path, client=client)
+    with Session(engine) as session, session.begin():
+        session.add(
+            OfferCurrent(
+                offer_id="own-public-offer",
+                productline_id="12345678",
+                sku="PUBLIC-SKU",
+                captured_at=datetime(2026, 8, 5, tzinfo=UTC),
+            )
+        )
 
     result = await collector.collect(
         url,
@@ -318,13 +335,146 @@ async def test_own_store_collection_skips_buybox_stock_and_reviews_without_follo
 
     assert result.succeeded is True
     assert "未发现跟卖报价" in result.message
-    client.fetch_all_reviews.assert_not_awaited()
+    client.fetch_all_reviews.assert_awaited_once_with("12345678")
     with Session(engine) as session:
         snapshot = session.scalar(select(CompetitorSnapshot))
         assert snapshot is not None
         assert snapshot.offers == []
-        assert snapshot.review_count == 0
+        assert snapshot.review_count == 12
+        assert snapshot.fetched_review_count == 2
+        assert session.scalar(select(func.count()).select_from(CompetitorReview)) == 2
+        assert session.scalar(select(func.count()).select_from(CompetitorVariantSnapshot)) == 1
         assert session.scalar(select(CompetitorTarget)) is None
+    engine.dispose()
+
+
+async def test_own_store_collection_excludes_own_identity_but_keeps_competitor_buybox(
+    tmp_path: Path,
+) -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    plid = "12345678"
+    url = f"https://www.takealot.com/p/PLID{plid}"
+    own_offer = CompetitorOffer(
+        selected=True,
+        sku="own-offer",
+        seller_id="own-seller",
+        seller_name="Our Store",
+        price=100,
+        stock_status="In stock",
+        is_buybox=True,
+        plid=plid,
+        url=url,
+        offer_id=None,
+    )
+    competing_buybox = CompetitorOffer(
+        selected=False,
+        sku="COMPETITOR-SKU",
+        seller_id="competitor-seller",
+        seller_name="Competing Seller",
+        price=95,
+        stock_status="In stock",
+        is_buybox=True,
+        plid=plid,
+        url=f"{url}?variant=other",
+        offer_id="competitor-buybox",
+        variant_key="colour=blue",
+        variant_label="Colour：Blue",
+    )
+    product = CompetitorProduct(
+        plid=plid,
+        url=url,
+        title="Own Product",
+        image_url=None,
+        sku="OWN-SKU",
+        seller_id="own-seller",
+        seller_name="Our Store",
+        price=100,
+        stock_status="In stock",
+        is_leadtime=False,
+        review_count=0,
+        rating=0,
+        offers=(own_offer, competing_buybox),
+        variants=(),
+    )
+    client = MagicMock()
+    client.fetch_product = AsyncMock(return_value=product)
+    client.fetch_all_reviews = AsyncMock(return_value=[])
+    with Session(engine) as session, session.begin():
+        session.add(
+            OfferCurrent(
+                offer_id="own-offer",
+                productline_id=plid,
+                sku="OWN-SKU",
+                captured_at=datetime(2026, 8, 5, tzinfo=UTC),
+            )
+        )
+
+    collector = CompetitorCollector(engine=engine, project_root=tmp_path, client=client)
+    result = await collector.collect(
+        url,
+        with_stock_probe=False,
+        followers_only=True,
+    )
+
+    assert result.succeeded is True
+    assert "包含竞争卖家主报价" in result.message
+    with Session(engine) as session:
+        snapshot = session.scalar(select(CompetitorSnapshot))
+        assert snapshot is not None
+        assert [offer["offer_id"] for offer in snapshot.offers or []] == [
+            "competitor-buybox"
+        ]
+        assert snapshot.offers[0]["is_buybox"] is True
+    engine.dispose()
+
+
+async def test_collection_lanes_use_separate_persistent_stock_profiles(
+    tmp_path: Path,
+) -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    product = CompetitorProduct(
+        plid="12345678",
+        url="https://www.takealot.com/p/PLID12345678",
+        title="Example",
+        image_url=None,
+        sku="SKU",
+        seller_id="seller",
+        seller_name="Seller",
+        price=100,
+        stock_status="In stock",
+        is_leadtime=False,
+        review_count=0,
+        rating=0,
+        offers=(),
+        variants=(),
+    )
+    collector = CompetitorCollector(engine=engine, project_root=tmp_path, client=MagicMock())
+    with patch(
+        "takealot_ops.competitors.service.probe_product_stocks",
+        new=AsyncMock(return_value=([], [])),
+    ) as probe:
+        await collector._collect_product_stocks(
+            product,
+            enabled=True,
+            visible_browser=False,
+            followers_only=False,
+        )
+        await collector._collect_product_stocks(
+            product,
+            enabled=True,
+            visible_browser=False,
+            followers_only=True,
+        )
+
+    assert probe.await_args_list[0].kwargs["profile_dir"].name == "competitor-browser-profile"
+    assert (
+        probe.await_args_list[1].kwargs["profile_dir"].name
+        == "own-store-follower-browser-profile"
+    )
+    assert probe.await_args_list[0].kwargs["probe_offer_buyboxes"] is False
+    assert probe.await_args_list[1].kwargs["probe_offer_buyboxes"] is True
     engine.dispose()
 
 
@@ -741,7 +891,17 @@ async def test_public_client_parses_product_offers_and_all_review_pages() -> Non
                             "status": "Ships in 10 - 14 work days",
                             "is_leadtime": True,
                         },
-                    }
+                    },
+                    {
+                        "is_selected": False,
+                        "sku": "offer-3",
+                        "price": 195.0,
+                        "sponsored_ads_seller_id": "Mseller-3",
+                        "stock_availability": {
+                            "status": "In stock",
+                            "is_leadtime": False,
+                        },
+                    },
                 ],
             },
             "seller_detail": {
@@ -820,20 +980,30 @@ async def test_public_client_parses_product_offers_and_all_review_pages() -> Non
     assert product.seller_name == "Seller One"
     assert product.is_leadtime is True
     assert product.stock_status == "没货（非平台仓/供应商调货）"
-    assert len(product.offers) == 2
+    assert len(product.offers) == 3
     assert product.offers[0].plid == "123"
     assert product.offers[0].url == "https://www.takealot.com/example/PLID123"
     assert product.offers[0].offer_id == "offer-1"
     assert product.offers[0].is_buybox is True
     assert product.offers[0].is_leadtime is True
-    assert product.offers[1].plid == "123"
-    assert product.offers[1].url == "https://www.takealot.com/example/PLID123"
-    assert product.offers[1].offer_id == "other-buying-option-SKU-2"
-    assert product.offers[1].is_buybox is False
-    assert product.offers[1].is_add_to_cart_available is True
-    assert product.offers[1].condition == "New"
+    assert product.offers[0].is_follower_offer is False
+    assert product.offers[0].buybox_rank == 0
+    assert product.offers[1].offer_id == "offer-3"
+    assert product.offers[1].seller_id == "seller-3"
+    assert product.offers[1].seller_name == "卖家ID seller-3（平台未返回名称）"
+    assert product.offers[1].is_buybox is True
+    assert product.offers[1].is_follower_offer is True
+    assert product.offers[1].buybox_rank == 1
+    assert product.offers[2].plid == "123"
+    assert product.offers[2].url == "https://www.takealot.com/example/PLID123"
+    assert product.offers[2].offer_id == "other-buying-option-SKU-2"
+    assert product.offers[2].is_buybox is False
+    assert product.offers[2].is_add_to_cart_available is True
+    assert product.offers[2].condition == "New"
+    assert product.offers[2].is_follower_offer is True
     assert product.offers[0].identity_key == "offer:offer-1"
-    assert product.offers[1].identity_key == "offer:other-buying-option-sku-2"
+    assert product.offers[1].identity_key == "offer:offer-3"
+    assert product.offers[2].identity_key == "offer:other-buying-option-sku-2"
     discovered = _discovered_offer_targets(
         product,
         submitted_url="https://www.takealot.com/example/PLID123",

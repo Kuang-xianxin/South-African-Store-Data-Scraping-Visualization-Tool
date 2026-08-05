@@ -22,6 +22,7 @@ Runner = Callable[..., subprocess.CompletedProcess[str]]
 def run_dashboard_refresh(
     project_root: Path,
     *,
+    store_code: str = "current",
     runner: Runner = subprocess.run,
     timeout_seconds: int = 600,
 ) -> DashboardRefreshResult:
@@ -31,13 +32,18 @@ def run_dashboard_refresh(
     if not python.is_file():
         return DashboardRefreshResult(False, "未找到项目运行环境，无法刷新数据。")
 
-    command: Sequence[str] = (
+    base_command = (
         str(python),
         "-m",
         "takealot_ops.cli",
         "daily-report-run",
         "--slot",
         "manual",
+    )
+    command: Sequence[str] = (
+        (*base_command, "--store", store_code)
+        if store_code != "current"
+        else base_command
     )
     try:
         completed = runner(

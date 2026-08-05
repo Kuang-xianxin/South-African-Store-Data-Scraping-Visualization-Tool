@@ -1,5 +1,6 @@
 export interface CompetitorOfferItem {
   报价键: string;
+  报价来源?: "seller_api" | "public_offer";
   offer_id: string | null;
   卖家ID: string | null;
   卖家: string;
@@ -16,6 +17,7 @@ export interface CompetitorOfferItem {
   变体: string;
   是否主报价: boolean;
   是否变体主报价: boolean;
+  是否跟卖?: boolean;
   plid: string;
   链接: string;
   区间起始价格: number | null;
@@ -26,6 +28,9 @@ export interface CompetitorOfferItem {
   库存数量变化: number | null;
   库存可比: boolean;
   库存信号: string;
+  店铺?: string;
+  Takealot可售库存?: number | null;
+  卖家可售库存?: number | null;
 }
 
 export interface CompetitorItem {
@@ -50,6 +55,7 @@ export interface CompetitorItem {
   上次成功库存精确: boolean;
   上次成功库存时间: string | null;
   评论数: number;
+  评论数可用?: boolean;
   评分: number | null;
   好评: number;
   中评: number;
@@ -61,6 +67,8 @@ export interface CompetitorItem {
   库存净流入: number | null;
   库存净流出: number | null;
   新增评论: number | null;
+  新增好评: number | null;
+  新增差评: number | null;
   趋势判断: string;
   判断说明: string;
   信号区间开始: string | null;
@@ -69,15 +77,19 @@ export interface CompetitorItem {
   库存可比: boolean | null;
   链接: string;
   跟卖报价: CompetitorOfferItem[];
+  对比报价?: CompetitorOfferItem[];
   自有报价: OwnStoreOfferItem[];
   共享评论说明: string | null;
 }
 
 export interface OwnStoreOfferItem {
   offer_id: string;
+  店铺: string;
   SKU: string | null;
   价格: number | null;
   库存: number | null;
+  Takealot可售库存?: number | null;
+  卖家可售库存?: number | null;
   状态: string | null;
   基准日: string;
   拉取时间: string;
@@ -101,7 +113,21 @@ export interface CompetitorStoreTargetItem {
   url: string;
   title: string;
   offer_count: number;
+  store_count: number;
+  store_names: string[];
   captured_at: string;
+}
+
+export type OwnStoreScope = "current" | "all";
+
+export interface CompetitorStoreTargetPayload {
+  items: CompetitorStoreTargetItem[];
+  scope: OwnStoreScope;
+  selected_store_count: number;
+  selected_membership_count: number;
+  all_store_count: number;
+  all_store_unique_count: number;
+  all_store_membership_count: number;
 }
 
 export interface CompetitorTargetItem {
@@ -238,7 +264,17 @@ export interface SummaryPayload {
   latest_metric_date: string | null;
   kpis: StoreKpis;
   sales_series: SalesPoint[];
+  traffic_series: StoreTrafficPoint[];
   top_products: ProductItem[];
+}
+
+export interface StoreTrafficPoint {
+  business_date: string;
+  captured_at: string;
+  status: "success" | "failed";
+  page_views_30_days_total: number | null;
+  product_count: number;
+  missing_product_count: number;
 }
 
 export interface ProductsPayload {
@@ -270,10 +306,106 @@ export interface QuadrantItem extends ProductItem {
   quadrant: QuadrantKey;
 }
 
+export type KeywordTrafficDirection = "up" | "down" | "flat" | "unavailable";
+export type KeywordTrendChange =
+  | "reversal_up"
+  | "reversal_down"
+  | "improving"
+  | "weakening"
+  | "stable"
+  | "insufficient";
+
+export interface KeywordTrafficProductSummary {
+  offer_id: string;
+  sku: string | null;
+  title: string | null;
+  image_url: string | null;
+  latest_page_views_30_days: number | null;
+  latest_snapshot_date: string | null;
+  keyword_event_count: number;
+  keyword_change_count: number;
+  last_keyword_change_date: string | null;
+  current_keywords: string[];
+}
+
+export interface KeywordTrafficListPayload {
+  as_of: string;
+  items: KeywordTrafficProductSummary[];
+  summary: {
+    product_count: number;
+    with_traffic_count: number;
+    archived_product_count: number;
+    keyword_change_count: number;
+  };
+}
+
+export interface KeywordTrafficHistoryPoint {
+  date: string;
+  page_views_30_days: number | null;
+}
+
+export interface KeywordTrafficWindow {
+  start_date: string;
+  end_date: string;
+  available_days: number;
+  first_value: number | null;
+  last_value: number | null;
+  window_net_change: number | null;
+  slope_per_day: number | null;
+  trend_direction: KeywordTrafficDirection;
+}
+
+export interface KeywordTrafficComparison {
+  status: "waiting" | "collecting" | "data_missing" | "complete";
+  comparison_days: number;
+  observed_after_days: number;
+  before: KeywordTrafficWindow;
+  after: KeywordTrafficWindow;
+  traffic_direction: KeywordTrafficDirection;
+  traffic_delta: number | null;
+  traffic_delta_percent: number | null;
+  trend_change: KeywordTrendChange;
+  slope_change: number | null;
+}
+
+export interface KeywordTrafficEvent {
+  id: number;
+  effective_date: string;
+  event_kind: "baseline" | "change";
+  event_source: "offer_title";
+  change_label: string;
+  keywords: string[];
+  previous_keywords: string[];
+  added_keywords: string[];
+  removed_keywords: string[];
+  source_title: string;
+  previous_source_title: string | null;
+  detected_at: string;
+  comparison: KeywordTrafficComparison;
+}
+
+export interface KeywordTrafficDetailPayload {
+  as_of: string;
+  history_days: number;
+  comparison_days: number;
+  product: {
+    offer_id: string;
+    sku: string | null;
+    title: string | null;
+    image_url: string | null;
+    current_keywords: string[];
+  };
+  history: KeywordTrafficHistoryPoint[];
+  events: KeywordTrafficEvent[];
+  metric_notice: string;
+}
+
 export type UserRole = "viewer" | "operator" | "selection" | "admin";
 
 export type PermissionKey =
   | "store.view"
+  | "logistics.manage"
+  | "keyword_traffic.manage"
   | "competitors.view"
   | "competitors.collect"
   | "daily_report.view"
@@ -508,12 +640,64 @@ export interface TakealotShipmentItem {
   quantity_damaged: number;
 }
 
+export interface LogisticsHighConfidenceCandidate {
+  confidence: "high" | "medium" | "low";
+  method: string;
+  w8_order_no: string;
+  w8_headway_no: string;
+  w8_shipping_mark: string;
+  w8_status: string;
+  w8_created_at: string;
+  takealot_shipment_id: number;
+  takealot_purchase_order_number: string;
+  takealot_reference: string;
+  takealot_state: string;
+  takealot_created_at: string;
+  sku_lines: number;
+  w8_sku_lines: number;
+  takealot_sku_lines: number;
+  shared_sku_lines: number;
+  overlap_ratio: number;
+  quantity: number;
+  w8_quantity: number;
+  takealot_quantity: number;
+  quantity_delta: number;
+  date_gap_days: number;
+  w8_candidate_count: number;
+  takealot_candidate_count: number;
+  ambiguous: boolean;
+}
+
+export interface LogisticsConfirmedLink {
+  id: number;
+  w8_order_no: string;
+  takealot_shipment_id: number;
+  takealot_purchase_order_number: string;
+  takealot_reference: string;
+  confidence: "high" | "medium" | "low";
+  sku_lines: number;
+  quantity: number;
+  w8_quantity: number;
+  takealot_quantity: number;
+  quantity_delta: number;
+  date_gap_days: number | null;
+  confirmed_by: string;
+  confirmed_at: string;
+  active: boolean;
+}
+
 export interface LogisticsOverviewPayload {
   generated_at: string;
   cache_ttl_seconds: number;
   cache_age_seconds: number;
+  automatic_page_refresh: boolean;
   w8: {
     connected: boolean;
+    live_connected: boolean;
+    data_source: "live_api" | "local_database" | "unavailable";
+    synced_at: string | null;
+    snapshot_saved: boolean;
+    refresh_attempted: boolean;
     provider: string;
     environment: string;
     message?: string;
@@ -545,6 +729,11 @@ export interface LogisticsOverviewPayload {
   };
   takealot: {
     connected: boolean;
+    live_connected: boolean;
+    data_source: "live_api" | "local_database" | "unavailable";
+    synced_at: string | null;
+    snapshot_saved: boolean;
+    refresh_attempted: boolean;
     message?: string;
     summary: {
       shipments: number;
@@ -558,6 +747,7 @@ export interface LogisticsOverviewPayload {
       quantity_damaged: number;
     };
     recent_shipments: TakealotShipmentItem[];
+    warnings?: string[];
   };
   matching: {
     method: string;
@@ -566,6 +756,27 @@ export interface LogisticsOverviewPayload {
     matched_takealot_shipments: number;
     unmatched_w8_inbound: number;
     unmatched_takealot_shipments: number;
+    confirmed_link_count: number;
+    confirmed_links: LogisticsConfirmedLink[];
+    high_confidence_candidate_count: number;
+    high_confidence_candidates: LogisticsHighConfidenceCandidate[];
+    medium_confidence_candidate_count: number;
+    medium_confidence_candidates: LogisticsHighConfidenceCandidate[];
+    low_confidence_candidate_count: number;
+    low_confidence_candidates: LogisticsHighConfidenceCandidate[];
+    split_batch_group_count: number;
+    split_batch_groups: Array<{
+      w8_order_no: string;
+      w8_created_at: string;
+      w8_quantity: number;
+      sku_lines: number;
+      takealot_shipment_ids: number[];
+      takealot_purchase_order_numbers: string[];
+      shipment_count: number;
+      max_date_gap_days: number;
+      method: string;
+    }>;
+    warnings: string[];
     items: Array<{
       w8_order_no: string;
       w8_headway_no: string;

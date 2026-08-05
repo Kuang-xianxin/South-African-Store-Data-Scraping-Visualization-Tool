@@ -639,7 +639,7 @@ def test_collection_batch_registry_allows_a_consumed_target_to_be_manually_retri
     ] == ["manual_retry", "manual"]
 
 
-def test_collection_batch_registry_puts_newest_target_first() -> None:
+def test_collection_batch_registry_preserves_new_target_order_at_tail() -> None:
     registry = CollectionBatchRegistry()
     registry.event(
         batch_id="batch-1",
@@ -666,11 +666,8 @@ def test_collection_batch_registry_puts_newest_target_first() -> None:
     )
     assert [
         item["plid"] for item in registry.status()["queued_targets"]
-    ] == ["87654321", "12345678"]
-    assert [
-        (item["plid"], item["source"])
-        for item in registry.status()["prioritized_targets"]
-    ] == [("87654321", "automatic"), ("12345678", "automatic")]
+    ] == ["12345678", "87654321"]
+    assert registry.status()["prioritized_targets"] == []
 
 
 def test_collection_batch_registry_restores_pending_queue_after_restart(
@@ -723,7 +720,7 @@ def test_collection_batch_registry_restores_pending_queue_after_restart(
     assert {
         (item["plid"], item["source"])
         for item in restored["prioritized_targets"]
-    } == {("12345678", "automatic"), ("87654321", "manual")}
+    } == {("87654321", "manual")}
 
     restarted.start_link(
         batch_id="batch-1",
@@ -754,7 +751,7 @@ def test_collection_batch_registry_restores_pending_queue_after_restart(
     assert [item["plid"] for item in resumed_again["priority_targets"]] == [
         "87654321"
     ]
-    assert len(resumed_again["prioritized_targets"]) == 2
+    assert len(resumed_again["prioritized_targets"]) == 1
 
 
 def test_collection_batch_registry_rejects_priority_without_active_batch() -> None:

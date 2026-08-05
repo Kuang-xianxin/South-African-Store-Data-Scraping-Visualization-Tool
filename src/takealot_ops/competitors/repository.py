@@ -388,6 +388,8 @@ class CompetitorRepository:
                     "variant_key": offer.variant_key,
                     "variant_label": offer.variant_label,
                     "identity_key": offer.identity_key,
+                    "buybox_rank": offer.buybox_rank,
+                    "is_follower_offer": offer.is_follower_offer,
                     **_offer_stock_payload(offer, variant_stocks, offer_stocks or []),
                 }
                 for offer in product.offers

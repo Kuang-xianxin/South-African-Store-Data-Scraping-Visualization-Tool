@@ -25,6 +25,7 @@ from takealot_ops.binlog_archive import (
     run_continuous_binlog_archive,
 )
 from takealot_ops.collectors import collect_offers, collect_sales
+from takealot_ops.competitors.auto_tracking import run_automatic_follower_tracking
 from takealot_ops.competitors.service import CompetitorCollector, parse_competitor_urls
 from takealot_ops.dashboard.launcher import launch_dashboard, launch_legacy_dashboard
 from takealot_ops.domain import sast_date
@@ -38,6 +39,7 @@ from takealot_ops.erp.daily_report import (
     record_daily_report_failure,
     unresolved_locations,
 )
+from takealot_ops.logistics.service import LogisticsOverviewService
 from takealot_ops.metrics.service import MetricService
 from takealot_ops.quality import verify_quality
 from takealot_ops.reporting import generate_daily_reports
@@ -51,10 +53,16 @@ from takealot_ops.scheduler import (
     verify_database_integrity,
     verify_local_backup,
 )
-from takealot_ops.settings import DashboardSettings, Settings, SettingsError
+from takealot_ops.settings import (
+    DashboardSettings,
+    Settings,
+    SettingsError,
+    configured_stores,
+)
 from takealot_ops.storage.migrations import create_engine_for_settings, create_schema
 from takealot_ops.storage.mysql_migration import migrate_sqlite_to_mysql
 from takealot_ops.storage.repository import Repository
+from takealot_ops.storage.store_context import DEFAULT_STORE_CODE, store_scope
 
 
 EXIT_CONFIGURATION = 2
@@ -78,11 +86,14 @@ def build_parser() -> argparse.ArgumentParser:
     collect = commands.add_parser("collect", help="采集 Offer 和近七个 SAST 自然日销售")
     collect.add_argument("--start", type=_parse_date, help="销售开始日期 YYYY-MM-DD")
     collect.add_argument("--end", type=_parse_date, help="销售结束日期 YYYY-MM-DD")
+    _add_store_target_arguments(collect)
 
     export = commands.add_parser("export", help="从本地数据库生成 HTML、Excel 和 PNG")
     export.add_argument("--date", type=_parse_date, help="报告截止日期 YYYY-MM-DD")
+    _add_store_target_arguments(export)
 
-    commands.add_parser("daily-run", help="执行每日采集、校验、导出和备份")
+    daily_run = commands.add_parser("daily-run", help="执行每日采集、校验、导出和备份")
+    _add_store_target_arguments(daily_run)
     commands.add_parser(
         "backup-local",
         help="立即生成、压缩并校验本地 MySQL 备份",
@@ -118,6 +129,7 @@ def build_parser() -> argparse.ArgumentParser:
         choices=("morning", "evening", "pre_close", "manual"),
         required=True,
     )
+    _add_store_target_arguments(daily_report_run)
     daily_report_capture = commands.add_parser(
         "daily-report-capture",
         help="不访问平台，直接把当前数据库冻结为运营日报版本",
@@ -128,10 +140,12 @@ def build_parser() -> argparse.ArgumentParser:
         required=True,
     )
     daily_report_capture.add_argument("--date", type=_parse_date)
-    commands.add_parser(
+    _add_store_target_arguments(daily_report_capture)
+    daily_report_deadline = commands.add_parser(
         "daily-report-deadline",
         help="记录18:30仍未合并的数据并在可导出时保存本地表格",
     )
+    _add_store_target_arguments(daily_report_deadline)
     commands.add_parser("dashboard", help="在 127.0.0.1 启动本地看板")
     commands.add_parser(
         "dashboard-legacy",
@@ -153,9 +167,25 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="在库存探测时显示隔离浏览器窗口",
     )
+    automatic_followers = commands.add_parser(
+        "track-own-store-followers",
+        help="轮巡全部已接入店铺的自有商品并自动记录跟卖",
+    )
+    automatic_followers.add_argument(
+        "--max-targets",
+        type=int,
+        default=0,
+        help="本轮最多检查的去重 PLID 数量；0 表示全部（默认 0）",
+    )
+    automatic_followers.add_argument(
+        "--skip-stock",
+        action="store_true",
+        help="记录跟卖身份和价格，但跳过匿名购物车库存探测",
+    )
 
     verify = commands.add_parser("verify", help="检查数据库完整性和数据质量")
     verify.add_argument("--date", type=_parse_date, help="检查日期 YYYY-MM-DD")
+    _add_store_target_arguments(verify)
     migrate = commands.add_parser(
         "migrate-to-mysql",
         help="把旧 SQLite 全量迁移到当前配置的空 MySQL 数据库",
@@ -176,11 +206,23 @@ def main(argv: Sequence[str] | None = None) -> int:
     logger = _configure_logging(project_root)
     try:
         if args.command == "collect":
-            exit_code = _collect_command(project_root, args.start, args.end)
+            exit_code = _run_store_targets(
+                project_root,
+                args,
+                lambda: _collect_command(project_root, args.start, args.end),
+            )
         elif args.command == "export":
-            exit_code = _export_command(project_root, args.date)
+            exit_code = _run_store_targets(
+                project_root,
+                args,
+                lambda: _export_command(project_root, args.date),
+            )
         elif args.command == "daily-run":
-            exit_code = _daily_command(project_root)
+            exit_code = _run_store_targets(
+                project_root,
+                args,
+                lambda: _daily_command(project_root),
+            )
         elif args.command == "backup-local":
             exit_code = _backup_local_command(project_root)
         elif args.command == "backup-verify":
@@ -192,15 +234,32 @@ def main(argv: Sequence[str] | None = None) -> int:
         elif args.command == "binlog-archive-status":
             exit_code = _binlog_archive_status_command(project_root, args.preflight)
         elif args.command == "daily-report-run":
-            exit_code = _daily_report_run_command(project_root, args.slot)
-        elif args.command == "daily-report-capture":
-            exit_code = _daily_report_capture_command(
+            logistics_sync = LogisticsOverviewService(
                 project_root,
-                args.slot,
-                args.date,
+                force_refresh_min_interval_seconds=15 * 60,
+            )
+            exit_code = _run_store_targets(
+                project_root,
+                args,
+                lambda: _daily_report_run_command(project_root, args.slot),
+                after_success=lambda: _sync_logistics_snapshots(logistics_sync),
+            )
+        elif args.command == "daily-report-capture":
+            exit_code = _run_store_targets(
+                project_root,
+                args,
+                lambda: _daily_report_capture_command(
+                    project_root,
+                    args.slot,
+                    args.date,
+                ),
             )
         elif args.command == "daily-report-deadline":
-            exit_code = _daily_report_deadline_command(project_root)
+            exit_code = _run_store_targets(
+                project_root,
+                args,
+                lambda: _daily_report_deadline_command(project_root),
+            )
         elif args.command == "dashboard":
             exit_code = launch_dashboard(DashboardSettings.from_env(project_root))
         elif args.command == "dashboard-legacy":
@@ -214,8 +273,18 @@ def main(argv: Sequence[str] | None = None) -> int:
                 skip_stock=args.skip_stock,
                 show_browser=args.show_browser,
             )
+        elif args.command == "track-own-store-followers":
+            exit_code = _track_own_store_followers_command(
+                project_root,
+                max_targets=args.max_targets,
+                skip_stock=args.skip_stock,
+            )
         elif args.command == "verify":
-            exit_code = _verify_command(project_root, args.date)
+            exit_code = _run_store_targets(
+                project_root,
+                args,
+                lambda: _verify_command(project_root, args.date),
+            )
         elif args.command == "migrate-to-mysql":
             exit_code = _migrate_to_mysql_command(
                 project_root,
@@ -233,6 +302,68 @@ def main(argv: Sequence[str] | None = None) -> int:
         logger.error("%s failed: %s", args.command, type(exc).__name__)
         print(f"操作失败：{type(exc).__name__}；详情见 logs/takealot-ops.log", file=sys.stderr)
         return EXIT_OPERATION
+
+
+def _add_store_target_arguments(parser: argparse.ArgumentParser) -> None:
+    target = parser.add_mutually_exclusive_group()
+    target.add_argument("--store", help="仅处理指定店铺代码")
+    target.add_argument(
+        "--all-stores",
+        action="store_true",
+        help="依次处理本地已配置的全部店铺",
+    )
+
+
+def _run_store_targets(
+    project_root: Path,
+    args: argparse.Namespace,
+    operation: Callable[[], int],
+    *,
+    after_success: Callable[[], None] | None = None,
+) -> int:
+    codes = (
+        [store.code for store in configured_stores(project_root)]
+        if bool(getattr(args, "all_stores", False))
+        else [str(getattr(args, "store", None) or DEFAULT_STORE_CODE)]
+    )
+    exit_code = 0
+    for code in codes:
+        print(f"店铺任务：{code}")
+        with store_scope(code):
+            result = operation()
+            if result == 0 and after_success is not None:
+                after_success()
+        if result != 0 and exit_code == 0:
+            exit_code = result
+    return exit_code
+
+
+def _sync_logistics_snapshots(service: LogisticsOverviewService) -> None:
+    """Refresh durable logistics snapshots after one store collection succeeds."""
+    try:
+        payload = service.load(force=True)
+    except Exception as exc:
+        logging.getLogger("takealot_ops.cli").exception(
+            "scheduled logistics snapshot refresh failed"
+        )
+        print(
+            f"物流快照同步失败，店铺主采集结果不受影响：{type(exc).__name__}",
+            file=sys.stderr,
+        )
+        return
+    live = [
+        name
+        for name in ("w8", "takealot")
+        if bool(payload.get(name, {}).get("live_connected"))
+    ]
+    if len(live) == 2:
+        print("物流快照已随本次店铺采集同步：长睿与 Takealot 均成功。")
+        return
+    missing = "、".join(name for name in ("w8", "takealot") if name not in live)
+    print(
+        f"物流快照同步未全部成功（{missing}），物流页继续使用最近成功快照。",
+        file=sys.stderr,
+    )
 
 
 def _collect_command(project_root: Path, start: date | None, end: date | None) -> int:
@@ -704,6 +835,36 @@ async def _collect_competitors_async(
     finally:
         engine.dispose()
     return EXIT_COLLECTION if failures else 0
+
+
+def _track_own_store_followers_command(
+    project_root: Path,
+    *,
+    max_targets: int,
+    skip_stock: bool,
+) -> int:
+    if max_targets < 0:
+        raise ValueError("--max-targets 不得小于 0")
+    settings = DashboardSettings.from_env(project_root)
+    engine = create_engine_for_settings(settings)
+    try:
+        create_schema(engine)
+        result = asyncio.run(
+            run_automatic_follower_tracking(
+                engine,
+                project_root=project_root,
+                max_targets=max_targets or None,
+                with_stock_probe=not skip_stock,
+            )
+        )
+    finally:
+        engine.dispose()
+    print(
+        "自有商品跟卖自动追踪完成："
+        f"候选 {result.available_targets}，本轮选择 {result.selected_targets}，"
+        f"成功 {result.succeeded}，部分成功 {result.partial}，失败 {result.failed}。"
+    )
+    return 0
 
 
 def _migrate_to_mysql_command(

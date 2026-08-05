@@ -149,7 +149,7 @@ class CollectionBatchRegistry:
         return fallback_with_stock_probe, fallback_visible_browser
 
     def enqueue_target(self, *, plid: str, url: str) -> bool:
-        """Put a newly persisted target at the head of the active pending queue."""
+        """Append a newly persisted target to the active batch tail."""
         with self._lock:
             self._expire_if_abandoned()
             if not self._state.active or self._release_after_request:
@@ -159,22 +159,11 @@ class CollectionBatchRegistry:
             ):
                 return False
             queued_at = _utc_iso()
-            self._state.queued_targets.insert(
-                0,
+            self._state.queued_targets.append(
                 {
                     "plid": plid,
                     "url": url,
                     "queued_at": queued_at,
-                }
-            )
-            self._state.prioritized_targets.insert(
-                0,
-                {
-                    "plid": plid,
-                    "url": url,
-                    "requested_at": queued_at,
-                    "requested_by": "新增链接自动插队",
-                    "source": "automatic",
                 },
             )
             self._state.total += 1

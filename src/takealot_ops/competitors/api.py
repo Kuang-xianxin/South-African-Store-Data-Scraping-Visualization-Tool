@@ -271,14 +271,22 @@ class CompetitorPublicClient:
         compact_offers: list[CompetitorOffer] = []
         for detail_index, offer_detail in enumerate(variant_details):
             variant = variants[detail_index]
-            variant_offer = _selected_offer(offer_detail)
             variant_seller = _mapping(offer_detail.get("seller_detail"))
-            if variant_offer:
+            buybox_items = _mapping_list(
+                _mapping(offer_detail.get("buybox")).get("items")
+            )
+            known_sellers = _known_offer_sellers(offer_detail)
+            for buybox_rank, variant_offer in enumerate(buybox_items):
+                selected = bool(variant_offer.get("is_selected"))
                 compact_offers.append(
                     _offer_record(
                         variant_offer,
-                        variant_seller,
-                        selected=detail_index == selected_index,
+                        _buybox_offer_seller(
+                            variant_offer,
+                            selected_seller=variant_seller,
+                            known_sellers=known_sellers,
+                        ),
+                        selected=selected,
                         is_buybox=True,
                         fallback_url=str(
                             offer_detail.get("desktop_href")
@@ -288,6 +296,8 @@ class CompetitorPublicClient:
                         condition=_condition_label(variant_offer.get("condition")),
                         variant_key=variant.key,
                         variant_label=variant.label,
+                        buybox_rank=buybox_rank,
+                        is_follower_offer=not selected,
                     )
                 )
             other_offers = _mapping(offer_detail.get("other_offers"))
@@ -308,6 +318,7 @@ class CompetitorPublicClient:
                             condition=condition_label,
                             variant_key=variant.key,
                             variant_label=variant.label,
+                            is_follower_offer=True,
                         )
                     )
         core = _mapping(detail.get("core"))
@@ -536,10 +547,17 @@ def _offer_record(
     condition: str | None = None,
     variant_key: str = "default",
     variant_label: str = "默认款",
+    buybox_rank: int | None = None,
+    is_follower_offer: bool = False,
 ) -> CompetitorOffer:
     stock = _mapping(offer.get("stock_availability"))
     offer_url, offer_plid = _offer_target(offer, fallback_url=fallback_url)
-    offer_id = str(offer.get("offer_id") or offer.get("id") or "").strip() or None
+    offer_id = str(
+        offer.get("offer_id")
+        or offer.get("id")
+        or (offer.get("sku") if is_buybox else "")
+        or ""
+    ).strip() or None
     seller_id = str(seller.get("seller_id") or "").strip()
     seller_name = str(seller.get("display_name") or "未知卖家")
     sku = str(offer.get("sku") or offer.get("product_id") or "").strip()
@@ -573,7 +591,53 @@ def _offer_record(
             variant_key=variant_key,
             condition=condition,
         ),
+        buybox_rank=buybox_rank,
+        is_follower_offer=is_follower_offer,
     )
+
+
+def _normalised_public_seller_id(value: object) -> str:
+    seller_id = str(value or "").strip()
+    return seller_id[1:] if seller_id[:1].casefold() == "m" else seller_id
+
+
+def _known_offer_sellers(detail: Mapping[str, Any]) -> dict[str, Mapping[str, Any]]:
+    sellers: dict[str, Mapping[str, Any]] = {}
+    selected_seller = _mapping(detail.get("seller_detail"))
+    selected_id = _normalised_public_seller_id(selected_seller.get("seller_id"))
+    if selected_id:
+        sellers[selected_id] = selected_seller
+    other_offers = _mapping(detail.get("other_offers"))
+    for condition in _mapping_list(other_offers.get("conditions")):
+        for offer in _mapping_list(condition.get("items")):
+            seller = _mapping(offer.get("seller"))
+            seller_id = _normalised_public_seller_id(seller.get("seller_id"))
+            if seller_id:
+                sellers[seller_id] = seller
+    return sellers
+
+
+def _buybox_offer_seller(
+    offer: Mapping[str, Any],
+    *,
+    selected_seller: Mapping[str, Any],
+    known_sellers: Mapping[str, Mapping[str, Any]],
+) -> Mapping[str, Any]:
+    embedded = _mapping(offer.get("seller"))
+    seller_id = _normalised_public_seller_id(
+        embedded.get("seller_id") or offer.get("sponsored_ads_seller_id")
+    )
+    if not seller_id and bool(offer.get("is_selected")):
+        seller_id = _normalised_public_seller_id(selected_seller.get("seller_id"))
+    if seller_id in known_sellers:
+        return known_sellers[seller_id]
+    display_name = str(embedded.get("display_name") or "").strip()
+    return {
+        "seller_id": seller_id,
+        "display_name": display_name or (
+            f"卖家ID {seller_id}（平台未返回名称）" if seller_id else "未知卖家"
+        ),
+    }
 
 
 def _condition_label(value: object) -> str | None:

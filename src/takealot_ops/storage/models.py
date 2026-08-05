@@ -20,12 +20,14 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
+from takealot_ops.storage.store_context import StoreScopedMixin, current_store_code
+
 
 class Base(DeclarativeBase):
     """Base class for all persistent entities."""
 
 
-class CollectionRun(Base):
+class CollectionRun(StoreScopedMixin, Base):
     """One collection attempt and its outcome."""
 
     __tablename__ = "collection_runs"
@@ -40,7 +42,7 @@ class CollectionRun(Base):
     error: Mapped[str | None] = mapped_column(Text)
 
 
-class OfferCurrent(Base):
+class OfferCurrent(StoreScopedMixin, Base):
     """Latest known state for a seller offer."""
 
     __tablename__ = "offer_current"
@@ -74,11 +76,18 @@ class OfferCurrent(Base):
     takealot_stock_on_way: Mapped[int | None] = mapped_column(Integer)
 
 
-class OfferSnapshot(Base):
+class OfferSnapshot(StoreScopedMixin, Base):
     """Daily historical offer state and traffic snapshot."""
 
     __tablename__ = "offer_snapshots"
-    __table_args__ = (UniqueConstraint("snapshot_date", "offer_id"),)
+    __table_args__ = (
+        UniqueConstraint(
+            "store_code",
+            "snapshot_date",
+            "offer_id",
+            name="uq_offer_snapshots_store_date_offer",
+        ),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     snapshot_date: Mapped[date] = mapped_column(Date, nullable=False)
@@ -111,11 +120,18 @@ class OfferSnapshot(Base):
     takealot_stock_on_way: Mapped[int | None] = mapped_column(Integer)
 
 
-class StoreOfferBaseline(Base):
+class StoreOfferBaseline(StoreScopedMixin, Base):
     """Earliest Seller API offer pull retained for one Beijing display day."""
 
     __tablename__ = "store_offer_baselines"
-    __table_args__ = (UniqueConstraint("display_date", "offer_id"),)
+    __table_args__ = (
+        UniqueConstraint(
+            "store_code",
+            "display_date",
+            "offer_id",
+            name="uq_store_offer_baselines_store_date_offer",
+        ),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     display_date: Mapped[date] = mapped_column(Date, nullable=False, index=True)
@@ -132,7 +148,35 @@ class StoreOfferBaseline(Base):
     captured_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
-class SaleItem(Base):
+class StoreOfferObservation(StoreScopedMixin, Base):
+    """One immutable Seller API offer observation from every complete refresh."""
+
+    __tablename__ = "store_offer_observations"
+    __table_args__ = (
+        UniqueConstraint(
+            "store_code",
+            "captured_at",
+            "offer_id",
+            name="uq_store_offer_observations_store_time_offer",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    display_date: Mapped[date] = mapped_column(Date, nullable=False, index=True)
+    offer_id: Mapped[str] = mapped_column(String(100), nullable=False)
+    productline_id: Mapped[str | None] = mapped_column(String(100), index=True)
+    sku: Mapped[str | None] = mapped_column(String(255))
+    title: Mapped[str | None] = mapped_column(Text)
+    image_url: Mapped[str | None] = mapped_column(Text)
+    selling_price: Mapped[Decimal | None] = mapped_column(Numeric(14, 2))
+    status: Mapped[str | None] = mapped_column(String(100))
+    total_stock: Mapped[int | None] = mapped_column(Integer)
+    takealot_available_stock: Mapped[int | None] = mapped_column(Integer)
+    seller_available_stock: Mapped[int | None] = mapped_column(Integer)
+    captured_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class SaleItem(StoreScopedMixin, Base):
     """A sale line item, kept current by order item identifier."""
 
     __tablename__ = "sale_items"
@@ -157,7 +201,7 @@ class SaleItem(Base):
     raw_payload: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
 
 
-class ReturnItem(Base):
+class ReturnItem(StoreScopedMixin, Base):
     """A seller return item reserved for return collection."""
 
     __tablename__ = "return_items"
@@ -170,11 +214,18 @@ class ReturnItem(Base):
     raw_payload: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
 
 
-class DailyProductMetric(Base):
+class DailyProductMetric(StoreScopedMixin, Base):
     """Precomputed daily product metrics for dashboard queries."""
 
     __tablename__ = "daily_product_metrics"
-    __table_args__ = (UniqueConstraint("metric_date", "offer_id"),)
+    __table_args__ = (
+        UniqueConstraint(
+            "store_code",
+            "metric_date",
+            "offer_id",
+            name="uq_daily_product_metrics_store_date_offer",
+        ),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     metric_date: Mapped[date] = mapped_column(Date, nullable=False)
@@ -193,11 +244,19 @@ class DailyProductMetric(Base):
     offer_status: Mapped[str | None] = mapped_column(String(100))
 
 
-class AnomalyEvent(Base):
+class AnomalyEvent(StoreScopedMixin, Base):
     """A date-stamped anomaly classification for an offer."""
 
     __tablename__ = "anomaly_events"
-    __table_args__ = (UniqueConstraint("event_date", "offer_id", "anomaly_type"),)
+    __table_args__ = (
+        UniqueConstraint(
+            "store_code",
+            "event_date",
+            "offer_id",
+            "anomaly_type",
+            name="uq_anomaly_events_store_date_offer_type",
+        ),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     event_date: Mapped[date] = mapped_column(Date, nullable=False)
@@ -209,7 +268,7 @@ class AnomalyEvent(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
-class DataQualityEvent(Base):
+class DataQualityEvent(StoreScopedMixin, Base):
     """A quality issue observed during collection or metric generation."""
 
     __tablename__ = "data_quality_events"
@@ -273,6 +332,23 @@ class CompetitorLinkHealth(Base):
     control_plid: Mapped[str | None] = mapped_column(String(30))
     control_check_ok: Mapped[bool | None] = mapped_column(Boolean)
     last_error: Mapped[str | None] = mapped_column(Text)
+
+
+class OwnStoreFollowerTracking(Base):
+    """Automatic public-page check state for one current own-store PLID."""
+
+    __tablename__ = "own_store_follower_tracking"
+
+    plid: Mapped[str] = mapped_column(String(30), primary_key=True)
+    last_attempted_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        index=True,
+    )
+    last_succeeded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_status: Mapped[str] = mapped_column(String(30), nullable=False)
+    consecutive_failures: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    last_message: Mapped[str | None] = mapped_column(Text)
 
 
 class CompetitorSnapshot(Base):
@@ -436,11 +512,91 @@ class ErpSession(Base):
     last_seen_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
 
 
-class ErpRefreshState(Base):
-    """Persistent global cooldown state for the ERP full-refresh action."""
+class LogisticsShipmentLink(Base):
+    """One operator-confirmed relationship between W8 inbound and Takealot shipment."""
+
+    __tablename__ = "logistics_shipment_links"
+    __table_args__ = (
+        UniqueConstraint(
+            "store_id",
+            "w8_order_no",
+            "takealot_shipment_id",
+            name="uq_logistics_shipment_link_pair",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    store_id: Mapped[int] = mapped_column(
+        ForeignKey("erp_stores.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    w8_order_no: Mapped[str] = mapped_column(String(80), nullable=False, index=True)
+    takealot_shipment_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    evidence: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, index=True)
+    confirmed_by_user_id: Mapped[int | None] = mapped_column(
+        ForeignKey("erp_users.id", ondelete="SET NULL"),
+        index=True,
+    )
+    confirmed_by_username: Mapped[str] = mapped_column(String(64), nullable=False)
+    confirmed_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    revoked_by_user_id: Mapped[int | None] = mapped_column(
+        ForeignKey("erp_users.id", ondelete="SET NULL"),
+    )
+    revoked_by_username: Mapped[str | None] = mapped_column(String(64))
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime)
+    revoke_note: Mapped[str | None] = mapped_column(Text)
+
+
+class LogisticsShipmentLinkAudit(Base):
+    """Append-only confirmation and revocation history for a logistics link."""
+
+    __tablename__ = "logistics_shipment_link_audits"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    link_id: Mapped[int] = mapped_column(
+        ForeignKey("logistics_shipment_links.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    action: Mapped[str] = mapped_column(String(30), nullable=False, index=True)
+    actor_user_id: Mapped[int | None] = mapped_column(
+        ForeignKey("erp_users.id", ondelete="SET NULL"),
+    )
+    actor_username: Mapped[str] = mapped_column(String(64), nullable=False)
+    note: Mapped[str | None] = mapped_column(Text)
+    evidence: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, index=True)
+
+
+class LogisticsProviderSnapshot(StoreScopedMixin, Base):
+    """Latest successful provider payload retained for offline logistics reads."""
+
+    __tablename__ = "logistics_provider_snapshots"
+
+    store_code: Mapped[str] = mapped_column(
+        String(64),
+        primary_key=True,
+        default=current_store_code,
+        server_default="current",
+    )
+    provider: Mapped[str] = mapped_column(String(30), primary_key=True)
+    fetched_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, index=True)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+
+
+class ErpRefreshState(StoreScopedMixin, Base):
+    """Persistent per-store cooldown state for the ERP full-refresh action."""
 
     __tablename__ = "erp_refresh_state"
 
+    store_code: Mapped[str] = mapped_column(
+        String(64),
+        primary_key=True,
+        default=current_store_code,
+        server_default="current",
+    )
     action_key: Mapped[str] = mapped_column(String(50), primary_key=True)
     last_success_at: Mapped[datetime | None] = mapped_column(DateTime)
     last_success_by: Mapped[str | None] = mapped_column(String(64))
@@ -448,7 +604,7 @@ class ErpRefreshState(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
 
 
-class DailyReportRun(Base):
+class DailyReportRun(StoreScopedMixin, Base):
     """One immutable scheduled or manual capture used by the operations daily report."""
 
     __tablename__ = "daily_report_runs"
@@ -462,11 +618,18 @@ class DailyReportRun(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
 
 
-class DailyInventorySnapshot(Base):
+class DailyInventorySnapshot(StoreScopedMixin, Base):
     """Preferred next-day inventory, with delayed same-day recovery when needed."""
 
     __tablename__ = "daily_inventory_snapshots"
-    __table_args__ = (UniqueConstraint("inventory_date", "offer_id"),)
+    __table_args__ = (
+        UniqueConstraint(
+            "store_code",
+            "inventory_date",
+            "offer_id",
+            name="uq_daily_inventory_store_date_offer",
+        ),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     inventory_date: Mapped[date] = mapped_column(Date, nullable=False, index=True)
@@ -481,11 +644,18 @@ class DailyInventorySnapshot(Base):
     stock_source: Mapped[str | None] = mapped_column(String(50))
 
 
-class DailyReportObservation(Base):
+class DailyReportObservation(StoreScopedMixin, Base):
     """One product value set frozen at a daily-report capture time."""
 
     __tablename__ = "daily_report_observations"
-    __table_args__ = (UniqueConstraint("run_id", "offer_id"),)
+    __table_args__ = (
+        UniqueConstraint(
+            "store_code",
+            "run_id",
+            "offer_id",
+            name="uq_daily_report_observation_store_run_offer",
+        ),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     run_id: Mapped[str] = mapped_column(
@@ -502,11 +672,18 @@ class DailyReportObservation(Base):
     stock_source: Mapped[str | None] = mapped_column(String(50))
 
 
-class DailyReportResolution(Base):
+class DailyReportResolution(StoreScopedMixin, Base):
     """Human candidate and confirmed final values for one product and business day."""
 
     __tablename__ = "daily_report_resolutions"
-    __table_args__ = (UniqueConstraint("business_date", "offer_id"),)
+    __table_args__ = (
+        UniqueConstraint(
+            "store_code",
+            "business_date",
+            "offer_id",
+            name="uq_daily_report_resolution_store_date_offer",
+        ),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     business_date: Mapped[date] = mapped_column(Date, nullable=False, index=True)
@@ -535,7 +712,7 @@ class DailyReportResolution(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
 
 
-class DailyReportAudit(Base):
+class DailyReportAudit(StoreScopedMixin, Base):
     """Append-only audit trail for report edits, confirmations, and alert handling."""
 
     __tablename__ = "daily_report_audits"
@@ -550,11 +727,17 @@ class DailyReportAudit(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
 
 
-class DailyReportDeadlineSnapshot(Base):
+class DailyReportDeadlineSnapshot(StoreScopedMixin, Base):
     """Persistent unresolved-work snapshot made at the daily confirmation deadline."""
 
     __tablename__ = "daily_report_deadline_snapshots"
 
+    store_code: Mapped[str] = mapped_column(
+        String(64),
+        primary_key=True,
+        default=current_store_code,
+        server_default="current",
+    )
     business_date: Mapped[date] = mapped_column(Date, primary_key=True)
     snapped_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
     unresolved_count: Mapped[int] = mapped_column(Integer, nullable=False)

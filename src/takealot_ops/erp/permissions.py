@@ -9,6 +9,8 @@ from collections.abc import Iterable
 ROLES = frozenset({"viewer", "operator", "selection", "admin"})
 
 STORE_VIEW = "store.view"
+LOGISTICS_MANAGE = "logistics.manage"
+KEYWORD_TRAFFIC_MANAGE = "keyword_traffic.manage"
 COMPETITORS_VIEW = "competitors.view"
 COMPETITORS_COLLECT = "competitors.collect"
 DAILY_REPORT_VIEW = "daily_report.view"
@@ -23,6 +25,8 @@ USERS_MANAGE = "users.manage"
 PERMISSIONS = frozenset(
     {
         STORE_VIEW,
+        LOGISTICS_MANAGE,
+        KEYWORD_TRAFFIC_MANAGE,
         COMPETITORS_VIEW,
         COMPETITORS_COLLECT,
         DAILY_REPORT_VIEW,
@@ -35,6 +39,7 @@ PERMISSIONS = frozenset(
         USERS_MANAGE,
     }
 )
+ACTIVE_PERMISSIONS = PERMISSIONS - {KEYWORD_TRAFFIC_MANAGE}
 
 ROLE_PERMISSIONS: dict[str, frozenset[str]] = {
     "viewer": frozenset(
@@ -45,7 +50,7 @@ ROLE_PERMISSIONS: dict[str, frozenset[str]] = {
             REPORTS_VIEW,
         }
     ),
-    "operator": frozenset(PERMISSIONS - {USERS_MANAGE}),
+    "operator": frozenset(ACTIVE_PERMISSIONS - {USERS_MANAGE}),
     "selection": frozenset(
         {
             COMPETITORS_VIEW,
@@ -53,7 +58,7 @@ ROLE_PERMISSIONS: dict[str, frozenset[str]] = {
             DAILY_REPORT_VIEW,
         }
     ),
-    "admin": frozenset(PERMISSIONS),
+    "admin": frozenset(ACTIVE_PERMISSIONS),
 }
 
 PERMISSION_DEPENDENCIES: dict[str, frozenset[str]] = {
@@ -63,6 +68,7 @@ PERMISSION_DEPENDENCIES: dict[str, frozenset[str]] = {
     REPORTS_GENERATE: frozenset({REPORTS_VIEW}),
     NFT102_MANAGE: frozenset({REPORTS_VIEW}),
     REFRESH_RUN: frozenset({STORE_VIEW}),
+    LOGISTICS_MANAGE: frozenset({STORE_VIEW}),
 }
 
 

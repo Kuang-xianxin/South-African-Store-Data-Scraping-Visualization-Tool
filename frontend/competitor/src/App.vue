@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 
 import {
   ApiRequestError,
@@ -10,13 +10,16 @@ import {
   fetchRefreshStatus,
   logout,
   refreshStoreData,
+  setActiveStoreCode,
   setAuthSession,
+  withStoreContext,
   type RefreshStatus,
 } from "./api";
 import CompetitorsPage from "./pages/CompetitorsPage.vue";
 import DailyReportPage from "./pages/DailyReportPage.vue";
 import LoginPage from "./pages/LoginPage.vue";
 import LogisticsPage from "./pages/LogisticsPage.vue";
+import KeywordTrafficPage from "./pages/KeywordTrafficPage.vue";
 import OverviewPage from "./pages/OverviewPage.vue";
 import ProductsPage from "./pages/ProductsPage.vue";
 import QuadrantsPage from "./pages/QuadrantsPage.vue";
@@ -33,6 +36,7 @@ import type {
   AuthStatus,
   DailyReportReminders,
   FreshnessPayload,
+  OwnStoreScope,
   StoreAccessItem,
 } from "./types";
 import type { PermissionKey } from "./types";
@@ -40,6 +44,7 @@ import type { PermissionKey } from "./types";
 type PageKey =
   | "overview"
   | "products"
+  | "keyword-traffic"
   | "quadrants"
   | "risks"
   | "logistics"
@@ -51,6 +56,7 @@ type PageKey =
 const storeScopedPages = new Set<PageKey>([
   "overview",
   "products",
+  "keyword-traffic",
   "quadrants",
   "risks",
   "logistics",
@@ -59,22 +65,25 @@ const storeScopedPages = new Set<PageKey>([
 const pageStorageKey = "takealot-erp-active-page-v1";
 const competitorCheckpointKey = "takealot-competitor-collection-v1";
 const competitorClientKey = "takealot-competitor-client-v1";
+const competitorCheckpointVersion = 9;
+const allStoresSelectorValue = "all-connected-stores";
 
 const basePages = [
   { key: "overview", label: "经营总览", hint: "今日经营脉搏", mark: "01", permission: "store.view" },
   { key: "products", label: "商品中心", hint: "单品销售与流量", mark: "02", permission: "store.view" },
-  { key: "quadrants", label: "经营坐标", hint: "流量与下单分布", mark: "03", permission: "store.view" },
-  { key: "risks", label: "风险与质量", hint: "异常和数据质量", mark: "04", permission: "store.view" },
-  { key: "logistics", label: "物流管理", hint: "长睿与平台货件", mark: "05", permission: "store.view" },
-  { key: "competitors", label: "竞品雷达", hint: "库存评论与销量", mark: "06", permission: "competitors.view" },
-  { key: "daily-report", label: "运营日报", hint: "全周期核对与合并", mark: "07", permission: "daily_report.view" },
-  { key: "reports", label: "报表工作台", hint: "NFT102 续写", mark: "08", permission: "nft102.manage" },
+  { key: "keyword-traffic", label: "关键词流量", hint: "变更节点与趋势对比", mark: "03", permission: "store.view" },
+  { key: "quadrants", label: "经营坐标", hint: "流量与下单分布", mark: "04", permission: "store.view" },
+  { key: "risks", label: "风险与质量", hint: "异常和数据质量", mark: "05", permission: "store.view" },
+  { key: "logistics", label: "物流管理", hint: "长睿与平台货件", mark: "06", permission: "store.view" },
+  { key: "competitors", label: "竞品雷达", hint: "库存评论与销量", mark: "07", permission: "competitors.view" },
+  { key: "daily-report", label: "运营日报", hint: "全周期核对与合并", mark: "08", permission: "daily_report.view" },
+  { key: "reports", label: "报表工作台", hint: "NFT102 续写", mark: "09", permission: "nft102.manage" },
 ] as const;
 const adminPage = {
   key: "users",
   label: "用户权限",
   hint: "账号与权限管理",
-  mark: "09",
+  mark: "10",
   permission: "users.manage",
 } as const;
 
@@ -82,6 +91,7 @@ const authReady = ref(false);
 const authStatus = ref<AuthStatus>({ setup_required: false, bootstrap_allowed: false });
 const session = ref<AuthSession | null>(null);
 const selectedStoreId = ref<number | null>(null);
+const competitorOwnStoreScope = ref<OwnStoreScope>("current");
 const currentPage = ref<PageKey>(initialPage());
 const asOf = ref(localDate());
 const dailyReportAsOf = ref(currentOperationsBusinessDate());
@@ -116,6 +126,7 @@ let dailyReportEvents: EventSource | null = null;
 const hasPermission = (permission: PermissionKey) =>
   userHasPermission(session.value?.user, permission);
 const canManageUsers = computed(() => hasPermission("users.manage"));
+const canManageLogistics = computed(() => hasPermission("logistics.manage"));
 const canRefresh = computed(() => hasPermission("refresh.run"));
 const canCollectCompetitors = computed(() => hasPermission("competitors.collect"));
 const canControlCompetitorCollection = computed(
@@ -189,6 +200,7 @@ const pageComponent = computed(() => {
   const components = {
     overview: OverviewPage,
     products: ProductsPage,
+    "keyword-traffic": KeywordTrafficPage,
     quadrants: QuadrantsPage,
     risks: RisksPage,
     logistics: LogisticsPage,
@@ -213,8 +225,13 @@ const storeScopeLabel = computed(() => {
 });
 const canAccessConnectedStore = computed(() =>
   (session.value?.user.accessible_stores ?? []).some(
-    (store) => store.code === "current" && store.data_connected,
+    (store) => store.data_connected,
   ),
+);
+const accessibleConnectedStoreCount = computed(
+  () => (session.value?.user.accessible_stores ?? []).filter(
+    (store) => store.active && store.data_connected,
+  ).length,
 );
 const selectedStore = computed<StoreAccessItem | null>(() => {
   const stores = session.value?.user.accessible_stores ?? [];
@@ -225,14 +242,46 @@ const selectedStore = computed<StoreAccessItem | null>(() => {
     ?? null
   );
 });
+const competitorAllStoresSelected = computed(
+  () => currentPage.value === "competitors" && competitorOwnStoreScope.value === "all",
+);
+const selectedStoreChoice = computed({
+  get: () =>
+    competitorAllStoresSelected.value
+      ? allStoresSelectorValue
+      : selectedStoreId.value === null
+        ? ""
+        : String(selectedStoreId.value),
+  set: (value: string) => {
+    if (value === allStoresSelectorValue) {
+      competitorOwnStoreScope.value = "all";
+      return;
+    }
+    competitorOwnStoreScope.value = "current";
+    const storeId = Number(value);
+    selectedStoreId.value = Number.isFinite(storeId) ? storeId : null;
+  },
+});
 const selectedStorePending = computed(
   () =>
     storeScopedPages.has(activePage.value.key as PageKey)
     && (
       selectedStore.value === null
-      || selectedStore.value.code !== "current"
       || !selectedStore.value.data_connected
     ),
+);
+
+watch(
+  () => selectedStore.value?.code,
+  (storeCode, previousStoreCode) => {
+    setActiveStoreCode(storeCode);
+    if (!storeCode || storeCode === previousStoreCode) return;
+    refreshKey.value += 1;
+    void loadFreshness();
+    void loadDailyReportReminders();
+    void loadRefreshStatus();
+    connectDailyReportEvents();
+  },
 );
 const activePageProps = computed(() => {
   const key = activePage.value.key;
@@ -245,6 +294,16 @@ const activePageProps = computed(() => {
       canOperate: canCollectCompetitors.value,
       canControlCollection: canControlCompetitorCollection.value,
       currentUsername: session.value?.user.username ?? "",
+      currentStoreName: selectedStore.value?.display_name ?? "当前店铺",
+      accessibleConnectedStoreCount: accessibleConnectedStoreCount.value,
+      ownStoreScope: competitorOwnStoreScope.value,
+      onPermissionDenied: showPermissionDenied,
+    };
+  }
+  if (key === "logistics") {
+    return {
+      ...common,
+      canManage: canManageLogistics.value,
       onPermissionDenied: showPermissionDenied,
     };
   }
@@ -335,14 +394,16 @@ function acceptSession(next: AuthSession) {
   const currentSelection = next.user.accessible_stores.find(
     (store) => store.id === selectedStoreId.value,
   );
-  selectedStoreId.value = (
+  const nextStore = (
     currentSelection
     ?? next.user.accessible_stores.find(
       (store) => store.code === "current" && store.data_connected,
     )
     ?? next.user.accessible_stores[0]
     ?? null
-  )?.id ?? null;
+  );
+  selectedStoreId.value = nextStore?.id ?? null;
+  setActiveStoreCode(nextStore?.code);
   const allowedPage = pages.value.find((page) => page.key === currentPage.value);
   const allowedPageNeedsStore = (
     allowedPage
@@ -418,7 +479,7 @@ function connectDailyReportEvents() {
     || !hasPermission("daily_report.view")
     || !canAccessConnectedStore.value
   ) return;
-  const source = new EventSource("/api/erp/daily-report/events");
+  const source = new EventSource(withStoreContext("/api/erp/daily-report/events"));
   const publishUpdate = (event: Event) => {
     const payload = JSON.parse((event as MessageEvent<string>).data) as {
       business_date?: string;
@@ -493,7 +554,7 @@ function switchPage(page: PageKey) {
 
 function initialPage(): PageKey {
   try {
-    const checkpoint = JSON.parse(
+    let checkpoint = JSON.parse(
       localStorage.getItem(competitorCheckpointKey) ?? "null",
     ) as {
       version?: number;
@@ -501,10 +562,14 @@ function initialPage(): PageKey {
       stopReason?: string;
       clientId?: string;
     } | null;
+    if (checkpoint && checkpoint.version !== competitorCheckpointVersion) {
+      localStorage.removeItem(competitorCheckpointKey);
+      checkpoint = null;
+    }
     const currentClientId = sessionStorage.getItem(competitorClientKey);
     const checkpointBelongsToThisPage =
-      (checkpoint?.version ?? 0) < 8
-      || (
+      (checkpoint?.version ?? 0) >= competitorCheckpointVersion
+      && (
         Boolean(currentClientId)
         && checkpoint?.clientId === currentClientId
       );
@@ -634,15 +699,21 @@ function currentOperationsBusinessDate() {
         <div class="topbar-actions">
           <label v-if="session.user.accessible_stores.length" class="store-context">
             <span>当前查看店铺</span>
-            <select v-model.number="selectedStoreId" aria-label="切换当前查看店铺">
+            <select v-model="selectedStoreChoice" aria-label="切换当前查看店铺">
+              <option
+                v-if="currentPage === 'competitors' && accessibleConnectedStoreCount > 1"
+                :value="allStoresSelectorValue"
+              >
+                全部店铺 · {{ accessibleConnectedStoreCount }} 店合并
+              </option>
               <option
                 v-for="store in session.user.accessible_stores"
                 :key="store.id"
-                :value="store.id"
+                :value="String(store.id)"
               >
                 {{
                   `${store.display_name} · ${
-                    store.code === "current" && store.data_connected
+                    store.data_connected
                       ? "已接入"
                       : "待接入"
                   }`
@@ -664,6 +735,7 @@ function currentOperationsBusinessDate() {
               !['logistics', 'users'].includes(currentPage)
               && !selectedStorePending
               && canAccessConnectedStore
+              && !competitorAllStoresSelected
             "
             class="refresh-button"
             :disabled="refreshing || (canRefresh && !refreshStatus.can_refresh)"
@@ -719,18 +791,18 @@ function currentOperationsBusinessDate() {
           v-if="selectedStorePending && currentPage !== 'users'"
           class="store-context-pending"
         >
-          <p>{{ selectedStore ? "STORE RESERVED" : "STORE ACCESS REQUIRED" }}</p>
+          <p>{{ selectedStore ? "STORE NOT CONNECTED" : "STORE ACCESS REQUIRED" }}</p>
           <h2>
             {{
               selectedStore
-                ? `${selectedStore.display_name} 已预留，数据尚未接入`
+                ? `${selectedStore.display_name} 数据尚未接入`
                 : "当前账号尚未获授权访问已接入店铺"
             }}
           </h2>
           <span>
             {{
               selectedStore
-                ? "当前页面不会复用“当前店铺”的数据。完成该店铺的数据表分区、采集密钥、计划任务和接口上下文后，才会开放真实业务数据。"
+                ? "当前页面不会复用其他店铺的数据；管理员完成该店铺凭据和采集任务配置后才会开放。"
                 : "经营总览、商品、经营坐标、风险与运营日报属于店铺数据模块；竞品雷达等公共模块仍可按账号已开放的功能权限正常使用。"
             }}
           </span>

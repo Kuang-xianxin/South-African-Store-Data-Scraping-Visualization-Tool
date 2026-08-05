@@ -28,9 +28,11 @@ from takealot_ops.competitors.stock import (
     _probe_custom_quantity_with_retry,
     _read_visible_numeric_quantity_options,
     _select_quantity_option,
+    _select_buybox_offer,
     _stock_probe_failure_note,
     _submit_custom_quantity,
     _url_matches_plid,
+    probe_product_stocks,
 )
 
 
@@ -50,11 +52,86 @@ def test_stock_probe_failure_note_records_stage_and_network_code() -> None:
         "Page.goto: net::ERR_CONNECTION_CLOSED at https://www.takealot.com/cart\n"
         "Call log:\n  - navigating to cart"
     )
-
     assert _stock_probe_failure_note("打开购物车", error) == (
         "打开购物车失败：连接在页面加载时被关闭（ERR_CONNECTION_CLOSED）"
     )
 
+
+@pytest.mark.asyncio
+async def test_multi_buybox_probe_selects_the_exact_green_radio_option() -> None:
+    offer = CompetitorOffer(
+        selected=False,
+        sku="240468115",
+        seller_id="29900272",
+        seller_name="卖家ID 29900272（平台未返回名称）",
+        price=513,
+        stock_status="Ships in 7 - 9 work days",
+        is_buybox=True,
+        offer_id="240468115",
+        buybox_rank=1,
+        is_follower_offer=True,
+    )
+    page = Mock()
+    page.wait_for_timeout = AsyncMock()
+    radios = page.locator.return_value
+    radios.count = AsyncMock(return_value=2)
+    radio = radios.nth.return_value
+    radio.is_checked = AsyncMock(side_effect=[False, True])
+    radio.click = AsyncMock()
+
+    await _select_buybox_offer(page, offer)
+
+    page.locator.assert_called_once_with('main aside input[type="radio"]:visible')
+    radios.nth.assert_called_once_with(1)
+    radio.click.assert_awaited_once_with()
+    page.wait_for_timeout.assert_awaited_once_with(1200)
+
+
+@pytest.mark.asyncio
+async def test_follower_probe_can_keep_competing_buybox_without_variant_probe(
+    tmp_path,
+) -> None:
+    buybox = CompetitorOffer(
+        selected=True,
+        sku="COMPETING-SKU",
+        seller_id="competing-seller",
+        seller_name="Competing Seller",
+        price=99,
+        stock_status="Out of stock",
+        is_buybox=True,
+        is_add_to_cart_available=False,
+        plid="12345678",
+        url="https://www.takealot.com/p/PLID12345678",
+    )
+    product = CompetitorProduct(
+        plid="12345678",
+        url="https://www.takealot.com/p/PLID12345678",
+        title="Example",
+        image_url=None,
+        sku="COMPETING-SKU",
+        seller_id="competing-seller",
+        seller_name="Competing Seller",
+        price=99,
+        stock_status="Out of stock",
+        is_leadtime=False,
+        review_count=0,
+        rating=0,
+        offers=(buybox,),
+        variants=(),
+    )
+
+    variants, offers = await probe_product_stocks(
+        product,
+        profile_dir=tmp_path / "stock-profile",
+        probe_buyboxes=False,
+        probe_offer_buyboxes=True,
+    )
+
+    assert variants == []
+    assert len(offers) == 1
+    assert offers[0].offer.is_buybox is True
+    assert offers[0].stock.quantity == 0
+    assert offers[0].stock.exact is True
 
 @pytest.mark.asyncio
 async def test_initial_quantity_menu_waits_for_animated_numeric_options(

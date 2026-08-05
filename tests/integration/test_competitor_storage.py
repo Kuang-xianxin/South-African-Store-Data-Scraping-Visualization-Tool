@@ -15,6 +15,7 @@ from takealot_ops.competitors.domain import (
     CompetitorReviewRecord,
     CompetitorVariant,
     OfferStockObservation,
+    ReviewSummary,
     StockProbeResult,
     VariantStockObservation,
     analyze_sales_signal,
@@ -30,7 +31,12 @@ from takealot_ops.competitors.service import (
 from takealot_ops.competitors.stock import skipped_stock_probe
 from takealot_ops.competitors.web import create_app
 from takealot_ops.storage.migrations import create_schema
-from takealot_ops.storage.models import CompetitorTarget, OfferCurrent, StoreOfferBaseline
+from takealot_ops.storage.models import (
+    CompetitorTarget,
+    OfferCurrent,
+    StoreOfferBaseline,
+    StoreOfferObservation,
+)
 
 
 def test_only_default_variant_falls_back_to_snapshot_product_image() -> None:
@@ -337,6 +343,191 @@ def test_follower_offer_stock_is_bound_to_its_exact_seller_offer(tmp_path: Path)
     assert offers["other-buying-option-SKU-TWO"]["stock_note"] == "卖家二库存"
 
 
+def test_anonymous_buybox_history_uses_variant_sku_without_crossing_sellers(
+    tmp_path: Path,
+) -> None:
+    engine = create_engine(f"sqlite:///{(tmp_path / 'variant-history.db').as_posix()}")
+    create_schema(engine)
+    plid = "96909926"
+    base_url = f"https://www.takealot.com/example/PLID{plid}"
+
+    def variant(
+        key: str,
+        sku: str,
+        price: float,
+        *,
+        seller_id: str = "",
+        seller_name: str = "未知卖家",
+        stock_status: str = "Supplier out of stock",
+    ) -> CompetitorVariant:
+        return CompetitorVariant(
+            key=key,
+            label=key,
+            url=f"{base_url}?{key}",
+            title="Knee Brace",
+            sku=sku,
+            seller_id=seller_id,
+            seller_name=seller_name,
+            price=price,
+            stock_status=stock_status,
+            is_leadtime=False,
+            is_add_to_cart_available=stock_status == "In stock",
+        )
+
+    def offer(
+        item: CompetitorVariant,
+        *,
+        selected: bool,
+        include_identity: bool,
+    ) -> CompetitorOffer:
+        return CompetitorOffer(
+            selected=selected,
+            sku=item.sku if include_identity else "",
+            seller_id=item.seller_id if include_identity else "",
+            seller_name=item.seller_name if include_identity else "未知卖家",
+            price=item.price,
+            stock_status=item.stock_status,
+            is_buybox=True,
+            is_add_to_cart_available=item.is_add_to_cart_available,
+            plid=plid,
+            url=item.url,
+            variant_key=item.key,
+            variant_label=item.label,
+        )
+
+    right = variant("size=Right+Hand", "98109848", 450.0)
+    left = variant("size=Left+Hand", "98109849", 529.0)
+    other_seller_left = variant(
+        "size=Left+Hand",
+        "231601538",
+        701.0,
+        seller_id="29887827",
+        seller_name="T C STORE",
+        stock_status="In stock",
+    )
+    out_of_stock = StockProbeResult(0, True, "out-of-stock", "平台没货")
+    seller_stock = StockProbeResult(4, True, "anonymous-cart-limit", "精确库存")
+
+    observations = (
+        (
+            datetime(2026, 7, 29, 6, tzinfo=UTC),
+            CompetitorProduct(
+                plid=plid,
+                url=base_url,
+                title="Knee Brace",
+                image_url=None,
+                sku=right.sku,
+                seller_id=right.seller_id,
+                seller_name=right.seller_name,
+                price=right.price,
+                stock_status=right.stock_status,
+                is_leadtime=False,
+                review_count=0,
+                rating=0.0,
+                offers=(offer(right, selected=True, include_identity=False),),
+                variants=(right, left),
+            ),
+            (
+                VariantStockObservation(right, out_of_stock),
+                VariantStockObservation(left, out_of_stock),
+            ),
+            out_of_stock,
+        ),
+        (
+            datetime(2026, 8, 2, 5, tzinfo=UTC),
+            CompetitorProduct(
+                plid=plid,
+                url=base_url,
+                title="Knee Brace - Left Hand",
+                image_url=None,
+                sku=other_seller_left.sku,
+                seller_id=other_seller_left.seller_id,
+                seller_name=other_seller_left.seller_name,
+                price=other_seller_left.price,
+                stock_status=other_seller_left.stock_status,
+                is_leadtime=False,
+                review_count=0,
+                rating=0.0,
+                offers=(
+                    offer(other_seller_left, selected=True, include_identity=True),
+                ),
+                variants=(other_seller_left,),
+            ),
+            (VariantStockObservation(other_seller_left, seller_stock),),
+            seller_stock,
+        ),
+        (
+            datetime(2026, 8, 3, 2, tzinfo=UTC),
+            CompetitorProduct(
+                plid=plid,
+                url=base_url,
+                title="Knee Brace",
+                image_url=None,
+                sku=left.sku,
+                seller_id=left.seller_id,
+                seller_name=left.seller_name,
+                price=left.price,
+                stock_status=left.stock_status,
+                is_leadtime=False,
+                review_count=0,
+                rating=0.0,
+                offers=(
+                    offer(right, selected=False, include_identity=False),
+                    offer(left, selected=True, include_identity=False),
+                ),
+                variants=(right, left),
+            ),
+            (
+                VariantStockObservation(right, out_of_stock),
+                VariantStockObservation(left, out_of_stock),
+            ),
+            out_of_stock,
+        ),
+    )
+    for collected_at, product, variant_stocks, stock in observations:
+        with Session(engine) as session, session.begin():
+            CompetitorRepository(session).save_observation(
+                product=product,
+                reviews=[],
+                review_summary=summarize_reviews([]),
+                stock=stock,
+                variant_stocks=list(variant_stocks),
+                lifetime_sales=estimate_lifetime_sales(0),
+                signal=analyze_sales_signal(
+                    None,
+                    current_stock_quantity=stock.quantity,
+                    current_stock_exact=stock.exact,
+                    current_review_count=0,
+                ),
+                collected_at=collected_at,
+            )
+
+    dataset = load_competitor_dataset(engine)
+    engine.dispose()
+
+    left_key = "variant-buybox:98109849|size=left+hand"
+    current_offers = {
+        item["报价键"]: item for item in dataset.current.iloc[0]["跟卖报价"]
+    }
+    assert current_offers[left_key]["SKU"] == "98109849"
+    assert current_offers[left_key]["价格"] == 529.0
+    assert current_offers[left_key]["库存数量"] == 0
+    assert bool(current_offers[left_key]["库存精确"])
+    assert current_offers[left_key]["区间起始价格"] == 529.0
+    assert current_offers[left_key]["库存数量变化"] == 0
+
+    history = {
+        item["采集时间"].date(): {offer["报价键"]: offer for offer in item["跟卖报价"]}
+        for _, item in dataset.history.iterrows()
+    }
+    assert history[date(2026, 7, 29)][left_key]["库存数量"] == 0
+    assert left_key not in history[date(2026, 8, 2)]
+    assert history[date(2026, 8, 2)][
+        "fallback:29887827|231601538|size=left+hand|"
+    ]["库存数量"] == 4
+    assert history[date(2026, 8, 3)][left_key]["库存数量"] == 0
+
+
 def test_own_store_product_is_separated_and_only_exposes_follower_offers(
     tmp_path: Path,
 ) -> None:
@@ -347,7 +538,7 @@ def test_own_store_product_is_separated_and_only_exposes_follower_offers(
     captured_at = datetime(2026, 8, 2, 1, tzinfo=UTC)
     buybox = CompetitorOffer(
         selected=True,
-        sku="BUYBOX",
+        sku="OWN-SKU",
         seller_id="seller-main",
         seller_name="Main Seller",
         price=120.0,
@@ -355,7 +546,7 @@ def test_own_store_product_is_separated_and_only_exposes_follower_offers(
         is_buybox=True,
         plid=plid,
         url=url,
-        offer_id="main-offer",
+        offer_id="own-offer",
     )
     follower = CompetitorOffer(
         selected=False,
@@ -375,7 +566,7 @@ def test_own_store_product_is_separated_and_only_exposes_follower_offers(
         url=url,
         title="Own Store Product",
         image_url="https://example.invalid/own.jpg",
-        sku="BUYBOX",
+        sku="OWN-SKU",
         seller_id="seller-main",
         seller_name="Main Seller",
         price=120.0,
@@ -410,6 +601,20 @@ def test_own_store_product_is_separated_and_only_exposes_follower_offers(
                 status="buyable",
                 total_stock=7,
                 captured_at=captured_at,
+            )
+        )
+        session.add(
+            StoreOfferObservation(
+                display_date=date(2026, 8, 2),
+                offer_id="own-offer",
+                productline_id=plid,
+                sku="OWN-SKU",
+                title="Own Store Product",
+                image_url="https://example.invalid/own.jpg",
+                selling_price=95,
+                status="buyable",
+                total_stock=6,
+                captured_at=datetime(2026, 8, 2, 2, tzinfo=UTC),
             )
         )
         session.add(
@@ -461,11 +666,163 @@ def test_own_store_product_is_separated_and_only_exposes_follower_offers(
     assert len(dataset.store_current) == 1
     item = dataset.store_current.iloc[0]
     assert item["来源"] == "own_store"
-    assert item["价格"] == 100.0
-    assert item["库存数量"] == 7
+    assert item["价格"] == 95.0
+    assert item["库存数量"] == 6
     assert [offer["offer_id"] for offer in item["跟卖报价"]] == [
         "follower-offer"
     ]
+    assert [offer["报价来源"] for offer in item["对比报价"]] == [
+        "seller_api",
+        "public_offer",
+    ]
+    assert item["对比报价"][0]["卖家"] == "当前店铺"
+    assert item["对比报价"][0]["库存数量"] == 6
+    seller_api_history = dataset.store_history.loc[
+        dataset.store_history["评论数可用"].eq(False)
+    ]
+    assert len(seller_api_history) == 2
+
+
+def test_own_store_product_without_public_snapshot_waits_for_first_check(
+    tmp_path: Path,
+) -> None:
+    engine = create_engine(f"sqlite:///{(tmp_path / 'store-waiting.db').as_posix()}")
+    create_schema(engine)
+    captured_at = datetime(2026, 8, 4, 1, tzinfo=UTC)
+    with Session(engine) as session, session.begin():
+        session.add(
+            OfferCurrent(
+                offer_id="own-waiting",
+                productline_id="87654321",
+                title="Waiting Product",
+                selling_price=100,
+                total_stock=5,
+                captured_at=captured_at,
+            )
+        )
+        session.add(
+            StoreOfferBaseline(
+                display_date=date(2026, 8, 4),
+                offer_id="own-waiting",
+                productline_id="87654321",
+                sku="WAITING-SKU",
+                title="Waiting Product",
+                selling_price=100,
+                status="buyable",
+                total_stock=5,
+                captured_at=captured_at,
+            )
+        )
+
+    dataset = load_competitor_dataset(engine)
+    engine.dispose()
+
+    item = dataset.store_current.iloc[0]
+    assert item["趋势判断"] == "等待首次检查"
+    assert "等待后台轮巡首次检查" in item["判断说明"]
+
+
+def test_own_store_without_followers_still_exposes_reviews_and_variants(
+    tmp_path: Path,
+) -> None:
+    engine = create_engine(f"sqlite:///{(tmp_path / 'store-public-detail.db').as_posix()}")
+    create_schema(engine)
+    plid = "96909926"
+    url = f"https://www.takealot.com/p/PLID{plid}"
+    captured_at = datetime(2026, 8, 4, 4, tzinfo=UTC)
+    variant = CompetitorVariant(
+        key="side=right",
+        label="Side：Right Hand",
+        url=url,
+        title="Knee Brace - Right Hand",
+        image_url=None,
+        sku="PUBLIC-RIGHT",
+        seller_id="seller-main",
+        seller_name="Main Seller",
+        price=699,
+        stock_status="In stock",
+        is_leadtime=False,
+        is_add_to_cart_available=True,
+    )
+    product = CompetitorProduct(
+        plid=plid,
+        url=url,
+        title="Knee Brace - Right Hand",
+        image_url=None,
+        sku="PUBLIC-RIGHT",
+        seller_id="seller-main",
+        seller_name="Main Seller",
+        price=699,
+        stock_status="In stock",
+        is_leadtime=False,
+        review_count=2,
+        rating=4.5,
+        offers=(),
+        variants=(variant,),
+    )
+    reviews = [
+        CompetitorReviewRecord("review-1", 5, "Great", "Good", "A", "2026-08-01"),
+        CompetitorReviewRecord("review-2", 4, "Useful", "Works", "B", "2026-08-02"),
+    ]
+    skipped = skipped_stock_probe()
+    with Session(engine) as session, session.begin():
+        session.add(
+            OfferCurrent(
+                offer_id="own-right",
+                productline_id=plid,
+                title=product.title,
+                selling_price=699,
+                total_stock=0,
+                captured_at=captured_at,
+            )
+        )
+        session.add(
+            StoreOfferBaseline(
+                display_date=date(2026, 8, 4),
+                offer_id="own-right",
+                productline_id=plid,
+                sku="OWN-RIGHT",
+                title=product.title,
+                selling_price=699,
+                status="not_buyable",
+                total_stock=0,
+                captured_at=captured_at,
+            )
+        )
+        CompetitorRepository(session).save_observation(
+            product=product,
+            reviews=reviews,
+            review_summary=summarize_reviews(reviews),
+            stock=skipped,
+            variant_stocks=[VariantStockObservation(variant, skipped)],
+            lifetime_sales=estimate_lifetime_sales(product.review_count),
+            signal=analyze_sales_signal(
+                None,
+                current_stock_quantity=None,
+                current_stock_exact=False,
+                current_review_count=product.review_count,
+            ),
+            collected_at=captured_at,
+            register_target=False,
+        )
+
+    dataset = load_competitor_dataset(engine)
+    engine.dispose()
+
+    item = dataset.store_current.iloc[0]
+    assert item["趋势判断"] == "暂未发现跟卖"
+    assert item["评论数"] == 2
+    assert item["评分"] == 4.5
+    assert item["好评"] == 2
+    assert "首次检查或评论数变化" in item["共享评论说明"]
+    assert len(dataset.reviews) == 2
+    assert len(dataset.variants) == 1
+    assert "未执行购物车库存探测" in dataset.variants.iloc[0]["库存说明"]
+    assert len(dataset.store_history) == 2
+    baseline_history = dataset.store_history.loc[
+        dataset.store_history["评论数可用"].eq(False)
+    ].iloc[0]
+    assert baseline_history["对比报价"][0]["报价来源"] == "seller_api"
 
 
 def test_competitor_signals_recompute_from_oldest_and_latest_in_date_range(
@@ -529,14 +886,47 @@ def test_competitor_signals_recompute_from_oldest_and_latest_in_date_range(
         ),
     )
     observations = (
-        (datetime(2026, 7, 22, 8, tzinfo=UTC), 10, 10, 220.0, 180.0, "Out of stock"),
-        (datetime(2026, 7, 23, 8, tzinfo=UTC), 8, 11, 210.0, 190.0, "Out of stock"),
-        (datetime(2026, 7, 24, 8, tzinfo=UTC), 4, 13, 200.0, 210.0, "In stock"),
+        (
+            datetime(2026, 7, 22, 8, tzinfo=UTC),
+            10,
+            10,
+            6,
+            2,
+            2,
+            220.0,
+            180.0,
+            "Out of stock",
+        ),
+        (
+            datetime(2026, 7, 23, 8, tzinfo=UTC),
+            8,
+            11,
+            7,
+            2,
+            2,
+            210.0,
+            190.0,
+            "Out of stock",
+        ),
+        (
+            datetime(2026, 7, 24, 8, tzinfo=UTC),
+            4,
+            13,
+            8,
+            2,
+            3,
+            200.0,
+            210.0,
+            "In stock",
+        ),
     )
     for (
         collected_at,
         quantity,
         review_count,
+        positive_reviews,
+        neutral_reviews,
+        negative_reviews,
         price,
         other_price,
         other_stock_status,
@@ -567,7 +957,12 @@ def test_competitor_signals_recompute_from_oldest_and_latest_in_date_range(
             repository.save_observation(
                 product=product,
                 reviews=[],
-                review_summary=summarize_reviews([]),
+                review_summary=ReviewSummary(
+                    total=review_count,
+                    positive=positive_reviews,
+                    neutral=neutral_reviews,
+                    negative=negative_reviews,
+                ),
                 stock=stock,
                 variant_stocks=[
                     VariantStockObservation(
@@ -597,6 +992,8 @@ def test_competitor_signals_recompute_from_oldest_and_latest_in_date_range(
     assert all_signal["库存净变化"] == -6
     assert all_signal["库存净流出"] == 6
     assert all_signal["新增评论"] == 3
+    assert all_signal["新增好评"] == 2
+    assert all_signal["新增差评"] == 1
     assert all_signal["趋势判断"] == "两个独立正向信号"
     assert all_signal["观察期销量信号"] == "60–150"
     assert all_signal["区间快照数"] == 3
@@ -631,6 +1028,8 @@ def test_competitor_signals_recompute_from_oldest_and_latest_in_date_range(
     assert recent_signal["库存净变化"] == -4
     assert recent_signal["库存净流出"] == 4
     assert recent_signal["新增评论"] == 2
+    assert recent_signal["新增好评"] == 1
+    assert recent_signal["新增差评"] == 1
     assert recent_signal["观察期销量信号"] == "40–100"
     assert recent_signal["区间快照数"] == 2
     assert recent_signal["区间起始价格"] == 210.0
