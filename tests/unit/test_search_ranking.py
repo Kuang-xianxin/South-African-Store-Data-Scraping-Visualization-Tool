@@ -326,7 +326,7 @@ async def test_service_validates_keywords_locates_cursor_page_and_reuses_vision(
         "rechargeable",
         "silent",
     ]
-    assert "搜索词前置" in first["analysis"]["title_reason"]
+    assert "第一核心词" in first["analysis"]["title_reason"]
     assert second["analysis"]["vision_reused"] is True
     assert second["analysis"]["usage"]["total_tokens"] == 0
     assert second["analysis"]["title_validation"]["status"] == "pending_title_change"
@@ -341,7 +341,7 @@ def test_title_suggestion_puts_validated_terms_first_and_removes_punctuation() -
     )
 
     assert suggestion == (
-        "Portable Projection Screen Outdoor Movie High Brightness 100 Inch Foldable"
+        "Portable Projection Screen High Brightness Outdoor Movie 100 Inch Foldable"
     )
     assert suggestion.startswith("Portable Projection Screen")
     assert all(character.isalnum() or character == " " for character in suggestion)

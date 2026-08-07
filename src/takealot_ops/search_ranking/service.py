@@ -45,7 +45,6 @@ PROMPT_VERSION = "takealot-v4-image-narrow"
 ORGANIC_PAGE_SIZE = 36
 DESKTOP_COLUMNS = 4
 TITLE_MAX_LENGTH = 160
-TITLE_PRIORITY_TOKEN_LIMIT = 14
 ORGANIC_RESULT_TYPE = "product_views"
 AUTOCOMPLETE_RESULT_LIMIT = 5
 AUTOCOMPLETE_SEED_LIMIT = 6
@@ -840,8 +839,8 @@ class SearchRankingService:
                 title_reason = _title_suggestion_reason(accepted_title_keywords)
                 opportunity_title_suggestion = (
                     _build_title_suggestion(
-                        title_material,
-                        opportunity_title_keywords[:1] + accepted_title_keywords,
+                        title_suggestion,
+                        opportunity_title_keywords[:1],
                     )
                     if opportunity_title_keywords
                     else None
@@ -1639,8 +1638,8 @@ def _previous_analysis_snapshot(session: Session, offer_id: str) -> dict[str, An
     )
     opportunity_suggestion = (
         _build_title_suggestion(
-            title_material,
-            opportunity_title_keywords[:1] + accepted_title_keywords,
+            core_suggestion,
+            opportunity_title_keywords[:1],
         )
         if opportunity_title_keywords
         else None
@@ -1748,17 +1747,6 @@ def _build_title_suggestion(
                 continue
             output.append(_title_token_case(token, preferred_case))
             output_keys.add(key)
-        for phrase in priority_phrases[1:]:
-            for token in phrase:
-                key = _title_dedup_key(token)
-                if key in output_keys:
-                    continue
-                if len(output) >= TITLE_PRIORITY_TOKEN_LIMIT:
-                    break
-                output.append(_title_token_case(token, preferred_case))
-                output_keys.add(key)
-            if len(output) >= TITLE_PRIORITY_TOKEN_LIMIT:
-                break
 
     for token in suggestion_tokens:
         key = _title_dedup_key(token)
@@ -1800,8 +1788,8 @@ def _title_token_case(token: str, preferred_case: dict[str, str]) -> str:
 def _title_suggestion_reason(accepted_keywords: list[str]) -> str:
     if accepted_keywords:
         return (
-            "建议标题已由服务器按固定规则整理：通过 Takealot 相关性验证的搜索词"
-            "前置，卖点和参数后置，标题只保留字母、数字和空格。修改后仍需使用"
+            "建议标题已由服务器按固定规则整理：证据最强且获当前标题支持的第一核心词"
+            "完整前置，其他卖点和参数保持后置，标题只保留字母、数字和空格。修改后仍需使用"
             "相同搜索词复采排名，不能保证前移。"
         )
     return (
@@ -1909,8 +1897,8 @@ def _analysis_payload(
     title_reason = _title_suggestion_reason(accepted_title_keywords)
     opportunity_title_suggestion = (
         _build_title_suggestion(
-            title_material,
-            opportunity_title_keywords[:1] + accepted_title_keywords,
+            title_suggestion,
+            opportunity_title_keywords[:1],
         )
         if opportunity_title_keywords
         else None
