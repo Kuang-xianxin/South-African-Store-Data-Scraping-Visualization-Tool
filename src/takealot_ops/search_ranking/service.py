@@ -3,17 +3,18 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import hashlib
 import json
 import os
 import re
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import Any, Protocol
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 
 import httpx
 from dotenv import load_dotenv
@@ -22,6 +23,12 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from takealot_ops.competitors.api import CompetitorPublicClient
+from takealot_ops.erp.product_images import (
+    ProductImageInputError,
+    ProductImageUnavailableError,
+    ProductThumbnailCache,
+    trusted_product_image_url,
+)
 from takealot_ops.settings import DashboardSettings
 from takealot_ops.storage.migrations import (
     create_engine_for_database_url,
@@ -34,12 +41,24 @@ from takealot_ops.storage.models import (
 )
 
 
-OPENAI_RESPONSES_URL = "https://api.openai.com/v1/responses"
-PROMPT_VERSION = "takealot-search-v1"
+PROMPT_VERSION = "takealot-search-v2"
 ORGANIC_PAGE_SIZE = 36
 DESKTOP_COLUMNS = 4
 TOKEN_PATTERN = re.compile(r"[a-z0-9]+")
 API_VERSION_PATTERN = re.compile(r"/rest/(v-[^/]+)/")
+QWEN_INPUT_PRICE_CNY_PER_MILLION = 2.0
+QWEN_OUTPUT_PRICE_CNY_PER_MILLION = 8.0
+DOUBAO_INPUT_PRICE_CNY_PER_MILLION = 0.6
+DOUBAO_OUTPUT_PRICE_CNY_PER_MILLION = 3.6
+PRICING_SNAPSHOT_DATE = "2026-08-07"
+ELIGIBILITY_REASON_LABELS = {
+    "not_buyable": "状态不是 buyable",
+    "no_available_stock": "没有明确正数可售库存",
+    "stale_snapshot": "Seller Offers 快照已过期",
+    "missing_title": "缺少主标题",
+    "invalid_plid": "缺少有效 PLID",
+    "untrusted_image": "缺少可信 Takealot 官方主图",
+}
 
 
 class SearchRankingInputError(ValueError):
@@ -78,37 +97,120 @@ class VisionProfile(BaseModel):
 @dataclass(frozen=True)
 class VisionCallResult:
     profile: VisionProfile
+    provider: str
     model: str
     response_id: str | None
     usage: dict[str, int]
+    estimated_cost_cny: float
+
+
+@dataclass(frozen=True)
+class VisionProviderSettings:
+    name: str
+    display_name: str
+    api_key: str
+    base_url: str
+    model: str
+    input_price_cny_per_million: float
+    output_price_cny_per_million: float
+
+    @property
+    def chat_completions_url(self) -> str:
+        return f"{self.base_url.rstrip('/')}/chat/completions"
 
 
 @dataclass(frozen=True)
 class SearchRankingRuntimeSettings:
-    api_key: str
-    primary_model: str
-    fallback_model: str | None
+    project_root: Path
+    providers: tuple[VisionProviderSettings, ...]
     max_pages: int
     max_keywords: int
     confidence_threshold: float
     relevance_threshold: float
     request_timeout_seconds: float
     page_delay_seconds: float
+    offer_max_age_hours: float
+    image_max_dimension: int
+
+    @property
+    def configured_providers(self) -> tuple[VisionProviderSettings, ...]:
+        return tuple(provider for provider in self.providers if provider.api_key)
+
+    @property
+    def primary_provider(self) -> VisionProviderSettings:
+        configured = self.configured_providers
+        return configured[0] if configured else self.providers[0]
+
+    @property
+    def fallback_provider(self) -> VisionProviderSettings | None:
+        configured = self.configured_providers
+        if len(configured) >= 2:
+            return configured[1]
+        return None
+
+    @property
+    def provider_signature(self) -> str:
+        return "|".join(
+            f"{provider.name}:{provider.model}" for provider in self.providers
+        )
 
     @classmethod
     def from_env(cls, project_root: Path) -> SearchRankingRuntimeSettings:
         load_dotenv(project_root / ".env", override=False)
-        fallback = os.environ.get(
-            "TAKEALOT_SEARCH_VISION_FALLBACK_MODEL",
-            "gpt-5.6-luna",
-        ).strip()
-        return cls(
-            api_key=os.environ.get("OPENAI_API_KEY", "").strip(),
-            primary_model=os.environ.get(
-                "TAKEALOT_SEARCH_VISION_MODEL",
-                "gpt-5.6-terra",
+        qwen = VisionProviderSettings(
+            name="qwen",
+            display_name="阿里云百炼千问",
+            api_key=os.environ.get("DASHSCOPE_API_KEY", "").strip(),
+            base_url=_https_base_url(
+                "TAKEALOT_SEARCH_QWEN_BASE_URL",
+                "https://dashscope.aliyuncs.com/compatible-mode/v1",
+            ),
+            model=os.environ.get(
+                "TAKEALOT_SEARCH_QWEN_MODEL", "qwen3.7-plus"
             ).strip(),
-            fallback_model=fallback or None,
+            input_price_cny_per_million=_bounded_float(
+                "TAKEALOT_SEARCH_QWEN_INPUT_PRICE_CNY_PER_MILLION",
+                QWEN_INPUT_PRICE_CNY_PER_MILLION,
+                0.0,
+                100.0,
+            ),
+            output_price_cny_per_million=_bounded_float(
+                "TAKEALOT_SEARCH_QWEN_OUTPUT_PRICE_CNY_PER_MILLION",
+                QWEN_OUTPUT_PRICE_CNY_PER_MILLION,
+                0.0,
+                100.0,
+            ),
+        )
+        doubao = VisionProviderSettings(
+            name="doubao",
+            display_name="火山方舟豆包",
+            api_key=os.environ.get("ARK_API_KEY", "").strip(),
+            base_url=_https_base_url(
+                "TAKEALOT_SEARCH_DOUBAO_BASE_URL",
+                "https://ark.cn-beijing.volces.com/api/v3",
+            ),
+            model=os.environ.get(
+                "TAKEALOT_SEARCH_DOUBAO_MODEL",
+                "doubao-seed-2-0-lite-260215",
+            ).strip(),
+            input_price_cny_per_million=_bounded_float(
+                "TAKEALOT_SEARCH_DOUBAO_INPUT_PRICE_CNY_PER_MILLION",
+                DOUBAO_INPUT_PRICE_CNY_PER_MILLION,
+                0.0,
+                100.0,
+            ),
+            output_price_cny_per_million=_bounded_float(
+                "TAKEALOT_SEARCH_DOUBAO_OUTPUT_PRICE_CNY_PER_MILLION",
+                DOUBAO_OUTPUT_PRICE_CNY_PER_MILLION,
+                0.0,
+                100.0,
+            ),
+        )
+        if not qwen.model or not doubao.model:
+            raise SearchRankingConfigurationError("搜索定位模型名称不能为空")
+        return cls(
+            project_root=project_root.resolve(),
+            providers=(qwen, doubao),
             max_pages=_bounded_int("TAKEALOT_SEARCH_MAX_PAGES", 5, 1, 10),
             max_keywords=_bounded_int("TAKEALOT_SEARCH_MAX_KEYWORDS", 4, 2, 5),
             confidence_threshold=_bounded_float(
@@ -123,6 +225,12 @@ class SearchRankingRuntimeSettings:
             page_delay_seconds=_bounded_float(
                 "TAKEALOT_SEARCH_PAGE_DELAY_SECONDS", 1.5, 0.0, 10.0
             ),
+            offer_max_age_hours=_bounded_float(
+                "TAKEALOT_SEARCH_OFFER_MAX_AGE_HOURS", 36.0, 1.0, 168.0
+            ),
+            image_max_dimension=_bounded_choice_int(
+                "TAKEALOT_SEARCH_IMAGE_MAX_DIMENSION", 640, {192, 384, 640}
+            ),
         )
 
 
@@ -136,8 +244,8 @@ class VisionClient(Protocol):
     ) -> VisionCallResult: ...
 
 
-class OpenAIProductVisionClient:
-    """Strict-schema Responses API client with bounded retries and fallback."""
+class OpenAICompatibleProductVisionClient:
+    """Cross-vendor multimodal chat client with forced schema tools and fallback."""
 
     def __init__(self, settings: SearchRankingRuntimeSettings) -> None:
         self.settings = settings
@@ -149,111 +257,120 @@ class OpenAIProductVisionClient:
         title: str,
         sku: str | None,
     ) -> VisionCallResult:
-        if not self.settings.api_key:
+        providers = self.settings.configured_providers
+        if not providers:
             raise SearchRankingConfigurationError(
-                "未配置 OPENAI_API_KEY；搜索定位不会在缺少密钥时调用模型"
+                "未配置 DASHSCOPE_API_KEY 或 ARK_API_KEY；搜索定位不会调用模型"
             )
-        models = [self.settings.primary_model]
-        if (
-            self.settings.fallback_model
-            and self.settings.fallback_model != self.settings.primary_model
-        ):
-            models.append(self.settings.fallback_model)
+        image_data_url = await asyncio.to_thread(
+            _thumbnail_data_url,
+            self.settings,
+            image_url,
+        )
         last_error: Exception | None = None
         async with httpx.AsyncClient(
             timeout=self.settings.request_timeout_seconds,
             follow_redirects=False,
         ) as client:
-            for model_index, model in enumerate(models):
+            for provider_index, provider in enumerate(providers):
                 try:
-                    return await self._request_model(
+                    return await self._request_provider(
                         client,
-                        model=model,
-                        image_url=image_url,
+                        provider=provider,
+                        image_data_url=image_data_url,
                         title=title,
                         sku=sku,
                     )
-                except SearchRankingConfigurationError:
-                    raise
-                except SearchRankingProviderError as exc:
+                except (SearchRankingConfigurationError, SearchRankingProviderError) as exc:
                     last_error = exc
-                    if model_index == len(models) - 1:
+                    if provider_index == len(providers) - 1:
                         raise
-        raise SearchRankingProviderError("多模态模型暂时不可用") from last_error
+        raise SearchRankingProviderError("千问与豆包多模态服务暂时均不可用") from last_error
 
-    async def _request_model(
+    async def _request_provider(
         self,
         client: httpx.AsyncClient,
         *,
-        model: str,
-        image_url: str,
+        provider: VisionProviderSettings,
+        image_data_url: str,
         title: str,
         sku: str | None,
     ) -> VisionCallResult:
         payload = {
-            "model": model,
-            "input": [
+            "model": provider.model,
+            "messages": [
                 {
                     "role": "system",
-                    "content": [
-                        {
-                            "type": "input_text",
-                            "text": _SYSTEM_PROMPT,
-                        }
-                    ],
+                    "content": _SYSTEM_PROMPT,
                 },
                 {
                     "role": "user",
                     "content": [
                         {
-                            "type": "input_text",
+                            "type": "text",
                             "text": (
                                 "Analyze this seller offer. The current title is: "
                                 f"{title}\nSeller SKU: {sku or 'unknown'}"
                             ),
                         },
                         {
-                            "type": "input_image",
-                            "image_url": image_url,
-                            "detail": "high",
+                            "type": "image_url",
+                            "image_url": {"url": image_data_url},
                         },
                     ],
                 },
             ],
-            "text": {
-                "format": {
-                    "type": "json_schema",
-                    "name": "takealot_product_search_profile",
-                    "strict": True,
-                    "schema": VisionProfile.model_json_schema(),
+            "tools": [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "submit_takealot_product_profile",
+                        "description": "Return the validated product identity and Takealot keyword candidates.",
+                        "parameters": VisionProfile.model_json_schema(),
+                    },
                 }
+            ],
+            "tool_choice": {
+                "type": "function",
+                "function": {"name": "submit_takealot_product_profile"},
             },
+            "max_tokens": 1200,
         }
+        if provider.name == "qwen":
+            payload["enable_thinking"] = False
+        elif provider.name == "doubao":
+            payload["thinking"] = {"type": "disabled"}
         headers = {
-            "Authorization": f"Bearer {self.settings.api_key}",
+            "Authorization": f"Bearer {provider.api_key}",
             "Content-Type": "application/json",
         }
         last_error: Exception | None = None
-        for attempt in range(3):
+        for attempt in range(2):
             try:
-                response = await client.post(OPENAI_RESPONSES_URL, headers=headers, json=payload)
+                response = await client.post(
+                    provider.chat_completions_url,
+                    headers=headers,
+                    json=payload,
+                )
             except (httpx.TimeoutException, httpx.TransportError) as exc:
                 last_error = exc
-                if attempt < 2:
+                if attempt < 1:
                     await asyncio.sleep(1.5 * (2**attempt))
                     continue
                 raise SearchRankingProviderError("多模态模型网络请求连续失败") from exc
             if response.status_code in {401, 403}:
-                raise SearchRankingConfigurationError("OPENAI_API_KEY 无效或无权使用所选模型")
+                raise SearchRankingConfigurationError(
+                    f"{provider.display_name}密钥无效或无权使用所选模型"
+                )
             if response.status_code == 400:
                 raise SearchRankingConfigurationError(
-                    f"模型 {model} 或结构化图片输入配置不受当前账号支持"
+                    f"{provider.display_name}模型 {provider.model} 或结构化图片输入配置不受当前账号支持"
                 )
             if response.status_code == 429 or response.status_code >= 500:
                 last_error = SearchRankingProviderError(
                     f"多模态模型临时返回 HTTP {response.status_code}"
                 )
-                if attempt < 2:
+                if attempt < 1:
                     await asyncio.sleep(1.5 * (2**attempt))
                     continue
                 raise last_error
@@ -263,21 +380,46 @@ class OpenAIProductVisionClient:
                 )
             try:
                 body = response.json()
-                profile = VisionProfile.model_validate_json(_response_output_text(body))
+                profile = VisionProfile.model_validate_json(_chat_profile_json(body))
             except (ValueError, TypeError, ValidationError, json.JSONDecodeError) as exc:
                 raise SearchRankingProviderError("多模态模型没有返回合格的结构化商品识别结果") from exc
             usage = body.get("usage") if isinstance(body, dict) else {}
+            input_tokens = int(
+                (usage or {}).get("prompt_tokens")
+                or (usage or {}).get("input_tokens")
+                or 0
+            )
+            output_tokens = int(
+                (usage or {}).get("completion_tokens")
+                or (usage or {}).get("output_tokens")
+                or 0
+            )
+            normalized_usage = {
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+                "total_tokens": int(
+                    (usage or {}).get("total_tokens") or input_tokens + output_tokens
+                ),
+            }
             return VisionCallResult(
                 profile=profile,
-                model=model,
+                provider=provider.name,
+                model=provider.model,
                 response_id=str(body.get("id")) if body.get("id") else None,
-                usage={
-                    "input_tokens": int((usage or {}).get("input_tokens") or 0),
-                    "output_tokens": int((usage or {}).get("output_tokens") or 0),
-                    "total_tokens": int((usage or {}).get("total_tokens") or 0),
-                },
+                usage=normalized_usage,
+                estimated_cost_cny=_estimated_cost_cny(provider, normalized_usage),
             )
         raise SearchRankingProviderError("多模态模型暂时不可用") from last_error
+
+
+@dataclass(frozen=True)
+class OfferEligibility:
+    eligible: bool
+    reasons: tuple[str, ...]
+    trusted_image_url: str | None
+    available_stock: int
+    captured_at: datetime
+    age_hours: float
 
 
 @dataclass(frozen=True)
@@ -313,19 +455,30 @@ class SearchRankingService:
         self.project_root = project_root.resolve()
         self.runtime = SearchRankingRuntimeSettings.from_env(self.project_root)
         self.database_url = DashboardSettings.from_env(self.project_root).database_url
-        self._vision_client_factory = vision_client_factory or OpenAIProductVisionClient
+        self._vision_client_factory = (
+            vision_client_factory or OpenAICompatibleProductVisionClient
+        )
         self._search_client_factory = search_client_factory or (
             lambda: CompetitorPublicClient(timeout_seconds=45.0)
         )
 
     def status_payload(self) -> dict[str, Any]:
+        primary = self.runtime.primary_provider
+        fallback = self.runtime.fallback_provider
         return {
-            "configured": bool(self.runtime.api_key),
-            "provider": "openai",
-            "primary_model": self.runtime.primary_model,
-            "fallback_model": self.runtime.fallback_model,
+            "configured": bool(self.runtime.configured_providers),
+            "provider": primary.name,
+            "provider_label": primary.display_name,
+            "primary_model": primary.model,
+            "fallback_provider": fallback.name if fallback else None,
+            "fallback_provider_label": fallback.display_name if fallback else None,
+            "fallback_model": fallback.model if fallback else None,
+            "configured_provider_count": len(self.runtime.configured_providers),
+            "pricing_snapshot_date": PRICING_SNAPSHOT_DATE,
             "max_pages": self.runtime.max_pages,
             "max_keywords": self.runtime.max_keywords,
+            "offer_max_age_hours": self.runtime.offer_max_age_hours,
+            "image_max_dimension": self.runtime.image_max_dimension,
             "organic_page_size": ORGANIC_PAGE_SIZE,
             "columns_per_row": DESKTOP_COLUMNS,
             "position_scope": "organic_results_excluding_sponsored",
@@ -336,6 +489,7 @@ class SearchRankingService:
         engine = create_read_only_engine(self.database_url)
         try:
             with Session(engine) as session:
+                now = _utcnow()
                 offers = list(
                     session.scalars(
                         select(OfferCurrent).order_by(OfferCurrent.title, OfferCurrent.offer_id)
@@ -349,12 +503,41 @@ class SearchRankingService:
                 latest: dict[str, SearchRankingAnalysis] = {}
                 for analysis in analyses:
                     latest.setdefault(analysis.offer_id, analysis)
-                items = [
-                    _offer_summary(offer, latest.get(offer.offer_id)) for offer in offers
+                evaluated = [
+                    (offer, _offer_eligibility(offer, self.runtime, now=now))
+                    for offer in offers
                 ]
+                items = [
+                    _offer_summary(offer, latest.get(offer.offer_id), eligibility)
+                    for offer, eligibility in evaluated
+                    if eligibility.eligible
+                ]
+                excluded_reasons: dict[str, int] = {}
+                for _, eligibility in evaluated:
+                    if eligibility.eligible:
+                        continue
+                    for reason in eligibility.reasons:
+                        excluded_reasons[reason] = excluded_reasons.get(reason, 0) + 1
+                latest_capture = max(
+                    (eligibility.captured_at for _, eligibility in evaluated),
+                    default=None,
+                )
         finally:
             engine.dispose()
-        return {"status": self.status_payload(), "items": items}
+        return {
+            "status": self.status_payload(),
+            "eligibility": {
+                "source": "authenticated_store_seller_offers",
+                "rule": "current_offer_and_buyable_and_positive_available_stock_and_fresh",
+                "current_offer_count": len(offers),
+                "eligible_count": len(items),
+                "excluded_count": len(offers) - len(items),
+                "excluded_reasons": excluded_reasons,
+                "latest_capture_at": latest_capture.isoformat() if latest_capture else None,
+                "max_age_hours": self.runtime.offer_max_age_hours,
+            },
+            "items": items,
+        }
 
     def detail_payload(self, offer_id: str) -> dict[str, Any] | None:
         engine = create_read_only_engine(self.database_url)
@@ -362,6 +545,9 @@ class SearchRankingService:
             with Session(engine) as session:
                 offer = session.scalar(select(OfferCurrent).where(OfferCurrent.offer_id == offer_id))
                 if offer is None:
+                    return None
+                eligibility = _offer_eligibility(offer, self.runtime)
+                if not eligibility.eligible:
                     return None
                 analyses = list(
                     session.scalars(
@@ -385,7 +571,7 @@ class SearchRankingService:
                 )
                 payload = {
                     "status": self.status_payload(),
-                    "product": _offer_summary(offer, latest),
+                    "product": _offer_summary(offer, latest, eligibility),
                     "analysis": _analysis_payload(latest, results) if latest else None,
                     "history": [_analysis_history_item(item) for item in analyses],
                 }
@@ -401,20 +587,16 @@ class SearchRankingService:
                 offer = session.scalar(select(OfferCurrent).where(OfferCurrent.offer_id == offer_id))
                 if offer is None:
                     raise SearchRankingInputError("没有找到对应的店铺商品")
+                eligibility = _offer_eligibility(offer, self.runtime)
+                _raise_if_ineligible(eligibility)
                 title = " ".join(str(offer.title or "").split())
-                image_url = str(offer.image_url or "").strip()
+                image_url = str(eligibility.trusted_image_url or "")
                 plid = str(offer.productline_id or "").strip()
-                if not title:
-                    raise SearchRankingInputError("商品没有主标题，无法生成可靠搜索词")
-                if not image_url.startswith("https://"):
-                    raise SearchRankingInputError("商品没有可供多模态识别的 HTTPS 主图")
-                if not plid.isdigit():
-                    raise SearchRankingInputError("商品没有有效的 Takealot PLID")
                 previous = _previous_analysis_snapshot(session, offer_id)
                 cache_key = _analysis_cache_key(
                     image_url=image_url,
                     title=title,
-                    model=self.runtime.primary_model,
+                    provider_signature=self.runtime.provider_signature,
                 )
                 cached = session.scalar(
                     select(SearchRankingAnalysis)
@@ -427,6 +609,7 @@ class SearchRankingService:
                     .limit(1)
                 )
                 now = _utcnow()
+                primary = self.runtime.primary_provider
                 analysis = SearchRankingAnalysis(
                     offer_id=offer.offer_id,
                     productline_id=plid,
@@ -434,8 +617,8 @@ class SearchRankingService:
                     source_title=title,
                     source_image_url=image_url,
                     cache_key=cache_key,
-                    provider="openai",
-                    model=self.runtime.primary_model,
+                    provider=primary.name,
+                    model=primary.model,
                     prompt_version=PROMPT_VERSION,
                     status="running",
                     vision_reused=cached is not None,
@@ -446,14 +629,27 @@ class SearchRankingService:
                 analysis_id = analysis.id
                 cached_payload = dict(cached.vision_payload or {}) if cached else None
                 cached_model = cached.model if cached else None
+                cached_provider = cached.provider if cached else None
                 sku = offer.sku
 
             if cached_payload is not None:
                 profile = VisionProfile.model_validate(
                     cached_payload.get("profile", cached_payload)
                 )
-                vision_payload = cached_payload
-                used_model = cached_model or self.runtime.primary_model
+                source_usage = cached_payload.get("usage", {})
+                vision_payload = {
+                    **cached_payload,
+                    "usage": {
+                        "input_tokens": 0,
+                        "output_tokens": 0,
+                        "total_tokens": 0,
+                    },
+                    "source_usage": source_usage,
+                    "estimated_cost_cny": 0.0,
+                    "pricing_snapshot_date": PRICING_SNAPSHOT_DATE,
+                }
+                used_provider = cached_provider or primary.name
+                used_model = cached_model or primary.model
             else:
                 call = await self._vision_client_factory(self.runtime).identify(
                     image_url=image_url,
@@ -461,11 +657,14 @@ class SearchRankingService:
                     sku=sku,
                 )
                 profile = call.profile
+                used_provider = call.provider
                 used_model = call.model
                 vision_payload = {
                     "profile": profile.model_dump(mode="json"),
                     "usage": call.usage,
                     "response_id": call.response_id,
+                    "estimated_cost_cny": call.estimated_cost_cny,
+                    "pricing_snapshot_date": PRICING_SNAPSHOT_DATE,
                 }
 
             candidates = _unique_candidates(profile)[: self.runtime.max_keywords]
@@ -481,6 +680,12 @@ class SearchRankingService:
                         )
                     )
             else:
+                self._assert_offer_still_eligible(
+                    offer_id=offer_id,
+                    expected_plid=plid,
+                    expected_title=title,
+                    expected_image_url=image_url,
+                )
                 async with self._search_client_factory() as search_client:
                     for order, candidate in enumerate(candidates, start=1):
                         observations.append(
@@ -503,6 +708,7 @@ class SearchRankingService:
                 persisted_analysis = session.get(SearchRankingAnalysis, analysis_id)
                 if persisted_analysis is None:
                     raise RuntimeError("搜索定位分析记录意外丢失")
+                persisted_analysis.provider = used_provider
                 persisted_analysis.model = used_model
                 persisted_analysis.product_name = profile.product_name
                 persisted_analysis.category = profile.category
@@ -532,6 +738,39 @@ class SearchRankingService:
                         failed_analysis.error = _safe_error(exc)
                         failed_analysis.completed_at = _utcnow()
             raise
+        finally:
+            engine.dispose()
+
+    def _assert_offer_still_eligible(
+        self,
+        *,
+        offer_id: str,
+        expected_plid: str,
+        expected_title: str,
+        expected_image_url: str,
+    ) -> None:
+        engine = create_read_only_engine(self.database_url)
+        try:
+            with Session(engine) as session:
+                offer = session.scalar(
+                    select(OfferCurrent).where(OfferCurrent.offer_id == offer_id)
+                )
+                if offer is None:
+                    raise SearchRankingInputError(
+                        "该商品已不在当前店铺 Seller Offers 中，已停止搜索"
+                    )
+                eligibility = _offer_eligibility(offer, self.runtime)
+                _raise_if_ineligible(eligibility)
+                current_title = " ".join(str(offer.title or "").split())
+                current_plid = str(offer.productline_id or "").strip()
+                if (
+                    current_plid != expected_plid
+                    or current_title != expected_title
+                    or eligibility.trusted_image_url != expected_image_url
+                ):
+                    raise SearchRankingInputError(
+                        "商品资料在识别期间发生变化，已停止搜索，请重新运行"
+                    )
         finally:
             engine.dispose()
 
@@ -735,8 +974,64 @@ def _low_confidence_observation(
     )
 
 
-def _analysis_cache_key(*, image_url: str, title: str, model: str) -> str:
-    raw = "\n".join((PROMPT_VERSION, model, image_url, title))
+def _offer_eligibility(
+    offer: OfferCurrent,
+    runtime: SearchRankingRuntimeSettings,
+    *,
+    now: datetime | None = None,
+) -> OfferEligibility:
+    current_time = now or _utcnow()
+    captured_at = _naive_utc(offer.captured_at)
+    age_hours = max(0.0, (current_time - captured_at).total_seconds() / 3600)
+    takealot_stock = _optional_int(offer.takealot_available_stock)
+    seller_stock = _optional_int(offer.seller_available_stock)
+    if takealot_stock is None and seller_stock is None:
+        available_stock = 0
+    else:
+        available_stock = max(takealot_stock or 0, 0) + max(seller_stock or 0, 0)
+
+    reasons: list[str] = []
+    if str(offer.status or "").strip().casefold() != "buyable":
+        reasons.append("not_buyable")
+    if available_stock <= 0:
+        reasons.append("no_available_stock")
+    if captured_at < current_time - timedelta(hours=runtime.offer_max_age_hours):
+        reasons.append("stale_snapshot")
+    if not " ".join(str(offer.title or "").split()):
+        reasons.append("missing_title")
+    if not str(offer.productline_id or "").strip().isdigit():
+        reasons.append("invalid_plid")
+    try:
+        trusted_image = trusted_product_image_url(str(offer.image_url or ""))
+    except ProductImageInputError:
+        trusted_image = None
+        reasons.append("untrusted_image")
+    return OfferEligibility(
+        eligible=not reasons,
+        reasons=tuple(reasons),
+        trusted_image_url=trusted_image,
+        available_stock=available_stock,
+        captured_at=captured_at,
+        age_hours=age_hours,
+    )
+
+
+def _raise_if_ineligible(eligibility: OfferEligibility) -> None:
+    if eligibility.eligible:
+        return
+    labels = [ELIGIBILITY_REASON_LABELS.get(reason, reason) for reason in eligibility.reasons]
+    raise SearchRankingInputError(
+        "该链接不再满足‘当前店铺自有且在售’条件，未调用模型：" + "、".join(labels)
+    )
+
+
+def _analysis_cache_key(
+    *,
+    image_url: str,
+    title: str,
+    provider_signature: str,
+) -> str:
+    raw = "\n".join((PROMPT_VERSION, provider_signature, image_url, title))
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
@@ -844,18 +1139,22 @@ def _keyword_result_model(
 def _offer_summary(
     offer: OfferCurrent,
     analysis: SearchRankingAnalysis | None,
+    eligibility: OfferEligibility,
 ) -> dict[str, Any]:
     return {
         "offer_id": offer.offer_id,
         "productline_id": offer.productline_id,
         "sku": offer.sku,
         "title": offer.title,
-        "image_url": offer.image_url,
-        "analyzable": bool(
-            offer.title
-            and str(offer.image_url or "").startswith("https://")
-            and str(offer.productline_id or "").isdigit()
-        ),
+        "image_url": eligibility.trusted_image_url,
+        "offer_status": offer.status,
+        "available_stock": eligibility.available_stock,
+        "takealot_available_stock": offer.takealot_available_stock,
+        "seller_available_stock": offer.seller_available_stock,
+        "captured_at": eligibility.captured_at.isoformat(),
+        "snapshot_age_hours": round(eligibility.age_hours, 2),
+        "ownership_source": "authenticated_store_seller_offers",
+        "analyzable": eligibility.eligible,
         "latest_analysis": _analysis_history_item(analysis) if analysis else None,
     }
 
@@ -865,6 +1164,7 @@ def _analysis_history_item(analysis: SearchRankingAnalysis) -> dict[str, Any]:
         "id": analysis.id,
         "status": analysis.status,
         "source_title": analysis.source_title,
+        "provider": analysis.provider,
         "model": analysis.model,
         "confidence": _float_or_none(analysis.confidence),
         "vision_reused": analysis.vision_reused,
@@ -889,6 +1189,11 @@ def _analysis_payload(
         "category": analysis.category,
         "profile": profile,
         "usage": vision.get("usage", {}) if isinstance(vision, dict) else {},
+        "estimated_cost_cny": (
+            _float_or_none(vision.get("estimated_cost_cny"))
+            if isinstance(vision, dict)
+            else None
+        ),
         "title_suggestion": analysis.title_suggestion,
         "title_reason": analysis.title_reason,
         "title_validation": analysis.title_validation,
@@ -919,25 +1224,33 @@ def _keyword_payload(item: SearchRankingKeywordResult) -> dict[str, Any]:
     }
 
 
-def _response_output_text(body: Mapping[str, Any]) -> str:
-    direct = body.get("output_text")
-    if isinstance(direct, str) and direct.strip():
-        return direct
-    output = body.get("output")
-    if not isinstance(output, list):
-        raise ValueError("missing output")
-    for item in output:
-        if not isinstance(item, Mapping) or item.get("type") != "message":
-            continue
-        content = item.get("content")
-        if not isinstance(content, list):
-            continue
-        for block in content:
-            if isinstance(block, Mapping) and block.get("type") == "output_text":
-                text = block.get("text")
-                if isinstance(text, str) and text.strip():
-                    return text
-    raise ValueError("missing output text")
+def _chat_profile_json(body: Mapping[str, Any]) -> str:
+    choices = body.get("choices")
+    if not isinstance(choices, list) or not choices:
+        raise ValueError("missing choices")
+    first = choices[0]
+    message = first.get("message") if isinstance(first, Mapping) else None
+    if not isinstance(message, Mapping):
+        raise ValueError("missing message")
+    tool_calls = message.get("tool_calls")
+    if isinstance(tool_calls, list):
+        for tool_call in tool_calls:
+            function = (
+                tool_call.get("function") if isinstance(tool_call, Mapping) else None
+            )
+            if not isinstance(function, Mapping):
+                continue
+            if function.get("name") != "submit_takealot_product_profile":
+                continue
+            arguments = function.get("arguments")
+            if isinstance(arguments, str) and arguments.strip():
+                return arguments
+            if isinstance(arguments, Mapping):
+                return json.dumps(arguments)
+    content = message.get("content")
+    if isinstance(content, str) and content.strip():
+        return content
+    raise ValueError("missing function arguments")
 
 
 def _safe_error(exc: Exception) -> str:
@@ -964,8 +1277,64 @@ def _float_or_none(value: Any) -> float | None:
     return float(value) if value is not None else None
 
 
+def _naive_utc(value: datetime | None) -> datetime:
+    if value is None:
+        return datetime.min
+    if value.tzinfo is None:
+        return value
+    return value.astimezone(UTC).replace(tzinfo=None)
+
+
 def _utcnow() -> datetime:
     return datetime.now(UTC).replace(tzinfo=None)
+
+
+def _thumbnail_data_url(
+    settings: SearchRankingRuntimeSettings,
+    image_url: str,
+) -> str:
+    cache = ProductThumbnailCache(settings.project_root)
+    try:
+        path = cache.thumbnail_path(image_url, settings.image_max_dimension)
+        encoded = base64.b64encode(path.read_bytes()).decode("ascii")
+    except (ProductImageInputError, ProductImageUnavailableError, OSError) as exc:
+        raise SearchRankingProviderError(
+            "商品主图暂时无法读取，未调用多模态模型"
+        ) from exc
+    finally:
+        cache.close()
+    return f"data:image/jpeg;base64,{encoded}"
+
+
+def _estimated_cost_cny(
+    provider: VisionProviderSettings,
+    usage: Mapping[str, int],
+) -> float:
+    amount = (
+        int(usage.get("input_tokens") or 0)
+        * provider.input_price_cny_per_million
+        + int(usage.get("output_tokens") or 0)
+        * provider.output_price_cny_per_million
+    ) / 1_000_000
+    return round(amount, 6)
+
+
+def _https_base_url(name: str, default: str) -> str:
+    value = os.environ.get(name, default).strip().rstrip("/")
+    try:
+        parsed = urlsplit(value)
+    except ValueError as exc:
+        raise SearchRankingConfigurationError(f"{name} 不是有效地址") from exc
+    if (
+        parsed.scheme != "https"
+        or not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise SearchRankingConfigurationError(f"{name} 必须是无凭据、无参数的 HTTPS 地址")
+    return value
 
 
 def _bounded_int(name: str, default: int, minimum: int, maximum: int) -> int:
@@ -975,6 +1344,17 @@ def _bounded_int(name: str, default: int, minimum: int, maximum: int) -> int:
         raise SearchRankingConfigurationError(f"{name} 必须是整数") from exc
     if not minimum <= value <= maximum:
         raise SearchRankingConfigurationError(f"{name} 必须在 {minimum} 到 {maximum} 之间")
+    return value
+
+
+def _bounded_choice_int(name: str, default: int, choices: set[int]) -> int:
+    try:
+        value = int(os.environ.get(name, default))
+    except ValueError as exc:
+        raise SearchRankingConfigurationError(f"{name} 必须是整数") from exc
+    if value not in choices:
+        allowed = "、".join(str(item) for item in sorted(choices))
+        raise SearchRankingConfigurationError(f"{name} 只支持 {allowed}")
     return value
 
 

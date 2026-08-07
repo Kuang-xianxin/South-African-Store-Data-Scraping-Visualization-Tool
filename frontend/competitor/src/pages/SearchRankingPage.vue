@@ -32,6 +32,7 @@ const error = ref("");
 const failedImages = ref(new Set<string>());
 
 const products = computed(() => listPayload.value?.items ?? []);
+const eligibility = computed(() => listPayload.value?.eligibility ?? null);
 const filteredProducts = computed(() => {
   const needle = search.value.trim().toLocaleLowerCase();
   if (!needle) return products.value;
@@ -92,7 +93,7 @@ async function runAnalysis() {
     return;
   }
   if (!detail.value?.status.configured) {
-    error.value = "服务端尚未配置 OPENAI_API_KEY，未发起任何模型调用";
+    error.value = "服务端尚未配置 DASHSCOPE_API_KEY 或 ARK_API_KEY，未发起任何模型调用";
     return;
   }
   analyzing.value = true;
@@ -156,6 +157,21 @@ function percent(value: number) {
   return `${Math.round(value * 100)}%`;
 }
 
+function providerLabel(provider: string) {
+  const labels: Record<string, string> = {
+    qwen: "千问",
+    doubao: "豆包",
+    openai: "OpenAI（历史）",
+  };
+  return labels[provider] ?? provider;
+}
+
+function costLabel(value: number | null | undefined) {
+  if (value === null || value === undefined) return "—";
+  if (value === 0) return "¥0（缓存复用）";
+  return `约 ¥${value.toFixed(4)}`;
+}
+
 function errorMessage(caught: unknown, fallback: string) {
   return caught instanceof ApiRequestError ? caught.message : fallback;
 }
@@ -168,28 +184,40 @@ function errorMessage(caught: unknown, fallback: string) {
         <p>IMAGE → VERIFIED QUERY → ORGANIC POSITION</p>
         <h2>图片识别只是候选，平台结果才是热词验收</h2>
         <span>
-          模型先理解商品，再用 Takealot 自然结果验证词义；广告位不计入自然排名，
-          普通查看只读本地记录，不会调用模型或访问平台。
+          只有当前店铺授权 Seller Offers 中仍为 buyable、明确有可售库存且快照新鲜的链接才会进入；
+          模型先理解商品，再用 Takealot 自然结果验证词义，普通查看不会调用模型或访问平台。
         </span>
       </div>
       <dl v-if="listPayload">
-        <div><dt>主模型</dt><dd>{{ listPayload.status.primary_model }}</dd></div>
+        <div><dt>主服务</dt><dd>{{ listPayload.status.provider_label }} · {{ listPayload.status.primary_model }}</dd></div>
+        <div v-if="listPayload.status.fallback_model">
+          <dt>跨厂商备用</dt><dd>{{ listPayload.status.fallback_provider_label }} · {{ listPayload.status.fallback_model }}</dd>
+        </div>
         <div><dt>单词最多扫描</dt><dd>{{ listPayload.status.max_pages }} 页</dd></div>
         <div><dt>自然结果网格</dt><dd>36 个 / 页 · 4 列</dd></div>
       </dl>
     </section>
+
+    <p v-if="eligibility" class="eligibility-note">
+      当前授权 Offer {{ eligibility.current_offer_count }} 条，严格在售 {{ eligibility.eligible_count }} 条；
+      {{ eligibility.excluded_count }} 条已在模型调用前排除。最近完整刷新：
+      {{ eligibility.latest_capture_at ? formatChinaDateTime(eligibility.latest_capture_at) : "暂无" }}，
+      有效期 {{ eligibility.max_age_hours }} 小时。
+    </p>
 
     <p v-if="error" class="error-banner" role="alert">{{ error }}</p>
 
     <div class="ranking-layout">
       <aside class="product-rail">
         <div class="rail-title">
-          <div><p>STORE OFFERS</p><h3>店铺商品</h3></div>
+          <div><p>OWN BUYABLE OFFERS</p><h3>自有在售商品</h3></div>
           <span>{{ filteredProducts.length }} / {{ products.length }}</span>
         </div>
         <input v-model="search" type="search" placeholder="搜索标题、SKU、PLID" />
         <div v-if="loadingList" class="empty-state">正在读取本地商品…</div>
-        <div v-else-if="!filteredProducts.length" class="empty-state">没有匹配商品</div>
+        <div v-else-if="!filteredProducts.length" class="empty-state">
+          没有符合“自有、buyable、正数可售库存、快照新鲜”的商品
+        </div>
         <template v-else>
           <button
             v-for="product in filteredProducts"
@@ -208,6 +236,7 @@ function errorMessage(caught: unknown, fallback: string) {
             <span class="product-copy">
               <strong>{{ product.title || "未命名商品" }}</strong>
               <small>{{ product.sku || product.offer_id }} · PLID{{ product.productline_id || "—" }}</small>
+              <small>可售 {{ product.available_stock }} · {{ formatChinaDateTime(product.captured_at) }}</small>
               <em :class="product.latest_analysis?.status ?? 'untracked'">
                 {{
                   product.latest_analysis?.status === "completed"
@@ -238,8 +267,12 @@ function errorMessage(caught: unknown, fallback: string) {
             <div class="hero-copy">
               <p>PLID{{ selectedProduct.productline_id || "—" }} · {{ selectedProduct.sku || selectedProduct.offer_id }}</p>
               <h2>{{ selectedProduct.title || "未命名商品" }}</h2>
+              <span class="ownership-note">
+                授权 Seller Offers 当前记录 · {{ selectedProduct.offer_status }} · 可售库存
+                {{ selectedProduct.available_stock }} · {{ formatChinaDateTime(selectedProduct.captured_at) }}
+              </span>
               <span v-if="!selectedProduct.analyzable" class="blocked-note">
-                需要有效主标题、HTTPS 主图和数字 PLID 才能分析。
+                当前链接已不满足自有在售闸门，模型不会被调用。
               </span>
             </div>
             <button
@@ -252,10 +285,10 @@ function errorMessage(caught: unknown, fallback: string) {
           </section>
 
           <p v-if="analyzing" class="running-note">
-            正在调用多模态模型并逐个验证热词。为控制成本与平台频率，同一时间只运行一个任务；请不要关闭当前页面。
+            系统会先再次确认链接仍自有在售，再调用多模态模型并逐个验证热词；同图同标题优先复用缓存。
           </p>
           <p v-if="detail && !detail.status.configured" class="config-note">
-            当前仅可查看历史结果。服务端未配置 OPENAI_API_KEY，点击时不会产生费用或外部请求。
+            当前仅可查看历史结果。服务端未配置 DASHSCOPE_API_KEY / ARK_API_KEY，点击时不会产生费用或外部请求。
           </p>
 
           <template v-if="analysis">
@@ -268,12 +301,15 @@ function errorMessage(caught: unknown, fallback: string) {
               <article>
                 <p>识别置信度</p>
                 <h3>{{ confidenceLabel(analysis.confidence) }}</h3>
-                <span>{{ analysis.model }} · {{ analysis.vision_reused ? "复用缓存，未重复计费" : "本次调用" }}</span>
+                <span>{{ providerLabel(analysis.provider) }} · {{ analysis.model }} · {{ analysis.vision_reused ? "复用缓存" : "本次调用" }}</span>
               </article>
               <article>
                 <p>模型用量</p>
                 <h3>{{ analysis.usage.total_tokens ?? "—" }}</h3>
-                <span>输入 {{ analysis.usage.input_tokens ?? "—" }} · 输出 {{ analysis.usage.output_tokens ?? "—" }} tokens</span>
+                <span>
+                  输入 {{ analysis.usage.input_tokens ?? "—" }} · 输出 {{ analysis.usage.output_tokens ?? "—" }} tokens ·
+                  {{ costLabel(analysis.estimated_cost_cny) }}（按 {{ detail?.status.pricing_snapshot_date }} 配置单价）
+                </span>
               </article>
             </section>
 
@@ -347,6 +383,7 @@ function errorMessage(caught: unknown, fallback: string) {
               <div class="history-list">
                 <span v-for="run in detail.history" :key="run.id">
                   #{{ run.id }} · {{ formatChinaDateTime(run.created_at) }} · {{ run.model }} ·
+                  {{ providerLabel(run.provider) }} ·
                   {{ run.status === "completed" ? confidenceLabel(run.confidence) : run.status }}
                 </span>
               </div>
@@ -377,6 +414,7 @@ dt { color: #738078; font-size: 12px; } dd { margin: 0; font-weight: 750; }
 .error-banner { color: #8e2f25; background: #fff0ed; border: 1px solid #efc2bb; }
 .config-note { color: #755713; background: #fff8dc; border: 1px solid #ead58b; }
 .running-note { color: #285c47; background: #e8f4ed; border: 1px solid #b9d7c7; }
+.eligibility-note { margin: 0; padding: 11px 15px; border: 1px solid #c9d9cf; border-radius: 10px; color: #355e49; background: #f0f6f2; font-size: 12px; line-height: 1.6; }
 .ranking-layout { display: grid; grid-template-columns: minmax(260px, 325px) minmax(0, 1fr); gap: 18px; align-items: start; }
 .product-rail, .ranking-detail > section, .detail-loading { border: 1px solid #d9dfdb; border-radius: 16px; background: #fff; }
 .product-rail { position: sticky; top: 18px; max-height: calc(100vh - 36px); overflow: auto; padding: 16px; }
@@ -398,6 +436,7 @@ dt { color: #738078; font-size: 12px; } dd { margin: 0; font-weight: 750; }
 .product-hero > img, .hero-fallback { width: 110px; height: 110px; object-fit: contain; border-radius: 12px; background: #f3f4f1; }
 .hero-fallback { display: grid; place-items: center; color: #98a199; font-size: 11px; }
 .hero-copy p { margin: 0 0 6px; color: #78857c; font-size: 12px; }.hero-copy h2 { margin: 0; font-size: 22px; line-height: 1.35; }
+.ownership-note { display: block; margin-top: 8px; color: #50705e; font-size: 12px; line-height: 1.5; }
 .blocked-note { display: block; margin-top: 8px; color: #9d3c31; font-size: 12px; }
 .analyze-button { padding: 12px 16px; border: 0; border-radius: 10px; color: #fff; background: #235c45; font-weight: 800; cursor: pointer; }
 .analyze-button:disabled { cursor: not-allowed; opacity: .55; }

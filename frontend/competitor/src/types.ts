@@ -428,11 +428,18 @@ export interface KeywordTrafficDetailPayload {
 
 export interface SearchRankingStatus {
   configured: boolean;
-  provider: "openai";
+  provider: string;
+  provider_label: string;
   primary_model: string;
+  fallback_provider: string | null;
+  fallback_provider_label: string | null;
   fallback_model: string | null;
+  configured_provider_count: number;
+  pricing_snapshot_date: string;
   max_pages: number;
   max_keywords: number;
+  offer_max_age_hours: number;
+  image_max_dimension: number;
   organic_page_size: number;
   columns_per_row: number;
   position_scope: "organic_results_excluding_sponsored";
@@ -443,6 +450,7 @@ export interface SearchRankingAnalysisSummary {
   id: number;
   status: "running" | "completed" | "failed";
   source_title: string;
+  provider: string;
   model: string;
   confidence: number | null;
   vision_reused: boolean;
@@ -458,6 +466,13 @@ export interface SearchRankingProduct {
   sku: string | null;
   title: string | null;
   image_url: string | null;
+  offer_status: string | null;
+  available_stock: number;
+  takealot_available_stock: number | null;
+  seller_available_stock: number | null;
+  captured_at: string;
+  snapshot_age_hours: number;
+  ownership_source: "authenticated_store_seller_offers";
   analyzable: boolean;
   latest_analysis: SearchRankingAnalysisSummary | null;
 }
@@ -507,6 +522,7 @@ export interface SearchRankingAnalysis extends SearchRankingAnalysisSummary {
     output_tokens?: number;
     total_tokens?: number;
   };
+  estimated_cost_cny: number | null;
   title_suggestion: string | null;
   title_reason: string | null;
   title_validation: {
@@ -526,6 +542,16 @@ export interface SearchRankingAnalysis extends SearchRankingAnalysisSummary {
 
 export interface SearchRankingListPayload {
   status: SearchRankingStatus;
+  eligibility: {
+    source: "authenticated_store_seller_offers";
+    rule: "current_offer_and_buyable_and_positive_available_stock_and_fresh";
+    current_offer_count: number;
+    eligible_count: number;
+    excluded_count: number;
+    excluded_reasons: Record<string, number>;
+    latest_capture_at: string | null;
+    max_age_hours: number;
+  };
   items: SearchRankingProduct[];
 }
 
