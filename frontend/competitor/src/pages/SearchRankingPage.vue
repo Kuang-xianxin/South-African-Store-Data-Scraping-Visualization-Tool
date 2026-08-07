@@ -194,7 +194,10 @@ function errorMessage(caught: unknown, fallback: string) {
           <dt>跨厂商备用</dt><dd>{{ listPayload.status.fallback_provider_label }} · {{ listPayload.status.fallback_model }}</dd>
         </div>
         <div><dt>单词最多扫描</dt><dd>{{ listPayload.status.max_pages }} 页</dd></div>
-        <div><dt>自然结果网格</dt><dd>36 个 / 页 · 4 列</dd></div>
+        <div>
+          <dt>位置计算方式</dt>
+          <dd>每页最多 36 个自然商品 · 从左到右每行 4 个 · 广告不计</dd>
+        </div>
       </dl>
     </section>
 
@@ -328,9 +331,14 @@ function errorMessage(caught: unknown, fallback: string) {
                   <div class="keyword-main">
                     <div>
                       <a :href="item.search_url" target="_blank" rel="noreferrer">{{ item.keyword }}</a>
-                      <span>{{ resultLabel(item) }}</span>
+                      <span v-if="!item.found">{{ resultLabel(item) }}</span>
                     </div>
-                    <strong v-if="item.organic_rank">自然总位 #{{ item.organic_rank }}</strong>
+                    <strong v-if="item.found" class="keyword-position">
+                      <span>第 {{ item.page_number }} 页 · 第 {{ item.row_number }} 行 · 第 {{ item.column_number }} 列</span>
+                      <small>
+                        跨页自然排名 #{{ item.organic_rank }}（排除广告后按序第 {{ item.organic_rank }} 个）
+                      </small>
+                    </strong>
                     <strong v-else-if="item.relevance_status === 'accepted'">未进入扫描范围</strong>
                     <strong v-else>已拦截</strong>
                   </div>
@@ -348,7 +356,8 @@ function errorMessage(caught: unknown, fallback: string) {
                 </article>
               </div>
               <p class="position-notice">
-                坐标口径：固定 1365×900 桌面视口、默认 Relevance、每页 36 个自然结果、每行 4 列，广告不计入。
+                位置按固定 1365×900 桌面视口和默认 Relevance 计算：每页最多36个自然商品，
+                从左到右、从上到下排列，每行4个；第1页对应跨页自然排名1–36，第2页对应37–72，广告不参与排名或行列计算。
                 实际屏幕行列可能被当时广告插入推后，排名也会随时间、地区、个性化、库存和价格变化。
               </p>
             </section>
@@ -450,12 +459,12 @@ dt { color: #738078; font-size: 12px; } dd { margin: 0; font-weight: 750; }
 .keyword-card.rejected_irrelevant, .keyword-card.model_low_confidence { border-left-color: #bb6a3b; background: #fffaf4; }
 .keyword-main { display: flex; justify-content: space-between; gap: 18px; }
 .keyword-main > div { display: grid; gap: 4px; }.keyword-main a { color: #194f3a; font-size: 17px; font-weight: 850; }.keyword-main span { color: #5d6c63; font-size: 12px; }
-.keyword-main > strong { color: #235c45; white-space: nowrap; }.keyword-card dl { display: flex; gap: 28px; margin: 14px 0 8px; }.keyword-card dl div { display: grid; gap: 3px; }
+.keyword-main > strong { color: #235c45; white-space: nowrap; }.keyword-position { display: grid; gap: 4px; text-align: right; }.keyword-position > span { color: #194f3a; font-size: 15px; font-weight: 850; }.keyword-position > small { color: #65746b; font-size: 12px; font-weight: 700; }.keyword-card dl { display: flex; gap: 28px; margin: 14px 0 8px; }.keyword-card dl div { display: grid; gap: 3px; }
 .keyword-card p { margin: 7px 0; color: #4e5c53; }.keyword-card small, .position-notice, .causality-note { color: #6e7a72; line-height: 1.6; }
 .position-notice, .causality-note { margin: 0; padding: 12px 14px; border-radius: 9px; background: #f3f5f3; font-size: 12px; }
 .title-compare { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }.title-compare article { padding: 15px; border-radius: 10px; background: #f4f6f4; }.title-compare strong { line-height: 1.55; }
 .title-review > p { margin: 0; line-height: 1.7; }.movement-list, .history-list { display: flex; flex-wrap: wrap; gap: 8px; }.movement-list span, .history-list span { padding: 7px 10px; border-radius: 999px; background: #e8f1eb; color: #315a46; font-size: 12px; }
 .first-run { text-align: center; padding: 70px 20px !important; }.first-run span, .empty-state, .detail-loading { color: #748077; }
 @media (max-width: 1050px) { .ranking-layout { grid-template-columns: 1fr; }.product-rail { position: static; max-height: 420px; }.method-banner { flex-direction: column; }.product-hero { grid-template-columns: 90px minmax(0, 1fr); }.analyze-button { grid-column: 1 / -1; }.identity-grid { grid-template-columns: 1fr; } }
-@media (max-width: 650px) { .method-banner { padding: 18px; }.product-hero { grid-template-columns: 1fr; }.title-compare { grid-template-columns: 1fr; }.keyword-main { flex-direction: column; }.keyword-card dl { flex-wrap: wrap; } }
+@media (max-width: 650px) { .method-banner { padding: 18px; }.product-hero { grid-template-columns: 1fr; }.title-compare { grid-template-columns: 1fr; }.keyword-main { flex-direction: column; }.keyword-position { text-align: left; }.keyword-card dl { flex-wrap: wrap; } }
 </style>
