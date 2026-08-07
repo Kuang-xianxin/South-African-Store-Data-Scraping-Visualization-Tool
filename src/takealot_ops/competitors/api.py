@@ -417,6 +417,78 @@ class CompetitorPublicClient:
             )
         return sorted(unique.values(), key=lambda item: item.review_date, reverse=True)
 
+    async def fetch_search_first_page(
+        self,
+        keyword: str,
+    ) -> tuple[str, dict[str, Any]]:
+        """Capture the current public search payload behind Takealot's rendered page."""
+        query = " ".join(keyword.split())
+        if not query or len(query) > 200:
+            raise ValueError("搜索词必须为1到200个字符")
+        page = self._page
+        if page is None:
+            raise RuntimeError("竞品浏览器尚未启动")
+        loop = asyncio.get_running_loop()
+        captured: asyncio.Future[tuple[str, dict[str, Any]]] = loop.create_future()
+        tasks: set[asyncio.Task[None]] = set()
+
+        async def capture(response: Any) -> None:
+            if captured.done():
+                return
+            try:
+                payload = await response.json()
+                if not isinstance(payload, dict):
+                    raise ValueError("Takealot 搜索接口没有返回对象")
+                captured.set_result((response.url, payload))
+            except Exception as exc:
+                if not captured.done():
+                    captured.set_exception(exc)
+
+        def on_response(response: Any) -> None:
+            if "/searches/products," not in response.url or captured.done():
+                return
+            task = asyncio.create_task(capture(response))
+            tasks.add(task)
+            task.add_done_callback(tasks.discard)
+
+        page.on("response", on_response)
+        try:
+            response = await page.goto(
+                f"https://www.takealot.com/all?{urlencode({'qsearch': query})}",
+                wait_until="domcontentloaded",
+                timeout=max(self._timeout_ms, 45_000),
+            )
+            if response is None or _is_retryable_takealot_status(response.status):
+                raise CompetitorNetworkError("Takealot 搜索页暂时无法访问")
+            return await asyncio.wait_for(captured, timeout=max(15, self._timeout_ms / 1000))
+        except asyncio.TimeoutError as exc:
+            raise CompetitorNetworkError("Takealot 搜索结果接口响应超时") from exc
+        finally:
+            page.remove_listener("response", on_response)
+            if tasks:
+                await asyncio.gather(*tasks, return_exceptions=True)
+
+    async def fetch_search_next_page(
+        self,
+        request_url: str,
+        after: str,
+    ) -> dict[str, Any]:
+        """Follow one server-issued organic-search cursor on the same safe endpoint."""
+        parsed = urlsplit(request_url)
+        if (
+            parsed.scheme != "https"
+            or parsed.hostname != "api.takealot.com"
+            or "/searches/products," not in parsed.path
+            or not after
+        ):
+            raise ValueError("Takealot 搜索游标地址无效")
+        params = dict(parse_qsl(parsed.query, keep_blank_values=True))
+        params.pop("before", None)
+        params.pop("start", None)
+        params["after"] = after
+        next_url = parsed._replace(query=urlencode(params)).geturl()
+        return await self._get_json(next_url)
+
     # ── internal ──────────────────────────────────────────────────────────
 
     async def _human_delay(self, min_s: float, max_s: float) -> None:

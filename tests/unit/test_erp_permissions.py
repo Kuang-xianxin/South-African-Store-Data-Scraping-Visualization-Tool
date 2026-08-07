@@ -10,6 +10,7 @@ from takealot_ops.erp.permissions import (
     KEYWORD_TRAFFIC_MANAGE,
     LOGISTICS_MANAGE,
     ROLE_PERMISSIONS,
+    SEARCH_RANKING_RUN,
     normalize_permissions,
     permissions_from_storage,
     permissions_to_storage,
@@ -37,6 +38,16 @@ def test_logistics_management_is_operator_admin_only_and_requires_store_view() -
     assert LOGISTICS_MANAGE in ROLE_PERMISSIONS["admin"]
     assert normalize_permissions("viewer", [LOGISTICS_MANAGE]) == frozenset(
         {"store.view", LOGISTICS_MANAGE}
+    )
+
+
+def test_search_ranking_run_is_operator_admin_only_and_requires_store_view() -> None:
+    assert SEARCH_RANKING_RUN not in ROLE_PERMISSIONS["viewer"]
+    assert SEARCH_RANKING_RUN not in ROLE_PERMISSIONS["selection"]
+    assert SEARCH_RANKING_RUN in ROLE_PERMISSIONS["operator"]
+    assert SEARCH_RANKING_RUN in ROLE_PERMISSIONS["admin"]
+    assert normalize_permissions("viewer", [SEARCH_RANKING_RUN]) == frozenset(
+        {"store.view", SEARCH_RANKING_RUN}
     )
 
 
@@ -99,6 +110,8 @@ def test_create_schema_adds_permissions_and_store_scope_to_legacy_users(
         assert inspect(engine).has_table("platform_warehouse_draft_lines")
         assert inspect(engine).has_table("platform_warehouse_draft_audits")
         assert inspect(engine).has_table("platform_warehouse_shipments")
+        assert inspect(engine).has_table("search_ranking_analyses")
+        assert inspect(engine).has_table("search_ranking_keyword_results")
         draft_columns = {
             str(column["name"])
             for column in inspect(engine).get_columns("platform_warehouse_drafts")

@@ -141,6 +141,8 @@ _STORE_SCOPED_TABLES = (
     "collection_runs",
     "offer_current",
     "offer_snapshots",
+    "search_ranking_analyses",
+    "search_ranking_keyword_results",
     "store_offer_baselines",
     "store_offer_observations",
     "sale_items",
