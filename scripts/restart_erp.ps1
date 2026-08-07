@@ -10,6 +10,28 @@ if (-not (Test-Path -LiteralPath $pythonPath -PathType Leaf)) {
     throw "Project Python not found: $pythonPath"
 }
 
+function Import-UserEnvironmentVariableIfMissing {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Name
+    )
+
+    $processValue = [Environment]::GetEnvironmentVariable($Name, "Process")
+    if (-not [string]::IsNullOrWhiteSpace($processValue)) {
+        return
+    }
+
+    $userValue = [Environment]::GetEnvironmentVariable($Name, "User")
+    if (-not [string]::IsNullOrWhiteSpace($userValue)) {
+        [Environment]::SetEnvironmentVariable($Name, $userValue, "Process")
+    }
+}
+
+# Codex or another long-running launcher may predate a Windows user-variable change.
+# Import only the two optional search-model keys, without printing or persisting values.
+Import-UserEnvironmentVariableIfMissing -Name "DASHSCOPE_API_KEY"
+Import-UserEnvironmentVariableIfMissing -Name "ARK_API_KEY"
+
 $portText = & $pythonPath -c "from pathlib import Path; from takealot_ops.settings import DashboardSettings; print(DashboardSettings.from_env(Path.cwd()).dashboard_port)" 2>&1
 if ($LASTEXITCODE -ne 0) {
     throw "Unable to read the ERP port: $portText"
