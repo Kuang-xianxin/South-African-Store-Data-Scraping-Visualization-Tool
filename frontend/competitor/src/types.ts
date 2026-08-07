@@ -426,12 +426,123 @@ export interface KeywordTrafficDetailPayload {
   metric_notice: string;
 }
 
+export interface SearchRankingStatus {
+  configured: boolean;
+  provider: "openai";
+  primary_model: string;
+  fallback_model: string | null;
+  max_pages: number;
+  max_keywords: number;
+  organic_page_size: number;
+  columns_per_row: number;
+  position_scope: "organic_results_excluding_sponsored";
+  passive_reads_are_local_only: boolean;
+}
+
+export interface SearchRankingAnalysisSummary {
+  id: number;
+  status: "running" | "completed" | "failed";
+  source_title: string;
+  model: string;
+  confidence: number | null;
+  vision_reused: boolean;
+  created_at: string;
+  completed_at: string | null;
+  error: string | null;
+  title_validation_status: string | null;
+}
+
+export interface SearchRankingProduct {
+  offer_id: string;
+  productline_id: string | null;
+  sku: string | null;
+  title: string | null;
+  image_url: string | null;
+  analyzable: boolean;
+  latest_analysis: SearchRankingAnalysisSummary | null;
+}
+
+export interface SearchRankingKeywordResult {
+  id: number;
+  keyword: string;
+  candidate_order: number;
+  relevance_status:
+    | "accepted"
+    | "rejected_irrelevant"
+    | "model_low_confidence";
+  relevance_score: number;
+  validation_evidence: {
+    candidate_rationale?: string;
+    validation_terms?: string[];
+    top_result_titles?: string[];
+    matched_top_results?: number;
+    evaluated_top_results?: number;
+    api_version?: string | null;
+    reason?: string;
+  };
+  total_num_found: number | null;
+  pages_scanned: number;
+  found: boolean;
+  page_number: number | null;
+  page_rank: number | null;
+  organic_rank: number | null;
+  row_number: number | null;
+  column_number: number | null;
+  columns_per_row: number;
+  target_url: string | null;
+  search_url: string;
+  observed_at: string;
+}
+
+export interface SearchRankingAnalysis extends SearchRankingAnalysisSummary {
+  product_name: string | null;
+  category: string | null;
+  profile: {
+    product_type_terms?: string[];
+    distinctive_terms?: string[];
+    exclusions?: string[];
+  };
+  usage: {
+    input_tokens?: number;
+    output_tokens?: number;
+    total_tokens?: number;
+  };
+  title_suggestion: string | null;
+  title_reason: string | null;
+  title_validation: {
+    status?: string;
+    causality?: "observational_only";
+    guarantee?: boolean;
+    note?: string;
+    comparisons?: Array<{
+      keyword: string;
+      before_rank: number;
+      after_rank: number;
+      delta: number;
+    }>;
+  } | null;
+  keywords: SearchRankingKeywordResult[];
+}
+
+export interface SearchRankingListPayload {
+  status: SearchRankingStatus;
+  items: SearchRankingProduct[];
+}
+
+export interface SearchRankingDetailPayload {
+  status: SearchRankingStatus;
+  product: SearchRankingProduct;
+  analysis: SearchRankingAnalysis | null;
+  history: SearchRankingAnalysisSummary[];
+}
+
 export type UserRole = "viewer" | "operator" | "selection" | "admin";
 
 export type PermissionKey =
   | "store.view"
   | "logistics.manage"
   | "keyword_traffic.manage"
+  | "search_ranking.run"
   | "competitors.view"
   | "competitors.collect"
   | "daily_report.view"

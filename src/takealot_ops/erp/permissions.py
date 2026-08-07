@@ -11,6 +11,7 @@ ROLES = frozenset({"viewer", "operator", "selection", "admin"})
 STORE_VIEW = "store.view"
 LOGISTICS_MANAGE = "logistics.manage"
 KEYWORD_TRAFFIC_MANAGE = "keyword_traffic.manage"
+SEARCH_RANKING_RUN = "search_ranking.run"
 COMPETITORS_VIEW = "competitors.view"
 COMPETITORS_COLLECT = "competitors.collect"
 DAILY_REPORT_VIEW = "daily_report.view"
@@ -27,6 +28,7 @@ PERMISSIONS = frozenset(
         STORE_VIEW,
         LOGISTICS_MANAGE,
         KEYWORD_TRAFFIC_MANAGE,
+        SEARCH_RANKING_RUN,
         COMPETITORS_VIEW,
         COMPETITORS_COLLECT,
         DAILY_REPORT_VIEW,
@@ -69,6 +71,7 @@ PERMISSION_DEPENDENCIES: dict[str, frozenset[str]] = {
     NFT102_MANAGE: frozenset({REPORTS_VIEW}),
     REFRESH_RUN: frozenset({STORE_VIEW}),
     LOGISTICS_MANAGE: frozenset({STORE_VIEW}),
+    SEARCH_RANKING_RUN: frozenset({STORE_VIEW}),
 }
 
 

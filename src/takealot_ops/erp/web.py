@@ -107,6 +107,7 @@ from takealot_ops.erp.permissions import (
     REFRESH_RUN,
     REPORTS_GENERATE,
     REPORTS_VIEW,
+    SEARCH_RANKING_RUN,
     STORE_VIEW,
     USERS_MANAGE,
 )
@@ -144,6 +145,12 @@ from takealot_ops.nft102_portal import (
 )
 from takealot_ops.reporting import generate_daily_reports
 from takealot_ops.scheduler import verify_database_integrity
+from takealot_ops.search_ranking import (
+    SearchRankingConfigurationError,
+    SearchRankingInputError,
+    SearchRankingProviderError,
+    SearchRankingService,
+)
 from takealot_ops.settings import DashboardSettings
 from takealot_ops.storage.migrations import create_engine_for_settings, create_schema
 from takealot_ops.storage.models import (
@@ -517,6 +524,8 @@ def create_app(project_root: Path | None = None) -> FastAPI:
     product_thumbnails = ProductThumbnailCache(root)
     logistics_overview = LogisticsOverviewService(root)
     platform_warehouse = PlatformWarehouseService(root)
+    search_ranking = SearchRankingService(root)
+    search_ranking_lock = asyncio.Lock()
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
@@ -538,6 +547,7 @@ def create_app(project_root: Path | None = None) -> FastAPI:
     app.add_middleware(GZipMiddleware, minimum_size=1024, compresslevel=5)
     app.state.auth_manager = auth
     app.state.product_thumbnail_cache = product_thumbnails
+    app.state.search_ranking_service = search_ranking
 
     def require_competitor_batch_controller(request: Request) -> None:
         user = request.state.erp_user
@@ -913,6 +923,43 @@ def create_app(project_root: Path | None = None) -> FastAPI:
         if payload is None:
             raise HTTPException(status_code=404, detail="没有找到对应的店铺商品")
         return payload
+
+    @app.get("/api/erp/search-ranking")
+    def search_ranking_products(request: Request) -> dict[str, Any]:
+        service: SearchRankingService = request.app.state.search_ranking_service
+        return service.list_payload()
+
+    @app.get("/api/erp/search-ranking/{offer_id}")
+    def search_ranking_product_detail(
+        offer_id: str,
+        request: Request,
+    ) -> dict[str, Any]:
+        service: SearchRankingService = request.app.state.search_ranking_service
+        payload = service.detail_payload(offer_id)
+        if payload is None:
+            raise HTTPException(status_code=404, detail="没有找到对应的店铺商品")
+        return payload
+
+    @app.post("/api/erp/search-ranking/{offer_id}/analyze")
+    async def analyze_search_ranking(
+        offer_id: str,
+        request: Request,
+    ) -> dict[str, Any]:
+        if search_ranking_lock.locked():
+            raise HTTPException(
+                status_code=409,
+                detail="另一个搜索定位任务正在运行；为控制模型成本和平台访问频率，请稍后重试",
+            )
+        service: SearchRankingService = request.app.state.search_ranking_service
+        try:
+            async with search_ranking_lock:
+                return await service.analyze_offer(offer_id)
+        except SearchRankingInputError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except SearchRankingConfigurationError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        except (SearchRankingProviderError, CompetitorNetworkError) as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
 
     @app.get("/api/erp/quadrants")
     def quadrants(
@@ -2681,6 +2728,8 @@ def _required_permission(path: str, method: str) -> str | tuple[str, ...] | None
         return STORE_VIEW if safe_method else LOGISTICS_MANAGE
     if path.startswith("/api/erp/keyword-traffic"):
         return STORE_VIEW
+    if path.startswith("/api/erp/search-ranking"):
+        return STORE_VIEW if safe_method else SEARCH_RANKING_RUN
     if path.startswith("/api/erp/daily-report/export"):
         return DAILY_REPORT_VIEW if safe_method else DAILY_REPORT_EXPORT
     if path.startswith("/api/erp/daily-report"):
@@ -2718,6 +2767,7 @@ def _requires_connected_store_access(path: str) -> bool:
                 "/api/erp/summary",
                 "/api/erp/products",
                 "/api/erp/keyword-traffic",
+                "/api/erp/search-ranking",
                 "/api/erp/quadrants",
                 "/api/erp/risks",
                 "/api/erp/logistics",
@@ -2751,6 +2801,8 @@ def _permission_denied_message(permission: str | tuple[str, ...]) -> str:
         return "当前账号不能刷新全部数据"
     if permission == LOGISTICS_MANAGE:
         return "当前账号可以查看物流数据，但不能确认或撤销物流关联"
+    if permission == SEARCH_RANKING_RUN:
+        return "当前账号可以查看搜索定位，但不能调用模型或采集搜索排名"
     if permission in {REPORTS_GENERATE, NFT102_MANAGE}:
         return "当前账号不能执行报表生成或续写"
     return "当前账号没有访问此模块的权限"

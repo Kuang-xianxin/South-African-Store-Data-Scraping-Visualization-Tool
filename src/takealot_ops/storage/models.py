@@ -120,6 +120,71 @@ class OfferSnapshot(StoreScopedMixin, Base):
     takealot_stock_on_way: Mapped[int | None] = mapped_column(Integer)
 
 
+class SearchRankingAnalysis(StoreScopedMixin, Base):
+    """One auditable image-to-keyword analysis and ranking collection run."""
+
+    __tablename__ = "search_ranking_analyses"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    offer_id: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
+    productline_id: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
+    sku: Mapped[str | None] = mapped_column(String(255))
+    source_title: Mapped[str] = mapped_column(Text, nullable=False)
+    source_image_url: Mapped[str] = mapped_column(Text, nullable=False)
+    cache_key: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    provider: Mapped[str] = mapped_column(String(30), nullable=False)
+    model: Mapped[str] = mapped_column(String(100), nullable=False)
+    prompt_version: Mapped[str] = mapped_column(String(30), nullable=False)
+    status: Mapped[str] = mapped_column(String(30), nullable=False, index=True)
+    product_name: Mapped[str | None] = mapped_column(Text)
+    category: Mapped[str | None] = mapped_column(Text)
+    confidence: Mapped[Decimal | None] = mapped_column(Numeric(6, 4))
+    vision_payload: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+    vision_reused: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    title_suggestion: Mapped[str | None] = mapped_column(Text)
+    title_reason: Mapped[str | None] = mapped_column(Text)
+    title_validation: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+    error: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, index=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime)
+
+
+class SearchRankingKeywordResult(StoreScopedMixin, Base):
+    """One platform-validated keyword and its immutable organic position evidence."""
+
+    __tablename__ = "search_ranking_keyword_results"
+    __table_args__ = (
+        UniqueConstraint(
+            "analysis_id",
+            "candidate_order",
+            name="uq_search_ranking_result_analysis_order",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    analysis_id: Mapped[int] = mapped_column(
+        ForeignKey("search_ranking_analyses.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    keyword: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    candidate_order: Mapped[int] = mapped_column(Integer, nullable=False)
+    relevance_status: Mapped[str] = mapped_column(String(30), nullable=False, index=True)
+    relevance_score: Mapped[Decimal] = mapped_column(Numeric(6, 4), nullable=False)
+    validation_evidence: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    total_num_found: Mapped[int | None] = mapped_column(Integer)
+    pages_scanned: Mapped[int] = mapped_column(Integer, nullable=False)
+    found: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    page_number: Mapped[int | None] = mapped_column(Integer)
+    page_rank: Mapped[int | None] = mapped_column(Integer)
+    organic_rank: Mapped[int | None] = mapped_column(Integer)
+    row_number: Mapped[int | None] = mapped_column(Integer)
+    column_number: Mapped[int | None] = mapped_column(Integer)
+    columns_per_row: Mapped[int] = mapped_column(Integer, nullable=False, default=4)
+    target_url: Mapped[str | None] = mapped_column(Text)
+    observed_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, index=True)
+
+
 class StoreOfferBaseline(StoreScopedMixin, Base):
     """Earliest Seller API offer pull retained for one Beijing display day."""
 

@@ -11,6 +11,7 @@ export const permissionLabels: Record<PermissionKey, string> = {
   "store.view": "查看店铺经营数据",
   "logistics.manage": "管理物流关联与平台仓草稿",
   "keyword_traffic.manage": "旧版关键词手工记录（已停用）",
+  "search_ranking.run": "调用多模态模型并采集搜索定位",
   "competitors.view": "查看竞品雷达",
   "competitors.collect": "采集竞品",
   "daily_report.view": "查看运营日报",
@@ -33,6 +34,7 @@ export const templatePermissions: Record<UserRole, PermissionKey[]> = {
   operator: [
     "store.view",
     "logistics.manage",
+    "search_ranking.run",
     "competitors.view",
     "competitors.collect",
     "daily_report.view",
@@ -51,6 +53,7 @@ export const templatePermissions: Record<UserRole, PermissionKey[]> = {
   admin: [
     "store.view",
     "logistics.manage",
+    "search_ranking.run",
     "competitors.view",
     "competitors.collect",
     "daily_report.view",
@@ -75,6 +78,7 @@ export const permissionGroups: Array<{
     permissions: [
       "store.view",
       "logistics.manage",
+      "search_ranking.run",
       "refresh.run",
     ],
   },
@@ -112,6 +116,7 @@ const dependencies: Partial<Record<PermissionKey, PermissionKey[]>> = {
   "nft102.manage": ["reports.view"],
   "refresh.run": ["store.view"],
   "logistics.manage": ["store.view"],
+  "search_ranking.run": ["store.view"],
 };
 
 export function userHasPermission(

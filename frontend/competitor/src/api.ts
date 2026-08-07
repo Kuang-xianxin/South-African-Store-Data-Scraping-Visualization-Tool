@@ -31,6 +31,10 @@ import type {
   PlatformWarehouseDraft,
   PlatformWarehousePayload,
 } from "./types";
+import type {
+  SearchRankingDetailPayload,
+  SearchRankingListPayload,
+} from "./types";
 import { templatePermissions } from "./permissions";
 
 let csrfToken = "";
@@ -596,6 +600,27 @@ export function fetchKeywordTrafficDetail(
   return request<KeywordTrafficDetailPayload>(
     `/api/erp/keyword-traffic/${encodeURIComponent(offerId)}`
       + `?${query(asOf)}&history_days=${historyDays}&comparison_days=${comparisonDays}`,
+  );
+}
+
+export function fetchSearchRankingProducts(): Promise<SearchRankingListPayload> {
+  return request<SearchRankingListPayload>("/api/erp/search-ranking");
+}
+
+export function fetchSearchRankingDetail(
+  offerId: string,
+): Promise<SearchRankingDetailPayload> {
+  return request<SearchRankingDetailPayload>(
+    `/api/erp/search-ranking/${encodeURIComponent(offerId)}`,
+  );
+}
+
+export function analyzeSearchRanking(
+  offerId: string,
+): Promise<SearchRankingDetailPayload> {
+  return request<SearchRankingDetailPayload>(
+    `/api/erp/search-ranking/${encodeURIComponent(offerId)}/analyze`,
+    { method: "POST" },
   );
 }
 
