@@ -186,8 +186,8 @@ def build_quadrant_payload(
     as_of: date,
     percentile: int,
 ) -> dict[str, Any]:
-    """Return canonical seven-day quadrant classification and boundaries."""
-    window = build_quadrant_window(dataset.product_daily, as_of, days=7)
+    """Return canonical thirty-day operating-coordinate data and boundaries."""
+    window = build_quadrant_window(dataset.product_daily, as_of, days=30)
     classified = classify_quadrants(window, percentile=percentile)
     boundaries = dict(classified.attrs)
     classified = _enrich_products(classified, dataset.offer_current)

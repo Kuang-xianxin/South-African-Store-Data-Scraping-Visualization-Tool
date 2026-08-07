@@ -103,6 +103,7 @@ def test_create_schema_adds_permissions_and_store_scope_to_legacy_users(
         assert "store_access_all" in columns
         assert inspect(engine).has_table("erp_stores")
         assert inspect(engine).has_table("erp_user_stores")
+        assert inspect(engine).has_table("competitor_personal_watchlist")
         assert inspect(engine).has_table("logistics_shipment_links")
         assert inspect(engine).has_table("logistics_shipment_link_audits")
         assert inspect(engine).has_table("logistics_provider_snapshots")

@@ -47,12 +47,23 @@ def test_erp_product_detail_keeps_daily_history_and_rolling_traffic_label_data(
     assert len(detail["history"]) == 2
 
 
-def test_erp_quadrants_keep_real_boundaries_after_identity_enrichment(
+def test_erp_quadrants_use_thirty_day_orders_and_keep_identity_enrichment(
     dashboard_dataset: DashboardDataset,
 ) -> None:
-    payload = build_quadrant_payload(dashboard_dataset, AS_OF, 50)
+    older_offer_a = dashboard_dataset.product_daily.iloc[0].copy()
+    older_offer_a["metric_date"] = date(2026, 7, 1)
+    older_offer_a["ordered_units"] = 11
+    product_daily = pd.concat(
+        [dashboard_dataset.product_daily, pd.DataFrame([older_offer_a])],
+        ignore_index=True,
+    )
+    payload = build_quadrant_payload(
+        replace(dashboard_dataset, product_daily=product_daily),
+        AS_OF,
+        50,
+    )
 
-    assert payload["window_start"] == "2026-07-14"
+    assert payload["window_start"] == "2026-06-21"
     assert payload["window_end"] == "2026-07-20"
     assert payload["boundaries"]["page_views"] == 960
     assert sum(payload["counts"].values()) == 2
@@ -62,6 +73,7 @@ def test_erp_quadrants_keep_real_boundaries_after_identity_enrichment(
     }
     offer_a = next(item for item in payload["items"] if item["offer_id"] == "offer-a")
     offer_b = next(item for item in payload["items"] if item["offer_id"] == "offer-b")
+    assert offer_a["ordered_units"] == 19
     assert "page_views_7_day_estimate" not in offer_a
     assert offer_a["first_listed_at"] == "2026-01-15 12:34"
     assert offer_a["first_listed_source"] == "platform"

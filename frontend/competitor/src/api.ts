@@ -3,6 +3,8 @@ import type {
   CompetitorDetail,
   CompetitorLinkHealthItem,
   CompetitorOverview,
+  CompetitorPersonalWatchlistItem,
+  CompetitorPersonalWatchlistPayload,
   CompetitorStoreTargetPayload,
   CompetitorTargetAuditPayload,
   CompetitorTargetItem,
@@ -23,6 +25,7 @@ import type {
   ProductsPayload,
   QuadrantPayload,
   RiskPayload,
+  StoreOverviewPayload,
   SummaryPayload,
   DailyReportExport,
   DailyReportPayload,
@@ -286,6 +289,28 @@ export async function fetchCompetitorTargets(): Promise<CompetitorTargetItem[]> 
   return result.items;
 }
 
+export function fetchCompetitorPersonalWatchlist(): Promise<CompetitorPersonalWatchlistPayload> {
+  return request<CompetitorPersonalWatchlistPayload>(
+    "/api/competitors/personal-watchlist",
+  );
+}
+
+export function addCompetitorPersonalWatchlistItem(
+  plid: string,
+): Promise<{ item: CompetitorPersonalWatchlistItem; created: boolean }> {
+  return request(`/api/competitors/personal-watchlist/${encodeURIComponent(plid)}`, {
+    method: "PUT",
+  });
+}
+
+export function deleteCompetitorPersonalWatchlistItem(
+  plid: string,
+): Promise<{ ok: boolean; removed: boolean }> {
+  return request(`/api/competitors/personal-watchlist/${encodeURIComponent(plid)}`, {
+    method: "DELETE",
+  });
+}
+
 export async function fetchCompetitorStoreTargets(
   ownStoreScope: OwnStoreScope = "current",
 ): Promise<CompetitorStoreTargetPayload> {
@@ -302,6 +327,7 @@ export async function createCompetitorTarget(
   queued_to_active_batch: boolean;
   automatic_store_target: boolean;
   store_names: string[];
+  personal_watchlist_member: boolean;
 }> {
   return request("/api/competitors/targets", {
     method: "POST",
@@ -555,6 +581,10 @@ export async function fetchFreshness(): Promise<FreshnessPayload> {
 
 export async function fetchSummary(asOf: string): Promise<SummaryPayload> {
   return request<SummaryPayload>(`/api/erp/summary?${query(asOf)}`);
+}
+
+export async function fetchStoreOverview(asOf: string): Promise<StoreOverviewPayload> {
+  return request<StoreOverviewPayload>(`/api/erp/summary/stores?${query(asOf)}`);
 }
 
 export async function fetchProducts(asOf: string): Promise<ProductsPayload> {

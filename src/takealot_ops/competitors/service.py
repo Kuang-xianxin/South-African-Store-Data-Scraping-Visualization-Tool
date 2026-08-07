@@ -1182,6 +1182,51 @@ def _snapshot_offers(row: CompetitorSnapshot) -> list[Mapping[str, object]]:
     return [item for item in value if isinstance(item, Mapping)]
 
 
+def _follow_selling_opportunity(
+    row: CompetitorSnapshot,
+) -> tuple[bool, str | None, str, int | None]:
+    """Classify only complete public-offer evidence from a successful snapshot."""
+
+    value: object = row.offers
+    if isinstance(value, str):
+        try:
+            value = ast.literal_eval(value)
+        except (SyntaxError, ValueError):
+            value = None
+    if not isinstance(value, list) or any(not isinstance(item, Mapping) for item in value):
+        return (
+            False,
+            None,
+            "旧快照没有完整公开报价列表，不能判定为跟卖机会。",
+            None,
+        )
+
+    offers = cast(list[Mapping[str, object]], value)
+    offer_count = len(offers)
+    if offer_count == 0:
+        return (
+            True,
+            "暂无卖家报价",
+            "本次公开商品采集成功，但平台没有返回任何卖家报价。",
+            0,
+        )
+
+    stock_states = [_offer_stock_state(offer) for offer in offers]
+    if all(state == "没货" for state in stock_states):
+        return (
+            True,
+            "全部报价售罄",
+            f"本次共采集到 {offer_count} 个公开报价，且每个报价都有明确没货证据。",
+            offer_count,
+        )
+    return (
+        False,
+        None,
+        "当前公开报价中仍有可售或库存未知报价，不列为跟卖机会。",
+        offer_count,
+    )
+
+
 def _normalized_offer_scope(value: object) -> str:
     return " ".join(str(value or "").casefold().split())
 
@@ -1597,6 +1642,12 @@ def _snapshot_row(
     raw_history: bool = False,
 ) -> dict[str, object]:
     stock_text = _stock_text(row)
+    (
+        follow_opportunity,
+        follow_opportunity_type,
+        follow_opportunity_note,
+        public_offer_count,
+    ) = _follow_selling_opportunity(row)
     if raw_history:
         observed_stock_outflow = None
         review_delta = None
@@ -1670,6 +1721,10 @@ def _snapshot_row(
         "区间快照数": interval_snapshot_count,
         "库存可比": stock_comparable,
         "链接": row.url,
+        "跟卖机会": follow_opportunity,
+        "跟卖机会类型": follow_opportunity_type,
+        "跟卖机会说明": follow_opportunity_note,
+        "公开报价数": public_offer_count,
         "跟卖报价": offer_rows or [],
         "对比报价": offer_rows or [],
         "自有报价": [],

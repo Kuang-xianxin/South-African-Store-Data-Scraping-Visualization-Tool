@@ -9,7 +9,7 @@ import json
 import os
 import re
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -41,12 +41,40 @@ from takealot_ops.storage.models import (
 )
 
 
-PROMPT_VERSION = "takealot-search-v2"
+PROMPT_VERSION = "takealot-v4-image-narrow"
 ORGANIC_PAGE_SIZE = 36
 DESKTOP_COLUMNS = 4
 TITLE_MAX_LENGTH = 160
 TITLE_PRIORITY_TOKEN_LIMIT = 14
 ORGANIC_RESULT_TYPE = "product_views"
+AUTOCOMPLETE_RESULT_LIMIT = 5
+AUTOCOMPLETE_SEED_LIMIT = 6
+OPPORTUNITY_RELEVANCE_THRESHOLD = 0.10
+CORE_MAJORITY_FLOOR = 0.51
+IDENTITY_TITLE_SIMILARITY_FLOOR = 0.40
+HIGH_RISK_CLAIM_TOKENS = {
+    "app",
+    "battery",
+    "bluetooth",
+    "compatible",
+    "control",
+    "dimmable",
+    "foldable",
+    "heated",
+    "memory",
+    "portable",
+    "power",
+    "rechargeable",
+    "remote",
+    "smart",
+    "solar",
+    "touch",
+    "usb",
+    "waterproof",
+    "wifi",
+    "wireless",
+}
+TITLE_CONNECTOR_TOKENS = {"a", "an", "and", "for", "of", "the", "to", "with"}
 TOKEN_PATTERN = re.compile(r"[a-z0-9]+")
 API_VERSION_PATTERN = re.compile(r"/rest/(v-[^/]+)/")
 QWEN_INPUT_PRICE_CNY_PER_MILLION = 2.0
@@ -91,6 +119,8 @@ class VisionProfile(BaseModel):
     product_type_terms: list[str] = Field(min_length=1, max_length=5)
     distinctive_terms: list[str] = Field(min_length=0, max_length=8)
     keywords: list[KeywordCandidate] = Field(min_length=2, max_length=5)
+    autocomplete_seeds: list[KeywordCandidate] = Field(min_length=2, max_length=5)
+    opportunity_seeds: list[KeywordCandidate] = Field(min_length=1, max_length=3)
     exclusions: list[str] = Field(min_length=0, max_length=8)
     confidence: float = Field(ge=0, le=1)
     title_suggestion: str = Field(min_length=2, max_length=160)
@@ -105,6 +135,7 @@ class VisionCallResult:
     response_id: str | None
     usage: dict[str, int]
     estimated_cost_cny: float
+    provider_attempts: tuple[dict[str, Any], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -137,7 +168,9 @@ class SearchRankingRuntimeSettings:
 
     @property
     def configured_providers(self) -> tuple[VisionProviderSettings, ...]:
-        return tuple(provider for provider in self.providers if provider.api_key)
+        configured = [provider for provider in self.providers if provider.api_key]
+        priority = {"doubao": 0, "qwen": 1}
+        return tuple(sorted(configured, key=lambda item: priority.get(item.name, 99)))
 
     @property
     def primary_provider(self) -> VisionProviderSettings:
@@ -242,8 +275,7 @@ class VisionClient(Protocol):
         self,
         *,
         image_url: str,
-        title: str,
-        sku: str | None,
+        reference_title: str,
     ) -> VisionCallResult: ...
 
 
@@ -257,8 +289,7 @@ class OpenAICompatibleProductVisionClient:
         self,
         *,
         image_url: str,
-        title: str,
-        sku: str | None,
+        reference_title: str,
     ) -> VisionCallResult:
         providers = self.settings.configured_providers
         if not providers:
@@ -271,23 +302,66 @@ class OpenAICompatibleProductVisionClient:
             image_url,
         )
         last_error: Exception | None = None
+        conflicting_results: list[tuple[float, VisionCallResult]] = []
+        provider_attempts: list[dict[str, Any]] = []
         async with httpx.AsyncClient(
             timeout=self.settings.request_timeout_seconds,
             follow_redirects=False,
         ) as client:
             for provider_index, provider in enumerate(providers):
                 try:
-                    return await self._request_provider(
+                    result = await self._request_provider(
                         client,
                         provider=provider,
                         image_data_url=image_data_url,
-                        title=title,
-                        sku=sku,
                     )
                 except (SearchRankingConfigurationError, SearchRankingProviderError) as exc:
                     last_error = exc
+                    provider_attempts.append(
+                        {
+                            "provider": provider.name,
+                            "status": "request_or_schema_failed",
+                            "reason": type(exc).__name__,
+                        }
+                    )
                     if provider_index == len(providers) - 1:
-                        raise
+                        break
+                    continue
+                _, cross_check = _cross_check_image_profile(
+                    result.profile,
+                    reference_title,
+                )
+                similarity = float(cross_check["source_title_similarity"])
+                if similarity >= IDENTITY_TITLE_SIMILARITY_FLOOR:
+                    provider_attempts.append(
+                        {
+                            "provider": provider.name,
+                            "status": "accepted",
+                            "source_title_similarity": similarity,
+                        }
+                    )
+                    return replace(
+                        result,
+                        provider_attempts=tuple(provider_attempts),
+                    )
+                provider_attempts.append(
+                    {
+                        "provider": provider.name,
+                        "status": "identity_conflict",
+                        "source_title_similarity": similarity,
+                    }
+                )
+                conflicting_results.append((similarity, result))
+        if conflicting_results:
+            _, best = max(conflicting_results, key=lambda item: item[0])
+            low_confidence_profile = best.profile.model_copy(
+                update={"confidence": min(best.profile.confidence, 0.49)}
+            )
+            return replace(
+                best,
+                profile=low_confidence_profile,
+                provider_attempts=tuple(provider_attempts),
+            )
         raise SearchRankingProviderError("千问与豆包多模态服务暂时均不可用") from last_error
 
     async def _request_provider(
@@ -296,8 +370,6 @@ class OpenAICompatibleProductVisionClient:
         *,
         provider: VisionProviderSettings,
         image_data_url: str,
-        title: str,
-        sku: str | None,
     ) -> VisionCallResult:
         payload = {
             "model": provider.model,
@@ -312,8 +384,9 @@ class OpenAICompatibleProductVisionClient:
                         {
                             "type": "text",
                             "text": (
-                                "Analyze this seller offer. The current title is: "
-                                f"{title}\nSeller SKU: {sku or 'unknown'}"
+                                "Identify the physical product shown in the image. "
+                                "No seller title or SKU is supplied at this stage; "
+                                "base the identity and shopper wording only on visible evidence."
                             ),
                         },
                         {
@@ -383,7 +456,7 @@ class OpenAICompatibleProductVisionClient:
                 )
             try:
                 body = response.json()
-                profile = VisionProfile.model_validate_json(_chat_profile_json(body))
+                profile = _validated_chat_profile(body)
             except (ValueError, TypeError, ValidationError, json.JSONDecodeError) as exc:
                 raise SearchRankingProviderError("多模态模型没有返回合格的结构化商品识别结果") from exc
             usage = body.get("usage") if isinstance(body, dict) else {}
@@ -444,6 +517,17 @@ class KeywordObservation:
     observed_at: datetime
 
 
+@dataclass(frozen=True)
+class SearchKeywordCandidate:
+    phrase: str
+    rationale: str
+    candidate_source: str
+    intended_strategy: str
+    seed: str | None = None
+    seed_source: str | None = None
+    autocomplete_rank: int | None = None
+
+
 class SearchRankingService:
     """Persisted store-scoped analysis; ordinary GET requests remain local-only."""
 
@@ -484,6 +568,11 @@ class SearchRankingService:
             "image_max_dimension": self.runtime.image_max_dimension,
             "organic_page_size": ORGANIC_PAGE_SIZE,
             "columns_per_row": DESKTOP_COLUMNS,
+            "core_first_page_threshold": max(
+                self.runtime.relevance_threshold,
+                CORE_MAJORITY_FLOOR,
+            ),
+            "opportunity_first_page_threshold": OPPORTUNITY_RELEVANCE_THRESHOLD,
             "position_scope": "organic_results_excluding_sponsored",
             "ranking_source": "sections.products.results:type=product_views",
             "passive_reads_are_local_only": True,
@@ -599,7 +688,6 @@ class SearchRankingService:
                 previous = _previous_analysis_snapshot(session, offer_id)
                 cache_key = _analysis_cache_key(
                     image_url=image_url,
-                    title=title,
                     provider_signature=self.runtime.provider_signature,
                 )
                 cached = session.scalar(
@@ -634,11 +722,13 @@ class SearchRankingService:
                 cached_payload = dict(cached.vision_payload or {}) if cached else None
                 cached_model = cached.model if cached else None
                 cached_provider = cached.provider if cached else None
-                sku = offer.sku
 
             if cached_payload is not None:
-                profile = VisionProfile.model_validate(
-                    cached_payload.get("profile", cached_payload)
+                model_profile = VisionProfile.model_validate(
+                    cached_payload.get(
+                        "model_profile",
+                        cached_payload.get("profile", cached_payload),
+                    )
                 )
                 source_usage = cached_payload.get("usage", {})
                 vision_payload = {
@@ -657,23 +747,28 @@ class SearchRankingService:
             else:
                 call = await self._vision_client_factory(self.runtime).identify(
                     image_url=image_url,
-                    title=title,
-                    sku=sku,
+                    reference_title=title,
                 )
-                profile = call.profile
+                model_profile = call.profile
                 used_provider = call.provider
                 used_model = call.model
                 vision_payload = {
-                    "profile": profile.model_dump(mode="json"),
+                    "model_profile": model_profile.model_dump(mode="json"),
                     "usage": call.usage,
                     "response_id": call.response_id,
                     "estimated_cost_cny": call.estimated_cost_cny,
+                    "provider_attempts": list(call.provider_attempts),
                     "pricing_snapshot_date": PRICING_SNAPSHOT_DATE,
                 }
 
-            candidates = _unique_candidates(profile)[: self.runtime.max_keywords]
+            profile, recognition = _cross_check_image_profile(model_profile, title)
             observations: list[KeywordObservation] = []
+            autocomplete_checks: list[dict[str, Any]] = []
             if profile.confidence < self.runtime.confidence_threshold:
+                candidates = _precise_candidates(
+                    profile,
+                    source_title=title,
+                )[: self.runtime.max_keywords]
                 for order, candidate in enumerate(candidates, start=1):
                     observations.append(
                         _low_confidence_observation(
@@ -691,12 +786,18 @@ class SearchRankingService:
                     expected_image_url=image_url,
                 )
                 async with self._search_client_factory() as search_client:
+                    candidates, autocomplete_checks = await _discover_keyword_candidates(
+                        search_client,
+                        profile=profile,
+                        source_title=title,
+                        title_reference_terms=recognition["title_reference_terms"],
+                        max_keywords=self.runtime.max_keywords,
+                    )
                     for order, candidate in enumerate(candidates, start=1):
                         observations.append(
                             await _collect_keyword_observation(
                                 search_client,
-                                keyword=candidate.phrase,
-                                rationale=candidate.rationale,
+                                candidate=candidate,
                                 candidate_order=order,
                                 target_plid=plid,
                                 profile=profile,
@@ -717,20 +818,49 @@ class SearchRankingService:
                 persisted_analysis.product_name = profile.product_name
                 persisted_analysis.category = profile.category
                 persisted_analysis.confidence = Decimal(str(profile.confidence))
-                accepted_title_keywords = [
+                accepted_title_keywords = _title_supported_keywords(
+                    [
+                        item.keyword
+                        for item in observations
+                        if item.relevance_status == "accepted"
+                    ],
+                    title,
+                )
+                opportunity_title_keywords = [
                     item.keyword
                     for item in observations
-                    if item.relevance_status == "accepted"
+                    if item.relevance_status == "opportunity"
+                    and _keyword_claims_supported(item.keyword, title)
                 ]
+                title_material = title
                 title_suggestion = _build_title_suggestion(
-                    profile.title_suggestion,
+                    title_material,
                     accepted_title_keywords,
                 )
                 title_reason = _title_suggestion_reason(accepted_title_keywords)
+                opportunity_title_suggestion = (
+                    _build_title_suggestion(
+                        title_material,
+                        opportunity_title_keywords[:1] + accepted_title_keywords,
+                    )
+                    if opportunity_title_keywords
+                    else None
+                )
                 profile_payload = profile.model_dump(mode="json")
                 profile_payload["title_suggestion"] = title_suggestion
                 profile_payload["title_reason"] = title_reason
+                profile_payload["opportunity_title_suggestion"] = (
+                    opportunity_title_suggestion
+                )
+                profile_payload["opportunity_title_reason"] = (
+                    _opportunity_title_reason(opportunity_title_keywords)
+                    if opportunity_title_suggestion
+                    else None
+                )
+                vision_payload["model_profile"] = model_profile.model_dump(mode="json")
                 vision_payload["profile"] = profile_payload
+                vision_payload["recognition"] = recognition
+                vision_payload["autocomplete_checks"] = autocomplete_checks
                 persisted_analysis.vision_payload = vision_payload
                 persisted_analysis.title_suggestion = title_suggestion
                 persisted_analysis.title_reason = title_reason
@@ -796,8 +926,7 @@ class SearchRankingService:
 async def _collect_keyword_observation(
     client: CompetitorPublicClient,
     *,
-    keyword: str,
-    rationale: str,
+    candidate: SearchKeywordCandidate,
     candidate_order: int,
     target_plid: str,
     profile: VisionProfile,
@@ -805,19 +934,61 @@ async def _collect_keyword_observation(
     relevance_threshold: float,
     page_delay_seconds: float,
 ) -> KeywordObservation:
+    keyword = candidate.phrase
     request_url, payload = await client.fetch_search_first_page(keyword)
     first_products, paging = _search_products(payload)
     validation_terms = _validation_terms(profile)
-    top_titles = [item["title"] for item in first_products[:12]]
-    relevant_flags = [_title_matches_terms(title, validation_terms) for title in top_titles]
+    first_page_titles = [item["title"] for item in first_products[:ORGANIC_PAGE_SIZE]]
+    relevant_flags = [
+        _title_matches_terms(title, validation_terms) for title in first_page_titles
+    ]
     score = sum(relevant_flags) / len(relevant_flags) if relevant_flags else 0.0
+    matched_count = sum(relevant_flags)
+    evaluated_count = len(relevant_flags)
+    core_threshold = max(relevance_threshold, CORE_MAJORITY_FLOOR)
+    if score >= core_threshold:
+        relevance_status = "accepted"
+    elif (
+        candidate.candidate_source == "takealot_autocomplete"
+        and candidate.autocomplete_rank is not None
+        and score >= OPPORTUNITY_RELEVANCE_THRESHOLD
+    ):
+        relevance_status = "opportunity"
+    else:
+        relevance_status = "rejected_irrelevant"
     api_match = API_VERSION_PATTERN.search(request_url)
     evidence = {
-        "candidate_rationale": rationale,
+        "candidate_rationale": candidate.rationale,
+        "candidate_source": candidate.candidate_source,
+        "intended_strategy": candidate.intended_strategy,
+        "effective_strategy": (
+            "core" if relevance_status == "accepted" else relevance_status
+        ),
+        "autocomplete_seed": candidate.seed,
+        "autocomplete_seed_source": candidate.seed_source,
+        "autocomplete_rank": candidate.autocomplete_rank,
+        "autocomplete_endpoint": (
+            "searches/search_suggestions"
+            if candidate.autocomplete_rank is not None
+            else None
+        ),
+        "autocomplete_is_search_volume": False,
+        "demand_signal_note": (
+            "Takealot 搜索框补全及其顺序是平台直接意图信号，但不是公开搜索量。"
+            if candidate.autocomplete_rank is not None
+            else "该词来自图片精准识别，不把模型判断当作平台搜索量。"
+        ),
         "validation_terms": validation_terms,
-        "top_result_titles": top_titles[:5],
-        "matched_top_results": sum(relevant_flags),
-        "evaluated_top_results": len(relevant_flags),
+        "top_result_titles": first_page_titles[:5],
+        "matched_top_results": matched_count,
+        "evaluated_top_results": evaluated_count,
+        "matched_first_page_results": matched_count,
+        "evaluated_first_page_results": evaluated_count,
+        "first_page_same_type_ratio": score,
+        "first_page_majority": score >= CORE_MAJORITY_FLOOR,
+        "core_threshold": core_threshold,
+        "opportunity_threshold": OPPORTUNITY_RELEVANCE_THRESHOLD,
+        "direct_competitor_count_first_page": matched_count,
         "api_version": api_match.group(1) if api_match else None,
         "sort": "Relevance",
         "page_size": ORGANIC_PAGE_SIZE,
@@ -828,12 +999,12 @@ async def _collect_keyword_observation(
     }
     observed_at = _utcnow()
     total = _optional_int(paging.get("total_num_found"))
-    if score < relevance_threshold:
-        evidence["threshold"] = relevance_threshold
+    if relevance_status == "rejected_irrelevant":
+        evidence["threshold"] = core_threshold
         return KeywordObservation(
             keyword=keyword,
             candidate_order=candidate_order,
-            relevance_status="rejected_irrelevant",
+            relevance_status=relevance_status,
             relevance_score=score,
             validation_evidence=evidence,
             total_num_found=total,
@@ -861,7 +1032,7 @@ async def _collect_keyword_observation(
             return KeywordObservation(
                 keyword=keyword,
                 candidate_order=candidate_order,
-                relevance_status="accepted",
+                relevance_status=relevance_status,
                 relevance_score=score,
                 validation_evidence=evidence,
                 total_num_found=total,
@@ -886,7 +1057,7 @@ async def _collect_keyword_observation(
     return KeywordObservation(
         keyword=keyword,
         candidate_order=candidate_order,
-        relevance_status="accepted",
+        relevance_status=relevance_status,
         relevance_score=score,
         validation_evidence=evidence,
         total_num_found=total,
@@ -957,34 +1128,388 @@ def _is_sponsored_search_result(raw: Mapping[str, Any]) -> bool:
 
 
 def _validation_terms(profile: VisionProfile) -> list[str]:
-    terms: list[str] = []
-    for raw in profile.product_type_terms:
-        normalized = " ".join(raw.casefold().split())
-        if normalized and normalized not in terms:
-            terms.append(normalized)
-    return terms
+    # The first model term is contractually the narrow physical form. Broader use,
+    # colour, or category terms must not make a mixed first page look same-type.
+    primary = " ".join(profile.product_type_terms[0].casefold().split())
+    return [primary] if primary else []
 
 
 def _title_matches_terms(title: str, terms: list[str]) -> bool:
-    title_tokens = set(TOKEN_PATTERN.findall(title.casefold()))
+    title_tokens = _canonical_tokens(title)
     return any(
         bool(tokens) and set(tokens).issubset(title_tokens)
         for term in terms
-        if (tokens := TOKEN_PATTERN.findall(term))
+        if (tokens := _canonical_tokens(term))
     )
 
 
-def _unique_candidates(profile: VisionProfile) -> list[KeywordCandidate]:
-    output: list[KeywordCandidate] = []
+def _canonical_tokens(value: str) -> set[str]:
+    return {_canonical_token(token) for token in TOKEN_PATTERN.findall(value.casefold())}
+
+
+def _canonical_token(token: str) -> str:
+    irregular = {
+        "lighting": "light",
+        "backlighting": "backlight",
+        "controlled": "control",
+        "mice": "mouse",
+        "powered": "power",
+    }
+    if token in irregular:
+        return irregular[token]
+    if token.endswith("ies") and len(token) > 4:
+        return f"{token[:-3]}y"
+    if token.endswith(("ches", "shes", "xes", "zes")) and len(token) > 4:
+        return token[:-2]
+    if (
+        token.endswith("s")
+        and len(token) > 3
+        and not token.endswith(("ss", "us", "is", "ous", "less"))
+    ):
+        return token[:-1]
+    return token
+
+
+def _keyword_claims_supported(keyword: str, source_title: str) -> bool:
+    keyword_tokens = _canonical_tokens(keyword)
+    source_tokens = _canonical_tokens(source_title)
+    unsupported = (keyword_tokens & HIGH_RISK_CLAIM_TOKENS) - source_tokens
+    if "control" in unsupported and {"remote", "control"} & source_tokens:
+        unsupported.remove("control")
+    return not unsupported
+
+
+def _title_supported_keywords(
+    keywords: list[str],
+    source_title: str,
+) -> list[str]:
+    source_tokens = _canonical_tokens(source_title)
+    output: list[str] = []
+    for keyword in keywords:
+        meaningful = _canonical_tokens(keyword) - TITLE_CONNECTOR_TOKENS
+        if meaningful and meaningful.issubset(source_tokens):
+            output.append(keyword)
+    return output
+
+
+def _cross_check_image_profile(
+    profile: VisionProfile,
+    source_title: str,
+) -> tuple[VisionProfile, dict[str, Any]]:
+    """Keep model identity image-only, then compare it with the local seller title."""
+    source_tokens = _canonical_tokens(source_title)
+    name_tokens = _canonical_tokens(profile.product_name)
+    similarity = (
+        len(source_tokens & name_tokens) / len(name_tokens) if name_tokens else 0.0
+    )
+    source_word_count = len(TOKEN_PATTERN.findall(source_title.casefold()))
+    model_word_count = len(TOKEN_PATTERN.findall(profile.product_name.casefold()))
+    copied_or_verbose = model_word_count > 7 or (
+        source_word_count >= 8 and model_word_count >= 8 and similarity >= 0.9
+    )
+    candidate_product_name = (
+        _concise_visual_product_name(profile) if copied_or_verbose else profile.product_name
+    )
+    product_name, removed_identity_terms = _remove_unconfirmed_identity_claims(
+        candidate_product_name,
+        source_title,
+    )
+    title_reference_terms: list[str] = []
+    for raw in (
+        *profile.product_type_terms,
+        *profile.distinctive_terms,
+        *(candidate.phrase for candidate in profile.keywords),
+    ):
+        phrase = " ".join(raw.split())
+        tokens = _canonical_tokens(phrase)
+        if not tokens or not tokens.issubset(source_tokens):
+            continue
+        if phrase.casefold() in {item.casefold() for item in title_reference_terms}:
+            continue
+        title_reference_terms.append(phrase)
+        if len(title_reference_terms) >= 8:
+            break
+    normalized = profile.model_copy(update={"product_name": product_name})
+    return normalized, {
+        "basis": "image_only_then_title_cross_check",
+        "model_received_source_title": False,
+        "model_received_sku": False,
+        "original_model_product_name": profile.product_name,
+        "product_name_adjusted": copied_or_verbose or bool(removed_identity_terms),
+        "removed_unconfirmed_identity_terms": removed_identity_terms,
+        "source_title_similarity": round(similarity, 4),
+        "title_reference_terms": title_reference_terms,
+        "title_reference_role": "post_recognition_cross_check_only",
+    }
+
+
+def _remove_unconfirmed_identity_claims(
+    product_name: str,
+    source_title: str,
+) -> tuple[str, list[str]]:
+    source_tokens = _canonical_tokens(source_title)
+    supported_claims = set(source_tokens)
+    if "remote" in source_tokens:
+        supported_claims.add("control")
+    kept: list[str] = []
+    removed: list[str] = []
+    for token in _title_tokens(product_name):
+        normalized = _canonical_token(token.casefold())
+        if normalized in HIGH_RISK_CLAIM_TOKENS and normalized not in supported_claims:
+            removed.append(token)
+            continue
+        kept.append(token)
+    if len(kept) >= 2:
+        return " ".join(kept), removed
+    return product_name, []
+
+
+def _concise_visual_product_name(profile: VisionProfile) -> str:
+    base = max(
+        profile.product_type_terms,
+        key=lambda item: len(TOKEN_PATTERN.findall(item.casefold())),
+    )
+    output = _title_tokens(base)
+    seen = {token.casefold() for token in output}
+    for term in profile.distinctive_terms:
+        for token in _title_tokens(term):
+            key = token.casefold()
+            if key in seen:
+                continue
+            if len(output) >= 7:
+                break
+            output.append(token)
+            seen.add(key)
+        if len(output) >= 7:
+            break
+    return " ".join(output[:7]) or "Product"
+
+
+def _precise_candidates(
+    profile: VisionProfile,
+    *,
+    source_title: str | None = None,
+) -> list[SearchKeywordCandidate]:
+    output: list[SearchKeywordCandidate] = []
     seen: set[str] = set()
     for candidate in profile.keywords:
         phrase = " ".join(candidate.phrase.split())
+        if source_title and not _keyword_claims_supported(phrase, source_title):
+            continue
         key = phrase.casefold()
         if key in seen:
             continue
         seen.add(key)
-        output.append(KeywordCandidate(phrase=phrase, rationale=candidate.rationale.strip()))
+        output.append(
+            SearchKeywordCandidate(
+                phrase=phrase,
+                rationale=candidate.rationale.strip(),
+                candidate_source="image_precise",
+                intended_strategy="core",
+                seed_source="image_only_model",
+            )
+        )
     return output
+
+
+async def _discover_keyword_candidates(
+    client: CompetitorPublicClient,
+    *,
+    profile: VisionProfile,
+    source_title: str,
+    title_reference_terms: list[str],
+    max_keywords: int,
+) -> tuple[list[SearchKeywordCandidate], list[dict[str, Any]]]:
+    precise = _precise_candidates(profile, source_title=source_title)
+    core_seeds: list[tuple[KeywordCandidate, str, str]] = [
+        (candidate, "image_shopper_root", "core")
+        for candidate in profile.autocomplete_seeds
+    ]
+    core_seeds.extend(
+        (
+            KeywordCandidate(
+                phrase=term,
+                rationale="主标题中与图片识别一致的短语，仅在识别后用于补全交叉核对",
+            ),
+            "title_cross_check",
+            "core",
+        )
+        for term in title_reference_terms
+        if 2 <= len(term) <= 100
+        and len(TOKEN_PATTERN.findall(term.casefold())) <= 4
+    )
+    opportunity_seeds = [
+        (candidate, "image_need_state", "opportunity")
+        for candidate in profile.opportunity_seeds
+    ]
+    seed_specs = _unique_seed_specs(core_seeds)[:4]
+    seed_specs.extend(_unique_seed_specs(opportunity_seeds)[:2])
+    seed_specs = _unique_seed_specs(seed_specs)[:AUTOCOMPLETE_SEED_LIMIT]
+
+    autocomplete: list[tuple[float, SearchKeywordCandidate]] = []
+    checks: list[dict[str, Any]] = []
+    for seed_order, (seed, seed_source, intended_strategy) in enumerate(seed_specs):
+        normalized_seed = " ".join(seed.phrase.split())
+        try:
+            suggestions = (
+                await client.fetch_search_suggestions(normalized_seed)
+            )[:AUTOCOMPLETE_RESULT_LIMIT]
+        except Exception as exc:
+            checks.append(
+                {
+                    "seed": normalized_seed,
+                    "seed_source": seed_source,
+                    "status": "unavailable",
+                    "error_type": type(exc).__name__,
+                }
+            )
+            continue
+        checks.append(
+            {
+                "seed": normalized_seed,
+                "seed_source": seed_source,
+                "status": "observed",
+                "suggestions": suggestions,
+            }
+        )
+        for rank, phrase in enumerate(suggestions, start=1):
+            fit = _autocomplete_fit_score(phrase, profile, source_title=source_title)
+            if fit <= 0:
+                continue
+            autocomplete.append(
+                (
+                    fit - (rank * 0.01) - (seed_order * 0.001),
+                    SearchKeywordCandidate(
+                        phrase=phrase,
+                        rationale=seed.rationale.strip(),
+                        candidate_source="takealot_autocomplete",
+                        intended_strategy=intended_strategy,
+                        seed=normalized_seed,
+                        seed_source=seed_source,
+                        autocomplete_rank=rank,
+                    ),
+                )
+            )
+
+    ranked = [item for _, item in sorted(autocomplete, key=lambda row: row[0], reverse=True)]
+    core_autocomplete = [item for item in ranked if item.intended_strategy == "core"]
+    narrow_core_autocomplete = [
+        item
+        for item in core_autocomplete
+        if _candidate_has_primary_shape(item.phrase, profile)
+    ]
+    broad_core_autocomplete = [
+        item
+        for item in core_autocomplete
+        if not _candidate_has_primary_shape(item.phrase, profile)
+    ]
+    opportunity_autocomplete = [
+        item for item in ranked if item.intended_strategy == "opportunity"
+    ]
+    selected: list[SearchKeywordCandidate] = []
+    primary_core_pool = narrow_core_autocomplete or core_autocomplete
+    if primary_core_pool:
+        _append_unique_candidate(selected, primary_core_pool[0], max_keywords)
+    if precise:
+        _append_unique_candidate(selected, precise[0], max_keywords)
+    if len(primary_core_pool) > 1 and max_keywords >= 3:
+        _append_unique_candidate(selected, primary_core_pool[1], max_keywords)
+    if max_keywords >= 4:
+        used_seeds = {item.seed.casefold() for item in selected if item.seed}
+        diverse_broad = next(
+            (
+                item
+                for item in broad_core_autocomplete
+                if item.seed and item.seed.casefold() not in used_seeds
+            ),
+            None,
+        )
+        if diverse_broad is not None:
+            _append_unique_candidate(selected, diverse_broad, max_keywords)
+        elif opportunity_autocomplete:
+            _append_unique_candidate(selected, opportunity_autocomplete[0], max_keywords)
+    for candidate in (
+        *narrow_core_autocomplete,
+        *broad_core_autocomplete,
+        *precise,
+        *opportunity_autocomplete,
+    ):
+        _append_unique_candidate(selected, candidate, max_keywords)
+    return selected, checks
+
+
+def _unique_seed_specs(
+    seeds: list[tuple[KeywordCandidate, str, str]],
+) -> list[tuple[KeywordCandidate, str, str]]:
+    output: list[tuple[KeywordCandidate, str, str]] = []
+    seen: set[str] = set()
+    for item in seeds:
+        phrase = " ".join(item[0].phrase.split()).casefold()
+        if not phrase or phrase in seen:
+            continue
+        seen.add(phrase)
+        output.append(item)
+    return output
+
+
+def _autocomplete_fit_score(
+    phrase: str,
+    profile: VisionProfile,
+    *,
+    source_title: str,
+) -> float:
+    phrase_tokens = _canonical_tokens(phrase)
+    if not phrase_tokens:
+        return 0.0
+    primary_tokens = _canonical_tokens(profile.product_type_terms[0])
+    for exclusion in profile.exclusions:
+        exclusion_tokens = _canonical_tokens(exclusion)
+        if exclusion_tokens and exclusion_tokens.issubset(phrase_tokens):
+            return 0.0
+        exclusion_words = TOKEN_PATTERN.findall(exclusion.casefold())
+        exclusion_head = (
+            _canonical_token(exclusion_words[-1]) if exclusion_words else ""
+        )
+        if (
+            exclusion_head
+            and exclusion_head not in primary_tokens
+            and exclusion_head in phrase_tokens
+        ):
+            return 0.0
+    type_tokens = _canonical_tokens(" ".join(profile.product_type_terms))
+    distinctive_tokens = _canonical_tokens(" ".join(profile.distinctive_terms))
+    source_tokens = _canonical_tokens(source_title)
+    type_overlap = phrase_tokens & type_tokens
+    distinctive_overlap = phrase_tokens & distinctive_tokens
+    source_overlap = phrase_tokens & source_tokens
+    if not type_overlap and not distinctive_overlap and not source_overlap:
+        return 0.0
+    score = (
+        (3 * len(type_overlap)) + len(distinctive_overlap) + len(source_overlap)
+    ) / max(2, 2 * len(phrase_tokens))
+    if primary_tokens and primary_tokens.issubset(phrase_tokens):
+        score += 5.0
+    if len(phrase_tokens) == 1:
+        score *= 0.25
+    return score
+
+
+def _candidate_has_primary_shape(phrase: str, profile: VisionProfile) -> bool:
+    primary_tokens = _canonical_tokens(profile.product_type_terms[0])
+    return bool(primary_tokens) and primary_tokens.issubset(_canonical_tokens(phrase))
+
+
+def _append_unique_candidate(
+    output: list[SearchKeywordCandidate],
+    candidate: SearchKeywordCandidate,
+    limit: int,
+) -> None:
+    if len(output) >= limit:
+        return
+    normalized = " ".join(candidate.phrase.split()).casefold()
+    if not normalized or any(item.phrase.casefold() == normalized for item in output):
+        return
+    output.append(candidate)
 
 
 def _low_confidence_observation(
@@ -1070,10 +1595,11 @@ def _raise_if_ineligible(eligibility: OfferEligibility) -> None:
 def _analysis_cache_key(
     *,
     image_url: str,
-    title: str,
     provider_signature: str,
 ) -> str:
-    raw = "\n".join((PROMPT_VERSION, provider_signature, image_url, title))
+    # The model sees only the image. Title changes therefore reuse the paid vision
+    # result while title cross-checking and rank collection are recomputed locally.
+    raw = "\n".join((PROMPT_VERSION, provider_signature, image_url))
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
@@ -1096,15 +1622,35 @@ def _previous_analysis_snapshot(session: Session, offer_id: str) -> dict[str, An
             .order_by(SearchRankingKeywordResult.candidate_order)
         )
     )
-    accepted_title_keywords = [
-        item.keyword for item in results if item.relevance_status == "accepted"
+    accepted_title_keywords = _title_supported_keywords(
+        [item.keyword for item in results if item.relevance_status == "accepted"],
+        previous.source_title,
+    )
+    opportunity_title_keywords = [
+        item.keyword
+        for item in results
+        if item.relevance_status == "opportunity"
+        and _keyword_claims_supported(item.keyword, previous.source_title)
     ]
+    title_material = previous.source_title
+    core_suggestion = _build_title_suggestion(
+        title_material,
+        accepted_title_keywords,
+    )
+    opportunity_suggestion = (
+        _build_title_suggestion(
+            title_material,
+            opportunity_title_keywords[:1] + accepted_title_keywords,
+        )
+        if opportunity_title_keywords
+        else None
+    )
     return {
         "source_title": previous.source_title,
-        "title_suggestion": _build_title_suggestion(
-            str(previous.title_suggestion or ""),
-            accepted_title_keywords,
-        ),
+        "title_suggestion": core_suggestion,
+        "title_suggestions": [
+            item for item in (core_suggestion, opportunity_suggestion) if item
+        ],
         "analysis_id": previous.id,
         "ranks": {
             item.keyword.casefold(): item.organic_rank
@@ -1127,11 +1673,26 @@ def _title_validation(
     }
     if previous is None:
         return {**base, "status": "baseline_created", "comparisons": []}
-    suggestion = " ".join(str(previous.get("title_suggestion") or "").split())
+    suggestions = [
+        " ".join(str(item).split())
+        for item in previous.get("title_suggestions", [])
+        if " ".join(str(item).split())
+    ]
+    if not suggestions:
+        fallback = " ".join(str(previous.get("title_suggestion") or "").split())
+        suggestions = [fallback] if fallback else []
     old_title = " ".join(str(previous.get("source_title") or "").split())
     if current_title.casefold() == old_title.casefold():
         return {**base, "status": "pending_title_change", "comparisons": []}
-    if not suggestion or current_title.casefold() != suggestion.casefold():
+    matched_suggestion = next(
+        (
+            suggestion
+            for suggestion in suggestions
+            if current_title.casefold() == suggestion.casefold()
+        ),
+        None,
+    )
+    if matched_suggestion is None:
         return {**base, "status": "changed_to_other_title", "comparisons": []}
     previous_ranks = previous.get("ranks") or {}
     comparisons: list[dict[str, Any]] = []
@@ -1156,7 +1717,12 @@ def _title_validation(
         status = "mixed_movement"
     else:
         status = "no_observed_forward"
-    return {**base, "status": status, "comparisons": comparisons}
+    return {
+        **base,
+        "status": status,
+        "matched_suggestion": matched_suggestion,
+        "comparisons": comparisons,
+    }
 
 
 def _build_title_suggestion(
@@ -1173,27 +1739,33 @@ def _build_title_suggestion(
         tokens for keyword in accepted_keywords if (tokens := _title_tokens(keyword))
     ]
     output: list[str] = []
-    priority_keys: set[str] = set()
+    output_keys: set[str] = set()
 
     if priority_phrases:
         for token in priority_phrases[0]:
+            key = _title_dedup_key(token)
+            if key in output_keys:
+                continue
             output.append(_title_token_case(token, preferred_case))
-            priority_keys.add(token.casefold())
+            output_keys.add(key)
         for phrase in priority_phrases[1:]:
             for token in phrase:
-                key = token.casefold()
-                if key in priority_keys:
+                key = _title_dedup_key(token)
+                if key in output_keys:
                     continue
                 if len(output) >= TITLE_PRIORITY_TOKEN_LIMIT:
                     break
                 output.append(_title_token_case(token, preferred_case))
-                priority_keys.add(key)
+                output_keys.add(key)
             if len(output) >= TITLE_PRIORITY_TOKEN_LIMIT:
                 break
 
     for token in suggestion_tokens:
-        if token.casefold() not in priority_keys:
-            output.append(token)
+        key = _title_dedup_key(token)
+        if key in output_keys:
+            continue
+        output.append(token)
+        output_keys.add(key)
 
     if not output:
         output = ["Product"]
@@ -1207,6 +1779,13 @@ def _title_tokens(value: str) -> list[str]:
         character if character.isalnum() else " " for character in str(value)
     )
     return without_punctuation.split()
+
+
+def _title_dedup_key(token: str) -> str:
+    normalized = token.casefold()
+    if normalized in {"lighting", "backlighting"}:
+        return normalized
+    return _canonical_token(normalized)
 
 
 def _title_token_case(token: str, preferred_case: dict[str, str]) -> str:
@@ -1228,6 +1807,14 @@ def _title_suggestion_reason(accepted_keywords: list[str]) -> str:
     return (
         "当前没有候选搜索词通过 Takealot 相关性验证；建议标题只执行无标点清洗，"
         "不能据此判断排名会前移。"
+    )
+
+
+def _opportunity_title_reason(opportunity_keywords: list[str]) -> str:
+    return (
+        f"第二选择把 Takealot 搜索框补全支持的“{opportunity_keywords[0]}”前置，"
+        "用于测试相邻需求赛道。补全顺序是平台直接意图信号但不是搜索量；"
+        "该版本必须改后复采同词排名，不能预先保证前移。"
     )
 
 
@@ -1304,21 +1891,52 @@ def _analysis_payload(
     vision = analysis.vision_payload or {}
     raw_profile = vision.get("profile", vision) if isinstance(vision, dict) else {}
     profile = dict(raw_profile) if isinstance(raw_profile, Mapping) else {}
-    accepted_title_keywords = [
-        item.keyword for item in results if item.relevance_status == "accepted"
+    accepted_title_keywords = _title_supported_keywords(
+        [item.keyword for item in results if item.relevance_status == "accepted"],
+        analysis.source_title,
+    )
+    opportunity_title_keywords = [
+        item.keyword
+        for item in results
+        if item.relevance_status == "opportunity"
+        and _keyword_claims_supported(item.keyword, analysis.source_title)
     ]
+    title_material = analysis.source_title
     title_suggestion = _build_title_suggestion(
-        str(analysis.title_suggestion or ""),
+        title_material,
         accepted_title_keywords,
     )
     title_reason = _title_suggestion_reason(accepted_title_keywords)
+    opportunity_title_suggestion = (
+        _build_title_suggestion(
+            title_material,
+            opportunity_title_keywords[:1] + accepted_title_keywords,
+        )
+        if opportunity_title_keywords
+        else None
+    )
     profile["title_suggestion"] = title_suggestion
     profile["title_reason"] = title_reason
+    profile["opportunity_title_suggestion"] = opportunity_title_suggestion
+    profile["opportunity_title_reason"] = (
+        _opportunity_title_reason(opportunity_title_keywords)
+        if opportunity_title_suggestion
+        else None
+    )
     return {
         **_analysis_history_item(analysis),
         "product_name": analysis.product_name,
         "category": analysis.category,
         "profile": profile,
+        "recognition": (
+            vision.get("recognition", {}) if isinstance(vision, dict) else {}
+        ),
+        "autocomplete_checks": (
+            vision.get("autocomplete_checks", []) if isinstance(vision, dict) else []
+        ),
+        "provider_attempts": (
+            vision.get("provider_attempts", []) if isinstance(vision, dict) else []
+        ),
         "usage": vision.get("usage", {}) if isinstance(vision, dict) else {},
         "estimated_cost_cny": (
             _float_or_none(vision.get("estimated_cost_cny"))
@@ -1327,6 +1945,12 @@ def _analysis_payload(
         ),
         "title_suggestion": title_suggestion,
         "title_reason": title_reason,
+        "opportunity_title_suggestion": opportunity_title_suggestion,
+        "opportunity_title_reason": (
+            _opportunity_title_reason(opportunity_title_keywords)
+            if opportunity_title_suggestion
+            else None
+        ),
         "title_validation": analysis.title_validation,
         "keywords": [_keyword_payload(item) for item in results],
     }
@@ -1382,6 +2006,40 @@ def _chat_profile_json(body: Mapping[str, Any]) -> str:
     if isinstance(content, str) and content.strip():
         return content
     raise ValueError("missing function arguments")
+
+
+def _validated_chat_profile(body: Mapping[str, Any]) -> VisionProfile:
+    """Normalize minor provider schema variance before strict business validation."""
+    raw = json.loads(_chat_profile_json(body))
+    if not isinstance(raw, dict):
+        raise ValueError("product profile must be an object")
+    rationales = {
+        "keywords": "图片模型给出的精准商品搜索表达",
+        "autocomplete_seeds": "图片模型给出的自然搜索词根",
+        "opportunity_seeds": "图片模型给出的相邻需求词根",
+    }
+    for field, fallback_rationale in rationales.items():
+        candidates = raw.get(field)
+        if not isinstance(candidates, list):
+            continue
+        normalized: list[Any] = []
+        for candidate in candidates:
+            if isinstance(candidate, str):
+                normalized.append(
+                    {
+                        "phrase": " ".join(candidate.split()),
+                        "rationale": fallback_rationale,
+                    }
+                )
+            elif isinstance(candidate, Mapping):
+                item = dict(candidate)
+                if not " ".join(str(item.get("rationale") or "").split()):
+                    item["rationale"] = fallback_rationale
+                normalized.append(item)
+            else:
+                normalized.append(candidate)
+        raw[field] = normalized
+    return VisionProfile.model_validate(raw)
 
 
 def _safe_error(exc: Exception) -> str:
@@ -1507,15 +2165,31 @@ def _bounded_float(
 
 
 _SYSTEM_PROMPT = """
-You identify ecommerce products from both the supplied image and current seller title.
-Return 2-5 precise English search phrases that a South African shopper would type on
-Takealot for this exact product type. Accuracy beats breadth. Do not invent a brand,
-model, material, compatibility, capacity, size, audience, or feature that is not visible
-or stated. Avoid vague department words, SEO stuffing, and near-duplicate phrases.
-product_type_terms must contain short terms that should occur in genuinely relevant top
-result titles; they will be used for deterministic platform validation. distinctive_terms
-are optional attributes that distinguish this item. exclusions describe plausible visual
-confusions. The title suggestion must be natural English, preserve verified facts only,
-and put the most important accepted product wording early. It is a hypothesis for later
-rank observation, never a promise that ranking will improve.
+You are the image-only first stage of a Takealot search-intent pipeline. No seller title,
+SKU, listing metadata, or historical keyword is available to you. Identify the physical
+product from visible pixels instead of transcribing packaging or image text. product_name
+must be a concise 2-7 word identity, never an SEO title.
+
+Return three deliberately different groups of South African English shopper wording:
+1. keywords: 2-5 precise 2-6 word long-tail queries for shoppers who already know the
+   target product type.
+2. autocomplete_seeds: 2-5 short 1-3 word roots a less certain shopper would naturally
+   type before choosing a Takealot search-box completion, such as a product noun, use,
+   room, device, or locally natural term. These are roots, not invented completions.
+3. opportunity_seeds: 1-3 relevant adjacent need-state roots where this product could
+   satisfy the same buyer even if the direct product type may be less crowded. Relevance
+   is mandatory; do not force an unrelated traffic lane.
+
+Accuracy beats breadth. Do not invent a brand, model, material, compatibility, capacity,
+size, audience, or feature not visible in the image. Avoid department-only words, SEO
+stuffing, and near duplicates. product_type_terms must be short noun phrases likely to
+occur in genuinely same-type result titles; they drive deterministic first-page checks.
+The first product_type_terms item is mandatory and must be the narrow physical form or
+shape (for example light bars rather than RGB lights or ambient lighting), because only
+that first item is allowed to decide whether the full first page contains the same type.
+distinctive_terms describe visible differentiators. exclusions list plausible visual
+confusions and adjacent products that should be filtered out. The image-only title
+suggestion must be punctuation-free natural English with product wording first and
+visible selling points later. It is only source material for later platform validation,
+never a promise that ranking will improve.
 """.strip()

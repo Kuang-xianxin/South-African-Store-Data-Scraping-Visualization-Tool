@@ -237,6 +237,12 @@ class TakealotPortalSettings:
     request_timeout_seconds: float
     task_timeout_seconds: float
     max_total_quantity: int
+    enabled_store_codes: frozenset[str]
+
+    def is_store_enabled(self, store_code: str | None = None) -> bool:
+        """Return whether Seller Portal writes are enabled for one explicit store."""
+        code = normalize_store_code(store_code or current_store_code())
+        return self.enabled and code in self.enabled_store_codes
 
     @classmethod
     def from_env(cls, project_root: Path) -> TakealotPortalSettings:
@@ -264,12 +270,26 @@ class TakealotPortalSettings:
             raise SettingsError("平台仓单次总数量上限必须是整数") from exc
         if not 1 <= maximum <= 10_000:
             raise SettingsError("平台仓单次总数量上限必须在 1 到 10000 之间")
+        enabled_store_codes: set[str] = set()
+        raw_enabled_stores = os.environ.get(
+            "TAKEALOT_PORTAL_ENABLED_STORES", ""
+        ).strip()
+        for raw_code in raw_enabled_stores.replace(";", ",").split(","):
+            if not raw_code.strip():
+                continue
+            try:
+                enabled_store_codes.add(normalize_store_code(raw_code))
+            except ValueError as exc:
+                raise SettingsError(
+                    "TAKEALOT_PORTAL_ENABLED_STORES 包含无效店铺代码"
+                ) from exc
         return cls(
             enabled=_bool_from_env("TAKEALOT_PORTAL_BFF_ENABLED", default=False),
             base_url=TAKEALOT_SELLER_BFF_URL,
             request_timeout_seconds=request_timeout,
             task_timeout_seconds=task_timeout,
             max_total_quantity=maximum,
+            enabled_store_codes=frozenset(enabled_store_codes),
         )
 
 

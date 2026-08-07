@@ -99,6 +99,7 @@ const authReady = ref(false);
 const authStatus = ref<AuthStatus>({ setup_required: false, bootstrap_allowed: false });
 const session = ref<AuthSession | null>(null);
 const selectedStoreId = ref<number | null>(null);
+const overviewStoreScope = ref<OwnStoreScope>("current");
 const competitorOwnStoreScope = ref<OwnStoreScope>("current");
 const currentPage = ref<PageKey>(initialPage());
 const asOf = ref(localDate());
@@ -256,23 +257,47 @@ const selectedStore = computed<StoreAccessItem | null>(() => {
 const competitorAllStoresSelected = computed(
   () => currentPage.value === "competitors" && competitorOwnStoreScope.value === "all",
 );
+const overviewAllStoresSelected = computed(
+  () =>
+    currentPage.value === "overview"
+    && overviewStoreScope.value === "all"
+    && accessibleConnectedStoreCount.value > 1,
+);
 const selectedStoreChoice = computed({
   get: () =>
-    competitorAllStoresSelected.value
+    competitorAllStoresSelected.value || overviewAllStoresSelected.value
       ? allStoresSelectorValue
       : selectedStoreId.value === null
         ? ""
         : String(selectedStoreId.value),
   set: (value: string) => {
     if (value === allStoresSelectorValue) {
-      competitorOwnStoreScope.value = "all";
+      if (currentPage.value === "overview") {
+        overviewStoreScope.value = "all";
+      } else if (currentPage.value === "competitors") {
+        competitorOwnStoreScope.value = "all";
+      }
       return;
     }
-    competitorOwnStoreScope.value = "current";
+    if (currentPage.value === "overview") {
+      overviewStoreScope.value = "current";
+    } else if (currentPage.value === "competitors") {
+      competitorOwnStoreScope.value = "current";
+    }
     const storeId = Number(value);
     selectedStoreId.value = Number.isFinite(storeId) ? storeId : null;
   },
 });
+
+function selectStoreFromOverview(storeCode: string) {
+  const store = (session.value?.user.accessible_stores ?? []).find(
+    (candidate) => candidate.code === storeCode && candidate.active && candidate.data_connected,
+  );
+  if (!store) return;
+  overviewStoreScope.value = "current";
+  selectedStoreId.value = store.id;
+}
+
 const selectedStorePending = computed(
   () =>
     storeScopedPages.has(activePage.value.key as PageKey)
@@ -299,6 +324,13 @@ const activePageProps = computed(() => {
   const common = {
     asOf: key === "daily-report" ? dailyReportAsOf.value : asOf.value,
   };
+  if (key === "overview") {
+    return {
+      ...common,
+      currentStoreName: selectedStore.value?.display_name ?? "当前店铺",
+      allStoresSelected: overviewAllStoresSelected.value,
+    };
+  }
   if (key === "competitors") {
     return {
       ...common,
@@ -408,6 +440,8 @@ async function retryAuthentication() {
 function acceptSession(next: AuthSession) {
   session.value = next;
   setAuthSession(next);
+  overviewStoreScope.value = "current";
+  competitorOwnStoreScope.value = "current";
   const currentSelection = next.user.accessible_stores.find(
     (store) => store.id === selectedStoreId.value,
   );
@@ -448,6 +482,8 @@ function handleExpired() {
   disconnectDailyReportEvents();
   session.value = null;
   selectedStoreId.value = null;
+  overviewStoreScope.value = "current";
+  competitorOwnStoreScope.value = "current";
   setAuthSession(null);
   currentPage.value = "overview";
   refreshStatus.value.can_refresh = false;
@@ -718,10 +754,14 @@ function currentOperationsBusinessDate() {
             <span>当前查看店铺</span>
             <select v-model="selectedStoreChoice" aria-label="切换当前查看店铺">
               <option
-                v-if="currentPage === 'competitors' && accessibleConnectedStoreCount > 1"
+                v-if="['overview', 'competitors'].includes(currentPage) && accessibleConnectedStoreCount > 1"
                 :value="allStoresSelectorValue"
               >
-                全部店铺 · {{ accessibleConnectedStoreCount }} 店合并
+                {{
+                  currentPage === "overview"
+                    ? `全部 ${accessibleConnectedStoreCount} 个店铺`
+                    : `全部店铺 · ${accessibleConnectedStoreCount} 店合并`
+                }}
               </option>
               <option
                 v-for="store in session.user.accessible_stores"
@@ -753,6 +793,7 @@ function currentOperationsBusinessDate() {
               && !selectedStorePending
               && canAccessConnectedStore
               && !competitorAllStoresSelected
+              && !overviewAllStoresSelected
             "
             class="refresh-button"
             :disabled="refreshing || (canRefresh && !refreshStatus.can_refresh)"
@@ -837,6 +878,7 @@ function currentOperationsBusinessDate() {
             :is="pageComponent"
             :key="`${currentPage}-${refreshKey}`"
             v-bind="activePageProps"
+            @select-store="selectStoreFromOverview"
           />
         </KeepAlive>
         <div v-if="!pages.length" class="state-card">

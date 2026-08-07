@@ -489,6 +489,42 @@ class CompetitorPublicClient:
         next_url = parsed._replace(query=urlencode(params)).geturl()
         return await self._get_json(next_url)
 
+    async def fetch_search_suggestions(self, keyword: str) -> list[str]:
+        """Return Takealot's ranked search-box completions for a shopper prefix."""
+        query = " ".join(keyword.split())
+        if not query or len(query) > 100:
+            raise ValueError("补全词根必须为1到100个字符")
+        payload = await self._get_json(
+            f"{PUBLIC_API_BASE}/searches/search_suggestions?"
+            f"{urlencode({'qsearch': query})}"
+        )
+        sections = payload.get("sections")
+        section = (
+            sections.get("search_suggestions")
+            if isinstance(sections, Mapping)
+            else None
+        )
+        results = section.get("results") if isinstance(section, Mapping) else None
+        if not isinstance(results, list):
+            raise CompetitorNetworkError("Takealot 搜索框补全响应缺少结果列表")
+        output: list[str] = []
+        seen: set[str] = set()
+        for result in results:
+            suggestion = (
+                result.get("search_suggestion")
+                if isinstance(result, Mapping)
+                else None
+            )
+            phrase = " ".join(
+                str(suggestion.get("qsearch") or "").split()
+            ) if isinstance(suggestion, Mapping) else ""
+            normalized = phrase.casefold()
+            if not phrase or normalized in seen:
+                continue
+            seen.add(normalized)
+            output.append(phrase)
+        return output
+
     # ── internal ──────────────────────────────────────────────────────────
 
     async def _human_delay(self, min_s: float, max_s: float) -> None:

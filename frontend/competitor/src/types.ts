@@ -76,6 +76,10 @@ export interface CompetitorItem {
   区间快照数: number | null;
   库存可比: boolean | null;
   链接: string;
+  跟卖机会?: boolean;
+  跟卖机会类型?: FollowSellingOpportunityType | null;
+  跟卖机会说明?: string;
+  公开报价数?: number | null;
   跟卖报价: CompetitorOfferItem[];
   对比报价?: CompetitorOfferItem[];
   自有报价: OwnStoreOfferItem[];
@@ -85,6 +89,8 @@ export interface CompetitorItem {
   新增跟卖卖家: string[];
   跟卖卖家明细: OwnFollowerSellerEvent[];
 }
+
+export type FollowSellingOpportunityType = "全部报价售罄" | "暂无卖家报价";
 
 export interface OwnFollowerSellerEvent {
   卖家ID: string | null;
@@ -164,6 +170,16 @@ export interface CompetitorTargetItem {
   created_at: string;
   updated_at: string;
   has_history: boolean;
+}
+
+export interface CompetitorPersonalWatchlistItem {
+  plid: string;
+  added_at: string;
+}
+
+export interface CompetitorPersonalWatchlistPayload {
+  items: CompetitorPersonalWatchlistItem[];
+  count: number;
 }
 
 export interface CompetitorTargetAuditItem {
@@ -292,6 +308,15 @@ export interface SummaryPayload {
   sales_series: SalesPoint[];
   traffic_series: StoreTrafficPoint[];
   top_products: ProductItem[];
+  operators: StoreOperator[];
+}
+
+export interface StoreTrafficReference {
+  source_slot: string;
+  captured_at: string;
+  page_views_30_days_total: number;
+  product_count: number;
+  missing_product_count: number;
 }
 
 export interface StoreTrafficPoint {
@@ -301,6 +326,75 @@ export interface StoreTrafficPoint {
   page_views_30_days_total: number | null;
   product_count: number;
   missing_product_count: number;
+  reference: StoreTrafficReference | null;
+}
+
+export interface StoreOperator {
+  user_id: number;
+  display_name: string;
+  role: "viewer" | "operator" | "selection";
+}
+
+export interface StoreInventorySummary {
+  captured_at: string | null;
+  offer_count: number;
+  platform_available_stock: number | null;
+  platform_available_coverage: number;
+  platform_stock_on_way: number | null;
+  platform_stock_on_way_coverage: number;
+  platform_stock_in_receiving: number | null;
+  platform_stock_in_receiving_coverage: number;
+}
+
+export interface StoreHealth {
+  state: "attention" | "data_gap" | "healthy";
+  label: string;
+  priority: number;
+  business_reasons: string[];
+  data_reasons: string[];
+}
+
+export interface StoreOverviewItem {
+  store_code: string;
+  store_name: string;
+  latest_metric_date: string | null;
+  kpis: StoreKpis;
+  latest_traffic_point: StoreTrafficPoint | null;
+  operators: StoreOperator[];
+  inventory: StoreInventorySummary;
+  health: StoreHealth;
+}
+
+export interface OverseasWarehouseSummary {
+  snapshot_at: string | null;
+  warehouse_name: string | null;
+  stock_total: number | null;
+  usable_stock: number | null;
+  locked_stock: number | null;
+  outbound_allocated: number | null;
+  transit_stock: number | null;
+  defective_stock: number | null;
+  shared_across_stores: boolean;
+}
+
+export interface PlatformWarehouseSummary extends StoreInventorySummary {
+  store_count: number;
+  store_count_with_offers: number;
+}
+
+export interface StoreOverviewPayload {
+  as_of: string;
+  store_count: number;
+  health_summary: {
+    attention: number;
+    data_gap: number;
+    healthy: number;
+  };
+  logistics: {
+    overseas_warehouse: OverseasWarehouseSummary;
+    platform_warehouse: PlatformWarehouseSummary;
+  };
+  stores: StoreOverviewItem[];
 }
 
 export interface ProductsPayload {
@@ -442,6 +536,8 @@ export interface SearchRankingStatus {
   image_max_dimension: number;
   organic_page_size: number;
   columns_per_row: number;
+  core_first_page_threshold: number;
+  opportunity_first_page_threshold: number;
   position_scope: "organic_results_excluding_sponsored";
   passive_reads_are_local_only: boolean;
 }
@@ -483,6 +579,7 @@ export interface SearchRankingKeywordResult {
   candidate_order: number;
   relevance_status:
     | "accepted"
+    | "opportunity"
     | "rejected_irrelevant"
     | "model_low_confidence";
   relevance_score: number;
@@ -492,6 +589,26 @@ export interface SearchRankingKeywordResult {
     top_result_titles?: string[];
     matched_top_results?: number;
     evaluated_top_results?: number;
+    matched_first_page_results?: number;
+    evaluated_first_page_results?: number;
+    first_page_same_type_ratio?: number;
+    first_page_majority?: boolean;
+    direct_competitor_count_first_page?: number;
+    core_threshold?: number;
+    opportunity_threshold?: number;
+    candidate_source?: "image_precise" | "takealot_autocomplete";
+    intended_strategy?: "core" | "opportunity";
+    effective_strategy?: "core" | "opportunity" | "rejected_irrelevant";
+    autocomplete_seed?: string | null;
+    autocomplete_seed_source?:
+      | "image_shopper_root"
+      | "image_need_state"
+      | "title_cross_check"
+      | null;
+    autocomplete_rank?: number | null;
+    autocomplete_endpoint?: string | null;
+    autocomplete_is_search_volume?: boolean;
+    demand_signal_note?: string;
     api_version?: string | null;
     reason?: string;
   };
@@ -516,7 +633,26 @@ export interface SearchRankingAnalysis extends SearchRankingAnalysisSummary {
     product_type_terms?: string[];
     distinctive_terms?: string[];
     exclusions?: string[];
+    opportunity_title_suggestion?: string | null;
+    opportunity_title_reason?: string | null;
   };
+  recognition?: {
+    basis?: "image_only_then_title_cross_check";
+    model_received_source_title?: boolean;
+    model_received_sku?: boolean;
+    original_model_product_name?: string;
+    product_name_adjusted?: boolean;
+    removed_unconfirmed_identity_terms?: string[];
+    source_title_similarity?: number;
+    title_reference_terms?: string[];
+    title_reference_role?: "post_recognition_cross_check_only";
+  };
+  provider_attempts?: Array<{
+    provider: string;
+    status: "accepted" | "request_or_schema_failed" | "identity_conflict";
+    reason?: string;
+    source_title_similarity?: number;
+  }>;
   usage: {
     input_tokens?: number;
     output_tokens?: number;
@@ -525,6 +661,8 @@ export interface SearchRankingAnalysis extends SearchRankingAnalysisSummary {
   estimated_cost_cny: number | null;
   title_suggestion: string | null;
   title_reason: string | null;
+  opportunity_title_suggestion: string | null;
+  opportunity_title_reason: string | null;
   title_validation: {
     status?: string;
     causality?: "observational_only";

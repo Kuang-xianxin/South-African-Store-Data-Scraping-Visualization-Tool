@@ -9,6 +9,8 @@
     "preview": "vite preview --host 127.0.0.1",
     "test:competitor-signals": "node --experimental-strip-types --test tests/competitorOperatingSignals.test.ts",
     "test:competitor-list": "node --experimental-strip-types --test tests/competitorListSort.test.ts",
+    "test:competitor-search": "node --experimental-strip-types --test tests/competitorSearch.test.ts",
+    "test:competitor-opportunities": "node --experimental-strip-types --test tests/competitorFollowOpportunities.test.ts",
     "test:competitor-offers": "node --experimental-strip-types --test tests/competitorOfferHistory.test.ts",
     "test:collection-client": "node --experimental-strip-types --test tests/collectionClientClaim.test.ts",
     "test:retry": "node --experimental-strip-types --test tests/retryQueue.test.ts"

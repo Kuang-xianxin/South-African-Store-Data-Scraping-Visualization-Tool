@@ -95,7 +95,8 @@ class PlatformWarehouseService:
             credential_error = "服务器无法读取 Windows 凭据管理器"
         return {
             **status,
-            "enabled": self._portal_settings.enabled,
+            "enabled": self._portal_settings.is_store_enabled(store_code),
+            "globally_enabled": self._portal_settings.enabled,
             "base_url": self._portal_settings.base_url,
             "max_total_quantity": self._portal_settings.max_total_quantity,
             "shipped_write_enabled": _env_flag("TAKEALOT_PORTAL_SHIPPED_WRITE_ENABLED"),
@@ -106,9 +107,11 @@ class PlatformWarehouseService:
         }
 
     def portal_login(self, email: str, password: str) -> dict[str, Any]:
+        self._assert_portal_enabled()
         return self._portal.login(current_store_code(), email, password)
 
     def portal_verify_otp(self, otp: str) -> dict[str, Any]:
+        self._assert_portal_enabled()
         return self._portal.verify_otp(current_store_code(), otp)
 
     def portal_logout(self) -> dict[str, Any]:
@@ -124,8 +127,7 @@ class PlatformWarehouseService:
         note: str = "",
     ) -> dict[str, Any]:
         """Create a Takealot shipment draft in one explicit click, pausing only for 2FA."""
-        if not self._portal_settings.enabled:
-            raise PortalDisabledError("约平台仓真实写入总开关当前关闭")
+        self._assert_portal_enabled()
         request_id = _client_request_id(client_request_id)
         normalized = _normalize_lines(lines)
         self._assert_total_quantity(normalized)
@@ -227,6 +229,7 @@ class PlatformWarehouseService:
         actor_username: str,
     ) -> dict[str, Any]:
         """Verify the pending login OTP and automatically resume the same draft creation."""
+        self._assert_portal_enabled()
         draft = self._load_owned_draft(draft_id, actor_user_id, actor_username)
         if draft["status"] != "awaiting_2fa":
             raise PlatformWarehouseConflictError("该创建请求当前不在等待 2FA 状态")
@@ -246,6 +249,24 @@ class PlatformWarehouseService:
 
     def load(self) -> dict[str, Any]:
         """Return current offers, audited drafts, linked shipments and read-only snapshot."""
+        portal_enabled = self._portal_settings.is_store_enabled()
+        if portal_enabled:
+            capability_message = (
+                "当前店铺已启用 Seller Portal BFF。点击一次即校验会话、执行 Takealot "
+                "服务端分仓预审并创建平台草稿；只有 Takealot 登录响应要求 2FA 时才暂停并"
+                "弹出验证码，验证后自动续接同一请求。不会绕过容量或补货限制，任何不完整"
+                "分配都会拒绝建单。"
+            )
+        elif self._portal_settings.enabled:
+            capability_message = (
+                "当前店铺不在约平台仓允许列表中，登录、验证码、预审、创建及后续平台动作"
+                "均已由服务端禁用。"
+            )
+        else:
+            capability_message = (
+                "Seller Portal BFF 接入已安装但总开关默认关闭；开启后仍须把店铺代码加入"
+                "允许列表，当前店铺才可执行真实平台动作。"
+            )
         settings = DashboardSettings.from_env(self._project_root)
         engine = create_read_only_engine(settings.database_url)
         try:
@@ -269,16 +290,11 @@ class PlatformWarehouseService:
                     "capability": {
                         "write_mode": (
                             "guarded_seller_portal_bff"
-                            if self._portal_settings.enabled
+                            if portal_enabled
                             else "disabled_by_default"
                         ),
-                        "official_shipment_write_supported": self._portal_settings.enabled,
-                        "message": (
-                            "Seller Portal BFF 接入已安装但总开关默认关闭。启用后点击一次即校验会话、"
-                            "执行 Takealot 服务端分仓预审并创建平台草稿；只有 Takealot 登录响应要求 2FA 时"
-                            "才暂停并弹出验证码，验证后自动续接同一请求。不会绕过容量或补货限制，任何"
-                            "不完整分配都会拒绝建单。"
-                        ),
+                        "official_shipment_write_supported": portal_enabled,
+                        "message": capability_message,
                     },
                     "portal": self.portal_status(),
                     "offers": [_offer_payload(offer) for offer in offers],
@@ -526,6 +542,7 @@ class PlatformWarehouseService:
         actor_username: str,
     ) -> dict[str, Any]:
         """Run Takealot's own allocation review and issue a short-lived create approval."""
+        self._assert_portal_enabled()
         store_code = current_store_code()
         token = self._portal.token(store_code)
         with self._store_write_lock(store_code):
@@ -602,6 +619,7 @@ class PlatformWarehouseService:
         actor_username: str,
     ) -> dict[str, Any]:
         """Create Takealot draft shipment(s) once; ambiguous writes are never retried."""
+        self._assert_portal_enabled()
         store_code = current_store_code()
         token = self._portal.token(store_code)
         with self._store_write_lock(store_code):
@@ -667,6 +685,7 @@ class PlatformWarehouseService:
         shipment_id: int,
         action: PortalAction,
     ) -> dict[str, Any]:
+        self._assert_portal_enabled()
         self._assert_shipment_action_allowed(shipment_id, action)
         return self._portal.prepare_action(current_store_code(), action, shipment_id)
 
@@ -682,6 +701,7 @@ class PlatformWarehouseService:
         actor_user_id: int | None,
         actor_username: str,
     ) -> dict[str, Any]:
+        self._assert_portal_enabled()
         if confirmation_text.strip() != str(shipment_id):
             raise PlatformWarehouseInputError("二次确认必须完整输入 Shipment ID")
         store_code = current_store_code()
@@ -728,6 +748,15 @@ class PlatformWarehouseService:
                 tracking_reference=clean_tracking,
                 actor_user_id=actor_user_id,
                 actor_username=actor_username,
+            )
+
+    def _assert_portal_enabled(self) -> None:
+        store_code = current_store_code()
+        if not self._portal_settings.enabled:
+            raise PortalDisabledError("约平台仓真实写入总开关当前关闭")
+        if not self._portal_settings.is_store_enabled(store_code):
+            raise PortalDisabledError(
+                f"当前店铺 {store_code} 未启用约平台仓；仅允许已配置的店铺"
             )
 
     # Retained only for drafts created while the integration is disabled. These methods

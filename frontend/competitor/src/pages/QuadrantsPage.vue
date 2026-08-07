@@ -226,7 +226,7 @@ onBeforeUnmount(() => {
     <div class="page-intro">
       <div>
         <p class="section-kicker">PRODUCT POSITION</p>
-        <h2>用近7日下单与30天浏览量查看商品分布</h2>
+        <h2>用近30日下单与近30天浏览量查看商品分布</h2>
       </div>
     </div>
 
@@ -246,9 +246,9 @@ onBeforeUnmount(() => {
         <div class="matrix-shell">
           <span
             class="matrix-axis-title y"
-            aria-label="纵轴：近7日下单件数相对排名，数值由下向上增大"
+            aria-label="纵轴：近30日下单件数相对排名，数值由下向上增大"
           >
-            近7日下单件数相对排名
+            近30日下单件数相对排名
           </span>
           <div class="matrix">
           <template v-for="tick in gridTicks" :key="`grid-${tick}`">
@@ -346,7 +346,7 @@ onBeforeUnmount(() => {
             </div>
             <div class="tooltip-stats">
               <span>
-                <small>近7日下单</small>
+                <small>近30日下单</small>
                 <b>{{ number(hoveredItem.ordered_units) }}</b>
               </span>
               <span>
@@ -417,7 +417,7 @@ onBeforeUnmount(() => {
               <span>排序方式</span>
               <select v-model="productSort" aria-label="全部商品排序方式">
                 <option value="views_desc">近30天浏览量从高到低</option>
-                <option value="orders_desc">近7日下单从高到低</option>
+                <option value="orders_desc">近30日下单从高到低</option>
                 <option value="stock_desc">平台库存从高到低</option>
                 <option value="name_asc">商品名称 A–Z</option>
               </select>
@@ -459,7 +459,7 @@ onBeforeUnmount(() => {
                 <dd>{{ number(item.page_views_30_days) }}</dd>
               </div>
               <div>
-                <dt>近7日下单</dt>
+                <dt>近30日下单</dt>
                 <dd>{{ number(item.ordered_units) }}</dd>
               </div>
               <div>

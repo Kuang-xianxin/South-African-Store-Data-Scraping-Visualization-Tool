@@ -303,7 +303,7 @@ function trendChangeLabel(event: KeywordTrafficEvent | null) {
 }
 
 function comparisonStatusLabel(event: KeywordTrafficEvent | null) {
-  if (!event) return "等待每日完整 Offer 快照自动建立标题关键词档案。";
+  if (!event) return "等待每日完整 Offer 快照建立标题关键词档案。";
   const comparison = event.comparison;
   if (comparison.status === "waiting") return "变更后尚无可观察日期。";
   if (comparison.status === "collecting") {
@@ -314,7 +314,7 @@ function comparisonStatusLabel(event: KeywordTrafficEvent | null) {
 }
 
 function changeSummary(event: KeywordTrafficEvent) {
-  return event.change_label;
+  return event.change_label.replace(/^自动(?=基线|变化)/, "");
 }
 
 function errorMessage(error: unknown, fallback: string) {
@@ -328,9 +328,9 @@ function errorMessage(error: unknown, fallback: string) {
     <header class="keyword-hero">
       <div>
         <p class="eyebrow">KEYWORD × TRAFFIC MONITOR</p>
-        <h2>标题关键词自动建档，流量结果一眼看清</h2>
+        <h2>标题关键词档案，流量结果一眼看清</h2>
         <span>
-          每次完整 Offer 采集都会自动归档官方商品标题；发现标题词或词序变化时，系统自动打标签、固定高对比节点，并比较前后的流量水平和趋势速度。
+          每次完整 Offer 采集都会归档官方商品标题；发现标题词或词序变化时，系统标记高对比节点，并比较前后的流量水平和趋势速度。
         </span>
       </div>
       <div class="metric-boundary">
@@ -352,7 +352,7 @@ function errorMessage(error: unknown, fallback: string) {
         <small>缺失不补零</small>
       </article>
       <article>
-        <span>已自动建档</span>
+        <span>已建档</span>
         <strong>{{ formatNumber(listPayload.summary.archived_product_count) }}</strong>
         <small>来自每日标题快照</small>
       </article>
@@ -409,7 +409,7 @@ function errorMessage(error: unknown, fallback: string) {
               <em v-if="item.keyword_change_count" class="changed-badge">
                 {{ item.keyword_change_count }} 次变更
               </em>
-              <em v-else-if="item.keyword_event_count" class="baseline-badge">自动基线</em>
+              <em v-else-if="item.keyword_event_count" class="baseline-badge">基线</em>
               <em v-else class="untracked-badge">待首份快照</em>
             </span>
             <span class="product-traffic">
@@ -478,14 +478,14 @@ function errorMessage(error: unknown, fallback: string) {
             </div>
             <div class="keyword-chips">
               <span v-for="keyword in currentKeywords" :key="keyword">{{ keyword }}</span>
-              <em v-if="!currentKeywords.length">无需人工操作；下次完整采集会自动建立首份标题关键词档案。</em>
+              <em v-if="!currentKeywords.length">无需人工操作；下次完整采集会建立首份标题关键词档案。</em>
             </div>
           </section>
 
           <section v-if="selectedEvent" class="impact-section">
             <header>
               <div>
-                <p>{{ selectedEvent.event_kind === "change" ? "已选自动变化节点" : "已选自动基线节点" }}</p>
+                <p>{{ selectedEvent.event_kind === "change" ? "已选变化节点" : "已选基线节点" }}</p>
                 <h3>{{ selectedEvent.effective_date }} · {{ changeSummary(selectedEvent) }}</h3>
               </div>
               <span class="observation-status" :class="selectedEvent.comparison.status">
@@ -554,14 +554,14 @@ function errorMessage(error: unknown, fallback: string) {
                 <span><i class="line"></i>近30天浏览量</span>
                 <span><i class="before"></i>变更前窗口</span>
                 <span><i class="after"></i>变更后窗口</span>
-                <span><i class="marker"></i>自动检测变化</span>
+                <span><i class="marker"></i>标题变化</span>
               </div>
             </header>
             <div class="chart-wrap">
               <svg
                 :viewBox="`0 0 ${chartWidth} ${chartHeight}`"
                 role="img"
-                aria-label="近30天浏览量与标题关键词自动变化节点趋势图"
+                aria-label="近30天浏览量与标题关键词变化节点趋势图"
               >
                 <rect class="chart-background" :x="chartLeft" :y="chartTop" :width="chartInnerWidth" :height="chartInnerHeight" rx="14" />
                 <rect
@@ -602,7 +602,7 @@ function errorMessage(error: unknown, fallback: string) {
                   <line :x1="marker.x" :x2="marker.x" :y1="chartTop - 8" :y2="chartTop + chartInnerHeight" />
                   <rect :x="marker.x - 34" :y="14" width="68" height="26" rx="13" />
                   <text :x="marker.x" y="32">
-                    {{ marker.event.event_kind === "change" ? `自动 ${marker.number}` : "自动基线" }}
+                    {{ marker.event.event_kind === "change" ? `变化 ${marker.number}` : "基线" }}
                   </text>
                   <circle v-if="marker.y !== null" :cx="marker.x" :cy="marker.y" r="8" />
                 </g>
@@ -634,8 +634,8 @@ function errorMessage(error: unknown, fallback: string) {
           <section class="event-timeline">
             <header>
               <div>
-                <p>标题关键词自动变化时间线</p>
-                <h3>系统自动打标签；点击任一节点切换前后对比</h3>
+                <p>标题关键词变化时间线</p>
+                <h3>点击任一节点切换前后对比</h3>
               </div>
               <span>{{ detail.events.length }} 个记录 · {{ Math.max(0, detail.events.length - 1) }} 次变更</span>
             </header>
@@ -653,7 +653,7 @@ function errorMessage(error: unknown, fallback: string) {
               >
                 <span class="event-index">{{ detail.events.length - index }}</span>
                 <span class="event-body">
-                  <small>{{ event.effective_date }} · 系统自动检测</small>
+                  <small>{{ event.effective_date }} · 系统识别</small>
                   <strong>{{ changeSummary(event) }}</strong>
                   <span class="event-diffs">
                     <em v-for="keyword in event.added_keywords" :key="`add-${keyword}`" class="added">+ {{ keyword }}</em>
@@ -671,7 +671,7 @@ function errorMessage(error: unknown, fallback: string) {
             </div>
             <div v-else class="timeline-empty">
               <strong>等待首份完整 Offer 快照</strong>
-              <span>无需人工建档；采集成功后系统会自动提取标题词建立基线，以后发现变化自动打标签。</span>
+              <span>无需人工建档；采集成功后系统提取标题词建立基线，以后发现变化就标记节点。</span>
             </div>
           </section>
         </template>
@@ -926,4 +926,3 @@ function errorMessage(error: unknown, fallback: string) {
   .point-readout { bottom: 12px; left: 30px; right: 30px; }
 }
 </style>
-

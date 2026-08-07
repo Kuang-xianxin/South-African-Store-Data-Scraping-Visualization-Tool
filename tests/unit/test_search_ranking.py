@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -12,14 +13,19 @@ from sqlalchemy.orm import Session
 from takealot_ops.search_ranking.service import (
     KeywordCandidate,
     OpenAICompatibleProductVisionClient,
+    PROMPT_VERSION,
+    SearchKeywordCandidate,
     SearchRankingInputError,
     SearchRankingRuntimeSettings,
     SearchRankingService,
     VisionCallResult,
     VisionProfile,
     _build_title_suggestion,
+    _collect_keyword_observation,
+    _cross_check_image_profile,
     _search_products,
     _title_validation,
+    _validated_chat_profile,
 )
 from takealot_ops.search_ranking import service as search_ranking_service
 from takealot_ops.erp.web import create_app
@@ -40,10 +46,9 @@ class FakeVisionClient:
         self,
         *,
         image_url: str,
-        title: str,
-        sku: str | None,
+        reference_title: str,
     ) -> VisionCallResult:
-        del image_url, title, sku
+        del image_url, reference_title
         type(self).calls += 1
         return VisionCallResult(
             profile=VisionProfile(
@@ -61,6 +66,22 @@ class FakeVisionClient:
                         rationale="A deliberately broad candidate for validation",
                     ),
                 ],
+                autocomplete_seeds=[
+                    KeywordCandidate(
+                        phrase="wireless",
+                        rationale="A shopper starts with the connection type",
+                    ),
+                    KeywordCandidate(
+                        phrase="wireless mouse",
+                        rationale="The visible product type",
+                    ),
+                ],
+                opportunity_seeds=[
+                    KeywordCandidate(
+                        phrase="mouse for laptop",
+                        rationale="Adjacent laptop-use demand",
+                    )
+                ],
                 exclusions=["keyboard combo"],
                 confidence=0.91,
                 title_suggestion="Rechargeable Wireless Mouse - Silent Dual Mode",
@@ -74,6 +95,48 @@ class FakeVisionClient:
         )
 
 
+def test_prompt_version_fits_persisted_column() -> None:
+    assert len(PROMPT_VERSION) <= 30
+
+
+def test_qwen_string_candidate_arrays_are_normalized_before_validation() -> None:
+    arguments = {
+        "product_name": "RGB light bars",
+        "category": "Lighting",
+        "product_type_terms": ["light bars"],
+        "distinctive_terms": ["remote control"],
+        "keywords": ["rgb light bars", "remote light bars"],
+        "autocomplete_seeds": ["rgb light", "ambient light"],
+        "opportunity_seeds": ["gaming lights"],
+        "exclusions": ["light bulb"],
+        "confidence": 0.92,
+        "title_suggestion": "RGB Light Bars Remote Ambient Lighting",
+        "title_reason": "Image-only product wording",
+    }
+    body = {
+        "choices": [
+            {
+                "message": {
+                    "tool_calls": [
+                        {
+                            "function": {
+                                "name": "submit_takealot_product_profile",
+                                "arguments": json.dumps(arguments),
+                            }
+                        }
+                    ]
+                }
+            }
+        ]
+    }
+
+    profile = _validated_chat_profile(body)
+
+    assert profile.keywords[0].phrase == "rgb light bars"
+    assert profile.autocomplete_seeds[0].rationale == "图片模型给出的自然搜索词根"
+    assert profile.opportunity_seeds[0].phrase == "gaming lights"
+
+
 class FakeSearchClient:
     def __init__(self) -> None:
         self.next_calls = 0
@@ -84,11 +147,18 @@ class FakeSearchClient:
     async def __aexit__(self, *_: object) -> None:
         return None
 
+    async def fetch_search_suggestions(self, keyword: str) -> list[str]:
+        if keyword == "wireless":
+            return ["wireless mouse", "wireless gaming mouse"]
+        if keyword == "mouse for laptop":
+            return ["mouse for laptop"]
+        return []
+
     async def fetch_search_first_page(
         self,
         keyword: str,
     ) -> tuple[str, dict[str, Any]]:
-        if keyword == "wireless mouse":
+        if keyword in {"wireless mouse", "wireless gaming mouse"}:
             return _search_url(keyword), _payload(
                 [
                     (str(90_000_000 + index), f"Wireless Mouse Model {index}")
@@ -97,10 +167,21 @@ class FakeSearchClient:
                 after="page-two",
                 total=120,
             )
+        if keyword == "mouse for laptop":
+            products = [("12345678", "Rechargeable Wireless Mouse")]
+            products.extend(
+                (str(70_000_000 + index), f"Wireless Mouse Laptop {index}")
+                for index in range(8)
+            )
+            products.extend(
+                (str(75_000_000 + index), f"Laptop Sleeve Style {index}")
+                for index in range(27)
+            )
+            return _search_url(keyword), _payload(products, after="", total=640)
         return _search_url(keyword), _payload(
-            [(str(80_000_000 + index), f"Winter Jacket Style {index}") for index in range(12)],
+            [(str(80_000_000 + index), f"Winter Jacket Style {index}") for index in range(36)],
             after="",
-            total=12,
+            total=36,
         )
 
     async def fetch_search_next_page(
@@ -176,7 +257,7 @@ async def test_service_validates_keywords_locates_cursor_page_and_reuses_vision(
                 offer_id="offer-1",
                 productline_id="12345678",
                 sku="MOUSE-01",
-                title="Silent Rechargeable Mouse",
+                title="Silent Rechargeable Wireless Mouse",
                 image_url="http://media.takealot.com/covers_images/test/s.file",
                 status="buyable",
                 takealot_available_stock=2,
@@ -201,7 +282,7 @@ async def test_service_validates_keywords_locates_cursor_page_and_reuses_vision(
     first = await service.analyze_offer("offer-1")
     second = await service.analyze_offer("offer-1")
 
-    accepted, rejected = first["analysis"]["keywords"]
+    accepted, second_accepted, opportunity, rejected = first["analysis"]["keywords"]
     assert accepted["relevance_status"] == "accepted"
     assert accepted["page_number"] == 2
     assert accepted["page_rank"] == 5
@@ -211,6 +292,18 @@ async def test_service_validates_keywords_locates_cursor_page_and_reuses_vision(
     assert accepted["validation_evidence"]["position_scope"] == (
         "organic_results_excluding_sponsored"
     )
+    assert accepted["validation_evidence"]["candidate_source"] == (
+        "takealot_autocomplete"
+    )
+    assert accepted["validation_evidence"]["autocomplete_rank"] == 1
+    assert accepted["validation_evidence"]["evaluated_first_page_results"] == 36
+    assert accepted["validation_evidence"]["matched_first_page_results"] == 36
+    assert second_accepted["relevance_status"] == "accepted"
+    assert opportunity["relevance_status"] == "opportunity"
+    assert opportunity["validation_evidence"]["autocomplete_rank"] == 1
+    assert opportunity["validation_evidence"]["matched_first_page_results"] == 9
+    assert opportunity["validation_evidence"]["evaluated_first_page_results"] == 36
+    assert opportunity["found"] is True
     assert rejected["relevance_status"] == "rejected_irrelevant"
     assert rejected["pages_scanned"] == 1
     assert rejected["found"] is False
@@ -218,17 +311,27 @@ async def test_service_validates_keywords_locates_cursor_page_and_reuses_vision(
     assert first["analysis"]["provider"] == "qwen"
     assert first["analysis"]["estimated_cost_cny"] == 0.00088
     assert first["analysis"]["title_suggestion"] == (
-        "Wireless Mouse Rechargeable Silent Dual Mode"
+        "Wireless Mouse Silent Rechargeable"
     )
     assert first["analysis"]["profile"]["title_suggestion"] == (
-        "Wireless Mouse Rechargeable Silent Dual Mode"
+        "Wireless Mouse Silent Rechargeable"
     )
+    assert first["analysis"]["opportunity_title_suggestion"] == (
+        "Mouse For Laptop Wireless Silent Rechargeable"
+    )
+    assert first["analysis"]["recognition"]["model_received_source_title"] is False
+    assert first["analysis"]["recognition"]["title_reference_terms"] == [
+        "mouse",
+        "wireless mouse",
+        "rechargeable",
+        "silent",
+    ]
     assert "搜索词前置" in first["analysis"]["title_reason"]
     assert second["analysis"]["vision_reused"] is True
     assert second["analysis"]["usage"]["total_tokens"] == 0
     assert second["analysis"]["title_validation"]["status"] == "pending_title_change"
     assert FakeVisionClient.calls == 1
-    assert all(client.next_calls == 1 for client in clients)
+    assert all(client.next_calls == 2 for client in clients)
 
 
 def test_title_suggestion_puts_validated_terms_first_and_removes_punctuation() -> None:
@@ -242,6 +345,110 @@ def test_title_suggestion_puts_validated_terms_first_and_removes_punctuation() -
     )
     assert suggestion.startswith("Portable Projection Screen")
     assert all(character.isalnum() or character == " " for character in suggestion)
+
+
+def test_image_identity_cannot_remain_a_long_copy_of_source_title() -> None:
+    source_title = (
+        "2 RGB LED Light Bars TV Backlight with Remote Ambient Lighting Gaming Desk"
+    )
+    profile = VisionProfile(
+        product_name=source_title,
+        category="Lighting",
+        product_type_terms=["RGB light bars", "TV backlight"],
+        distinctive_terms=["ambient lighting", "remote control"],
+        keywords=[
+            KeywordCandidate(phrase="rgb light bars", rationale="Exact product type"),
+            KeywordCandidate(phrase="tv backlight", rationale="Visible TV use"),
+        ],
+        autocomplete_seeds=[
+            KeywordCandidate(phrase="rgb light", rationale="Natural shopper root"),
+            KeywordCandidate(phrase="ambient light", rationale="Natural use root"),
+        ],
+        opportunity_seeds=[
+            KeywordCandidate(phrase="gaming lights", rationale="Adjacent room use")
+        ],
+        exclusions=["light bulb", "led strip"],
+        confidence=0.95,
+        title_suggestion="RGB Light Bars TV Backlight Ambient Lighting",
+        title_reason="Image-only hypothesis",
+    )
+
+    normalized, recognition = _cross_check_image_profile(profile, source_title)
+
+    assert normalized.product_name != source_title
+    assert len(normalized.product_name.split()) <= 7
+    assert normalized.product_name == "RGB light bars ambient lighting remote control"
+    assert recognition["model_received_source_title"] is False
+    assert recognition["product_name_adjusted"] is True
+    assert "RGB light bars" in recognition["title_reference_terms"]
+
+    claim_checked, claim_evidence = _cross_check_image_profile(
+        profile.model_copy(update={"product_name": "Smart RGB light bars"}),
+        source_title,
+    )
+    assert claim_checked.product_name == "RGB light bars"
+    assert claim_evidence["removed_unconfirmed_identity_terms"] == ["Smart"]
+
+
+@pytest.mark.asyncio
+async def test_core_validation_uses_the_complete_first_page_majority() -> None:
+    class FirstPageClient:
+        async def fetch_search_first_page(
+            self,
+            keyword: str,
+        ) -> tuple[str, dict[str, Any]]:
+            products = [
+                (str(60_000_000 + index), f"Wireless Mouse {index}")
+                for index in range(20)
+            ]
+            products.extend(
+                (str(61_000_000 + index), f"Laptop Sleeve {index}")
+                for index in range(16)
+            )
+            return _search_url(keyword), _payload(products, after="", total=800)
+
+    profile = VisionProfile(
+        product_name="Wireless mouse",
+        category="Computer mice",
+        product_type_terms=["wireless mouse"],
+        distinctive_terms=["rechargeable"],
+        keywords=[
+            KeywordCandidate(phrase="wireless mouse", rationale="Exact type"),
+            KeywordCandidate(phrase="rechargeable mouse", rationale="Visible feature"),
+        ],
+        autocomplete_seeds=[
+            KeywordCandidate(phrase="wireless", rationale="Shopper root"),
+            KeywordCandidate(phrase="mouse", rationale="Product root"),
+        ],
+        opportunity_seeds=[
+            KeywordCandidate(phrase="laptop accessory", rationale="Adjacent demand")
+        ],
+        exclusions=["keyboard"],
+        confidence=0.9,
+        title_suggestion="Wireless Mouse Rechargeable",
+        title_reason="Image-only hypothesis",
+    )
+
+    observation = await _collect_keyword_observation(
+        FirstPageClient(),  # type: ignore[arg-type]
+        candidate=SearchKeywordCandidate(
+            phrase="wireless mouse",
+            rationale="Precise image query",
+            candidate_source="image_precise",
+            intended_strategy="core",
+        ),
+        candidate_order=1,
+        target_plid="12345678",
+        profile=profile,
+        max_pages=1,
+        relevance_threshold=0.60,
+        page_delay_seconds=0,
+    )
+
+    assert observation.relevance_status == "rejected_irrelevant"
+    assert observation.validation_evidence["evaluated_first_page_results"] == 36
+    assert observation.validation_evidence["matched_first_page_results"] == 20
+    assert observation.relevance_score == pytest.approx(20 / 36)
 
 
 def test_search_products_accepts_only_unflagged_product_results() -> None:
@@ -422,7 +629,7 @@ async def test_only_fresh_buyable_positive_stock_offers_enter_list_or_model(
 
 
 @pytest.mark.asyncio
-async def test_qwen_failure_falls_back_to_doubao_with_forced_schema_tool(
+async def test_doubao_failure_falls_back_to_qwen_with_forced_schema_tool(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -449,7 +656,7 @@ async def test_qwen_failure_falls_back_to_doubao_with_forced_schema_tool(
             json: dict[str, Any],
         ) -> httpx.Response:
             requests.append((url, headers, json))
-            if "dashscope" in url:
+            if "volces" in url:
                 return httpx.Response(400, json={"error": "unsupported test request"})
             arguments = VisionProfile(
                 product_name="Rechargeable wireless mouse",
@@ -461,6 +668,17 @@ async def test_qwen_failure_falls_back_to_doubao_with_forced_schema_tool(
                     KeywordCandidate(
                         phrase="rechargeable mouse", rationale="Visible charging port"
                     ),
+                ],
+                autocomplete_seeds=[
+                    KeywordCandidate(phrase="wireless", rationale="Shopper root"),
+                    KeywordCandidate(
+                        phrase="wireless mouse", rationale="Exact shopper root"
+                    ),
+                ],
+                opportunity_seeds=[
+                    KeywordCandidate(
+                        phrase="mouse for laptop", rationale="Adjacent use case"
+                    )
                 ],
                 exclusions=["keyboard combo"],
                 confidence=0.9,
@@ -499,19 +717,32 @@ async def test_qwen_failure_falls_back_to_doubao_with_forced_schema_tool(
 
     result = await OpenAICompatibleProductVisionClient(runtime).identify(
         image_url="https://media.takealot.com/covers_images/test.jpg",
-        title="Wireless Mouse",
-        sku="MOUSE-01",
+        reference_title="Rechargeable Wireless Mouse",
     )
 
-    assert result.provider == "doubao"
-    assert result.model == "doubao-seed-2-0-lite-260215"
-    assert result.estimated_cost_cny == 0.0024
+    assert result.provider == "qwen"
+    assert result.model == "qwen3.7-plus"
+    assert result.estimated_cost_cny == 0.006
     assert [url for url, _, _ in requests] == [
-        "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions",
         "https://ark.cn-beijing.volces.com/api/v3/chat/completions",
+        "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions",
     ]
-    assert requests[0][2]["enable_thinking"] is False
-    assert requests[1][2]["thinking"] == {"type": "disabled"}
+    assert requests[0][2]["thinking"] == {"type": "disabled"}
+    assert requests[1][2]["enable_thinking"] is False
     assert requests[1][2]["tool_choice"]["function"]["name"] == (
         "submit_takealot_product_profile"
+    )
+    serialized_request = str(requests[1][2])
+    assert "Rechargeable Wireless Mouse" not in serialized_request
+    assert result.provider_attempts == (
+        {
+            "provider": "doubao",
+            "status": "request_or_schema_failed",
+            "reason": "SearchRankingConfigurationError",
+        },
+        {
+            "provider": "qwen",
+            "status": "accepted",
+            "source_title_similarity": 1.0,
+        },
     )

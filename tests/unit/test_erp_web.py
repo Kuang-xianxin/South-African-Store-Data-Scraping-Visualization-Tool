@@ -29,11 +29,12 @@ from takealot_ops.storage.models import (
     CompetitorSnapshot,
     ErpStore,
     ErpSession,
+    LogisticsProviderSnapshot,
     OfferCurrent,
     OfferSnapshot,
     StoreOfferBaseline,
 )
-from takealot_ops.storage.store_context import store_scope
+from takealot_ops.storage.store_context import current_store_code, store_scope
 
 
 PROJECT_ROOT = Path(__file__).parents[2]
@@ -303,6 +304,7 @@ def test_competitor_radar_returns_automatic_store_targets_and_separate_items(
         "queued_to_active_batch": False,
         "automatic_store_target": True,
         "store_names": ["Beta Store"],
+        "personal_watchlist_member": False,
     }
     assert competitor_add.status_code == 200
     assert competitor_add.json()["item"]["plid"] == "77777777"
@@ -715,6 +717,229 @@ def test_store_assignments_scale_and_all_store_accounts_include_future_stores(
             assert len(refreshed_scope.json()["user"]["accessible_stores"]) == 7
 
 
+def test_store_summary_compares_only_accessible_connected_stores(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    database_path = tmp_path / "erp-store-summary.db"
+    database_url = f"sqlite:///{database_path.as_posix()}"
+    monkeypatch.setenv("TAKEALOT_DATABASE_URL", database_url)
+    app = create_app(PROJECT_ROOT)
+
+    with TestClient(app, client=("127.0.0.1", 50000)) as admin:
+        session = _bootstrap(admin)
+        csrf = str(session["csrf_token"])
+        current_store = admin.get("/api/auth/stores").json()["items"][0]
+        created_stores: list[dict[str, object]] = []
+        for number in range(2, 5):
+            response = admin.post(
+                "/api/auth/stores",
+                headers={"X-CSRF-Token": csrf},
+                json={
+                    "code": f"store-{number:02d}",
+                    "display_name": f"Store {number}",
+                },
+            )
+            assert response.status_code == 200
+            created_stores.append(response.json()["store"])
+
+        engine = create_engine(database_url)
+        with Session(engine) as database_session, database_session.begin():
+            connected_codes = {"store-02", "store-04"}
+            stores = database_session.scalars(select(ErpStore)).all()
+            for store in stores:
+                if store.code in connected_codes:
+                    store.data_connected = True
+            captured_at = datetime(2026, 8, 7, 1, tzinfo=UTC)
+            database_session.add_all(
+                [
+                    OfferCurrent(
+                        store_code="current",
+                        offer_id="summary-current-offer",
+                        captured_at=captured_at,
+                        takealot_available_stock=10,
+                        takealot_stock_on_way=5,
+                        takealot_stock_in_receiving=2,
+                    ),
+                    OfferCurrent(
+                        store_code="store-02",
+                        offer_id="summary-store-02-offer",
+                        captured_at=captured_at,
+                        takealot_available_stock=20,
+                        takealot_stock_on_way=7,
+                        takealot_stock_in_receiving=3,
+                    ),
+                    LogisticsProviderSnapshot(
+                        store_code="current",
+                        provider="w8",
+                        fetched_at=captured_at,
+                        payload={
+                            "connected": True,
+                            "warehouse": {"name": "Shared W8"},
+                            "summary": {
+                                "stock_total": 100,
+                                "usable_stock": 70,
+                                "locked_stock": 30,
+                                "outbound_allocated": 8,
+                                "transit_stock": 4,
+                                "defective_stock": 1,
+                            },
+                        },
+                    ),
+                ]
+            )
+
+        operator = admin.post(
+            "/api/auth/users",
+            headers={"X-CSRF-Token": csrf},
+            json={
+                "username": "summary.operator",
+                "display_name": "Summary Operator",
+                "password": "operator-password-123",
+                "role": "operator",
+                "all_stores": False,
+                "store_ids": [
+                    int(current_store["id"]),
+                    int(created_stores[0]["id"]),
+                    int(created_stores[1]["id"]),
+                ],
+            },
+        )
+        assert operator.status_code == 200
+
+        loaded_store_codes: list[str] = []
+
+        def fake_load_dataset(_settings, _as_of):
+            store_code = current_store_code()
+            loaded_store_codes.append(store_code)
+            return store_code
+
+        def fake_summary_payload(store_code, as_of):
+            multiplier = 1 if store_code == "current" else 2
+            return {
+                "as_of": as_of.isoformat(),
+                "latest_metric_date": "2026-08-06",
+                "kpis": {
+                    "latest_ordered_units": 10 * multiplier,
+                    "latest_ordered_revenue": 1000 * multiplier,
+                    "seven_day_ordered_units": 50 * multiplier,
+                    "latest_anomaly_products": 999 if store_code == "current" else 0,
+                    "page_views_30_days": 100 * multiplier,
+                    "median_conversion": 2.5 * multiplier,
+                    "selling_products": 3 * multiplier,
+                    "stockout_products": multiplier,
+                },
+            }
+
+        def fake_traffic_series(_engine, *, as_of):
+            multiplier = 1 if current_store_code() == "current" else 2
+            return [
+                {
+                    "business_date": as_of.isoformat(),
+                    "captured_at": "2026-08-07T01:00:00+00:00",
+                    "status": "success",
+                    "page_views_30_days_total": 200 * multiplier,
+                    "product_count": 4,
+                    "missing_product_count": 0,
+                    "reference": None,
+                }
+            ]
+
+        monkeypatch.setattr(
+            "takealot_ops.erp.web.load_erp_dataset",
+            fake_load_dataset,
+        )
+        monkeypatch.setattr(
+            "takealot_ops.erp.web.build_summary_payload",
+            fake_summary_payload,
+        )
+        monkeypatch.setattr(
+            "takealot_ops.erp.web.period_end_traffic_series",
+            fake_traffic_series,
+        )
+        with TestClient(app, client=("192.168.1.8", 50001)) as operator_client:
+            login = operator_client.post(
+                "/api/auth/login",
+                json={
+                    "username": "summary.operator",
+                    "password": "operator-password-123",
+                },
+            )
+            assert login.status_code == 200
+            response = operator_client.get(
+                "/api/erp/summary/stores?as_of=2026-08-06",
+                headers={"X-Store-Code": "current"},
+            )
+            single_store_response = operator_client.get(
+                "/api/erp/summary?as_of=2026-08-06",
+                headers={"X-Store-Code": "current"},
+            )
+
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["store_count"] == 2
+        stores_by_code = {
+            item["store_code"]: item
+            for item in payload["stores"]
+        }
+        assert set(stores_by_code) == {"current", "store-02"}
+        assert stores_by_code["store-02"]["kpis"]["latest_ordered_units"] == 20
+        assert (
+            stores_by_code["store-02"]["latest_traffic_point"][
+                "page_views_30_days_total"
+            ]
+            == 400
+        )
+        assert stores_by_code["current"]["operators"] == [
+            {
+                "user_id": operator.json()["user"]["id"],
+                "display_name": "Summary Operator",
+                "role": "operator",
+            }
+        ]
+        assert stores_by_code["store-02"]["inventory"] == {
+            "captured_at": "2026-08-07T01:00:00",
+            "offer_count": 1,
+            "platform_available_stock": 20,
+            "platform_available_coverage": 1,
+            "platform_stock_on_way": 7,
+            "platform_stock_on_way_coverage": 1,
+            "platform_stock_in_receiving": 3,
+            "platform_stock_in_receiving_coverage": 1,
+        }
+        assert stores_by_code["store-02"]["health"]["state"] == "attention"
+        assert stores_by_code["store-02"]["health"]["business_reasons"] == [
+            "缺货商品 2 个"
+        ]
+        assert stores_by_code["current"]["health"]["business_reasons"] == [
+            "缺货商品 1 个"
+        ]
+        assert payload["stores"][0]["store_code"] == "store-02"
+        assert payload["health_summary"] == {
+            "attention": 2,
+            "data_gap": 0,
+            "healthy": 0,
+        }
+        assert payload["logistics"]["overseas_warehouse"]["stock_total"] == 100
+        assert payload["logistics"]["platform_warehouse"] == {
+            "captured_at": "2026-08-07T01:00:00",
+            "store_count": 2,
+            "store_count_with_offers": 2,
+            "offer_count": 2,
+            "platform_available_stock": 30,
+            "platform_available_coverage": 2,
+            "platform_stock_on_way": 12,
+            "platform_stock_on_way_coverage": 2,
+            "platform_stock_in_receiving": 5,
+            "platform_stock_in_receiving_coverage": 2,
+        }
+        assert single_store_response.status_code == 200
+        assert single_store_response.json()["operators"][0]["display_name"] == (
+            "Summary Operator"
+        )
+        assert set(loaded_store_codes) == {"current", "store-02"}
+
+
 def test_public_competitor_module_does_not_require_store_assignment(
     tmp_path: Path,
     monkeypatch,
@@ -949,7 +1174,7 @@ def test_viewer_can_read_but_cannot_run_actions(
         assert viewer.get("/api/auth/users").status_code == 403
 
 
-def test_keyword_traffic_routes_automatically_detect_title_change(
+def test_keyword_traffic_routes_detect_title_change(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -1009,7 +1234,7 @@ def test_keyword_traffic_routes_automatically_detect_title_change(
         "Queen",
         "Mattress",
     ]
-    assert detail.json()["events"][1]["change_label"] == "自动变化｜新增 1 词"
+    assert detail.json()["events"][1]["change_label"] == "变化｜新增 1 词"
     assert detail.json()["history"][-1] == {
         "date": "2026-08-03",
         "page_views_30_days": 160,
@@ -2020,6 +2245,140 @@ def test_competitor_target_crud_audit_and_active_batch_tail(
         assert len(first_page["items"]) == 2
         assert second_page["page"] == 2
         assert len(second_page["items"]) == 1
+
+
+def test_competitor_personal_watchlist_is_account_scoped_and_viewer_editable(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    database_path = tmp_path / "erp-personal-watchlist.db"
+    monkeypatch.setenv(
+        "TAKEALOT_DATABASE_URL",
+        f"sqlite:///{database_path.as_posix()}",
+    )
+    app = create_app(tmp_path)
+    target_url = "https://www.takealot.com/example/PLID12345678"
+
+    with TestClient(app, client=("127.0.0.1", 50000)) as admin:
+        session = _bootstrap(admin)
+        csrf = str(session["csrf_token"])
+        created = admin.post(
+            "/api/competitors/targets",
+            headers={"X-CSRF-Token": csrf},
+            json={"url": target_url},
+        )
+        assert created.status_code == 200
+        assert created.json()["personal_watchlist_member"] is True
+        assert admin.get("/api/competitors/personal-watchlist").json() == {
+            "items": [
+                {
+                    "plid": "12345678",
+                    "added_at": created.json()["item"]["created_at"],
+                }
+            ],
+            "count": 1,
+        }
+        for username, role in (
+            ("selection.watchlist", "selection"),
+            ("viewer.watchlist", "viewer"),
+        ):
+            user = admin.post(
+                "/api/auth/users",
+                headers={"X-CSRF-Token": csrf},
+                json={
+                    "username": username,
+                    "display_name": username,
+                    "password": "watchlist-password-123",
+                    "role": role,
+                },
+            )
+            assert user.status_code == 200
+
+    with TestClient(app, client=("192.168.1.8", 50001)) as selection_client:
+        login = selection_client.post(
+            "/api/auth/login",
+            json={
+                "username": "selection.watchlist",
+                "password": "watchlist-password-123",
+            },
+        )
+        assert login.status_code == 200
+        selection_csrf = str(login.json()["csrf_token"])
+        assert selection_client.get(
+            "/api/competitors/personal-watchlist"
+        ).json()["items"] == []
+        duplicate = selection_client.post(
+            "/api/competitors/targets",
+            headers={"X-CSRF-Token": selection_csrf},
+            json={"url": target_url},
+        )
+        assert duplicate.status_code == 409
+        assert [
+            item["plid"]
+            for item in selection_client.get(
+                "/api/competitors/personal-watchlist"
+            ).json()["items"]
+        ] == ["12345678"]
+
+    with TestClient(app, client=("192.168.1.8", 50002)) as viewer:
+        login = viewer.post(
+            "/api/auth/login",
+            json={
+                "username": "viewer.watchlist",
+                "password": "watchlist-password-123",
+            },
+        )
+        assert login.status_code == 200
+        viewer_csrf = str(login.json()["csrf_token"])
+        assert viewer.get("/api/competitors/personal-watchlist").json()["count"] == 0
+        added = viewer.put(
+            "/api/competitors/personal-watchlist/12345678",
+            headers={"X-CSRF-Token": viewer_csrf},
+        )
+        assert added.status_code == 200
+        assert added.json()["created"] is True
+        repeated = viewer.put(
+            "/api/competitors/personal-watchlist/12345678",
+            headers={"X-CSRF-Token": viewer_csrf},
+        )
+        assert repeated.status_code == 200
+        assert repeated.json()["created"] is False
+        removed = viewer.delete(
+            "/api/competitors/personal-watchlist/12345678",
+            headers={"X-CSRF-Token": viewer_csrf},
+        )
+        assert removed.status_code == 200
+        assert removed.json()["removed"] is True
+        assert viewer.get("/api/competitors/personal-watchlist").json()["count"] == 0
+        assert [
+            item["plid"]
+            for item in viewer.get("/api/competitors/targets").json()["items"]
+        ] == ["12345678"]
+
+    with TestClient(app, client=("127.0.0.1", 50003)) as admin:
+        login = admin.post(
+            "/api/auth/login",
+            json={"username": "kxx", "password": "pass-123"},
+        )
+        assert login.status_code == 200
+        admin_csrf = str(login.json()["csrf_token"])
+        assert [
+            item["plid"]
+            for item in admin.get(
+                "/api/competitors/personal-watchlist"
+            ).json()["items"]
+        ] == ["12345678"]
+        globally_deleted = admin.delete(
+            "/api/competitors/targets/12345678",
+            headers={"X-CSRF-Token": admin_csrf},
+        )
+        assert globally_deleted.status_code == 200
+        assert [
+            item["plid"]
+            for item in admin.get(
+                "/api/competitors/personal-watchlist"
+            ).json()["items"]
+        ] == ["12345678"]
 
 
 def test_competitor_manual_retry_priority_is_audited_once(

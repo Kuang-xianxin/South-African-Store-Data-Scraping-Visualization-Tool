@@ -3,12 +3,15 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue"
 
 import {
   ApiRequestError,
+  addCompetitorPersonalWatchlistItem,
   collectCompetitor,
   createCompetitorTarget,
+  deleteCompetitorPersonalWatchlistItem,
   deleteCompetitorTarget,
   fetchCompetitorBatchStatus,
   fetchCompetitorDetail,
   fetchCompetitorLinkHealth,
+  fetchCompetitorPersonalWatchlist,
   fetchCompetitorTargetAudits,
   fetchCompetitorTargets,
   fetchCompetitorStoreTargets,
@@ -43,6 +46,16 @@ import {
   sortCompetitorItems,
   type CompetitorListSortDirection,
 } from "../competitorListSort";
+import {
+  competitorSearchTerm,
+  matchesCompetitorSearch,
+  matchesCompetitorSearchValues,
+} from "../competitorSearch";
+import {
+  matchesFollowSellingOpportunity,
+  summarizeFollowSellingOpportunities,
+  type FollowSellingOpportunityFilter,
+} from "../competitorFollowOpportunities";
 import { PRODUCT_IMAGE_SIZE, productThumbnailUrl } from "../productImages";
 import {
   MAX_AUTOMATIC_RETRY_ATTEMPTS,
@@ -157,6 +170,10 @@ const collectionClientInstanceId = collectionId("client");
 let collectionClientChannel: BroadcastChannel | null = null;
 const rawUrls = ref("");
 const targets = ref<CompetitorTargetItem[]>([]);
+const personalWatchlistPlids = ref<Set<string>>(new Set());
+const personalWatchlistBusyPlid = ref("");
+const personalWatchlistError = ref("");
+const personalWatchlistNotice = ref("");
 const storeTargets = ref<CompetitorStoreTargetItem[]>([]);
 const allStoreTargets = ref<CompetitorStoreTargetItem[]>([]);
 const ownStoreScope = computed<OwnStoreScope>(
@@ -184,7 +201,9 @@ const targetManagerNotice = ref("");
 const duplicateTarget = ref<{
   plid: string;
   hasHistory: boolean;
+  personalWatchlistCreated: boolean;
 } | null>(null);
+const duplicateTargetHighlightPlid = ref("");
 const editingTargetPlid = ref("");
 const editingTargetUrl = ref("");
 const targetAuditItems = ref<CompetitorTargetAuditItem[]>([]);
@@ -278,7 +297,9 @@ const reviewSort = ref<
 const competitorQuery = ref("");
 const competitorStockFilter = ref<"全部" | "有货" | "没货" | "未探测">("全部");
 const followerPresenceFilter = ref<"全部" | "有被跟卖" | "未发现跟卖">("全部");
+const personalWatchlistFilter = ref<"全部" | "我的监控池">("全部");
 const competitorSignalFilter = ref<CompetitorOperatingSignal>("全部");
+const followSellingOpportunityFilter = ref<FollowSellingOpportunityFilter>("全部");
 const competitorSourceView = ref<"competitor" | "own_store">("competitor");
 const competitorPage = ref(1);
 const storeCompetitorPage = ref(1);
@@ -301,6 +322,7 @@ const ownFollowerHistoryItems = ref<OwnFollowerHistoryItem[]>([]);
 const ownFollowerHistoryLoading = ref(false);
 const ownFollowerHistoryLoaded = ref(false);
 const ownFollowerHistoryError = ref("");
+const ownFollowerHistoryOpen = ref(false);
 const failedCompetitorImages = ref<Set<string>>(new Set());
 
 const allCompetitorItems = computed(() => [
@@ -463,6 +485,9 @@ const competitorsByPlid = computed(
 const selectedTarget = computed(
   () => targets.value.find((target) => target.plid === selectedPlid.value) ?? null,
 );
+const selectedInPersonalWatchlist = computed(
+  () => personalWatchlistPlids.value.has(selectedPlid.value),
+);
 const targetActionTarget = computed(
   () => targets.value.find((target) => target.plid === targetActionPlid.value) ?? null,
 );
@@ -490,19 +515,22 @@ const filteredTargetGroups = computed(() => {
   if (!query) return targetGroups.value;
   return targetGroups.value.filter((group) =>
     group.members.some((target) =>
-      [
-        target.plid,
-        target.title ?? "",
-        target.url,
-        ...targetOffers(target).flatMap((offer) => [
-          offer.offer_id ?? "",
-          offer.卖家ID ?? "",
-          offer.卖家,
-          offer.SKU ?? "",
-          offer.库存状态,
-          offer.库存信号,
-        ]),
-      ].some((value) => value.toLocaleLowerCase().includes(query)),
+      matchesCompetitorSearchValues(
+        [
+          target.plid,
+          target.title,
+          target.url,
+          ...targetOffers(target).flatMap((offer) => [
+            offer.offer_id,
+            offer.卖家ID,
+            offer.卖家,
+            offer.SKU,
+            offer.库存状态,
+            offer.库存信号,
+          ]),
+        ],
+        query,
+      ),
     ),
   );
 });
@@ -608,6 +636,9 @@ const targetActionIsManualRetry = computed(
   () => targetActionSource.value === "manual_retry",
 );
 const competitorSignalOptions = COMPETITOR_OPERATING_SIGNAL_OPTIONS;
+const followSellingOpportunitySummary = computed(() =>
+  summarizeFollowSellingOpportunities(competitors.value),
+);
 const filteredCompetitors = computed(() => {
   return competitors.value.filter(matchesCompetitorFilters);
 });
@@ -651,34 +682,14 @@ const ownStoreScopeLabel = computed(() =>
 );
 
 function matchesCompetitorFilters(item: CompetitorItem) {
-  const query = competitorSearchTerm(competitorQuery.value);
   if (
-      query
-      && ![
-        item.商品,
-        item.plid,
-        item.当前卖家 ?? "",
-        item.库存上限,
-        item.趋势判断,
-        item.价格信号,
-        ...item.自有报价.flatMap((offer) => [
-          offer.offer_id,
-          offer.店铺,
-          offer.SKU ?? "",
-          offer.状态 ?? "",
-        ]),
-        ...item.跟卖报价.flatMap((offer) => [
-          offer.offer_id ?? "",
-          offer.卖家ID ?? "",
-          offer.卖家,
-          offer.SKU ?? "",
-          offer.变体,
-          offer.库存状态,
-          offer.价格信号,
-          offer.库存信号,
-        ]),
-      ].some((value) => value.toLocaleLowerCase().includes(query))
+    item.来源 === "competitor"
+    && personalWatchlistFilter.value === "我的监控池"
+    && !personalWatchlistPlids.value.has(item.plid)
   ) {
+    return false;
+  }
+  if (!matchesCompetitorSearch(item, competitorQuery.value)) {
     return false;
   }
   if (
@@ -691,6 +702,9 @@ function matchesCompetitorFilters(item: CompetitorItem) {
     const hasFollowers = item.跟卖发现日期.length > 0 || followerOffers(item).length > 0;
     if (followerPresenceFilter.value === "有被跟卖" && !hasFollowers) return false;
     if (followerPresenceFilter.value === "未发现跟卖" && hasFollowers) return false;
+  }
+  if (!matchesFollowSellingOpportunity(item, followSellingOpportunityFilter.value)) {
+    return false;
   }
   return matchesCompetitorOperatingSignal(item, competitorSignalFilter.value);
 }
@@ -716,6 +730,11 @@ const competitorFiltersActive = computed(
     Boolean(competitorQuery.value.trim())
     || competitorStockFilter.value !== "全部"
     || followerPresenceFilter.value !== "全部"
+    || (
+      competitorSourceView.value === "competitor"
+      && personalWatchlistFilter.value !== "全部"
+    )
+    || followSellingOpportunityFilter.value !== "全部"
     || competitorSignalFilter.value !== "全部",
 );
 const exactStockCount = computed(
@@ -990,12 +1009,16 @@ onBeforeUnmount(() => {
   if (sharedBatchTimer !== null) window.clearInterval(sharedBatchTimer);
   if (batchHeartbeatTimer !== null) window.clearInterval(batchHeartbeatTimer);
   if (collectionClockTimer !== null) window.clearInterval(collectionClockTimer);
+  if (duplicateTargetHighlightTimer !== null) {
+    window.clearTimeout(duplicateTargetHighlightTimer);
+  }
   document.body.style.overflow = "";
 });
 
 let sharedBatchTimer: number | null = null;
 let batchHeartbeatTimer: number | null = null;
 let collectionClockTimer: number | null = null;
+let duplicateTargetHighlightTimer: number | null = null;
 
 watch([targetQuery, targetPageSize], () => {
   targetPage.value = 1;
@@ -1010,6 +1033,8 @@ watch(
     competitorQuery,
     competitorStockFilter,
     followerPresenceFilter,
+    personalWatchlistFilter,
+    followSellingOpportunityFilter,
     competitorSignalFilter,
     competitorListSortDirection,
     competitorPageSize,
@@ -1194,6 +1219,8 @@ function clearCompetitorFilters(): void {
   competitorQuery.value = "";
   competitorStockFilter.value = "全部";
   followerPresenceFilter.value = "全部";
+  personalWatchlistFilter.value = "全部";
+  followSellingOpportunityFilter.value = "全部";
   competitorSignalFilter.value = "全部";
 }
 
@@ -1250,6 +1277,7 @@ function openProductModal(item: CompetitorItem) {
     cancelEditTarget();
   }
   clearTargetManagerFeedback();
+  clearPersonalWatchlistFeedback();
   detailModalOpen.value = true;
 }
 
@@ -1259,6 +1287,7 @@ function closeProductModal() {
   hoveredOfferTrendIndex.value = null;
   if (editingTargetPlid.value === selectedPlid.value) cancelEditTarget();
   clearTargetManagerFeedback();
+  clearPersonalWatchlistFeedback();
 }
 
 function selectCompetitorOffer(offer: CompetitorOfferItem) {
@@ -1446,12 +1475,21 @@ async function loadSharedBatchStatus() {
 
 async function loadTargets() {
   try {
-    const [loadedTargets, storeTargetPayload, allStoreTargetPayload] = await Promise.all([
+    const [
+      loadedTargets,
+      storeTargetPayload,
+      allStoreTargetPayload,
+      personalWatchlistPayload,
+    ] = await Promise.all([
       fetchCompetitorTargets(),
       fetchCompetitorStoreTargets(ownStoreScope.value),
       fetchCompetitorStoreTargets("all"),
+      fetchCompetitorPersonalWatchlist(),
     ]);
     targets.value = loadedTargets;
+    personalWatchlistPlids.value = new Set(
+      personalWatchlistPayload.items.map((item) => item.plid),
+    );
     storeTargets.value = storeTargetPayload.items;
     allStoreTargets.value = allStoreTargetPayload.items;
     storeTargetMembershipCount.value = storeTargetPayload.selected_membership_count;
@@ -1465,6 +1503,49 @@ async function loadTargets() {
     targetManagerError.value =
       error instanceof Error ? error.message : "读取竞品链接清单失败";
   }
+}
+
+function setPersonalWatchlistLocal(plid: string, included: boolean): void {
+  const next = new Set(personalWatchlistPlids.value);
+  if (included) next.add(plid);
+  else next.delete(plid);
+  personalWatchlistPlids.value = next;
+}
+
+async function persistPersonalWatchlistAddition(plid: string): Promise<boolean> {
+  const result = await addCompetitorPersonalWatchlistItem(plid);
+  setPersonalWatchlistLocal(plid, true);
+  return result.created;
+}
+
+async function toggleSelectedPersonalWatchlist(): Promise<void> {
+  const item = selected.value;
+  if (!item || item.来源 !== "competitor" || personalWatchlistBusyPlid.value) return;
+  const removing = personalWatchlistPlids.value.has(item.plid);
+  clearPersonalWatchlistFeedback();
+  personalWatchlistBusyPlid.value = item.plid;
+  try {
+    if (removing) {
+      await deleteCompetitorPersonalWatchlistItem(item.plid);
+      setPersonalWatchlistLocal(item.plid, false);
+      personalWatchlistNotice.value = (
+        `PLID${item.plid} 已从你的个人监控池删除；全局每日采集和历史记录不受影响。`
+      );
+    } else {
+      await persistPersonalWatchlistAddition(item.plid);
+      personalWatchlistNotice.value = `PLID${item.plid} 已加入你的个人监控池。`;
+    }
+  } catch (error) {
+    personalWatchlistError.value =
+      error instanceof Error ? error.message : "更新个人监控池失败";
+  } finally {
+    personalWatchlistBusyPlid.value = "";
+  }
+}
+
+function clearPersonalWatchlistFeedback(): void {
+  personalWatchlistError.value = "";
+  personalWatchlistNotice.value = "";
 }
 
 async function addTarget() {
@@ -1483,7 +1564,16 @@ async function addTarget() {
   const plid = plidFromUrl(url);
   const existingTarget = targets.value.find((target) => target.plid === plid);
   if (existingTarget) {
-    showDuplicateTarget(existingTarget);
+    targetManagerBusy.value = "add";
+    try {
+      const personalWatchlistCreated = await persistPersonalWatchlistAddition(plid);
+      showDuplicateTarget(existingTarget, personalWatchlistCreated);
+    } catch (error) {
+      targetManagerError.value =
+        error instanceof Error ? error.message : "加入个人监控池失败";
+    } finally {
+      targetManagerBusy.value = "";
+    }
     return;
   }
   targetManagerBusy.value = "add";
@@ -1502,16 +1592,28 @@ async function addTarget() {
     if (!result.item) {
       throw new Error("新增接口未返回竞品记录，请刷新后重试");
     }
+    if (result.personal_watchlist_member) {
+      setPersonalWatchlistLocal(result.item.plid, true);
+    }
     await Promise.all([loadTargets(), loadSharedBatchStatus()]);
     targetManagerNotice.value = result.queued_to_active_batch
-      ? `PLID${result.item.plid} 已保存，并追加到当前运行批次队尾；断点中的原任务顺序保持不变。`
-      : `PLID${result.item.plid} 已保存，将进入下一次采集清单。`;
+      ? `PLID${result.item.plid} 已保存并自动加入你的个人监控池，同时追加到当前运行批次队尾；断点中的原任务顺序保持不变。`
+      : `PLID${result.item.plid} 已保存并自动加入你的个人监控池，将进入下一次采集清单。`;
   } catch (error) {
     if (error instanceof ApiRequestError && error.status === 409 && plid) {
-      await loadTargets();
+      let personalWatchlistCreated = false;
+      try {
+        personalWatchlistCreated = await persistPersonalWatchlistAddition(plid);
+        await loadTargets();
+      } catch (membershipError) {
+        targetManagerError.value = membershipError instanceof Error
+          ? membershipError.message
+          : "加入个人监控池失败";
+        return;
+      }
       const duplicate = targets.value.find((target) => target.plid === plid);
       if (duplicate) {
-        showDuplicateTarget(duplicate);
+        showDuplicateTarget(duplicate, personalWatchlistCreated);
         return;
       }
     }
@@ -1528,21 +1630,23 @@ function clearTargetManagerFeedback() {
   duplicateTarget.value = null;
 }
 
-function showDuplicateTarget(target: CompetitorTargetItem) {
+function showDuplicateTarget(
+  target: CompetitorTargetItem,
+  personalWatchlistCreated: boolean,
+) {
   targetManagerError.value = "";
   targetManagerNotice.value = "";
   duplicateTarget.value = {
     plid: target.plid,
     hasHistory: target.has_history,
+    personalWatchlistCreated,
   };
 }
 
 async function jumpToDuplicateTarget() {
   const duplicate = duplicateTarget.value;
   if (!duplicate?.hasHistory) return;
-  competitorQuery.value = "";
-  competitorStockFilter.value = "全部";
-  competitorSignalFilter.value = "全部";
+  clearCompetitorFilters();
   competitorSourceView.value = "competitor";
   if (!competitors.value.some((item) => item.plid === duplicate.plid)) {
     const availableStart = competitorDateRange.value.available_start;
@@ -1568,6 +1672,19 @@ async function jumpToDuplicateTarget() {
     targetManagerError.value = "已有历史记录，但当前观察区间没有可显示的商品卡片";
     return;
   }
+  if (duplicateTargetHighlightTimer !== null) {
+    window.clearTimeout(duplicateTargetHighlightTimer);
+  }
+  duplicateTargetHighlightPlid.value = "";
+  await nextTick();
+  duplicateTargetHighlightPlid.value = duplicate.plid;
+  duplicateTargetHighlightTimer = window.setTimeout(() => {
+    if (duplicateTargetHighlightPlid.value === duplicate.plid) {
+      duplicateTargetHighlightPlid.value = "";
+    }
+    duplicateTargetHighlightTimer = null;
+  }, 4_500);
+  await nextTick();
   row.scrollIntoView({ behavior: "smooth", block: "center" });
   row.focus({ preventScroll: true });
 }
@@ -1944,11 +2061,6 @@ async function ensureUniqueCollectionClientId() {
 
 function plidFromUrl(url: string) {
   return url.match(/PLID(\d+)/i)?.[1] ?? "";
-}
-
-function competitorSearchTerm(value: string) {
-  const trimmed = value.trim();
-  return (plidFromUrl(trimmed) || trimmed).toLocaleLowerCase();
 }
 
 function markAttempted(index: number) {
@@ -3150,6 +3262,11 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
               ? "该链接已在监控清单中，并已纳入每日采集且已有历史记录。"
               : "链接表单中已有这个链接。"
           }}
+          {{
+            duplicateTarget.personalWatchlistCreated
+              ? "已自动加入你的个人监控池。"
+              : "该商品也已在你的个人监控池中。"
+          }}
         </span>
         <button
           v-if="duplicateTarget.hasHistory"
@@ -4256,6 +4373,30 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
               <option value="未发现跟卖">未发现跟卖</option>
             </select>
           </label>
+          <label
+            v-if="competitorSourceView === 'competitor'"
+            class="competitor-filter-field"
+          >
+            <span>可跟卖机会</span>
+            <select v-model="followSellingOpportunityFilter">
+              <option value="全部">全部竞品</option>
+              <option value="可跟卖机会">全部可跟卖机会</option>
+              <option value="全部报价售罄">全部报价售罄</option>
+              <option value="暂无卖家报价">暂无卖家报价</option>
+            </select>
+          </label>
+          <label
+            v-if="competitorSourceView === 'competitor'"
+            class="competitor-filter-field"
+          >
+            <span>个人监控池</span>
+            <select v-model="personalWatchlistFilter">
+              <option value="全部">全部竞品</option>
+              <option value="我的监控池">
+                只看我的监控池（{{ personalWatchlistPlids.size }}）
+              </option>
+            </select>
+          </label>
           <label class="competitor-filter-field">
             <span>经营信号</span>
             <select v-model="competitorSignalFilter">
@@ -4354,81 +4495,102 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
               </span>
             </div>
           </div>
-          <section class="own-follower-history-query" aria-labelledby="own-follower-history-title">
+          <section
+            class="own-follower-history-query"
+            :class="{ 'is-collapsed': !ownFollowerHistoryOpen }"
+            aria-labelledby="own-follower-history-title"
+          >
             <div class="own-follower-history-heading">
               <div>
                 <p class="section-kicker">FOLLOWER DISCOVERY HISTORY</p>
                 <h4 id="own-follower-history-title">六店自有链接跟卖发现记录</h4>
               </div>
-              <span>按北京时间自然日 · 以系统保存的公开页快照为准</span>
-            </div>
-            <form class="own-follower-history-form" @submit.prevent="queryOwnFollowerHistory">
-              <label class="competitor-filter-field">
-                <span>开始日期</span>
-                <input
-                  v-model="ownFollowerHistoryStartDate"
-                  type="date"
-                  :max="ownFollowerHistoryEndDate || undefined"
-                />
-              </label>
-              <span class="competitor-date-range-separator" aria-hidden="true">至</span>
-              <label class="competitor-filter-field">
-                <span>结束日期</span>
-                <input
-                  v-model="ownFollowerHistoryEndDate"
-                  type="date"
-                  :min="ownFollowerHistoryStartDate || undefined"
-                />
-              </label>
-              <button class="primary-button" type="submit" :disabled="ownFollowerHistoryLoading">
-                {{ ownFollowerHistoryLoading ? "查询中…" : "查询六店跟卖记录" }}
-              </button>
-            </form>
-            <p v-if="ownFollowerHistoryError" class="inline-error" role="alert">
-              {{ ownFollowerHistoryError }}
-            </p>
-            <p v-if="!ownFollowerHistoryLoaded && !ownFollowerHistoryLoading" class="method-note">
-              选择日期后查询：即使某个跟卖卖家后来消失，只要区间内曾在快照中出现，仍会列出具体发现日期。
-              “新增跟卖卖家”表示系统首次观察日期落在所选区间，不代表卖家实际开始跟卖的绝对时间。
-            </p>
-            <div v-else-if="ownFollowerHistoryLoading" class="empty-state compact-empty-state">
-              正在读取六店历史快照…
+              <div class="own-follower-history-heading-actions">
+                <span>按北京时间自然日 · 以系统保存的公开页快照为准</span>
+                <button
+                  type="button"
+                  class="quiet-button own-follower-history-toggle"
+                  :aria-expanded="ownFollowerHistoryOpen"
+                  aria-controls="own-follower-history-details"
+                  @click="ownFollowerHistoryOpen = !ownFollowerHistoryOpen"
+                >
+                  {{ ownFollowerHistoryOpen ? "收起记录" : "展开记录" }}
+                </button>
+              </div>
             </div>
             <div
-              v-else-if="ownFollowerHistoryItems.length"
-              class="own-follower-history-list"
+              v-if="ownFollowerHistoryOpen"
+              id="own-follower-history-details"
+              class="own-follower-history-details"
             >
-              <article
-                v-for="event in ownFollowerHistoryItems"
-                :key="`own-follower-history-${event.plid}`"
-                class="own-follower-history-card"
+              <form class="own-follower-history-form" @submit.prevent="queryOwnFollowerHistory">
+                <label class="competitor-filter-field">
+                  <span>开始日期</span>
+                  <input
+                    v-model="ownFollowerHistoryStartDate"
+                    type="date"
+                    :max="ownFollowerHistoryEndDate || undefined"
+                  />
+                </label>
+                <span class="competitor-date-range-separator" aria-hidden="true">至</span>
+                <label class="competitor-filter-field">
+                  <span>结束日期</span>
+                  <input
+                    v-model="ownFollowerHistoryEndDate"
+                    type="date"
+                    :min="ownFollowerHistoryStartDate || undefined"
+                  />
+                </label>
+                <button class="primary-button" type="submit" :disabled="ownFollowerHistoryLoading">
+                  {{ ownFollowerHistoryLoading ? "查询中…" : "查询六店跟卖记录" }}
+                </button>
+              </form>
+              <p v-if="ownFollowerHistoryError" class="inline-error" role="alert">
+                {{ ownFollowerHistoryError }}
+              </p>
+              <p v-if="!ownFollowerHistoryLoaded && !ownFollowerHistoryLoading" class="method-note">
+                选择日期后查询：即使某个跟卖卖家后来消失，只要区间内曾在快照中出现，仍会列出具体发现日期。
+                “新增跟卖卖家”表示系统首次观察日期落在所选区间，不代表卖家实际开始跟卖的绝对时间。
+              </p>
+              <div v-else-if="ownFollowerHistoryLoading" class="empty-state compact-empty-state">
+                正在读取六店历史快照…
+              </div>
+              <div
+                v-else-if="ownFollowerHistoryItems.length"
+                class="own-follower-history-list"
               >
-                <div class="own-follower-history-card-heading">
-                  <div>
-                    <strong>{{ event.商品 }}</strong>
-                    <span>PLID{{ event.plid }} · {{ event.店铺.join("、") || "自有店铺" }}</span>
+                <article
+                  v-for="event in ownFollowerHistoryItems"
+                  :key="`own-follower-history-${event.plid}`"
+                  class="own-follower-history-card"
+                >
+                  <div class="own-follower-history-card-heading">
+                    <div>
+                      <strong>{{ event.商品 }}</strong>
+                      <span>PLID{{ event.plid }} · {{ event.店铺.join("、") || "自有店铺" }}</span>
+                    </div>
+                    <a :href="event.链接" target="_blank" rel="noreferrer">打开商品页</a>
                   </div>
-                  <a :href="event.链接" target="_blank" rel="noreferrer">打开商品页</a>
-                </div>
-                <p>
-                  区间内查到跟卖：{{ event.跟卖发现日期.join("、") }} ·
-                  新增卖家 {{ event.新增跟卖卖家数 }} 个
-                </p>
-                <div class="own-follower-seller-events">
-                  <div
-                    v-for="seller in event.跟卖卖家明细"
-                    :key="`${event.plid}-${seller.卖家ID || seller.卖家}`"
-                  >
-                    <strong>{{ seller.卖家 }}</strong>
-                    <span>系统首次观察到：{{ seller.首次发现日期 }}</span>
-                    <span>本区间查到：{{ seller.区间发现日期.join("、") }}</span>
-                    <em v-if="seller.是否区间新增">本区间新增跟卖卖家</em>
+                  <p>
+                    区间内查到跟卖：{{ event.跟卖发现日期.join("、") }} ·
+                    新增卖家 {{ event.新增跟卖卖家数 }} 个
+                  </p>
+                  <div class="own-follower-seller-events">
+                    <div
+                      v-for="seller in event.跟卖卖家明细"
+                      :key="`${event.plid}-${seller.卖家ID || seller.卖家}`"
+                    >
+                      <strong>{{ seller.卖家 }}</strong>
+                      <span>系统首次观察到：{{ seller.首次发现日期 }}</span>
+                      <span>本区间查到：{{ seller.区间发现日期.join("、") }}</span>
+                      <em v-if="seller.是否区间新增">本区间新增跟卖卖家</em>
+                    </div>
                   </div>
-                </div>
-              </article>
-            </div>
-            <div v-else class="empty-state compact-empty-state">
-              所选区间没有保存到自有链接的非自有卖家报价。
+                </article>
+              </div>
+              <div v-else class="empty-state compact-empty-state">
+                所选区间没有保存到自有链接的非自有卖家报价。
+              </div>
             </div>
           </section>
           <div v-if="!filteredStoreCompetitors.length" class="empty-state competitor-filter-empty">
@@ -4554,20 +4716,65 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
               <p class="section-kicker">TRUE COMPETITORS</p>
               <h3>真正竞品</h3>
             </div>
-            <span>共 {{ filteredCompetitors.length }} 条 · 仅来自人工监控清单</span>
+            <span>
+              共 {{ filteredCompetitors.length }} 条 · 可跟卖机会
+              {{ followSellingOpportunitySummary.total }} 条 · 我的监控池
+              {{ personalWatchlistPlids.size }} 条
+            </span>
+          </div>
+          <div class="follow-opportunity-summary" aria-label="可跟卖机会统计">
+            <div class="follow-opportunity-copy">
+              <strong>可跟卖机会</strong>
+              <span>
+                只统计最新成功快照；采集失败、旧快照缺报价明细或库存未知都不会误判。
+              </span>
+            </div>
+            <button
+              type="button"
+              :class="{ active: followSellingOpportunityFilter === '可跟卖机会' }"
+              @click="followSellingOpportunityFilter = '可跟卖机会'"
+            >
+              <strong>{{ followSellingOpportunitySummary.total }}</strong>
+              <span>全部机会</span>
+            </button>
+            <button
+              type="button"
+              :class="{ active: followSellingOpportunityFilter === '全部报价售罄' }"
+              @click="followSellingOpportunityFilter = '全部报价售罄'"
+            >
+              <strong>{{ followSellingOpportunitySummary.soldOut }}</strong>
+              <span>全部报价售罄</span>
+            </button>
+            <button
+              type="button"
+              :class="{ active: followSellingOpportunityFilter === '暂无卖家报价' }"
+              @click="followSellingOpportunityFilter = '暂无卖家报价'"
+            >
+              <strong>{{ followSellingOpportunitySummary.noSeller }}</strong>
+              <span>暂无卖家报价</span>
+            </button>
           </div>
         <div v-if="!filteredCompetitors.length" class="empty-state competitor-filter-empty">
           <strong>没有符合条件的竞品</strong>
-          <span>可以调整关键词、库存状态或经营信号。</span>
+          <span>可以调整关键词、个人监控池、库存状态、可跟卖机会或经营信号。</span>
         </div>
         <div v-else class="competitor-status-list">
           <article
             v-for="item in pagedCompetitors"
             :key="item.plid"
             :id="`competitor-row-${item.plid}`"
-            v-memo="[item, selectedPlid === item.plid, failedCompetitorImages.has(item.图片 || '')]"
+            v-memo="[
+              item,
+              selectedPlid === item.plid,
+              duplicateTargetHighlightPlid === item.plid,
+              personalWatchlistPlids.has(item.plid),
+              failedCompetitorImages.has(item.图片 || ''),
+            ]"
             class="competitor-status-card"
-            :class="{ selected: selectedPlid === item.plid }"
+            :class="{
+              selected: selectedPlid === item.plid,
+              'duplicate-target-highlight': duplicateTargetHighlightPlid === item.plid,
+            }"
             tabindex="0"
             role="button"
             aria-haspopup="dialog"
@@ -4595,6 +4802,22 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
                   <div class="competitor-status-eyebrow">
                     <span>PLID{{ item.plid }}</span>
                     <span>{{ formatChinaDateTime(item.采集时间) }}</span>
+                    <strong
+                      v-if="duplicateTargetHighlightPlid === item.plid"
+                      class="duplicate-target-highlight-badge"
+                      role="status"
+                    >已定位到此商品</strong>
+                    <strong
+                      v-if="personalWatchlistPlids.has(item.plid)"
+                      class="personal-watchlist-badge"
+                    >我的监控池</strong>
+                    <strong
+                      v-if="item.跟卖机会类型"
+                      class="follow-opportunity-badge"
+                      :title="item.跟卖机会说明"
+                    >
+                      {{ item.跟卖机会类型 }}
+                    </strong>
                   </div>
                   <h3>{{ item.商品 }}</h3>
                   <p>{{ followerSellerCount(item) }} 个卖家 · {{ item.跟卖报价.length }} 个变体 / 报价 · 主卖家 {{ item.当前卖家 || "未知" }}</p>
@@ -4730,6 +4953,48 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
               ×
             </button>
           </header>
+
+          <section
+            v-if="selected.来源 === 'competitor'"
+            class="personal-watchlist-banner"
+            :class="{ 'is-member': selectedInPersonalWatchlist }"
+            aria-label="个人监控池操作"
+          >
+            <div class="personal-watchlist-copy">
+              <p class="section-kicker">PERSONAL WATCHLIST</p>
+              <strong>
+                {{ selectedInPersonalWatchlist ? "已在你的个人监控池" : "尚未加入你的个人监控池" }}
+              </strong>
+              <span>
+                仅当前账号可见，用于个人筛选；加入或删除都不会启动、停止全局每日采集，也不会删除历史。
+              </span>
+              <small
+                v-if="personalWatchlistError"
+                class="personal-watchlist-feedback error"
+                role="alert"
+              >{{ personalWatchlistError }}</small>
+              <small
+                v-else-if="personalWatchlistNotice"
+                class="personal-watchlist-feedback success"
+                role="status"
+              >{{ personalWatchlistNotice }}</small>
+            </div>
+            <button
+              type="button"
+              class="personal-watchlist-toggle-button"
+              :class="{ 'is-remove': selectedInPersonalWatchlist }"
+              :disabled="personalWatchlistBusyPlid === selected.plid"
+              @click="toggleSelectedPersonalWatchlist"
+            >
+              {{
+                personalWatchlistBusyPlid === selected.plid
+                  ? "正在更新…"
+                  : selectedInPersonalWatchlist
+                    ? "从个人监控池删除"
+                    : "加入个人监控池"
+              }}
+            </button>
+          </section>
 
           <div v-if="detailLoading" class="empty-state slim">正在读取商品详情……</div>
           <p v-else-if="detailError" class="error-banner">{{ detailError }}</p>

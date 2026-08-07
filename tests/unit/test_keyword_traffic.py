@@ -86,10 +86,10 @@ def test_title_change_is_automatically_labeled_and_compared() -> None:
     assert len(payload["events"]) == 2
     baseline, change = payload["events"]
     assert baseline["event_kind"] == "baseline"
-    assert baseline["change_label"] == "自动基线｜首次完整标题快照"
+    assert baseline["change_label"] == "基线｜首次完整标题快照"
     assert change["event_kind"] == "change"
     assert change["event_source"] == "offer_title"
-    assert change["change_label"] == "自动变化｜新增 1 词"
+    assert change["change_label"] == "变化｜新增 1 词"
     assert change["added_keywords"] == ["Queen"]
     assert change["removed_keywords"] == []
     assert change["source_title"] == "Memory Foam Queen Mattress"
@@ -160,7 +160,7 @@ def test_product_list_automatically_archives_latest_title_snapshot() -> None:
     engine.dispose()
 
 
-def test_title_term_order_change_gets_an_automatic_change_label() -> None:
+def test_title_term_order_change_gets_a_change_label() -> None:
     engine = _engine()
     _add_history(
         engine,
@@ -183,7 +183,6 @@ def test_title_term_order_change_gets_an_automatic_change_label() -> None:
     change = payload["events"][1]
     assert change["added_keywords"] == []
     assert change["removed_keywords"] == []
-    assert change["change_label"] == "自动变化｜标题词顺序或写法变化"
+    assert change["change_label"] == "变化｜标题词顺序或写法变化"
     assert extract_title_keywords("Memory foam, memory foam") == ["Memory", "foam"]
     engine.dispose()
-

@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 from takealot_ops.platform_warehouse.portal import (
     PortalAmbiguousWriteError,
     PortalAuthenticationError,
+    PortalDisabledError,
     PortalSessionRegistry,
     TakealotPortalClient,
 )
@@ -21,6 +22,7 @@ from takealot_ops.storage.migrations import (
     create_schema,
 )
 from takealot_ops.storage.models import OfferCurrent
+from takealot_ops.storage.store_context import store_scope
 
 
 def _portal_settings() -> TakealotPortalSettings:
@@ -30,6 +32,7 @@ def _portal_settings() -> TakealotPortalSettings:
         request_timeout_seconds=5,
         task_timeout_seconds=5,
         max_total_quantity=500,
+        enabled_store_codes=frozenset({"current"}),
     )
 
 
@@ -265,6 +268,7 @@ def test_guarded_service_review_create_and_manual_actions_use_exact_confirmation
     database_url = f"sqlite:///{database_path.as_posix()}"
     monkeypatch.setenv("TAKEALOT_DATABASE_URL", database_url)
     monkeypatch.setenv("TAKEALOT_PORTAL_BFF_ENABLED", "true")
+    monkeypatch.setenv("TAKEALOT_PORTAL_ENABLED_STORES", "current")
     monkeypatch.setenv("TAKEALOT_PORTAL_SHIPPED_WRITE_ENABLED", "true")
     engine = create_engine_for_database_url(database_url)
     try:
@@ -351,6 +355,7 @@ def test_direct_create_reuses_valid_session_and_request_id(tmp_path, monkeypatch
     database_url = f"sqlite:///{database_path.as_posix()}"
     monkeypatch.setenv("TAKEALOT_DATABASE_URL", database_url)
     monkeypatch.setenv("TAKEALOT_PORTAL_BFF_ENABLED", "true")
+    monkeypatch.setenv("TAKEALOT_PORTAL_ENABLED_STORES", "current")
     engine = create_engine_for_database_url(database_url)
     try:
         create_schema(engine)
@@ -402,6 +407,7 @@ def test_direct_create_reauthenticates_when_memory_session_is_rejected(
     database_url = f"sqlite:///{database_path.as_posix()}"
     monkeypatch.setenv("TAKEALOT_DATABASE_URL", database_url)
     monkeypatch.setenv("TAKEALOT_PORTAL_BFF_ENABLED", "true")
+    monkeypatch.setenv("TAKEALOT_PORTAL_ENABLED_STORES", "current")
     engine = create_engine_for_database_url(database_url)
     try:
         create_schema(engine)
@@ -448,6 +454,7 @@ def test_direct_create_pauses_for_2fa_then_resumes_same_draft(
     database_url = f"sqlite:///{database_path.as_posix()}"
     monkeypatch.setenv("TAKEALOT_DATABASE_URL", database_url)
     monkeypatch.setenv("TAKEALOT_PORTAL_BFF_ENABLED", "true")
+    monkeypatch.setenv("TAKEALOT_PORTAL_ENABLED_STORES", "current")
     engine = create_engine_for_database_url(database_url)
     try:
         create_schema(engine)
@@ -494,3 +501,27 @@ def test_direct_create_pauses_for_2fa_then_resumes_same_draft(
     assert created["draft"]["id"] == pending["draft"]["id"]
     assert created["draft"]["status"] == "platform_draft"
     assert fake.writes == [("create", None)]
+
+
+def test_portal_store_allowlist_blocks_other_stores_before_login(
+    tmp_path, monkeypatch
+) -> None:
+    monkeypatch.setenv("TAKEALOT_PORTAL_BFF_ENABLED", "true")
+    monkeypatch.setenv("TAKEALOT_PORTAL_ENABLED_STORES", "store-03")
+    fake = _FakePortalClient()
+    service = PlatformWarehouseService(
+        tmp_path,
+        portal_registry=PortalSessionRegistry(fake),  # type: ignore[arg-type]
+        credential_store=_FakeCredentialStore(None),
+    )
+
+    assert service.portal_status()["enabled"] is False
+    assert service.portal_status()["globally_enabled"] is True
+    with pytest.raises(PortalDisabledError, match="current 未启用约平台仓"):
+        service.portal_login("seller@example.com", "secret")
+    assert fake.login_count == 0
+
+    with store_scope("store-03"):
+        assert service.portal_settings.is_store_enabled() is True
+        assert service.portal_login("seller@example.com", "secret")["authenticated"] is True
+    assert fake.login_count == 1

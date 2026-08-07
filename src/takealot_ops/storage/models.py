@@ -560,6 +560,25 @@ class ErpUserStore(Base):
     )
 
 
+class CompetitorPersonalWatchlist(Base):
+    """One competitor saved to one ERP account's personal watchlist."""
+
+    __tablename__ = "competitor_personal_watchlist"
+
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("erp_users.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    plid: Mapped[str] = mapped_column(
+        ForeignKey("competitor_targets.plid", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    added_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+    )
+
+
 class ErpSession(Base):
     """A revocable server-side ERP browser session."""
 

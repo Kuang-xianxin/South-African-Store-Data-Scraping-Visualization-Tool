@@ -8,7 +8,7 @@ import os
 import random
 import time
 from collections import defaultdict
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
@@ -63,6 +63,7 @@ from takealot_ops.erp.auth import (
     AuthInputError,
     AuthManager,
     IssuedSession,
+    StoreIdentity,
     UserIdentity,
 )
 from takealot_ops.erp.coordination import RefreshBusyError, RefreshCoordinator
@@ -110,6 +111,7 @@ from takealot_ops.erp.permissions import (
     SEARCH_RANKING_RUN,
     STORE_VIEW,
     USERS_MANAGE,
+    permissions_from_storage,
 )
 from takealot_ops.erp.product_images import (
     DEFAULT_MAX_DIMENSION,
@@ -129,6 +131,7 @@ from takealot_ops.erp.service import (
     sqlite_database_path,
 )
 from takealot_ops.logistics import LogisticsLinkError, LogisticsOverviewService
+from takealot_ops.logistics.snapshots import load_provider_snapshot
 from takealot_ops.platform_warehouse import (
     PlatformWarehouseConflictError,
     PlatformWarehouseInputError,
@@ -155,10 +158,14 @@ from takealot_ops.settings import DashboardSettings
 from takealot_ops.storage.migrations import create_engine_for_settings, create_schema
 from takealot_ops.storage.models import (
     CollectionRun,
+    CompetitorPersonalWatchlist,
     CompetitorSnapshot,
     CompetitorTarget,
     CompetitorTargetAudit,
     DailyProductMetric,
+    ErpUser,
+    ErpUserStore,
+    OfferCurrent,
 )
 from takealot_ops.storage.store_context import (
     STORE_CODE_HEADER,
@@ -504,6 +511,320 @@ class _SharedCompetitorPublicClient:
                 "Failed to close the reusable competitor public browser",
                 exc_info=True,
             )
+
+
+def _optional_int(value: Any) -> int | None:
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _empty_store_inventory() -> dict[str, Any]:
+    return {
+        "captured_at": None,
+        "offer_count": 0,
+        "platform_available_stock": None,
+        "platform_available_coverage": 0,
+        "platform_stock_on_way": None,
+        "platform_stock_on_way_coverage": 0,
+        "platform_stock_in_receiving": None,
+        "platform_stock_in_receiving_coverage": 0,
+    }
+
+
+def _store_inventory_snapshot(engine: Engine) -> dict[str, Any]:
+    """Summarize the current store's local offer inventory snapshot."""
+    with Session(engine) as session:
+        row = session.execute(
+            select(
+                func.count(OfferCurrent.offer_id).label("offer_count"),
+                func.max(OfferCurrent.captured_at).label("captured_at"),
+                func.sum(OfferCurrent.takealot_available_stock).label(
+                    "platform_available_stock"
+                ),
+                func.count(OfferCurrent.takealot_available_stock).label(
+                    "platform_available_coverage"
+                ),
+                func.sum(OfferCurrent.takealot_stock_on_way).label(
+                    "platform_stock_on_way"
+                ),
+                func.count(OfferCurrent.takealot_stock_on_way).label(
+                    "platform_stock_on_way_coverage"
+                ),
+                func.sum(OfferCurrent.takealot_stock_in_receiving).label(
+                    "platform_stock_in_receiving"
+                ),
+                func.count(OfferCurrent.takealot_stock_in_receiving).label(
+                    "platform_stock_in_receiving_coverage"
+                ),
+            )
+        ).mappings().one()
+    captured_at = row["captured_at"]
+    return {
+        "captured_at": captured_at.isoformat() if captured_at is not None else None,
+        "offer_count": int(row["offer_count"] or 0),
+        "platform_available_stock": _optional_int(row["platform_available_stock"]),
+        "platform_available_coverage": int(
+            row["platform_available_coverage"] or 0
+        ),
+        "platform_stock_on_way": _optional_int(row["platform_stock_on_way"]),
+        "platform_stock_on_way_coverage": int(
+            row["platform_stock_on_way_coverage"] or 0
+        ),
+        "platform_stock_in_receiving": _optional_int(
+            row["platform_stock_in_receiving"]
+        ),
+        "platform_stock_in_receiving_coverage": int(
+            row["platform_stock_in_receiving_coverage"] or 0
+        ),
+    }
+
+
+def _responsible_users_by_store(
+    engine: Engine,
+    stores: Sequence[StoreIdentity],
+) -> dict[str, list[dict[str, Any]]]:
+    """Return active non-admin users who can view each requested store."""
+    result: dict[str, list[dict[str, Any]]] = {
+        store.code: [] for store in stores
+    }
+    if not stores:
+        return result
+    store_by_id = {store.id: store.code for store in stores}
+    with Session(engine) as session:
+        users = session.scalars(
+            select(ErpUser)
+            .where(
+                ErpUser.active.is_(True),
+                ErpUser.role != "admin",
+            )
+            .order_by(ErpUser.display_name, ErpUser.id)
+        ).all()
+        assignments = session.execute(
+            select(ErpUserStore.user_id, ErpUserStore.store_id).where(
+                ErpUserStore.store_id.in_(tuple(store_by_id))
+            )
+        ).all()
+    assigned_by_user: dict[int, set[int]] = defaultdict(set)
+    for user_id, store_id in assignments:
+        assigned_by_user[int(user_id)].add(int(store_id))
+    for user in users:
+        try:
+            permissions = permissions_from_storage(
+                user.role,
+                user.permissions_json,
+            )
+        except ValueError:
+            continue
+        if STORE_VIEW not in permissions:
+            continue
+        user_store_ids = (
+            set(store_by_id)
+            if user.store_access_all
+            else assigned_by_user.get(user.id, set())
+        )
+        for store_id in user_store_ids:
+            store_code = store_by_id.get(store_id)
+            if store_code is None:
+                continue
+            result[store_code].append(
+                {
+                    "user_id": user.id,
+                    "display_name": user.display_name.strip() or user.username,
+                    "role": user.role,
+                }
+            )
+    role_priority = {"operator": 0, "viewer": 1, "selection": 2}
+    for users_for_store in result.values():
+        users_for_store.sort(
+            key=lambda item: (
+                role_priority.get(str(item["role"]), 9),
+                str(item["display_name"]).casefold(),
+                int(item["user_id"]),
+            )
+        )
+    return result
+
+
+def _empty_overseas_inventory() -> dict[str, Any]:
+    return {
+        "snapshot_at": None,
+        "warehouse_name": None,
+        "stock_total": None,
+        "usable_stock": None,
+        "locked_stock": None,
+        "outbound_allocated": None,
+        "transit_stock": None,
+        "defective_stock": None,
+        "shared_across_stores": True,
+    }
+
+
+def _shared_overseas_inventory(
+    engine: Engine,
+    stores: Sequence[StoreIdentity],
+) -> dict[str, Any]:
+    """Read the newest accessible W8 snapshot and count that shared warehouse once."""
+    latest: dict[str, Any] | None = None
+    for store in stores:
+        with store_scope(store.code):
+            snapshot = load_provider_snapshot(engine, "w8")
+        if snapshot is None:
+            continue
+        if latest is None or str(snapshot["fetched_at"]) > str(latest["fetched_at"]):
+            latest = snapshot
+    if latest is None:
+        return _empty_overseas_inventory()
+    payload = latest.get("payload")
+    if not isinstance(payload, Mapping) or not payload.get("connected"):
+        return _empty_overseas_inventory()
+    summary = payload.get("summary")
+    if not isinstance(summary, Mapping):
+        return _empty_overseas_inventory()
+    warehouse = payload.get("warehouse")
+    warehouse_name = None
+    if isinstance(warehouse, Mapping):
+        warehouse_name = str(
+            warehouse.get("name") or warehouse.get("code") or ""
+        ).strip() or None
+    return {
+        "snapshot_at": str(latest["fetched_at"]),
+        "warehouse_name": warehouse_name,
+        "stock_total": _optional_int(summary.get("stock_total")),
+        "usable_stock": _optional_int(summary.get("usable_stock")),
+        "locked_stock": _optional_int(summary.get("locked_stock")),
+        "outbound_allocated": _optional_int(summary.get("outbound_allocated")),
+        "transit_stock": _optional_int(summary.get("transit_stock")),
+        "defective_stock": _optional_int(summary.get("defective_stock")),
+        "shared_across_stores": True,
+    }
+
+
+def _aggregate_platform_inventory(
+    items: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    fields = (
+        ("platform_available_stock", "platform_available_coverage"),
+        ("platform_stock_on_way", "platform_stock_on_way_coverage"),
+        ("platform_stock_in_receiving", "platform_stock_in_receiving_coverage"),
+    )
+    result: dict[str, Any] = {
+        "captured_at": None,
+        "store_count": len(items),
+        "store_count_with_offers": 0,
+        "offer_count": 0,
+    }
+    captured_values: list[str] = []
+    for item in items:
+        inventory = item.get("inventory")
+        if not isinstance(inventory, Mapping):
+            continue
+        offer_count = int(inventory.get("offer_count") or 0)
+        result["offer_count"] += offer_count
+        if offer_count:
+            result["store_count_with_offers"] += 1
+        captured_at = inventory.get("captured_at")
+        if captured_at:
+            captured_values.append(str(captured_at))
+    result["captured_at"] = max(captured_values) if captured_values else None
+    for value_field, coverage_field in fields:
+        known_values: list[int] = []
+        coverage = 0
+        for item in items:
+            inventory = item.get("inventory")
+            if not isinstance(inventory, Mapping):
+                continue
+            value = _optional_int(inventory.get(value_field))
+            if value is not None:
+                known_values.append(value)
+            coverage += int(inventory.get(coverage_field) or 0)
+        result[value_field] = sum(known_values) if known_values else None
+        result[coverage_field] = coverage
+    return result
+
+
+def _store_health(item: Mapping[str, Any]) -> dict[str, Any]:
+    """Classify one store from explicit risk and completeness signals only."""
+    business_reasons: list[str] = []
+    data_reasons: list[str] = []
+    latest_metric_date = item.get("latest_metric_date")
+    kpis = item.get("kpis")
+    if not isinstance(kpis, Mapping):
+        kpis = {}
+    if latest_metric_date:
+        stockouts = _optional_int(kpis.get("stockout_products")) or 0
+        if stockouts:
+            business_reasons.append(f"缺货商品 {stockouts} 个")
+    else:
+        data_reasons.append("暂无经营指标日")
+
+    traffic = item.get("latest_traffic_point")
+    if not isinstance(traffic, Mapping):
+        data_reasons.append("周期末近30天浏览量暂无可用合计")
+    else:
+        official_value = _optional_int(traffic.get("page_views_30_days_total"))
+        reference = traffic.get("reference")
+        if official_value is None:
+            if isinstance(reference, Mapping):
+                data_reasons.append("周期末浏览量使用同日参考")
+                missing_products = _optional_int(reference.get("missing_product_count")) or 0
+            else:
+                data_reasons.append("周期末近30天浏览量暂无可用合计")
+                missing_products = 0
+        else:
+            missing_products = _optional_int(traffic.get("missing_product_count")) or 0
+        if missing_products:
+            data_reasons.append(f"周期末浏览量缺失 {missing_products} 个商品")
+
+    inventory = item.get("inventory")
+    if not isinstance(inventory, Mapping):
+        inventory = _empty_store_inventory()
+    offer_count = int(inventory.get("offer_count") or 0)
+    if not offer_count:
+        data_reasons.append("平台库存暂无商品快照")
+    else:
+        coverage_labels = (
+            ("platform_available_coverage", "平台可售库存"),
+            ("platform_stock_on_way_coverage", "平台在途库存"),
+            ("platform_stock_in_receiving_coverage", "平台收货中库存"),
+        )
+        for coverage_field, label in coverage_labels:
+            coverage = int(inventory.get(coverage_field) or 0)
+            if coverage < offer_count:
+                data_reasons.append(f"{label}缺失 {offer_count - coverage} 个商品")
+
+    if business_reasons:
+        state = "attention"
+        label = "需关注"
+        priority = 2
+    elif data_reasons:
+        state = "data_gap"
+        label = "数据待补"
+        priority = 1
+    else:
+        state = "healthy"
+        label = "当前口径正常"
+        priority = 0
+    return {
+        "state": state,
+        "label": label,
+        "priority": priority,
+        "business_reasons": business_reasons,
+        "data_reasons": data_reasons,
+    }
+
+
+def _health_rollup(items: Sequence[Mapping[str, Any]]) -> dict[str, int]:
+    result = {"attention": 0, "data_gap": 0, "healthy": 0}
+    for item in items:
+        health = item.get("health")
+        state = health.get("state") if isinstance(health, Mapping) else None
+        if state in result:
+            result[state] += 1
+    return result
 
 
 def create_app(project_root: Path | None = None) -> FastAPI:
@@ -856,20 +1177,105 @@ def create_app(project_root: Path | None = None) -> FastAPI:
         }
 
     @app.get("/api/erp/summary")
-    def summary(as_of: date = Query(default_factory=date.today)) -> dict[str, Any]:
+    def summary(
+        request: Request,
+        as_of: date = Query(default_factory=date.today),
+    ) -> dict[str, Any]:
         settings = DashboardSettings.from_env(root)
         payload = build_summary_payload(load_erp_dataset(settings, as_of), as_of)
         engine = create_read_only_erp_engine(settings.database_url)
         try:
-            payload["traffic_series"] = period_end_traffic_series(
-                engine,
-                as_of=as_of,
-            )
-        except SQLAlchemyError:
-            payload["traffic_series"] = []
+            store = request.state.erp_store
+            try:
+                payload["traffic_series"] = period_end_traffic_series(
+                    engine,
+                    as_of=as_of,
+                )
+            except SQLAlchemyError:
+                payload["traffic_series"] = []
+            try:
+                payload["operators"] = _responsible_users_by_store(
+                    engine,
+                    (store,),
+                ).get(store.code, [])
+            except SQLAlchemyError:
+                payload["operators"] = []
         finally:
             engine.dispose()
         return payload
+
+    @app.get("/api/erp/summary/stores")
+    def store_summaries(
+        request: Request,
+        as_of: date = Query(default_factory=date.today),
+    ) -> dict[str, Any]:
+        """Return a compact comparison for every connected store visible to the user."""
+        settings = DashboardSettings.from_env(root)
+        stores = tuple(
+            store
+            for store in request.state.erp_user.accessible_stores
+            if store.active and store.data_connected
+        )
+        items: list[dict[str, Any]] = []
+        engine = create_read_only_erp_engine(settings.database_url)
+        try:
+            try:
+                operators_by_store = _responsible_users_by_store(engine, stores)
+            except SQLAlchemyError:
+                operators_by_store = {store.code: [] for store in stores}
+            for store in stores:
+                with store_scope(store.code):
+                    payload = build_summary_payload(
+                        load_erp_dataset(settings, as_of),
+                        as_of,
+                    )
+                    try:
+                        traffic_series = period_end_traffic_series(
+                            engine,
+                            as_of=as_of,
+                        )
+                    except SQLAlchemyError:
+                        traffic_series = []
+                    try:
+                        inventory = _store_inventory_snapshot(engine)
+                    except SQLAlchemyError:
+                        inventory = _empty_store_inventory()
+                item = {
+                    "store_code": store.code,
+                    "store_name": store.display_name,
+                    "latest_metric_date": payload["latest_metric_date"],
+                    "kpis": payload["kpis"],
+                    "latest_traffic_point": (
+                        traffic_series[-1] if traffic_series else None
+                    ),
+                    "operators": operators_by_store.get(store.code, []),
+                    "inventory": inventory,
+                }
+                item["health"] = _store_health(item)
+                items.append(item)
+            items.sort(
+                key=lambda item: (
+                    -int(item["health"]["priority"]),
+                    -int(item["kpis"].get("stockout_products") or 0),
+                    str(item["store_name"]).casefold(),
+                )
+            )
+            try:
+                overseas_inventory = _shared_overseas_inventory(engine, stores)
+            except SQLAlchemyError:
+                overseas_inventory = _empty_overseas_inventory()
+        finally:
+            engine.dispose()
+        return {
+            "as_of": as_of.isoformat(),
+            "store_count": len(items),
+            "health_summary": _health_rollup(items),
+            "logistics": {
+                "overseas_warehouse": overseas_inventory,
+                "platform_warehouse": _aggregate_platform_inventory(items),
+            },
+            "stores": items,
+        }
 
     @app.get("/api/erp/products")
     def products(as_of: date = Query(default_factory=date.today)) -> dict[str, Any]:
@@ -1799,6 +2205,114 @@ def create_app(project_root: Path | None = None) -> FastAPI:
         finally:
             engine.dispose()
 
+    @app.get("/api/competitors/personal-watchlist")
+    def competitor_personal_watchlist(
+        request: Request,
+    ) -> dict[str, object]:
+        """Return only the current account's saved true competitors."""
+        user = request.state.erp_user
+        settings = DashboardSettings.from_env(root)
+        engine = create_read_only_erp_engine(settings.database_url)
+        try:
+            with Session(engine) as session:
+                store_plids = connected_store_plids(session)
+                statement = select(CompetitorPersonalWatchlist).where(
+                    CompetitorPersonalWatchlist.user_id == user.id
+                )
+                if store_plids:
+                    statement = statement.where(
+                        CompetitorPersonalWatchlist.plid.not_in(store_plids)
+                    )
+                items = session.scalars(
+                    statement.order_by(
+                        CompetitorPersonalWatchlist.added_at.desc(),
+                        CompetitorPersonalWatchlist.plid.asc(),
+                    )
+                ).all()
+                return {
+                    "items": [
+                        _competitor_personal_watchlist_payload(item)
+                        for item in items
+                    ],
+                    "count": len(items),
+                }
+        finally:
+            engine.dispose()
+
+    @app.put("/api/competitors/personal-watchlist/{plid}")
+    def add_competitor_personal_watchlist_item(
+        plid: str,
+        request: Request,
+    ) -> dict[str, object]:
+        """Idempotently save one true competitor for the current account."""
+        normalized_plid = _validated_competitor_plid(plid)
+        user = request.state.erp_user
+        settings = DashboardSettings.from_env(root)
+        engine = create_engine_for_settings(settings)
+        try:
+            create_schema(engine)
+            with Session(engine) as session:
+                target = session.get(CompetitorTarget, normalized_plid)
+                if target is None:
+                    raise HTTPException(
+                        status_code=404,
+                        detail=f"PLID{normalized_plid} 不是真正竞品记录",
+                    )
+                if normalized_plid in connected_store_plids(session):
+                    raise HTTPException(
+                        status_code=409,
+                        detail="自有店铺商品不加入个人竞品监控池",
+                    )
+                item, created = _ensure_competitor_personal_watchlist_item(
+                    session,
+                    user_id=user.id,
+                    plid=normalized_plid,
+                    added_at=datetime.now(UTC),
+                )
+                session.commit()
+                result = _competitor_personal_watchlist_payload(item)
+        finally:
+            engine.dispose()
+        competitor_logger.info(
+            "personal_watchlist action=add plid=%s user=%s created=%s",
+            normalized_plid,
+            user.username,
+            created,
+        )
+        return {"item": result, "created": created}
+
+    @app.delete("/api/competitors/personal-watchlist/{plid}")
+    def delete_competitor_personal_watchlist_item(
+        plid: str,
+        request: Request,
+    ) -> dict[str, object]:
+        """Remove one saved competitor without changing global collection."""
+        normalized_plid = _validated_competitor_plid(plid)
+        user = request.state.erp_user
+        settings = DashboardSettings.from_env(root)
+        engine = create_engine_for_settings(settings)
+        removed = False
+        try:
+            create_schema(engine)
+            with Session(engine) as session:
+                item = session.get(
+                    CompetitorPersonalWatchlist,
+                    (user.id, normalized_plid),
+                )
+                if item is not None:
+                    session.delete(item)
+                    removed = True
+                session.commit()
+        finally:
+            engine.dispose()
+        competitor_logger.info(
+            "personal_watchlist action=delete plid=%s user=%s removed=%s",
+            normalized_plid,
+            user.username,
+            removed,
+        )
+        return {"ok": True, "removed": removed}
+
     @app.post("/api/competitors/targets")
     def create_competitor_target(
         payload: CompetitorTargetRequest,
@@ -1825,9 +2339,23 @@ def create_app(project_root: Path | None = None) -> FastAPI:
                         "store_names": sorted(
                             {row.store_name for row in private_store_rows}
                         ),
+                        "personal_watchlist_member": False,
                     }
                 target = session.get(CompetitorTarget, plid)
                 if target is not None and target.active:
+                    _, personal_created = _ensure_competitor_personal_watchlist_item(
+                        session,
+                        user_id=user.id,
+                        plid=plid,
+                        added_at=now,
+                    )
+                    session.commit()
+                    competitor_logger.info(
+                        "personal_watchlist action=auto_add_existing plid=%s user=%s created=%s",
+                        plid,
+                        user.username,
+                        personal_created,
+                    )
                     raise HTTPException(status_code=409, detail=f"PLID{plid} 已在监控清单中")
                 old_url = target.url if target is not None else None
                 if target is None:
@@ -1857,6 +2385,13 @@ def create_app(project_root: Path | None = None) -> FastAPI:
                         changed_at=now,
                     )
                 )
+                session.flush()
+                _ensure_competitor_personal_watchlist_item(
+                    session,
+                    user_id=user.id,
+                    plid=plid,
+                    added_at=now,
+                )
                 session.commit()
                 result = _competitor_target_payload(
                     target,
@@ -1876,6 +2411,7 @@ def create_app(project_root: Path | None = None) -> FastAPI:
             "queued_to_active_batch": queued,
             "automatic_store_target": False,
             "store_names": [],
+            "personal_watchlist_member": True,
         }
 
     @app.patch("/api/competitors/targets/{plid}")
@@ -2533,6 +3069,41 @@ def _validated_competitor_target_url(value: str) -> tuple[str, str]:
     return plid, url
 
 
+def _validated_competitor_plid(value: str) -> str:
+    plid = value.strip()
+    if not plid.isdigit() or len(plid) > 30:
+        raise HTTPException(status_code=422, detail="PLID 必须是数字")
+    return plid
+
+
+def _ensure_competitor_personal_watchlist_item(
+    session: Session,
+    *,
+    user_id: int,
+    plid: str,
+    added_at: datetime,
+) -> tuple[CompetitorPersonalWatchlist, bool]:
+    item = session.get(CompetitorPersonalWatchlist, (user_id, plid))
+    if item is not None:
+        return item, False
+    item = CompetitorPersonalWatchlist(
+        user_id=user_id,
+        plid=plid,
+        added_at=added_at,
+    )
+    session.add(item)
+    return item, True
+
+
+def _competitor_personal_watchlist_payload(
+    item: CompetitorPersonalWatchlist,
+) -> dict[str, object]:
+    return {
+        "plid": item.plid,
+        "added_at": item.added_at.isoformat(),
+    }
+
+
 def _competitor_target_payload(
     target: CompetitorTarget,
     *,
@@ -2738,6 +3309,8 @@ def _required_permission(path: str, method: str) -> str | tuple[str, ...] | None
         return REPORTS_VIEW if safe_method else REPORTS_GENERATE
     if path.startswith("/api/erp/nft102"):
         return NFT102_MANAGE
+    if path.startswith("/api/competitors/personal-watchlist"):
+        return COMPETITORS_VIEW
     if path.startswith("/api/competitors"):
         return COMPETITORS_VIEW if safe_method else COMPETITORS_COLLECT
     if path.startswith(

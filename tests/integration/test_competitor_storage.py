@@ -231,6 +231,107 @@ def test_competitor_observation_persists_snapshot_and_deduplicated_reviews(
     }
 
 
+def test_latest_snapshot_classifies_only_explicit_follow_selling_opportunities(
+    tmp_path: Path,
+) -> None:
+    engine = create_engine(f"sqlite:///{(tmp_path / 'follow-opportunities.db').as_posix()}")
+    create_schema(engine)
+    collected_at = datetime(2026, 8, 7, 2, tzinfo=UTC)
+    cases = (
+        ("10000001", ()),
+        (
+            "10000002",
+            (
+                CompetitorOffer(
+                    selected=True,
+                    sku="SOLD-1",
+                    seller_id="seller-1",
+                    seller_name="Sold Out One",
+                    price=100.0,
+                    stock_status="Out of stock",
+                    is_buybox=True,
+                    is_add_to_cart_available=False,
+                ),
+                CompetitorOffer(
+                    selected=False,
+                    sku="SOLD-2",
+                    seller_id="seller-2",
+                    seller_name="Sold Out Two",
+                    price=110.0,
+                    stock_status="Sold out",
+                    is_buybox=False,
+                    is_add_to_cart_available=False,
+                ),
+            ),
+        ),
+        (
+            "10000003",
+            (
+                CompetitorOffer(
+                    selected=True,
+                    sku="UNKNOWN-1",
+                    seller_id="seller-3",
+                    seller_name="Unknown Stock",
+                    price=120.0,
+                    stock_status="Status pending",
+                    is_buybox=True,
+                    is_add_to_cart_available=None,
+                ),
+            ),
+        ),
+    )
+    skipped = skipped_stock_probe()
+    for plid, offers in cases:
+        product = CompetitorProduct(
+            plid=plid,
+            url=f"https://www.takealot.com/p/PLID{plid}",
+            title=f"Opportunity {plid}",
+            image_url=None,
+            sku=f"SKU-{plid}",
+            seller_id="",
+            seller_name="",
+            price=100.0,
+            stock_status="Status pending",
+            is_leadtime=False,
+            review_count=0,
+            rating=0.0,
+            offers=offers,
+            variants=(),
+        )
+        with Session(engine) as session, session.begin():
+            CompetitorRepository(session).save_observation(
+                product=product,
+                reviews=[],
+                review_summary=summarize_reviews([]),
+                stock=skipped,
+                variant_stocks=[],
+                offer_stocks=[],
+                lifetime_sales=estimate_lifetime_sales(0),
+                signal=analyze_sales_signal(
+                    None,
+                    current_stock_quantity=None,
+                    current_stock_exact=False,
+                    current_review_count=0,
+                ),
+                collected_at=collected_at,
+            )
+
+    dataset = load_competitor_dataset(engine)
+    engine.dispose()
+    items = {row["plid"]: row for _, row in dataset.current.iterrows()}
+
+    assert bool(items["10000001"]["跟卖机会"])
+    assert items["10000001"]["跟卖机会类型"] == "暂无卖家报价"
+    assert items["10000001"]["公开报价数"] == 0
+    assert bool(items["10000002"]["跟卖机会"])
+    assert items["10000002"]["跟卖机会类型"] == "全部报价售罄"
+    assert items["10000002"]["公开报价数"] == 2
+    assert not bool(items["10000003"]["跟卖机会"])
+    unavailable_type = items["10000003"]["跟卖机会类型"]
+    assert unavailable_type is None or unavailable_type != unavailable_type
+    assert items["10000003"]["公开报价数"] == 1
+
+
 def test_green_and_red_follower_stock_is_bound_to_its_exact_seller_offer(
     tmp_path: Path,
 ) -> None:

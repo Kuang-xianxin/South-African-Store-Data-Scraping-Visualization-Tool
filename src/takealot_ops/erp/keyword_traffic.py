@@ -256,14 +256,14 @@ def _event_payload(
 
 def _change_label(event_kind: str, added: Sequence[str], removed: Sequence[str]) -> str:
     if event_kind == "baseline":
-        return "自动基线｜首次完整标题快照"
+        return "基线｜首次完整标题快照"
     if added and removed:
-        return f"自动变化｜新增 {len(added)} 词，移除 {len(removed)} 词"
+        return f"变化｜新增 {len(added)} 词，移除 {len(removed)} 词"
     if added:
-        return f"自动变化｜新增 {len(added)} 词"
+        return f"变化｜新增 {len(added)} 词"
     if removed:
-        return f"自动变化｜移除 {len(removed)} 词"
-    return "自动变化｜标题词顺序或写法变化"
+        return f"变化｜移除 {len(removed)} 词"
+    return "变化｜标题词顺序或写法变化"
 
 
 def _comparison_payload(
@@ -393,4 +393,3 @@ def _trend_direction(slope: float | None) -> str:
     if slope < -TREND_FLAT_THRESHOLD:
         return "down"
     return "flat"
-

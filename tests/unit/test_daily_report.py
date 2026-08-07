@@ -79,7 +79,7 @@ def test_capture_business_date_uses_beijing_ten_to_ten_cycle() -> None:
     ) == date(2026, 7, 25)
 
 
-def test_period_end_traffic_series_uses_latest_success_and_keeps_gaps() -> None:
+def test_period_end_traffic_series_keeps_failure_and_adds_same_day_reference() -> None:
     engine = _engine()
     previous_date = REPORT_DATE - timedelta(days=1)
     capture_daily_report(
@@ -99,10 +99,23 @@ def test_period_end_traffic_series_uses_latest_success_and_keeps_gaps() -> None:
     capture_daily_report(
         engine,
         business_date=REPORT_DATE,
+        slot="morning",
+        captured_at=_report_capture_time(REPORT_DATE, 1),
+    )
+    capture_daily_report(
+        engine,
+        business_date=REPORT_DATE,
         slot="pre_close",
         captured_at=_report_capture_time(REPORT_DATE, 1, 30),
     )
     failed_date = REPORT_DATE + timedelta(days=1)
+    reference_captured_at = _report_capture_time(REPORT_DATE, 10)
+    capture_daily_report(
+        engine,
+        business_date=failed_date,
+        slot="evening",
+        captured_at=reference_captured_at,
+    )
     record_daily_report_failure(
         engine,
         business_date=failed_date,
@@ -110,13 +123,22 @@ def test_period_end_traffic_series_uses_latest_success_and_keeps_gaps() -> None:
         captured_at=_report_capture_time(failed_date, 1),
         reason="测试刷新失败",
     )
+    gap_date = failed_date + timedelta(days=1)
+    record_daily_report_failure(
+        engine,
+        business_date=gap_date,
+        slot="pre_close",
+        captured_at=_report_capture_time(gap_date, 1),
+        reason="测试整日无成功采集",
+    )
 
-    series = period_end_traffic_series(engine, as_of=failed_date)
+    series = period_end_traffic_series(engine, as_of=gap_date)
 
     assert [point["business_date"] for point in series] == [
         previous_date.isoformat(),
         REPORT_DATE.isoformat(),
         failed_date.isoformat(),
+        gap_date.isoformat(),
     ]
     assert series[0]["page_views_30_days_total"] == 70
     assert series[0]["product_count"] == 2
@@ -124,6 +146,16 @@ def test_period_end_traffic_series_uses_latest_success_and_keeps_gaps() -> None:
     assert series[1]["missing_product_count"] == 1
     assert series[2]["status"] == "failed"
     assert series[2]["page_views_30_days_total"] is None
+    assert series[2]["reference"] == {
+        "source_slot": "evening",
+        "captured_at": reference_captured_at.replace(tzinfo=None).isoformat(),
+        "page_views_30_days_total": 50,
+        "product_count": 2,
+        "missing_product_count": 1,
+    }
+    assert series[3]["status"] == "failed"
+    assert series[3]["page_views_30_days_total"] is None
+    assert series[3]["reference"] is None
 
 
 def test_period_end_traffic_series_labels_the_previous_beijing_day() -> None:

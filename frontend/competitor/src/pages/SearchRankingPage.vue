@@ -46,8 +46,13 @@ const analysis = computed(() => detail.value?.analysis ?? null);
 const acceptedKeywords = computed(() =>
   analysis.value?.keywords.filter((item) => item.relevance_status === "accepted") ?? [],
 );
+const opportunityKeywords = computed(() =>
+  analysis.value?.keywords.filter((item) => item.relevance_status === "opportunity") ?? [],
+);
 const rejectedKeywords = computed(() =>
-  analysis.value?.keywords.filter((item) => item.relevance_status !== "accepted") ?? [],
+  analysis.value?.keywords.filter((item) =>
+    ["rejected_irrelevant", "model_low_confidence"].includes(item.relevance_status),
+  ) ?? [],
 );
 
 onMounted(() => void loadProducts());
@@ -136,6 +141,20 @@ function resultLabel(item: SearchRankingKeywordResult) {
   return `第 ${item.page_number} 页 · 第 ${item.row_number} 行第 ${item.column_number} 列`;
 }
 
+function strategyLabel(item: SearchRankingKeywordResult) {
+  if (item.relevance_status === "accepted") return "核心词";
+  if (item.relevance_status === "opportunity") return "第二选择";
+  return "未采用";
+}
+
+function sourceLabel(item: SearchRankingKeywordResult) {
+  const evidence = item.validation_evidence;
+  if (evidence.autocomplete_rank && evidence.autocomplete_seed) {
+    return `Takealot 补全 · 输入“${evidence.autocomplete_seed}”后的第 ${evidence.autocomplete_rank} 项`;
+  }
+  return "图片独立识别的精准词";
+}
+
 function validationStatusLabel(status: string | null | undefined) {
   const labels: Record<string, string> = {
     baseline_created: "已建立修改前基线",
@@ -181,11 +200,12 @@ function errorMessage(caught: unknown, fallback: string) {
   <div class="ranking-page">
     <section class="method-banner">
       <div>
-        <p>IMAGE → VERIFIED QUERY → ORGANIC POSITION</p>
-        <h2>图片识别只是候选，平台结果才是热词验收</h2>
+        <p>IMAGE IDENTITY → TAKEALOT AUTOCOMPLETE → FIRST-PAGE FIT → ORGANIC POSITION</p>
+        <h2>图片独立识别，再由平台补全与完整第一页共同验词</h2>
         <span>
           只有当前店铺授权 Seller Offers 中仍为 buyable、明确有可售库存且快照新鲜的链接才会进入；
-          模型先理解商品，再用 Takealot 自然结果验证词义，普通查看不会调用模型或访问平台。
+          模型阶段看不到主标题和 SKU，识别完成后才用标题交叉核对，并用 Takealot 搜索框补全与自然结果验证。
+          普通查看不会调用模型或访问平台。
         </span>
       </div>
       <dl v-if="listPayload">
@@ -196,7 +216,7 @@ function errorMessage(caught: unknown, fallback: string) {
         <div><dt>单词最多扫描</dt><dd>{{ listPayload.status.max_pages }} 页</dd></div>
         <div>
           <dt>自然排名坐标</dt>
-          <dd>基于默认相关性排序，按 36 项分页并映射四列坐标</dd>
+          <dd>默认相关性序列 · 每 36 项划页 · 桌面四列坐标</dd>
         </div>
       </dl>
     </section>
@@ -288,7 +308,7 @@ function errorMessage(caught: unknown, fallback: string) {
           </section>
 
           <p v-if="analyzing" class="running-note">
-            系统会先再次确认链接仍自有在售，再调用多模态模型并逐个验证热词；同图同标题优先复用缓存。
+            系统会先再次确认链接仍自有在售，再独立识别图片、读取 Takealot 补全并逐词验证；同一主图优先复用模型结果。
           </p>
           <p v-if="detail && !detail.status.configured" class="config-note">
             当前仅可查看历史结果。服务端未配置 DASHSCOPE_API_KEY / ARK_API_KEY，点击时不会产生费用或外部请求。
@@ -297,14 +317,25 @@ function errorMessage(caught: unknown, fallback: string) {
           <template v-if="analysis">
             <section class="identity-grid">
               <article>
-                <p>模型识别</p>
+                <p>图片独立识别</p>
                 <h3>{{ analysis.product_name || "未识别" }}</h3>
-                <span>{{ analysis.category || "类别未知" }}</span>
+                <span>{{ analysis.category || "类别未知" }} · 模型未接收主标题或 SKU</span>
+              </article>
+              <article>
+                <p>主标题交叉核对</p>
+                <h3>{{ analysis.recognition?.title_reference_terms?.length ?? 0 }} 个一致短语</h3>
+                <span>
+                  {{ analysis.recognition?.title_reference_terms?.join(" / ") || "未找到可确认短语" }}
+                  · 仅在图片识别完成后参考
+                </span>
               </article>
               <article>
                 <p>识别置信度</p>
                 <h3>{{ confidenceLabel(analysis.confidence) }}</h3>
                 <span>{{ providerLabel(analysis.provider) }} · {{ analysis.model }} · {{ analysis.vision_reused ? "复用缓存" : "本次调用" }}</span>
+                <small v-if="analysis.provider_attempts?.some((item) => item.status !== 'accepted')">
+                  供应商异常或身份冲突已被拦截，未直接进入平台搜索。
+                </small>
               </article>
               <article>
                 <p>模型用量</p>
@@ -318,8 +349,11 @@ function errorMessage(caught: unknown, fallback: string) {
 
             <section class="keyword-section">
               <div class="section-heading">
-                <div><p>PLATFORM-VALIDATED QUERIES</p><h3>热词与自然搜索位置</h3></div>
-                <span>{{ acceptedKeywords.length }} 个通过 · {{ rejectedKeywords.length }} 个拦截</span>
+                <div><p>PLATFORM-EVIDENCED QUERY STRATEGY</p><h3>搜索词策略与自然位置</h3></div>
+                <span>
+                  {{ acceptedKeywords.length }} 个核心词 · {{ opportunityKeywords.length }} 个第二选择 ·
+                  {{ rejectedKeywords.length }} 个未采用
+                </span>
               </div>
               <div class="keyword-list">
                 <article
@@ -330,7 +364,9 @@ function errorMessage(caught: unknown, fallback: string) {
                 >
                   <div class="keyword-main">
                     <div>
+                      <span class="strategy-badge">{{ strategyLabel(item) }}</span>
                       <a :href="item.search_url" target="_blank" rel="noreferrer">{{ item.keyword }}</a>
+                      <small class="query-source">{{ sourceLabel(item) }}</small>
                       <span v-if="!item.found">{{ resultLabel(item) }}</span>
                     </div>
                     <strong v-if="item.found" class="keyword-position">
@@ -339,26 +375,41 @@ function errorMessage(caught: unknown, fallback: string) {
                         跨页自然排名 #{{ item.organic_rank }}（自然商品序列中的第 {{ item.organic_rank }} 个）
                       </small>
                     </strong>
-                    <strong v-else-if="item.relevance_status === 'accepted'">未进入扫描范围</strong>
+                    <strong v-else-if="['accepted', 'opportunity'].includes(item.relevance_status)">未进入扫描范围</strong>
                     <strong v-else>已拦截</strong>
                   </div>
                   <dl>
-                    <div><dt>平台相关度</dt><dd>{{ percent(item.relevance_score) }}</dd></div>
-                    <div><dt>结果量</dt><dd>{{ item.total_num_found ?? "—" }}</dd></div>
+                    <div><dt>首页同类占比</dt><dd>{{ percent(item.relevance_score) }}</dd></div>
+                    <div>
+                      <dt>首页直接同类</dt>
+                      <dd>
+                        {{ item.validation_evidence.matched_first_page_results ?? item.validation_evidence.matched_top_results ?? "—" }} /
+                        {{ item.validation_evidence.evaluated_first_page_results ?? item.validation_evidence.evaluated_top_results ?? "—" }}
+                      </dd>
+                    </div>
+                    <div><dt>平台返回商品数（供给规模）</dt><dd>{{ item.total_num_found ?? "—" }}</dd></div>
                     <div><dt>采集时间</dt><dd>{{ formatChinaDateTime(item.observed_at) }}</dd></div>
                   </dl>
                   <p>{{ item.validation_evidence.candidate_rationale || item.validation_evidence.reason }}</p>
-                  <small v-if="item.validation_evidence.evaluated_top_results">
-                    前 {{ item.validation_evidence.evaluated_top_results }} 个自然结果中，
-                    {{ item.validation_evidence.matched_top_results }} 个匹配商品类型词
+                  <small v-if="item.validation_evidence.evaluated_first_page_results || item.validation_evidence.evaluated_top_results">
+                    完整第一页自然商品中，
+                    {{ item.validation_evidence.matched_first_page_results ?? item.validation_evidence.matched_top_results }} 个命中同类型判定词
                     {{ item.validation_evidence.validation_terms?.join(" / ") }}。
+                    <template v-if="item.relevance_status === 'accepted'">多数同类型，纳入核心词。</template>
+                    <template v-else-if="item.relevance_status === 'opportunity'">
+                      同类密度低于核心词，但有 Takealot 补全证据，作为相邻需求赛道单列观察。
+                    </template>
                   </small>
                 </article>
               </div>
               <p class="position-notice">
-                定位基准：Takealot 默认 Relevance 返回的自然商品序列，以36项为一页，并映射为桌面端四列坐标；
-                第1页对应跨页自然排名1–36，第2页对应37–72。程序只解析平台搜索响应的自然商品集合，页面额外展示的赞助或推荐卡不进入该序列。
-                实际视觉位置仍可能被页面插入内容推后，排名也会随时间、地区、个性化、库存和价格变化。
+                核心词门槛：完整第一页至少 {{ percent(detail?.status.core_first_page_threshold ?? 0.6) }} 为同类型商品。
+                第二选择必须来自 Takealot 搜索框补全，且第一页同类占比不低于
+                {{ percent(detail?.status.opportunity_first_page_threshold ?? 0.1) }}；
+                “补全第几项”是平台直接意图信号，但不是公开搜索量，“平台返回商品数”只代表供给规模，也不是热度。
+                自然坐标按默认 Relevance 的商品序列划分：每 36 项为一页，桌面端从左到右每行四项。
+                广告并非靠样式猜测；程序只纳入平台搜索 API 的 products.results 中 type=product_views 且未带 sponsored/promoted 标记的项目，其他赞助或推荐区不计入。
+                页面插入内容仍可能改变视觉距离，排名也会随时间、地区、个性化、库存和价格变化。
               </p>
             </section>
 
@@ -370,9 +421,14 @@ function errorMessage(caught: unknown, fallback: string) {
               <div class="title-compare">
                 <article><p>当前标题</p><strong>{{ selectedProduct.title }}</strong></article>
                 <article>
-                  <p>建议标题</p>
+                  <p>核心词标题</p>
                   <strong>{{ analysis.title_suggestion || "暂无建议" }}</strong>
                   <small>仅含字母、数字和空格 · 相关搜索词前置 · 卖点和参数后置</small>
+                </article>
+                <article v-if="analysis.opportunity_title_suggestion" class="opportunity-title">
+                  <p>第二选择标题</p>
+                  <strong>{{ analysis.opportunity_title_suggestion }}</strong>
+                  <small>{{ analysis.opportunity_title_reason }}</small>
                 </article>
               </div>
               <p>{{ analysis.title_reason }}</p>
@@ -453,20 +509,25 @@ dt { color: #738078; font-size: 12px; } dd { margin: 0; font-weight: 750; }
 .blocked-note { display: block; margin-top: 8px; color: #9d3c31; font-size: 12px; }
 .analyze-button { padding: 12px 16px; border: 0; border-radius: 10px; color: #fff; background: #235c45; font-weight: 800; cursor: pointer; }
 .analyze-button:disabled { cursor: not-allowed; opacity: .55; }
-.identity-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; padding: 0 !important; border: 0 !important; background: transparent !important; }
+.identity-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; padding: 0 !important; border: 0 !important; background: transparent !important; }
 .identity-grid article { padding: 17px; border: 1px solid #d9dfdb; border-radius: 14px; background: #fff; }
 .identity-grid p, .title-compare p { margin: 0 0 7px; color: #758179; font-size: 11px; font-weight: 800; text-transform: uppercase; }
-.identity-grid h3 { margin: 0 0 5px; }.identity-grid span { color: #68746c; font-size: 12px; }
+.identity-grid h3 { margin: 0 0 5px; }.identity-grid span, .identity-grid small { display: block; color: #68746c; font-size: 12px; line-height: 1.5; }.identity-grid small { margin-top: 5px; color: #8a5a34; }
 .keyword-section, .title-review, .history-section { display: grid; gap: 16px; }
 .keyword-list { display: grid; gap: 10px; }
 .keyword-card { padding: 16px; border: 1px solid #d5ded8; border-left: 4px solid #35765a; border-radius: 11px; background: #fbfdfb; }
+.keyword-card.opportunity { border-left-color: #8f6b24; background: #fffdf4; }
 .keyword-card.rejected_irrelevant, .keyword-card.model_low_confidence { border-left-color: #bb6a3b; background: #fffaf4; }
 .keyword-main { display: flex; justify-content: space-between; gap: 18px; }
-.keyword-main > div { display: grid; gap: 4px; }.keyword-main a { color: #194f3a; font-size: 17px; font-weight: 850; }.keyword-main span { color: #5d6c63; font-size: 12px; }
+.keyword-main > div { display: grid; justify-items: start; gap: 4px; }.keyword-main a { color: #194f3a; font-size: 17px; font-weight: 850; }.keyword-main span { color: #5d6c63; font-size: 12px; }
+.strategy-badge { padding: 3px 7px; border-radius: 999px; color: #fff !important; background: #35765a; font-size: 10px !important; font-weight: 800; letter-spacing: .04em; }
+.keyword-card.opportunity .strategy-badge { background: #8f6b24; }
+.keyword-card.rejected_irrelevant .strategy-badge, .keyword-card.model_low_confidence .strategy-badge { background: #a85d35; }
+.query-source { color: #5f7166; font-weight: 700; }
 .keyword-main > strong { color: #235c45; white-space: nowrap; }.keyword-position { display: grid; gap: 4px; text-align: right; }.keyword-position > span { color: #194f3a; font-size: 15px; font-weight: 850; }.keyword-position > small { color: #65746b; font-size: 12px; font-weight: 700; }.keyword-card dl { display: flex; gap: 28px; margin: 14px 0 8px; }.keyword-card dl div { display: grid; gap: 3px; }
 .keyword-card p { margin: 7px 0; color: #4e5c53; }.keyword-card small, .position-notice, .causality-note { color: #6e7a72; line-height: 1.6; }
 .position-notice, .causality-note { margin: 0; padding: 12px 14px; border-radius: 9px; background: #f3f5f3; font-size: 12px; }
-.title-compare { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }.title-compare article { display: grid; align-content: start; gap: 7px; padding: 15px; border-radius: 10px; background: #f4f6f4; }.title-compare strong { line-height: 1.55; }.title-compare small { color: #6e7a72; line-height: 1.5; }
+.title-compare { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 12px; }.title-compare article { display: grid; align-content: start; gap: 7px; padding: 15px; border-radius: 10px; background: #f4f6f4; }.title-compare article.opportunity-title { background: #fff9e9; border: 1px solid #e5d29f; }.title-compare strong { line-height: 1.55; }.title-compare small { color: #6e7a72; line-height: 1.5; }
 .title-review > p { margin: 0; line-height: 1.7; }.movement-list, .history-list { display: flex; flex-wrap: wrap; gap: 8px; }.movement-list span, .history-list span { padding: 7px 10px; border-radius: 999px; background: #e8f1eb; color: #315a46; font-size: 12px; }
 .first-run { text-align: center; padding: 70px 20px !important; }.first-run span, .empty-state, .detail-loading { color: #748077; }
 @media (max-width: 1050px) { .ranking-layout { grid-template-columns: 1fr; }.product-rail { position: static; max-height: 420px; }.method-banner { flex-direction: column; }.product-hero { grid-template-columns: 90px minmax(0, 1fr); }.analyze-button { grid-column: 1 / -1; }.identity-grid { grid-template-columns: 1fr; } }
