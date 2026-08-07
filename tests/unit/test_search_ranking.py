@@ -17,6 +17,8 @@ from takealot_ops.search_ranking.service import (
     SearchRankingService,
     VisionCallResult,
     VisionProfile,
+    _build_title_suggestion,
+    _search_products,
     _title_validation,
 )
 from takealot_ops.search_ranking import service as search_ranking_service
@@ -215,11 +217,54 @@ async def test_service_validates_keywords_locates_cursor_page_and_reuses_vision(
     assert first["analysis"]["usage"]["total_tokens"] == 200
     assert first["analysis"]["provider"] == "qwen"
     assert first["analysis"]["estimated_cost_cny"] == 0.00088
+    assert first["analysis"]["title_suggestion"] == (
+        "Wireless Mouse Rechargeable Silent Dual Mode"
+    )
+    assert first["analysis"]["profile"]["title_suggestion"] == (
+        "Wireless Mouse Rechargeable Silent Dual Mode"
+    )
+    assert "搜索词前置" in first["analysis"]["title_reason"]
     assert second["analysis"]["vision_reused"] is True
     assert second["analysis"]["usage"]["total_tokens"] == 0
     assert second["analysis"]["title_validation"]["status"] == "pending_title_change"
     assert FakeVisionClient.calls == 1
     assert all(client.next_calls == 1 for client in clients)
+
+
+def test_title_suggestion_puts_validated_terms_first_and_removes_punctuation() -> None:
+    suggestion = _build_title_suggestion(
+        "High-Brightness Outdoor Movie Screen (100 Inch) Foldable & Portable Projection Screen",
+        ["portable projection screen", "outdoor movie screen"],
+    )
+
+    assert suggestion == (
+        "Portable Projection Screen Outdoor Movie High Brightness 100 Inch Foldable"
+    )
+    assert suggestion.startswith("Portable Projection Screen")
+    assert all(character.isalnum() or character == " " for character in suggestion)
+
+
+def test_search_products_accepts_only_unflagged_product_results() -> None:
+    payload = _payload([("12345678", "Organic Projection Screen")], after="", total=1)
+    organic = payload["sections"]["products"]["results"][0]
+    different_type = {
+        **organic,
+        "type": "sponsored_product_views",
+    }
+    explicitly_sponsored = {
+        **organic,
+        "is_sponsored": True,
+    }
+    payload["sections"]["products"]["results"] = [
+        different_type,
+        explicitly_sponsored,
+        organic,
+    ]
+    payload["sections"]["sponsored"] = {"results": [organic]}
+
+    products, _ = _search_products(payload)
+
+    assert [item["plid"] for item in products] == ["12345678"]
 
 
 def test_title_suggestion_is_only_marked_forward_after_comparable_observation() -> None:

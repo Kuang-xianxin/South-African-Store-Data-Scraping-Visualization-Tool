@@ -195,8 +195,8 @@ function errorMessage(caught: unknown, fallback: string) {
         </div>
         <div><dt>单词最多扫描</dt><dd>{{ listPayload.status.max_pages }} 页</dd></div>
         <div>
-          <dt>位置计算方式</dt>
-          <dd>每页最多 36 个自然商品 · 从左到右每行 4 个 · 广告不计</dd>
+          <dt>自然排名坐标</dt>
+          <dd>基于默认相关性排序，按 36 项分页并映射四列坐标</dd>
         </div>
       </dl>
     </section>
@@ -336,7 +336,7 @@ function errorMessage(caught: unknown, fallback: string) {
                     <strong v-if="item.found" class="keyword-position">
                       <span>第 {{ item.page_number }} 页 · 第 {{ item.row_number }} 行 · 第 {{ item.column_number }} 列</span>
                       <small>
-                        跨页自然排名 #{{ item.organic_rank }}（排除广告后按序第 {{ item.organic_rank }} 个）
+                        跨页自然排名 #{{ item.organic_rank }}（自然商品序列中的第 {{ item.organic_rank }} 个）
                       </small>
                     </strong>
                     <strong v-else-if="item.relevance_status === 'accepted'">未进入扫描范围</strong>
@@ -356,9 +356,9 @@ function errorMessage(caught: unknown, fallback: string) {
                 </article>
               </div>
               <p class="position-notice">
-                位置按固定 1365×900 桌面视口和默认 Relevance 计算：每页最多36个自然商品，
-                从左到右、从上到下排列，每行4个；第1页对应跨页自然排名1–36，第2页对应37–72，广告不参与排名或行列计算。
-                实际屏幕行列可能被当时广告插入推后，排名也会随时间、地区、个性化、库存和价格变化。
+                定位基准：Takealot 默认 Relevance 返回的自然商品序列，以36项为一页，并映射为桌面端四列坐标；
+                第1页对应跨页自然排名1–36，第2页对应37–72。程序只解析平台搜索响应的自然商品集合，页面额外展示的赞助或推荐卡不进入该序列。
+                实际视觉位置仍可能被页面插入内容推后，排名也会随时间、地区、个性化、库存和价格变化。
               </p>
             </section>
 
@@ -369,7 +369,11 @@ function errorMessage(caught: unknown, fallback: string) {
               </div>
               <div class="title-compare">
                 <article><p>当前标题</p><strong>{{ selectedProduct.title }}</strong></article>
-                <article><p>建议标题</p><strong>{{ analysis.title_suggestion || "暂无建议" }}</strong></article>
+                <article>
+                  <p>建议标题</p>
+                  <strong>{{ analysis.title_suggestion || "暂无建议" }}</strong>
+                  <small>仅含字母、数字和空格 · 相关搜索词前置 · 卖点和参数后置</small>
+                </article>
               </div>
               <p>{{ analysis.title_reason }}</p>
               <div
@@ -462,7 +466,7 @@ dt { color: #738078; font-size: 12px; } dd { margin: 0; font-weight: 750; }
 .keyword-main > strong { color: #235c45; white-space: nowrap; }.keyword-position { display: grid; gap: 4px; text-align: right; }.keyword-position > span { color: #194f3a; font-size: 15px; font-weight: 850; }.keyword-position > small { color: #65746b; font-size: 12px; font-weight: 700; }.keyword-card dl { display: flex; gap: 28px; margin: 14px 0 8px; }.keyword-card dl div { display: grid; gap: 3px; }
 .keyword-card p { margin: 7px 0; color: #4e5c53; }.keyword-card small, .position-notice, .causality-note { color: #6e7a72; line-height: 1.6; }
 .position-notice, .causality-note { margin: 0; padding: 12px 14px; border-radius: 9px; background: #f3f5f3; font-size: 12px; }
-.title-compare { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }.title-compare article { padding: 15px; border-radius: 10px; background: #f4f6f4; }.title-compare strong { line-height: 1.55; }
+.title-compare { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }.title-compare article { display: grid; align-content: start; gap: 7px; padding: 15px; border-radius: 10px; background: #f4f6f4; }.title-compare strong { line-height: 1.55; }.title-compare small { color: #6e7a72; line-height: 1.5; }
 .title-review > p { margin: 0; line-height: 1.7; }.movement-list, .history-list { display: flex; flex-wrap: wrap; gap: 8px; }.movement-list span, .history-list span { padding: 7px 10px; border-radius: 999px; background: #e8f1eb; color: #315a46; font-size: 12px; }
 .first-run { text-align: center; padding: 70px 20px !important; }.first-run span, .empty-state, .detail-loading { color: #748077; }
 @media (max-width: 1050px) { .ranking-layout { grid-template-columns: 1fr; }.product-rail { position: static; max-height: 420px; }.method-banner { flex-direction: column; }.product-hero { grid-template-columns: 90px minmax(0, 1fr); }.analyze-button { grid-column: 1 / -1; }.identity-grid { grid-template-columns: 1fr; } }

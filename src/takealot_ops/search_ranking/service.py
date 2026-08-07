@@ -44,6 +44,9 @@ from takealot_ops.storage.models import (
 PROMPT_VERSION = "takealot-search-v2"
 ORGANIC_PAGE_SIZE = 36
 DESKTOP_COLUMNS = 4
+TITLE_MAX_LENGTH = 160
+TITLE_PRIORITY_TOKEN_LIMIT = 14
+ORGANIC_RESULT_TYPE = "product_views"
 TOKEN_PATTERN = re.compile(r"[a-z0-9]+")
 API_VERSION_PATTERN = re.compile(r"/rest/(v-[^/]+)/")
 QWEN_INPUT_PRICE_CNY_PER_MILLION = 2.0
@@ -482,6 +485,7 @@ class SearchRankingService:
             "organic_page_size": ORGANIC_PAGE_SIZE,
             "columns_per_row": DESKTOP_COLUMNS,
             "position_scope": "organic_results_excluding_sponsored",
+            "ranking_source": "sections.products.results:type=product_views",
             "passive_reads_are_local_only": True,
         }
 
@@ -713,9 +717,23 @@ class SearchRankingService:
                 persisted_analysis.product_name = profile.product_name
                 persisted_analysis.category = profile.category
                 persisted_analysis.confidence = Decimal(str(profile.confidence))
+                accepted_title_keywords = [
+                    item.keyword
+                    for item in observations
+                    if item.relevance_status == "accepted"
+                ]
+                title_suggestion = _build_title_suggestion(
+                    profile.title_suggestion,
+                    accepted_title_keywords,
+                )
+                title_reason = _title_suggestion_reason(accepted_title_keywords)
+                profile_payload = profile.model_dump(mode="json")
+                profile_payload["title_suggestion"] = title_suggestion
+                profile_payload["title_reason"] = title_reason
+                vision_payload["profile"] = profile_payload
                 persisted_analysis.vision_payload = vision_payload
-                persisted_analysis.title_suggestion = profile.title_suggestion
-                persisted_analysis.title_reason = profile.title_reason
+                persisted_analysis.title_suggestion = title_suggestion
+                persisted_analysis.title_reason = title_reason
                 for item in observations:
                     session.add(_keyword_result_model(persisted_analysis.id, item))
                 persisted_analysis.title_validation = _title_validation(
@@ -805,6 +823,8 @@ async def _collect_keyword_observation(
         "page_size": ORGANIC_PAGE_SIZE,
         "columns_per_row": DESKTOP_COLUMNS,
         "position_scope": "organic_results_excluding_sponsored",
+        "ranking_source": "sections.products.results:type=product_views",
+        "sponsored_exclusion": "section_type_and_explicit_flags",
     }
     observed_at = _utcnow()
     total = _optional_int(paging.get("total_num_found"))
@@ -894,6 +914,8 @@ def _search_products(payload: Mapping[str, Any]) -> tuple[list[dict[str, str]], 
     for raw in raw_results:
         if not isinstance(raw, Mapping):
             continue
+        if raw.get("type") != ORGANIC_RESULT_TYPE or _is_sponsored_search_result(raw):
+            continue
         view = raw.get("product_views")
         core = view.get("core") if isinstance(view, Mapping) else None
         if not isinstance(core, Mapping):
@@ -912,6 +934,26 @@ def _search_products(payload: Mapping[str, Any]) -> tuple[list[dict[str, str]], 
         )
     paging = products_section.get("paging")
     return products, paging if isinstance(paging, Mapping) else {}
+
+
+def _is_sponsored_search_result(raw: Mapping[str, Any]) -> bool:
+    containers: list[Mapping[str, Any]] = [raw]
+    view = raw.get("product_views")
+    if isinstance(view, Mapping):
+        containers.append(view)
+        core = view.get("core")
+        if isinstance(core, Mapping):
+            containers.append(core)
+    for container in containers:
+        for key in ("is_sponsored", "sponsored", "is_ad", "is_promoted"):
+            value = container.get(key)
+            if value is True or str(value).strip().casefold() in {"1", "true", "yes"}:
+                return True
+        for key in ("listing_type", "placement_type", "result_type"):
+            kind = str(container.get(key) or "").strip().casefold()
+            if kind in {"ad", "advertisement", "promoted", "sponsored"}:
+                return True
+    return False
 
 
 def _validation_terms(profile: VisionProfile) -> list[str]:
@@ -1049,14 +1091,20 @@ def _previous_analysis_snapshot(session: Session, offer_id: str) -> dict[str, An
         return None
     results = list(
         session.scalars(
-            select(SearchRankingKeywordResult).where(
-                SearchRankingKeywordResult.analysis_id == previous.id
-            )
+            select(SearchRankingKeywordResult)
+            .where(SearchRankingKeywordResult.analysis_id == previous.id)
+            .order_by(SearchRankingKeywordResult.candidate_order)
         )
     )
+    accepted_title_keywords = [
+        item.keyword for item in results if item.relevance_status == "accepted"
+    ]
     return {
         "source_title": previous.source_title,
-        "title_suggestion": previous.title_suggestion,
+        "title_suggestion": _build_title_suggestion(
+            str(previous.title_suggestion or ""),
+            accepted_title_keywords,
+        ),
         "analysis_id": previous.id,
         "ranks": {
             item.keyword.casefold(): item.organic_rank
@@ -1109,6 +1157,78 @@ def _title_validation(
     else:
         status = "no_observed_forward"
     return {**base, "status": status, "comparisons": comparisons}
+
+
+def _build_title_suggestion(
+    raw_suggestion: str,
+    accepted_keywords: list[str],
+) -> str:
+    """Place validated search wording first and return punctuation-free title text."""
+    suggestion_tokens = _title_tokens(raw_suggestion)
+    preferred_case: dict[str, str] = {}
+    for token in suggestion_tokens:
+        preferred_case.setdefault(token.casefold(), token)
+
+    priority_phrases = [
+        tokens for keyword in accepted_keywords if (tokens := _title_tokens(keyword))
+    ]
+    output: list[str] = []
+    priority_keys: set[str] = set()
+
+    if priority_phrases:
+        for token in priority_phrases[0]:
+            output.append(_title_token_case(token, preferred_case))
+            priority_keys.add(token.casefold())
+        for phrase in priority_phrases[1:]:
+            for token in phrase:
+                key = token.casefold()
+                if key in priority_keys:
+                    continue
+                if len(output) >= TITLE_PRIORITY_TOKEN_LIMIT:
+                    break
+                output.append(_title_token_case(token, preferred_case))
+                priority_keys.add(key)
+            if len(output) >= TITLE_PRIORITY_TOKEN_LIMIT:
+                break
+
+    for token in suggestion_tokens:
+        if token.casefold() not in priority_keys:
+            output.append(token)
+
+    if not output:
+        output = ["Product"]
+    while output and len(" ".join(output)) > TITLE_MAX_LENGTH:
+        output.pop()
+    return " ".join(output) or "Product"
+
+
+def _title_tokens(value: str) -> list[str]:
+    without_punctuation = "".join(
+        character if character.isalnum() else " " for character in str(value)
+    )
+    return without_punctuation.split()
+
+
+def _title_token_case(token: str, preferred_case: dict[str, str]) -> str:
+    known = preferred_case.get(token.casefold())
+    if known is not None:
+        return known
+    if token.isalpha() and token.islower():
+        return token.capitalize()
+    return token
+
+
+def _title_suggestion_reason(accepted_keywords: list[str]) -> str:
+    if accepted_keywords:
+        return (
+            "建议标题已由服务器按固定规则整理：通过 Takealot 相关性验证的搜索词"
+            "前置，卖点和参数后置，标题只保留字母、数字和空格。修改后仍需使用"
+            "相同搜索词复采排名，不能保证前移。"
+        )
+    return (
+        "当前没有候选搜索词通过 Takealot 相关性验证；建议标题只执行无标点清洗，"
+        "不能据此判断排名会前移。"
+    )
 
 
 def _keyword_result_model(
@@ -1182,7 +1302,18 @@ def _analysis_payload(
     results: list[SearchRankingKeywordResult],
 ) -> dict[str, Any]:
     vision = analysis.vision_payload or {}
-    profile = vision.get("profile", vision) if isinstance(vision, dict) else {}
+    raw_profile = vision.get("profile", vision) if isinstance(vision, dict) else {}
+    profile = dict(raw_profile) if isinstance(raw_profile, Mapping) else {}
+    accepted_title_keywords = [
+        item.keyword for item in results if item.relevance_status == "accepted"
+    ]
+    title_suggestion = _build_title_suggestion(
+        str(analysis.title_suggestion or ""),
+        accepted_title_keywords,
+    )
+    title_reason = _title_suggestion_reason(accepted_title_keywords)
+    profile["title_suggestion"] = title_suggestion
+    profile["title_reason"] = title_reason
     return {
         **_analysis_history_item(analysis),
         "product_name": analysis.product_name,
@@ -1194,8 +1325,8 @@ def _analysis_payload(
             if isinstance(vision, dict)
             else None
         ),
-        "title_suggestion": analysis.title_suggestion,
-        "title_reason": analysis.title_reason,
+        "title_suggestion": title_suggestion,
+        "title_reason": title_reason,
         "title_validation": analysis.title_validation,
         "keywords": [_keyword_payload(item) for item in results],
     }
