@@ -67,6 +67,29 @@ async def test_collection_request_survives_cancelled_browser_waiter() -> None:
     assert calls == 1
 
 
+@pytest.mark.asyncio
+async def test_collection_request_coordinator_explicitly_cancels_inflight_request() -> None:
+    coordinator = CollectionRequestCoordinator[str]()
+    started = asyncio.Event()
+    cleaned_up = asyncio.Event()
+
+    async def operation() -> str:
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cleaned_up.set()
+
+    waiter = asyncio.create_task(coordinator.run("request-stop", operation))
+    await started.wait()
+
+    assert await coordinator.cancel("request-stop") is True
+    with pytest.raises(asyncio.CancelledError):
+        await waiter
+    assert cleaned_up.is_set()
+    assert await coordinator.cancel("request-stop") is False
+
+
 def test_collection_logger_writes_rotating_project_log(tmp_path: Path) -> None:
     logger = configure_collection_logger(tmp_path)
 

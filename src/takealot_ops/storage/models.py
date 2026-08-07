@@ -586,6 +586,139 @@ class LogisticsProviderSnapshot(StoreScopedMixin, Base):
     payload: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
 
 
+class PlatformWarehouseDraft(StoreScopedMixin, Base):
+    """One audited platform-warehouse draft and its upstream task state."""
+
+    __tablename__ = "platform_warehouse_drafts"
+    __table_args__ = (
+        UniqueConstraint(
+            "store_code",
+            "draft_number",
+            name="uq_platform_warehouse_draft_store_number",
+        ),
+        UniqueConstraint(
+            "store_code",
+            "client_request_id",
+            name="uq_platform_warehouse_draft_store_request",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    draft_number: Mapped[str] = mapped_column(String(40), nullable=False, index=True)
+    client_request_id: Mapped[str | None] = mapped_column(String(36))
+    status: Mapped[str] = mapped_column(String(30), nullable=False, index=True)
+    upstream_mode: Mapped[str] = mapped_column(
+        String(30), nullable=False, default="local_only"
+    )
+    po_number: Mapped[str | None] = mapped_column(String(80), index=True)
+    platform_shipment_id: Mapped[int | None] = mapped_column(Integer, index=True)
+    tracking_reference: Mapped[str | None] = mapped_column(String(200))
+    review_task_id: Mapped[int | None] = mapped_column(Integer, index=True)
+    review_payload: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+    review_payload_hash: Mapped[str | None] = mapped_column(String(64))
+    review_approval_hash: Mapped[str | None] = mapped_column(String(64))
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime)
+    review_expires_at: Mapped[datetime | None] = mapped_column(DateTime)
+    create_task_id: Mapped[int | None] = mapped_column(Integer, index=True)
+    upstream_result: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+    last_error: Mapped[str | None] = mapped_column(Text)
+    note: Mapped[str | None] = mapped_column(Text)
+    created_by_user_id: Mapped[int | None] = mapped_column(
+        ForeignKey("erp_users.id", ondelete="SET NULL"),
+        index=True,
+    )
+    created_by_username: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, index=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    po_confirmed_at: Mapped[datetime | None] = mapped_column(DateTime)
+    shipped_at: Mapped[datetime | None] = mapped_column(DateTime)
+    archived_at: Mapped[datetime | None] = mapped_column(DateTime)
+
+
+class PlatformWarehouseDraftLine(StoreScopedMixin, Base):
+    """A product line frozen into a local platform-warehouse draft."""
+
+    __tablename__ = "platform_warehouse_draft_lines"
+    __table_args__ = (
+        UniqueConstraint(
+            "draft_id",
+            "offer_id",
+            name="uq_platform_warehouse_draft_line_offer",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    draft_id: Mapped[int] = mapped_column(
+        ForeignKey("platform_warehouse_drafts.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    offer_id: Mapped[str] = mapped_column(String(100), nullable=False)
+    sku: Mapped[str | None] = mapped_column(String(255))
+    tsin_id: Mapped[str | None] = mapped_column(String(100))
+    title: Mapped[str | None] = mapped_column(Text)
+    image_url: Mapped[str | None] = mapped_column(Text)
+    cpt_quantity: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    jhb_quantity: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    dbn_quantity: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+
+
+class PlatformWarehouseDraftAudit(StoreScopedMixin, Base):
+    """Append-only operator audit for one local platform-warehouse draft."""
+
+    __tablename__ = "platform_warehouse_draft_audits"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    draft_id: Mapped[int] = mapped_column(
+        ForeignKey("platform_warehouse_drafts.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    action: Mapped[str] = mapped_column(String(30), nullable=False, index=True)
+    actor_user_id: Mapped[int | None] = mapped_column(
+        ForeignKey("erp_users.id", ondelete="SET NULL"),
+    )
+    actor_username: Mapped[str] = mapped_column(String(64), nullable=False)
+    note: Mapped[str | None] = mapped_column(Text)
+    details: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, index=True)
+
+
+class PlatformWarehouseShipment(StoreScopedMixin, Base):
+    """One Takealot shipment created from an audited platform-warehouse draft."""
+
+    __tablename__ = "platform_warehouse_shipments"
+    __table_args__ = (
+        UniqueConstraint(
+            "store_code",
+            "platform_shipment_id",
+            name="uq_platform_warehouse_shipment_store_platform_id",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    draft_id: Mapped[int] = mapped_column(
+        ForeignKey("platform_warehouse_drafts.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    platform_shipment_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    region: Mapped[str | None] = mapped_column(String(20), index=True)
+    facility_code: Mapped[str | None] = mapped_column(String(50), index=True)
+    facility_id: Mapped[int | None] = mapped_column(Integer)
+    reference: Mapped[str | None] = mapped_column(String(200), index=True)
+    status: Mapped[str] = mapped_column(String(30), nullable=False, index=True)
+    po_number: Mapped[str | None] = mapped_column(String(80), index=True)
+    tracking_reference: Mapped[str | None] = mapped_column(String(200))
+    last_task_id: Mapped[int | None] = mapped_column(Integer, index=True)
+    raw_summary: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, index=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    po_confirmed_at: Mapped[datetime | None] = mapped_column(DateTime)
+    shipped_at: Mapped[datetime | None] = mapped_column(DateTime)
+    archived_at: Mapped[datetime | None] = mapped_column(DateTime)
+
+
 class ErpRefreshState(StoreScopedMixin, Base):
     """Persistent per-store cooldown state for the ERP full-refresh action."""
 

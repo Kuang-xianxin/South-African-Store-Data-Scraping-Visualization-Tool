@@ -28,6 +28,8 @@ import type {
   DailyReportPayload,
   DailyReportReminders,
   OwnStoreScope,
+  PlatformWarehouseDraft,
+  PlatformWarehousePayload,
 } from "./types";
 import { templatePermissions } from "./permissions";
 
@@ -623,6 +625,120 @@ export function revokeLogisticsLink(
   note: string,
 ): Promise<{ link: LogisticsOverviewPayload["matching"]["confirmed_links"][number] }> {
   return request(`/api/erp/logistics/links/${linkId}/revoke`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ note }),
+  });
+}
+
+export function fetchPlatformWarehouse(): Promise<PlatformWarehousePayload> {
+  return request<PlatformWarehousePayload>("/api/erp/platform-warehouse");
+}
+
+export interface PlatformWarehouseDirectCreateResult {
+  state: "created" | "need_2fa";
+  draft: PlatformWarehouseDraft;
+  portal: PlatformWarehousePayload["portal"];
+  otp_destination?: string | null;
+}
+
+export function createPlatformWarehouseDirect(input: {
+  client_request_id: string;
+  lines: Array<{
+    offer_id: string;
+    cpt_quantity: number;
+    jhb_quantity: number;
+    dbn_quantity: number;
+  }>;
+  note?: string;
+}): Promise<PlatformWarehouseDirectCreateResult> {
+  return request("/api/erp/platform-warehouse/create-direct", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(input),
+  });
+}
+
+export function verifyPlatformWarehouseOtpAndCreate(
+  draftId: number,
+  otp: string,
+): Promise<PlatformWarehouseDirectCreateResult> {
+  return request(`/api/erp/platform-warehouse/drafts/${draftId}/verify-otp-and-create`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ otp }),
+  });
+}
+
+export function logoutPlatformWarehousePortal(): Promise<{
+  portal: PlatformWarehousePayload["portal"];
+}> {
+  return request("/api/erp/platform-warehouse/portal/logout", { method: "POST" });
+}
+
+export type PlatformWarehouseUpstreamAction = "confirm_po" | "confirm_shipped" | "archive";
+
+export function preparePlatformWarehouseAction(
+  shipmentId: number,
+  action: PlatformWarehouseUpstreamAction,
+): Promise<{
+  action: PlatformWarehouseUpstreamAction;
+  shipment_id: number;
+  approval_token: string;
+  expires_at: string;
+  preview: Record<string, unknown> | null;
+}> {
+  return request(`/api/erp/platform-warehouse/shipments/${shipmentId}/prepare-action`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ action }),
+  });
+}
+
+export function executePlatformWarehouseAction(
+  shipmentId: number,
+  input: {
+    action: PlatformWarehouseUpstreamAction;
+    approval_token: string;
+    confirmation_text: string;
+    tracking_reference?: string;
+    my_soh_decrease_warehouse_id?: number;
+  },
+): Promise<{ draft: PlatformWarehouseDraft }> {
+  return request(`/api/erp/platform-warehouse/shipments/${shipmentId}/execute-action`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(input),
+  });
+}
+
+export function confirmPlatformWarehousePo(
+  draftId: number,
+  input: { po_number: string; platform_shipment_id?: number; note?: string },
+): Promise<{ draft: PlatformWarehouseDraft }> {
+  return request(`/api/erp/platform-warehouse/drafts/${draftId}/confirm-po`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(input),
+  });
+}
+
+export function confirmPlatformWarehouseShipped(
+  draftId: number,
+  input: { tracking_reference: string; note?: string },
+): Promise<{ draft: PlatformWarehouseDraft }> {
+  return request(`/api/erp/platform-warehouse/drafts/${draftId}/confirm-shipped`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(input),
+  });
+}
+
+export function archivePlatformWarehouseDraft(
+  draftId: number,
+  note: string,
+): Promise<{ draft: PlatformWarehouseDraft }> {
+  return request(`/api/erp/platform-warehouse/drafts/${draftId}/archive`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ note }),

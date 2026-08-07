@@ -95,6 +95,21 @@ def test_create_schema_adds_permissions_and_store_scope_to_legacy_users(
         assert inspect(engine).has_table("logistics_shipment_links")
         assert inspect(engine).has_table("logistics_shipment_link_audits")
         assert inspect(engine).has_table("logistics_provider_snapshots")
+        assert inspect(engine).has_table("platform_warehouse_drafts")
+        assert inspect(engine).has_table("platform_warehouse_draft_lines")
+        assert inspect(engine).has_table("platform_warehouse_draft_audits")
+        assert inspect(engine).has_table("platform_warehouse_shipments")
+        draft_columns = {
+            str(column["name"])
+            for column in inspect(engine).get_columns("platform_warehouse_drafts")
+        }
+        assert {
+            "upstream_mode",
+            "review_payload_hash",
+            "review_approval_hash",
+            "create_task_id",
+            "last_error",
+        } <= draft_columns
         assert not inspect(engine).has_table("product_keyword_snapshots")
         with engine.connect() as connection:
             default_store = connection.exec_driver_sql(

@@ -3,9 +3,30 @@ import test from "node:test";
 
 import {
   MAX_AUTOMATIC_RETRY_ATTEMPTS,
+  mergeUniqueTargetUrls,
   retryGapForAttempt,
   scheduleRetryAfterGap,
 } from "../src/retryQueue.ts";
+
+test("unified collection keeps true competitors first and deduplicates own PLIDs", () => {
+  assert.deepEqual(
+    mergeUniqueTargetUrls(
+      [
+        "https://www.takealot.com/competitor/PLID11111111",
+        "https://www.takealot.com/competitor/PLID22222222",
+      ],
+      [
+        "https://www.takealot.com/p/PLID22222222",
+        "https://www.takealot.com/p/PLID33333333",
+      ],
+    ),
+    [
+      "https://www.takealot.com/competitor/PLID11111111",
+      "https://www.takealot.com/competitor/PLID22222222",
+      "https://www.takealot.com/p/PLID33333333",
+    ],
+  );
+});
 
 test("retry gaps grow exponentially by intervening task count", () => {
   assert.equal(MAX_AUTOMATIC_RETRY_ATTEMPTS, 3);

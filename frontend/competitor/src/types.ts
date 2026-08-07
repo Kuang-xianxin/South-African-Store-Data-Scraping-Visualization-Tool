@@ -80,6 +80,31 @@ export interface CompetitorItem {
   对比报价?: CompetitorOfferItem[];
   自有报价: OwnStoreOfferItem[];
   共享评论说明: string | null;
+  跟卖发现日期: string[];
+  新增跟卖卖家数: number;
+  新增跟卖卖家: string[];
+  跟卖卖家明细: OwnFollowerSellerEvent[];
+}
+
+export interface OwnFollowerSellerEvent {
+  卖家ID: string | null;
+  卖家: string;
+  首次发现日期: string;
+  区间发现日期: string[];
+  区间观察次数: number;
+  是否区间新增: boolean;
+}
+
+export interface OwnFollowerHistoryItem {
+  plid: string;
+  链接: string;
+  商品: string;
+  图片: string | null;
+  店铺: string[];
+  跟卖发现日期: string[];
+  新增跟卖卖家数: number;
+  新增跟卖卖家: string[];
+  跟卖卖家明细: OwnFollowerSellerEvent[];
 }
 
 export interface OwnStoreOfferItem {
@@ -105,6 +130,7 @@ export interface CompetitorDateRange {
 export interface CompetitorOverview {
   items: CompetitorItem[];
   store_items: CompetitorItem[];
+  own_follower_events: OwnFollowerHistoryItem[];
   date_range: CompetitorDateRange;
 }
 
@@ -785,6 +811,140 @@ export interface LogisticsOverviewPayload {
     }>;
   };
   boundaries: string[];
+}
+
+export interface PlatformWarehouseOffer {
+  offer_id: string;
+  sku: string | null;
+  tsin_id: string | null;
+  title: string | null;
+  image_url: string | null;
+  status: string | null;
+  total_stock: number | null;
+  takealot_available_stock: number | null;
+  takealot_stock_on_way: number | null;
+  takealot_stock_in_receiving: number | null;
+  official_warehouse_capacity: number | null;
+  capacity_reason: string;
+}
+
+export interface PlatformWarehouseDraftLine {
+  id: number;
+  offer_id: string;
+  sku: string | null;
+  tsin_id: string | null;
+  title: string | null;
+  image_url: string | null;
+  cpt_quantity: number;
+  jhb_quantity: number;
+  dbn_quantity: number;
+  total_quantity: number;
+}
+
+export interface PlatformWarehouseDraftAudit {
+  id: number;
+  action: string;
+  action_label: string;
+  actor_username: string;
+  note: string | null;
+  details: Record<string, unknown> | null;
+  created_at: string;
+}
+
+export interface PlatformWarehouseDraft {
+  id: number;
+  draft_number: string;
+  client_request_id: string | null;
+  status: string;
+  status_label: string;
+  upstream_mode: "local_only" | "guarded_bff";
+  po_number: string | null;
+  platform_shipment_id: number | null;
+  tracking_reference: string | null;
+  review_task_id: number | null;
+  reviewed_at: string | null;
+  review_expires_at: string | null;
+  create_task_id: number | null;
+  last_error: string | null;
+  note: string | null;
+  created_by: string;
+  created_at: string;
+  updated_at: string;
+  po_confirmed_at: string | null;
+  shipped_at: string | null;
+  archived_at: string | null;
+  line_count: number;
+  quantity_totals: {
+    cpt_quantity: number;
+    jhb_quantity: number;
+    dbn_quantity: number;
+  };
+  lines: PlatformWarehouseDraftLine[];
+  shipments: PlatformWarehouseLinkedShipment[];
+  audits: PlatformWarehouseDraftAudit[];
+}
+
+export interface PlatformWarehouseLinkedShipment {
+  shipment_id: number;
+  region: string | null;
+  facility_code: string | null;
+  facility_id: number | null;
+  reference: string | null;
+  status: string;
+  status_label: string;
+  po_number: string | null;
+  tracking_reference: string | null;
+  last_task_id: number | null;
+  updated_at: string;
+}
+
+export interface PlatformWarehousePortalStatus {
+  enabled: boolean;
+  base_url: string;
+  max_total_quantity: number;
+  shipped_write_enabled: boolean;
+  authenticated: boolean;
+  requires_otp: boolean;
+  otp_destination: string | null;
+  expires_at: string | null;
+  identity: Record<string, unknown> | null;
+  credential_configured: boolean;
+  credential_email: string | null;
+  credential_error: string | null;
+  credentials_persisted: boolean;
+}
+
+export interface PlatformWarehouseShipment {
+  shipment_id: number | null;
+  reference: string;
+  purchase_order_number: string;
+  destination_region: string;
+  purchase_order_state: string;
+  shipment_type: string;
+  shipped: boolean;
+  archived: boolean;
+  cancelled: boolean;
+  due_date: string;
+  created_at: string;
+  date_unloaded: string;
+  tracking_info: string;
+  sku_lines: number;
+  quantity_sending: number;
+  quantity_received: number;
+}
+
+export interface PlatformWarehousePayload {
+  generated_at: string;
+  capability: {
+    write_mode: "disabled_by_default" | "guarded_seller_portal_bff";
+    official_shipment_write_supported: boolean;
+    message: string;
+  };
+  portal: PlatformWarehousePortalStatus;
+  offers: PlatformWarehouseOffer[];
+  drafts: PlatformWarehouseDraft[];
+  platform_shipments: PlatformWarehouseShipment[];
+  platform_snapshot_synced_at: string | null;
 }
 
 export type DailyReportStatus =

@@ -91,6 +91,7 @@ def create_schema(engine: Engine) -> None:
     _ensure_default_erp_store(engine)
     _add_competitor_target_group_column(engine)
     _add_competitor_variant_observation_columns(engine)
+    _add_platform_warehouse_upstream_columns(engine)
     if engine.dialect.name == "sqlite":
         _add_sqlite_offer_stock_columns(engine)
     _seed_store_offer_baselines(engine)
@@ -148,6 +149,10 @@ _STORE_SCOPED_TABLES = (
     "anomaly_events",
     "data_quality_events",
     "logistics_provider_snapshots",
+    "platform_warehouse_drafts",
+    "platform_warehouse_draft_lines",
+    "platform_warehouse_draft_audits",
+    "platform_warehouse_shipments",
     "erp_refresh_state",
     "daily_report_runs",
     "daily_inventory_snapshots",
@@ -410,6 +415,49 @@ def _add_offer_created_at_columns(engine: Engine) -> None:
                 table = preparer.quote(table_name)
                 column = preparer.quote("created_at")
                 connection.exec_driver_sql(f"ALTER TABLE {table} ADD COLUMN {column} DATETIME NULL")
+
+
+def _add_platform_warehouse_upstream_columns(engine: Engine) -> None:
+    """Upgrade retained local drafts for the guarded Seller Portal workflow."""
+    table_name = "platform_warehouse_drafts"
+    with engine.begin() as connection:
+        schema = inspect(connection)
+        if not schema.has_table(table_name):
+            return
+        existing = {str(column["name"]) for column in schema.get_columns(table_name)}
+        preparer = connection.dialect.identifier_preparer
+        table = preparer.quote(table_name)
+        json_type = "JSON" if engine.dialect.name == "mysql" else "JSON"
+        additions = {
+            "client_request_id": "VARCHAR(36) NULL",
+            "upstream_mode": "VARCHAR(30) NOT NULL DEFAULT 'local_only'",
+            "review_task_id": "INTEGER NULL",
+            "review_payload": f"{json_type} NULL",
+            "review_payload_hash": "VARCHAR(64) NULL",
+            "review_approval_hash": "VARCHAR(64) NULL",
+            "reviewed_at": "DATETIME NULL",
+            "review_expires_at": "DATETIME NULL",
+            "create_task_id": "INTEGER NULL",
+            "upstream_result": f"{json_type} NULL",
+            "last_error": "TEXT NULL",
+        }
+        for name, column_type in additions.items():
+            if name in existing:
+                continue
+            column = preparer.quote(name)
+            connection.exec_driver_sql(
+                f"ALTER TABLE {table} ADD COLUMN {column} {column_type}"
+            )
+        indexes = {str(index["name"]) for index in inspect(connection).get_indexes(table_name)}
+        index_name = "uq_platform_warehouse_draft_store_request"
+        if index_name not in indexes:
+            quoted_index = preparer.quote(index_name)
+            store_column = preparer.quote("store_code")
+            request_column = preparer.quote("client_request_id")
+            connection.exec_driver_sql(
+                f"CREATE UNIQUE INDEX {quoted_index} ON {table} "
+                f"({store_column}, {request_column})"
+            )
 
 
 def _add_erp_user_permissions_column(engine: Engine) -> None:

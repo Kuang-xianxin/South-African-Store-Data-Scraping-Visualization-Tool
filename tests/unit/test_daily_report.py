@@ -126,6 +126,24 @@ def test_period_end_traffic_series_uses_latest_success_and_keeps_gaps() -> None:
     assert series[2]["page_views_30_days_total"] is None
 
 
+def test_period_end_traffic_series_labels_the_previous_beijing_day() -> None:
+    engine = _engine()
+    period_date = REPORT_DATE + timedelta(days=1)
+    captured_at = datetime(2026, 7, 26, 1, 0, tzinfo=UTC)
+    capture_daily_report(
+        engine,
+        business_date=REPORT_DATE,
+        slot="pre_close",
+        captured_at=captured_at,
+    )
+
+    series = period_end_traffic_series(engine, as_of=period_date)
+
+    assert len(series) == 1
+    assert series[0]["business_date"] == period_date.isoformat()
+    assert series[0]["captured_at"] == captured_at.replace(tzinfo=None).isoformat()
+
+
 def _seed(engine) -> None:
     with Session(engine) as session, session.begin():
         session.add(

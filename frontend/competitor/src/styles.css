@@ -1305,6 +1305,118 @@ textarea.link-input-error-pulse {
   border-left: 4px solid var(--green);
 }
 
+.own-follower-history-query {
+  display: grid;
+  gap: 13px;
+  padding: 16px;
+  border: 1px solid #cfdfd2;
+  border-radius: 14px;
+  background: rgb(255 255 255 / 78%);
+}
+
+.own-follower-history-heading,
+.own-follower-history-card-heading {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 14px;
+}
+
+.own-follower-history-heading h4 {
+  margin: 2px 0 0;
+  font-size: 0.96rem;
+}
+
+.own-follower-history-heading > span,
+.own-follower-history-card-heading span {
+  display: block;
+  color: var(--muted);
+  font-size: 0.66rem;
+  font-weight: 700;
+}
+
+.own-follower-history-form {
+  display: grid;
+  grid-template-columns: minmax(150px, 190px) auto minmax(150px, 190px) auto;
+  align-items: end;
+  gap: 9px;
+}
+
+.own-follower-history-form > button {
+  min-height: 39px;
+  white-space: nowrap;
+}
+
+.inline-error {
+  margin: 0;
+  color: #a63535;
+  font-size: 0.72rem;
+  font-weight: 800;
+}
+
+.compact-empty-state {
+  min-height: 90px;
+}
+
+.own-follower-history-list,
+.own-follower-seller-events {
+  display: grid;
+  gap: 9px;
+}
+
+.own-follower-history-card {
+  display: grid;
+  gap: 10px;
+  padding: 13px;
+  border: 1px solid #dce4de;
+  border-radius: 12px;
+  background: #fff;
+}
+
+.own-follower-history-card-heading strong {
+  display: block;
+  margin-bottom: 3px;
+  font-size: 0.78rem;
+}
+
+.own-follower-history-card-heading a {
+  color: var(--green);
+  font-size: 0.68rem;
+  font-weight: 800;
+}
+
+.own-follower-history-card > p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.68rem;
+  font-weight: 700;
+}
+
+.own-follower-seller-events > div {
+  display: grid;
+  grid-template-columns: minmax(150px, 0.7fr) minmax(150px, 0.8fr) minmax(220px, 1.4fr) auto;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 10px;
+  border-radius: 9px;
+  background: #f3f7f3;
+  font-size: 0.66rem;
+}
+
+.own-follower-seller-events span {
+  color: var(--muted);
+}
+
+.own-follower-seller-events em {
+  padding: 4px 7px;
+  border-radius: 999px;
+  color: #165f3c;
+  background: #dff3e7;
+  font-style: normal;
+  font-weight: 800;
+  white-space: nowrap;
+}
+
 .competitor-status-list {
   display: grid;
   gap: 10px;
@@ -5557,6 +5669,15 @@ button {
     grid-column: 1 / -1;
     width: 100%;
   }
+
+  .own-follower-history-form,
+  .own-follower-seller-events > div {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .own-follower-history-form > button {
+    grid-column: 1 / -1;
+  }
 }
 
 @media (max-width: 560px) {
@@ -5757,6 +5878,17 @@ button {
   }
 
   .competitor-date-range-controls {
+    grid-template-columns: 1fr;
+  }
+
+  .own-follower-history-heading,
+  .own-follower-history-card-heading {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .own-follower-history-form,
+  .own-follower-seller-events > div {
     grid-template-columns: 1fr;
   }
 

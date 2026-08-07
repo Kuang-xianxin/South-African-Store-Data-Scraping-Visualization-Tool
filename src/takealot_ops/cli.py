@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import getpass
 import logging
 import os
 import sys
@@ -41,6 +42,11 @@ from takealot_ops.erp.daily_report import (
 )
 from takealot_ops.logistics.service import LogisticsOverviewService
 from takealot_ops.metrics.service import MetricService
+from takealot_ops.platform_warehouse.credentials import (
+    PortalCredential,
+    WindowsPortalCredentialStore,
+    masked_email,
+)
 from takealot_ops.quality import verify_quality
 from takealot_ops.reporting import generate_daily_reports
 from takealot_ops.scheduler import (
@@ -62,7 +68,11 @@ from takealot_ops.settings import (
 from takealot_ops.storage.migrations import create_engine_for_settings, create_schema
 from takealot_ops.storage.mysql_migration import migrate_sqlite_to_mysql
 from takealot_ops.storage.repository import Repository
-from takealot_ops.storage.store_context import DEFAULT_STORE_CODE, store_scope
+from takealot_ops.storage.store_context import (
+    DEFAULT_STORE_CODE,
+    normalize_store_code,
+    store_scope,
+)
 
 
 EXIT_CONFIGURATION = 2
@@ -151,6 +161,27 @@ def build_parser() -> argparse.ArgumentParser:
         "dashboard-legacy",
         help="在 127.0.0.1 启动保留的 Streamlit 旧版看板",
     )
+    portal_credential_set = commands.add_parser(
+        "portal-credential-set",
+        help="在服务器 Windows 凭据管理器中保存某店铺的 Seller Portal 登录凭据",
+    )
+    portal_credential_set.add_argument("--store", default=DEFAULT_STORE_CODE)
+    portal_credential_set.add_argument("--email", required=True)
+    portal_credential_status = commands.add_parser(
+        "portal-credential-status",
+        help="只显示某店铺是否已配置 Seller Portal 凭据及脱敏邮箱",
+    )
+    portal_credential_status.add_argument("--store", default=DEFAULT_STORE_CODE)
+    portal_credential_delete = commands.add_parser(
+        "portal-credential-delete",
+        help="从服务器 Windows 凭据管理器删除某店铺的 Seller Portal 登录凭据",
+    )
+    portal_credential_delete.add_argument("--store", default=DEFAULT_STORE_CODE)
+    portal_credential_delete.add_argument(
+        "--confirm-store",
+        required=True,
+        help="必须再次完整输入店铺代码",
+    )
 
     competitors = commands.add_parser(
         "collect-competitors",
@@ -233,6 +264,15 @@ def main(argv: Sequence[str] | None = None) -> int:
             exit_code = _binlog_archive_maintain_command(project_root)
         elif args.command == "binlog-archive-status":
             exit_code = _binlog_archive_status_command(project_root, args.preflight)
+        elif args.command == "portal-credential-set":
+            exit_code = _portal_credential_set_command(args.store, args.email)
+        elif args.command == "portal-credential-status":
+            exit_code = _portal_credential_status_command(args.store)
+        elif args.command == "portal-credential-delete":
+            exit_code = _portal_credential_delete_command(
+                args.store,
+                args.confirm_store,
+            )
         elif args.command == "daily-report-run":
             logistics_sync = LogisticsOverviewService(
                 project_root,
@@ -437,6 +477,45 @@ def _backup_local_command(project_root: Path) -> int:
     verify_database_integrity(settings)
     result = verify_local_backup(backup_database(settings))
     _print_backup_verification(result)
+    return 0
+
+
+def _portal_credential_set_command(store_code: str, email: str) -> int:
+    normalized = normalize_store_code(store_code)
+    if not sys.stdin.isatty():
+        raise SettingsError("配置 Seller Portal 密码必须在服务器交互式终端执行")
+    password = getpass.getpass("Seller Portal 密码（输入不会显示）：")
+    confirmation = getpass.getpass("再次输入 Seller Portal 密码：")
+    if password != confirmation:
+        raise SettingsError("两次输入的 Seller Portal 密码不一致")
+    WindowsPortalCredentialStore().set(
+        normalized,
+        PortalCredential(email=email, password=password),
+    )
+    print(f"店铺 {normalized} 的 Seller Portal 凭据已保存到 Windows 凭据管理器。")
+    return 0
+
+
+def _portal_credential_status_command(store_code: str) -> int:
+    normalized = normalize_store_code(store_code)
+    credential = WindowsPortalCredentialStore().get(normalized)
+    if credential is None:
+        print(f"店铺 {normalized} 尚未配置 Seller Portal 凭据。")
+        return 0
+    print(f"店铺 {normalized} 已配置 Seller Portal 凭据：{masked_email(credential)}")
+    return 0
+
+
+def _portal_credential_delete_command(store_code: str, confirmation: str) -> int:
+    normalized = normalize_store_code(store_code)
+    if confirmation.strip() != normalized:
+        raise SettingsError("--confirm-store 必须与规范化后的店铺代码完全一致")
+    deleted = WindowsPortalCredentialStore().delete(normalized)
+    print(
+        f"店铺 {normalized} 的 Seller Portal 凭据已删除。"
+        if deleted
+        else f"店铺 {normalized} 原本就没有 Seller Portal 凭据。"
+    )
     return 0
 
 

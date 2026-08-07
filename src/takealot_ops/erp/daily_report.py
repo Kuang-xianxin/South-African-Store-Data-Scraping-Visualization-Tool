@@ -185,20 +185,31 @@ def period_end_traffic_series(
     as_of: date,
     days: int = 30,
 ) -> list[dict[str, object]]:
-    """Aggregate the latest 09:00 period-end product snapshot for each business day."""
+    """Aggregate the latest 09:00 snapshot for each completed Beijing period day."""
     if days < 1:
         raise ValueError("days must be at least 1")
     window_start = as_of - timedelta(days=days - 1)
+    china_zone = ZoneInfo("Asia/Shanghai")
+    capture_start = datetime.combine(
+        window_start + timedelta(days=1),
+        time.min,
+        tzinfo=china_zone,
+    ).astimezone(UTC).replace(tzinfo=None)
+    capture_end = datetime.combine(
+        as_of + timedelta(days=2),
+        time.min,
+        tzinfo=china_zone,
+    ).astimezone(UTC).replace(tzinfo=None)
     with Session(engine) as session:
         runs = list(
             session.scalars(
                 select(DailyReportRun)
                 .where(
-                    DailyReportRun.business_date.between(window_start, as_of),
                     DailyReportRun.slot == "pre_close",
+                    DailyReportRun.captured_at >= capture_start,
+                    DailyReportRun.captured_at < capture_end,
                 )
                 .order_by(
-                    DailyReportRun.business_date,
                     DailyReportRun.captured_at.desc(),
                     DailyReportRun.created_at.desc(),
                 )
@@ -206,17 +217,22 @@ def period_end_traffic_series(
         )
         runs_by_date: dict[date, list[DailyReportRun]] = {}
         for run in runs:
-            runs_by_date.setdefault(run.business_date, []).append(run)
+            period_date = _period_end_date(run.captured_at)
+            if window_start <= period_date <= as_of:
+                runs_by_date.setdefault(period_date, []).append(run)
 
         selected_runs = [
-            next(
-                (run for run in date_runs if run.status == "success"),
-                date_runs[0],
+            (
+                period_date,
+                next(
+                    (run for run in runs_by_date[period_date] if run.status == "success"),
+                    runs_by_date[period_date][0],
+                ),
             )
-            for date_runs in runs_by_date.values()
+            for period_date in sorted(runs_by_date)
         ]
         successful_ids = [
-            run.run_id for run in selected_runs if run.status == "success"
+            run.run_id for _, run in selected_runs if run.status == "success"
         ]
         aggregates: dict[str, tuple[int, int, int | None]] = {}
         if successful_ids:
@@ -240,7 +256,7 @@ def period_end_traffic_series(
             }
 
     points: list[dict[str, object]] = []
-    for run in selected_runs:
+    for period_date, run in selected_runs:
         product_count, available_count, partial_total = aggregates.get(
             run.run_id,
             (0, 0, None),
@@ -255,7 +271,7 @@ def period_end_traffic_series(
         )
         points.append(
             {
-                "business_date": run.business_date.isoformat(),
+                "business_date": period_date.isoformat(),
                 "captured_at": run.captured_at.isoformat(),
                 "status": run.status,
                 "page_views_30_days_total": observed_total,
@@ -264,6 +280,16 @@ def period_end_traffic_series(
             }
         )
     return points
+
+
+def _period_end_date(captured_at: datetime) -> date:
+    """Label a period-end capture as the Beijing natural day it completed."""
+    utc_value = (
+        captured_at.replace(tzinfo=UTC)
+        if captured_at.tzinfo is None
+        else captured_at.astimezone(UTC)
+    )
+    return utc_value.astimezone(ZoneInfo("Asia/Shanghai")).date() - timedelta(days=1)
 
 
 def capture_daily_report(

@@ -9,7 +9,7 @@ export const templateLabels: Record<UserRole, string> = {
 
 export const permissionLabels: Record<PermissionKey, string> = {
   "store.view": "查看店铺经营数据",
-  "logistics.manage": "确认与撤销物流关联",
+  "logistics.manage": "管理物流关联与平台仓草稿",
   "keyword_traffic.manage": "旧版关键词手工记录（已停用）",
   "competitors.view": "查看竞品雷达",
   "competitors.collect": "采集竞品",
@@ -71,7 +71,7 @@ export const permissionGroups: Array<{
 }> = [
   {
     title: "店铺经营",
-    description: "经营总览、关键词流量、风险质量及物流关联确认",
+    description: "经营总览、关键词流量、风险质量、物流关联与平台仓草稿",
     permissions: [
       "store.view",
       "logistics.manage",

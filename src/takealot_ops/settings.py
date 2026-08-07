@@ -27,6 +27,10 @@ DEFAULT_DASHBOARD_HOST = "0.0.0.0"
 DEFAULT_DASHBOARD_PORT = 8501
 DEFAULT_W8_BASE_URL = "https://crgyl.w8soft.net/prod-api/w8"
 DEFAULT_W8_REQUEST_TIMEOUT_SECONDS = 30.0
+TAKEALOT_SELLER_BFF_URL = "https://seller-api.takealot.com"
+DEFAULT_PORTAL_REQUEST_TIMEOUT_SECONDS = 30.0
+DEFAULT_PORTAL_TASK_TIMEOUT_SECONDS = 45.0
+DEFAULT_PORTAL_MAX_TOTAL_QUANTITY = 500
 
 
 class SettingsError(ValueError):
@@ -217,6 +221,84 @@ class W8Settings:
             base_url=base_url,
             request_timeout_seconds=timeout,
         )
+
+
+@dataclass(frozen=True)
+class TakealotPortalSettings:
+    """Safety controls for the private Seller Portal BFF integration.
+
+    The upstream host is deliberately fixed in code. Credentials and bearer tokens are
+    never part of these settings: per-store credentials live in the server account's
+    Windows Credential Manager, while bearer tokens remain process-memory only.
+    """
+
+    enabled: bool
+    base_url: str
+    request_timeout_seconds: float
+    task_timeout_seconds: float
+    max_total_quantity: int
+
+    @classmethod
+    def from_env(cls, project_root: Path) -> TakealotPortalSettings:
+        resolved_root = project_root.resolve()
+        load_dotenv(resolved_root / ".env", override=False)
+        request_timeout = _bounded_float_from_env(
+            "TAKEALOT_PORTAL_REQUEST_TIMEOUT_SECONDS",
+            DEFAULT_PORTAL_REQUEST_TIMEOUT_SECONDS,
+            minimum=1,
+            maximum=60,
+        )
+        task_timeout = _bounded_float_from_env(
+            "TAKEALOT_PORTAL_TASK_TIMEOUT_SECONDS",
+            DEFAULT_PORTAL_TASK_TIMEOUT_SECONDS,
+            minimum=5,
+            maximum=120,
+        )
+        raw_maximum = os.environ.get(
+            "TAKEALOT_PORTAL_MAX_TOTAL_QUANTITY",
+            str(DEFAULT_PORTAL_MAX_TOTAL_QUANTITY),
+        )
+        try:
+            maximum = int(raw_maximum)
+        except ValueError as exc:
+            raise SettingsError("平台仓单次总数量上限必须是整数") from exc
+        if not 1 <= maximum <= 10_000:
+            raise SettingsError("平台仓单次总数量上限必须在 1 到 10000 之间")
+        return cls(
+            enabled=_bool_from_env("TAKEALOT_PORTAL_BFF_ENABLED", default=False),
+            base_url=TAKEALOT_SELLER_BFF_URL,
+            request_timeout_seconds=request_timeout,
+            task_timeout_seconds=task_timeout,
+            max_total_quantity=maximum,
+        )
+
+
+def _bool_from_env(name: str, *, default: bool) -> bool:
+    value = os.environ.get(name)
+    if value is None or not value.strip():
+        return default
+    normalized = value.strip().casefold()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise SettingsError(f"{name} 必须是 true/false、1/0、yes/no 或 on/off")
+
+
+def _bounded_float_from_env(
+    name: str,
+    default: float,
+    *,
+    minimum: float,
+    maximum: float,
+) -> float:
+    try:
+        value = float(os.environ.get(name, default))
+    except ValueError as exc:
+        raise SettingsError(f"{name} 必须是数字") from exc
+    if not minimum <= value <= maximum:
+        raise SettingsError(f"{name} 必须在 {minimum:g} 到 {maximum:g} 之间")
+    return value
 
 
 def _dashboard_host_from_env() -> str:

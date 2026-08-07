@@ -11,6 +11,7 @@ export const COMPETITOR_OPERATING_SIGNAL_OPTIONS = [
   "好评增加",
   "差评增加",
   "库存减少且评论增加",
+  "新增跟卖卖家",
 ] as const;
 
 export type CompetitorOperatingSignal =
@@ -70,6 +71,7 @@ export function competitorOperatingSignals(item: CompetitorItem) {
   if (item.新增好评 !== null && item.新增好评 > 0) signals.add("好评增加");
   if (item.新增差评 !== null && item.新增差评 > 0) signals.add("差评增加");
   if (stockDecreased && reviewsIncreased) signals.add("库存减少且评论增加");
+  if (item.新增跟卖卖家数 > 0) signals.add("新增跟卖卖家");
   return COMPETITOR_OPERATING_SIGNAL_OPTIONS.filter((signal) => signals.has(signal));
 }
 

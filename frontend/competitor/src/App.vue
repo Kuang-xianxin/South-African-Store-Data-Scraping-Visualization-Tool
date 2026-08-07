@@ -19,6 +19,7 @@ import CompetitorsPage from "./pages/CompetitorsPage.vue";
 import DailyReportPage from "./pages/DailyReportPage.vue";
 import LoginPage from "./pages/LoginPage.vue";
 import LogisticsPage from "./pages/LogisticsPage.vue";
+import PlatformWarehousePage from "./pages/PlatformWarehousePage.vue";
 import KeywordTrafficPage from "./pages/KeywordTrafficPage.vue";
 import OverviewPage from "./pages/OverviewPage.vue";
 import ProductsPage from "./pages/ProductsPage.vue";
@@ -48,6 +49,7 @@ type PageKey =
   | "quadrants"
   | "risks"
   | "logistics"
+  | "platform-warehouse"
   | "competitors"
   | "daily-report"
   | "reports"
@@ -60,6 +62,7 @@ const storeScopedPages = new Set<PageKey>([
   "quadrants",
   "risks",
   "logistics",
+  "platform-warehouse",
   "daily-report",
 ]);
 const pageStorageKey = "takealot-erp-active-page-v1";
@@ -75,15 +78,16 @@ const basePages = [
   { key: "quadrants", label: "经营坐标", hint: "流量与下单分布", mark: "04", permission: "store.view" },
   { key: "risks", label: "风险与质量", hint: "异常和数据质量", mark: "05", permission: "store.view" },
   { key: "logistics", label: "物流管理", hint: "长睿与平台货件", mark: "06", permission: "store.view" },
-  { key: "competitors", label: "竞品雷达", hint: "库存评论与销量", mark: "07", permission: "competitors.view" },
-  { key: "daily-report", label: "运营日报", hint: "全周期核对与合并", mark: "08", permission: "daily_report.view" },
-  { key: "reports", label: "报表工作台", hint: "NFT102 续写", mark: "09", permission: "nft102.manage" },
+  { key: "platform-warehouse", label: "约平台仓", hint: "补货草稿与 PO", mark: "07", permission: "store.view" },
+  { key: "competitors", label: "竞品雷达", hint: "库存评论与销量", mark: "08", permission: "competitors.view" },
+  { key: "daily-report", label: "运营日报", hint: "全周期核对与合并", mark: "09", permission: "daily_report.view" },
+  { key: "reports", label: "报表工作台", hint: "NFT102 续写", mark: "10", permission: "nft102.manage" },
 ] as const;
 const adminPage = {
   key: "users",
   label: "用户权限",
   hint: "账号与权限管理",
-  mark: "10",
+  mark: "11",
   permission: "users.manage",
 } as const;
 
@@ -204,6 +208,7 @@ const pageComponent = computed(() => {
     quadrants: QuadrantsPage,
     risks: RisksPage,
     logistics: LogisticsPage,
+    "platform-warehouse": PlatformWarehousePage,
     competitors: CompetitorsPage,
     "daily-report": DailyReportPage,
     reports: ReportsPage,
@@ -300,7 +305,7 @@ const activePageProps = computed(() => {
       onPermissionDenied: showPermissionDenied,
     };
   }
-  if (key === "logistics") {
+  if (key === "logistics" || key === "platform-warehouse") {
     return {
       ...common,
       canManage: canManageLogistics.value,

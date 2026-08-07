@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, call
 
@@ -11,9 +12,13 @@ from takealot_ops.competitors.domain import (
     CompetitorVariant,
 )
 from takealot_ops.competitors.stock import (
+    _BuyboxOfferCandidate,
     _add_main_product_to_cart,
     _add_other_offer_to_cart,
+    _buybox_candidate_is_selected,
+    _choose_buybox_offer_candidate,
     _choose_quantity,
+    _dismiss_cookie,
     _dismiss_marketing_overlay,
     _dismiss_terms_modal,
     _expand_other_offers,
@@ -58,7 +63,9 @@ def test_stock_probe_failure_note_records_stage_and_network_code() -> None:
 
 
 @pytest.mark.asyncio
-async def test_multi_buybox_probe_selects_the_exact_green_radio_option() -> None:
+async def test_multi_buybox_probe_selects_the_exact_green_price_card(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     offer = CompetitorOffer(
         selected=False,
         sku="240468115",
@@ -73,18 +80,129 @@ async def test_multi_buybox_probe_selects_the_exact_green_radio_option() -> None
     )
     page = Mock()
     page.wait_for_timeout = AsyncMock()
-    radios = page.locator.return_value
-    radios.count = AsyncMock(return_value=2)
-    radio = radios.nth.return_value
+    radio = Mock()
     radio.is_checked = AsyncMock(side_effect=[False, True])
-    radio.click = AsyncMock()
+    radio.get_attribute = AsyncMock(return_value=None)
+    label = Mock()
+    label.click = AsyncMock()
+    label.get_attribute = AsyncMock(return_value=None)
+    candidate = _BuyboxOfferCandidate(
+        index=1,
+        click_targets=(label,),
+        state_targets=(radio, label),
+        text="Best Price R 513 Delivery 15 Aug",
+        radio=radio,
+    )
+    monkeypatch.setattr(
+        "takealot_ops.competitors.stock._buybox_offer_candidates",
+        AsyncMock(return_value=[candidate]),
+    )
+    monkeypatch.setattr(
+        "takealot_ops.competitors.stock._dismiss_marketing_overlay",
+        AsyncMock(),
+    )
+    monkeypatch.setattr(
+        "takealot_ops.competitors.stock._dismiss_terms_modal",
+        AsyncMock(return_value=False),
+    )
 
     await _select_buybox_offer(page, offer)
 
-    page.locator.assert_called_once_with('main aside input[type="radio"]:visible')
-    radios.nth.assert_called_once_with(1)
-    radio.click.assert_awaited_once_with()
+    label.click.assert_awaited_once_with(timeout=5_000)
     page.wait_for_timeout.assert_awaited_once_with(1200)
+
+
+def test_multi_buybox_candidate_uses_unique_price_after_dom_rerender() -> None:
+    offer = CompetitorOffer(
+        selected=False,
+        sku="238358711",
+        seller_id="29899430",
+        seller_name="卖家ID 29899430（平台未返回名称）",
+        price=999,
+        stock_status="In stock",
+        is_buybox=True,
+        offer_id="238358711",
+        buybox_rank=1,
+        is_follower_offer=True,
+    )
+    candidates = [
+        _BuyboxOfferCandidate(0, (Mock(),), (Mock(),), "Fastest Delivery R 1,099"),
+        _BuyboxOfferCandidate(1, (Mock(),), (Mock(),), "TakealotMore credit option"),
+        _BuyboxOfferCandidate(
+            2,
+            (Mock(),),
+            (Mock(),),
+            "Best Price R 999R 1,299 Get it Tomorrow, 7am - 7pm T&Cs Apply",
+        ),
+    ]
+
+    selected = _choose_buybox_offer_candidate(candidates, offer)
+
+    assert selected is candidates[2]
+
+
+def test_multi_buybox_candidate_rejects_rank_with_the_wrong_price() -> None:
+    offer = CompetitorOffer(
+        selected=False,
+        sku="238358711",
+        seller_id="29899430",
+        seller_name="卖家ID 29899430（平台未返回名称）",
+        price=999,
+        stock_status="In stock",
+        is_buybox=True,
+        offer_id="238358711",
+        buybox_rank=1,
+        is_follower_offer=True,
+    )
+    candidates = [
+        _BuyboxOfferCandidate(0, (Mock(),), (Mock(),), "Fastest Delivery R 1,099"),
+        _BuyboxOfferCandidate(1, (Mock(),), (Mock(),), "Best Price R 998"),
+    ]
+
+    assert _choose_buybox_offer_candidate(candidates, offer) is None
+
+
+@pytest.mark.asyncio
+async def test_multi_buybox_candidate_accepts_card_aria_selected_state() -> None:
+    radio = Mock()
+    radio.is_checked = AsyncMock(return_value=False)
+    radio.get_attribute = AsyncMock(return_value=None)
+    card = Mock()
+    card.get_attribute = AsyncMock(
+        side_effect=lambda attribute: "true" if attribute == "aria-checked" else None
+    )
+    candidate = _BuyboxOfferCandidate(
+        1,
+        (card,),
+        (radio, card),
+        "Best Price R 999",
+        radio,
+    )
+
+    assert await _buybox_candidate_is_selected(candidate) is True
+
+
+@pytest.mark.asyncio
+async def test_multi_buybox_candidate_accepts_current_active_card_class() -> None:
+    offer_link = Mock()
+    offer_link.get_attribute = AsyncMock(return_value=None)
+    card = Mock()
+    card.get_attribute = AsyncMock(
+        side_effect=lambda attribute: (
+            "buybox-offer-module_buybox-offer_1JNpe "
+            "buybox-offer-module_active_3I1Yj"
+            if attribute == "class"
+            else None
+        )
+    )
+    candidate = _BuyboxOfferCandidate(
+        index=1,
+        click_targets=(offer_link,),
+        state_targets=(offer_link, card),
+        text="Best Price R 999",
+    )
+
+    assert await _buybox_candidate_is_selected(candidate) is True
 
 
 @pytest.mark.asyncio
@@ -132,6 +250,77 @@ async def test_follower_probe_can_keep_competing_buybox_without_variant_probe(
     assert offers[0].offer.is_buybox is True
     assert offers[0].stock.quantity == 0
     assert offers[0].stock.exact is True
+
+
+@pytest.mark.asyncio
+async def test_stock_probe_cancellation_closes_browser_without_cart_cleanup(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    variant = CompetitorVariant(
+        key="default",
+        label="默认款",
+        url="https://www.takealot.com/p/PLID12345678",
+        title="Example",
+        sku="SKU-1",
+        seller_id="seller-1",
+        seller_name="Seller One",
+        price=99,
+        stock_status="In stock",
+        is_leadtime=False,
+        is_add_to_cart_available=True,
+    )
+    product = CompetitorProduct(
+        plid="12345678",
+        url=variant.url,
+        title=variant.title,
+        image_url=None,
+        sku=variant.sku,
+        seller_id=variant.seller_id,
+        seller_name=variant.seller_name,
+        price=variant.price,
+        stock_status=variant.stock_status,
+        is_leadtime=False,
+        review_count=0,
+        rating=0,
+        offers=(),
+        variants=(variant,),
+    )
+    page = Mock()
+    context = Mock()
+    context.pages = [page]
+    context.close = AsyncMock()
+    playwright = Mock()
+    playwright.chromium.launch_persistent_context = AsyncMock(return_value=context)
+    manager = Mock()
+    manager.__aenter__ = AsyncMock(return_value=playwright)
+    manager.__aexit__ = AsyncMock(return_value=None)
+    clear_cart = AsyncMock()
+    monkeypatch.setattr(
+        "takealot_ops.competitors.stock.async_playwright",
+        lambda: manager,
+    )
+    monkeypatch.setattr(
+        "takealot_ops.competitors.stock._find_browser_executable",
+        lambda: tmp_path / "chrome.exe",
+    )
+    monkeypatch.setattr(
+        "takealot_ops.competitors.stock._probe_page_stock",
+        AsyncMock(side_effect=asyncio.CancelledError()),
+    )
+    monkeypatch.setattr(
+        "takealot_ops.competitors.stock._clear_isolated_cart",
+        clear_cart,
+    )
+
+    with pytest.raises(asyncio.CancelledError):
+        await probe_product_stocks(
+            product,
+            profile_dir=tmp_path / "stock-profile",
+        )
+
+    assert context.close.await_count >= 1
+    clear_cart.assert_not_awaited()
 
 @pytest.mark.asyncio
 async def test_initial_quantity_menu_waits_for_animated_numeric_options(
@@ -860,6 +1049,31 @@ async def test_marketing_overlay_cleanup_is_limited_to_braze_elements() -> None:
     script = page.evaluate.await_args.args[0]
     assert ".ab-iam-root, .ab-page-blocker" in script
     assert "ab-pause-scrolling" in script
+
+
+@pytest.mark.asyncio
+async def test_cookie_dismissal_clears_late_braze_overlay_first(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+
+    async def clear_overlay(_page: Mock) -> None:
+        calls.append("overlay")
+
+    page = Mock()
+    button = page.get_by_role.return_value
+    button.count = AsyncMock(return_value=1)
+    button.is_visible = AsyncMock(return_value=True)
+    button.click = AsyncMock(side_effect=lambda **_kwargs: calls.append("cookie"))
+    monkeypatch.setattr(
+        "takealot_ops.competitors.stock._dismiss_marketing_overlay",
+        clear_overlay,
+    )
+
+    await _dismiss_cookie(page)
+
+    assert calls == ["overlay", "cookie"]
+    button.click.assert_awaited_once_with(timeout=5_000)
 
 
 @pytest.mark.asyncio

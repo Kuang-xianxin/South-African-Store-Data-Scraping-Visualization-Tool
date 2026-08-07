@@ -566,6 +566,21 @@ class CollectionRequestCoordinator(Generic[T]):
 
         return await asyncio.shield(task), reused
 
+    async def cancel(self, request_id: str | None) -> bool:
+        """Cancel one explicit in-flight request while preserving reload shielding."""
+        if not request_id:
+            return False
+        async with self._lock:
+            task = self._inflight.get(request_id)
+            if task is None:
+                return False
+            task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        return True
+
     async def _execute(
         self,
         request_id: str,

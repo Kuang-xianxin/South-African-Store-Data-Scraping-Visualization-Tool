@@ -14,7 +14,7 @@ from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from threading import Lock
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, Literal, NoReturn
 from urllib.parse import quote, urlsplit
 from zoneinfo import ZoneInfo
 
@@ -128,6 +128,15 @@ from takealot_ops.erp.service import (
     sqlite_database_path,
 )
 from takealot_ops.logistics import LogisticsLinkError, LogisticsOverviewService
+from takealot_ops.platform_warehouse import (
+    PlatformWarehouseConflictError,
+    PlatformWarehouseInputError,
+    PlatformWarehouseNotFoundError,
+    PlatformWarehouseService,
+    PortalAuthenticationError,
+    PortalDisabledError,
+    PortalError,
+)
 from takealot_ops.nft102_portal import (
     generate_nft102_from_baseline,
     inspect_nft102_upload,
@@ -262,6 +271,49 @@ class LogisticsLinkConfirmRequest(BaseModel):
 
 class LogisticsLinkRevokeRequest(BaseModel):
     note: str = Field(min_length=1, max_length=500)
+
+
+class PlatformWarehouseDraftLineRequest(BaseModel):
+    offer_id: str = Field(min_length=1, max_length=100)
+    cpt_quantity: int = Field(default=0, ge=0, le=1_000_000)
+    jhb_quantity: int = Field(default=0, ge=0, le=1_000_000)
+    dbn_quantity: int = Field(default=0, ge=0, le=1_000_000)
+
+
+class PlatformWarehouseDirectCreateRequest(BaseModel):
+    lines: list[PlatformWarehouseDraftLineRequest] = Field(min_length=1, max_length=1000)
+    note: str = Field(default="", max_length=2000)
+    client_request_id: str = Field(min_length=36, max_length=36)
+
+
+class PlatformWarehouseConfirmPoRequest(BaseModel):
+    po_number: str = Field(min_length=1, max_length=80)
+    platform_shipment_id: int | None = Field(default=None, ge=1)
+    note: str = Field(default="", max_length=2000)
+
+
+class PlatformWarehouseConfirmShippedRequest(BaseModel):
+    tracking_reference: str = Field(min_length=1, max_length=200)
+    note: str = Field(default="", max_length=2000)
+
+
+class PlatformWarehouseArchiveRequest(BaseModel):
+    note: str = Field(min_length=1, max_length=2000)
+
+
+class PlatformWarehousePortalOtpRequest(BaseModel):
+    otp: str = Field(min_length=1, max_length=12)
+
+
+class PlatformWarehousePrepareActionRequest(BaseModel):
+    action: Literal["confirm_po", "confirm_shipped", "archive"]
+
+
+class PlatformWarehouseExecuteActionRequest(PlatformWarehousePrepareActionRequest):
+    approval_token: str = Field(min_length=32, max_length=128)
+    confirmation_text: str = Field(min_length=1, max_length=80)
+    tracking_reference: str = Field(default="", max_length=200)
+    my_soh_decrease_warehouse_id: int | None = Field(default=None, ge=1)
 
 
 def _default_operations_business_date() -> date:
@@ -464,6 +516,7 @@ def create_app(project_root: Path | None = None) -> FastAPI:
     refresh_coordinator = RefreshCoordinator(root)
     product_thumbnails = ProductThumbnailCache(root)
     logistics_overview = LogisticsOverviewService(root)
+    platform_warehouse = PlatformWarehouseService(root)
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
@@ -945,6 +998,183 @@ def create_app(project_root: Path | None = None) -> FastAPI:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         return {"link": link}
 
+    @app.get("/api/erp/platform-warehouse")
+    def platform_warehouse_overview() -> dict[str, Any]:
+        """Return guarded drafts plus the latest read-only Takealot shipment snapshot."""
+        return platform_warehouse.load()
+
+    @app.get("/api/erp/platform-warehouse/portal/status")
+    def platform_warehouse_portal_status(request: Request) -> dict[str, Any]:
+        _require_platform_warehouse_loopback(request)
+        return {"portal": platform_warehouse.portal_status()}
+
+    @app.post("/api/erp/platform-warehouse/portal/logout")
+    def platform_warehouse_portal_logout(request: Request) -> dict[str, Any]:
+        _require_platform_warehouse_loopback(request)
+        return {"portal": platform_warehouse.portal_logout()}
+
+    @app.post("/api/erp/platform-warehouse/create-direct")
+    def create_platform_warehouse_direct(
+        payload: PlatformWarehouseDirectCreateRequest,
+        request: Request,
+    ) -> dict[str, Any]:
+        _require_platform_warehouse_loopback(request)
+        user = request.state.erp_user
+        try:
+            return platform_warehouse.create_platform_draft_direct(
+                [line.model_dump() for line in payload.lines],
+                client_request_id=payload.client_request_id,
+                actor_user_id=user.id,
+                actor_username=user.username,
+                note=payload.note,
+            )
+        except PlatformWarehouseInputError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except PlatformWarehouseNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except PlatformWarehouseConflictError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except (PortalAuthenticationError, PortalDisabledError, PortalError) as exc:
+            _raise_platform_warehouse_portal_error(exc)
+
+    @app.post("/api/erp/platform-warehouse/drafts/{draft_id}/verify-otp-and-create")
+    def verify_platform_warehouse_otp_and_create(
+        draft_id: int,
+        payload: PlatformWarehousePortalOtpRequest,
+        request: Request,
+    ) -> dict[str, Any]:
+        _require_platform_warehouse_loopback(request)
+        user = request.state.erp_user
+        try:
+            return platform_warehouse.verify_otp_and_continue_create(
+                draft_id,
+                payload.otp,
+                actor_user_id=user.id,
+                actor_username=user.username,
+            )
+        except PlatformWarehouseInputError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except PlatformWarehouseNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except PlatformWarehouseConflictError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except (PortalAuthenticationError, PortalDisabledError, PortalError) as exc:
+            _raise_platform_warehouse_portal_error(exc)
+
+    @app.post("/api/erp/platform-warehouse/shipments/{shipment_id}/prepare-action")
+    def prepare_platform_warehouse_shipment_action(
+        shipment_id: int,
+        payload: PlatformWarehousePrepareActionRequest,
+        request: Request,
+    ) -> dict[str, Any]:
+        _require_platform_warehouse_loopback(request)
+        try:
+            return platform_warehouse.prepare_shipment_action(shipment_id, payload.action)
+        except PlatformWarehouseNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except PlatformWarehouseConflictError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except (PortalAuthenticationError, PortalDisabledError, PortalError) as exc:
+            _raise_platform_warehouse_portal_error(exc)
+
+    @app.post("/api/erp/platform-warehouse/shipments/{shipment_id}/execute-action")
+    def execute_platform_warehouse_shipment_action(
+        shipment_id: int,
+        payload: PlatformWarehouseExecuteActionRequest,
+        request: Request,
+    ) -> dict[str, Any]:
+        _require_platform_warehouse_loopback(request)
+        user = request.state.erp_user
+        try:
+            draft = platform_warehouse.execute_shipment_action(
+                shipment_id,
+                payload.action,
+                approval_token=payload.approval_token,
+                confirmation_text=payload.confirmation_text,
+                tracking_reference=payload.tracking_reference,
+                my_soh_decrease_warehouse_id=payload.my_soh_decrease_warehouse_id,
+                actor_user_id=user.id,
+                actor_username=user.username,
+            )
+        except PlatformWarehouseInputError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except PlatformWarehouseNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except PlatformWarehouseConflictError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except (PortalAuthenticationError, PortalDisabledError, PortalError) as exc:
+            _raise_platform_warehouse_portal_error(exc)
+        return {"draft": draft}
+
+    @app.post("/api/erp/platform-warehouse/drafts/{draft_id}/confirm-po")
+    def confirm_platform_warehouse_po(
+        draft_id: int,
+        payload: PlatformWarehouseConfirmPoRequest,
+        request: Request,
+    ) -> dict[str, Any]:
+        user = request.state.erp_user
+        try:
+            draft = platform_warehouse.confirm_po(
+                draft_id,
+                po_number=payload.po_number,
+                platform_shipment_id=payload.platform_shipment_id,
+                actor_user_id=user.id,
+                actor_username=user.username,
+                note=payload.note,
+            )
+        except PlatformWarehouseInputError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except PlatformWarehouseNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except PlatformWarehouseConflictError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return {"draft": draft}
+
+    @app.post("/api/erp/platform-warehouse/drafts/{draft_id}/confirm-shipped")
+    def confirm_platform_warehouse_shipped(
+        draft_id: int,
+        payload: PlatformWarehouseConfirmShippedRequest,
+        request: Request,
+    ) -> dict[str, Any]:
+        user = request.state.erp_user
+        try:
+            draft = platform_warehouse.confirm_shipped(
+                draft_id,
+                tracking_reference=payload.tracking_reference,
+                actor_user_id=user.id,
+                actor_username=user.username,
+                note=payload.note,
+            )
+        except PlatformWarehouseInputError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except PlatformWarehouseNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except PlatformWarehouseConflictError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return {"draft": draft}
+
+    @app.post("/api/erp/platform-warehouse/drafts/{draft_id}/archive")
+    def archive_platform_warehouse_draft(
+        draft_id: int,
+        payload: PlatformWarehouseArchiveRequest,
+        request: Request,
+    ) -> dict[str, Any]:
+        user = request.state.erp_user
+        try:
+            draft = platform_warehouse.archive(
+                draft_id,
+                actor_user_id=user.id,
+                actor_username=user.username,
+                note=payload.note,
+            )
+        except PlatformWarehouseInputError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except PlatformWarehouseNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except PlatformWarehouseConflictError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return {"draft": draft}
+
     @app.get("/api/erp/refresh-status")
     def refresh_status(request: Request) -> dict[str, object]:
         return refresh_coordinator.status(role=_refresh_coordination_role(request.state.erp_user))
@@ -1421,6 +1651,7 @@ def create_app(project_root: Path | None = None) -> FastAPI:
         return {
             "items": frame_records(dataset.current),
             "store_items": frame_records(dataset.store_current),
+            "own_follower_events": dataset.own_follower_events,
             "date_range": dataset.date_range_payload(),
         }
 
@@ -1702,12 +1933,33 @@ def create_app(project_root: Path | None = None) -> FastAPI:
         source = payload.source if payload is not None else "manual"
         settings = DashboardSettings.from_env(root)
         engine = create_read_only_erp_engine(settings.database_url)
+        is_true_competitor = False
         try:
             with Session(engine) as session:
                 target = session.get(CompetitorTarget, plid)
-                if target is None or not target.active:
-                    raise HTTPException(status_code=404, detail=f"PLID{plid} 不在监控清单中")
-                url = target.url
+                if target is not None and target.active:
+                    is_true_competitor = True
+                    url = target.url
+                else:
+                    accessible_store_codes = _own_store_codes_for_request(
+                        request,
+                        "all",
+                    )
+                    own_store_match = next(
+                        (
+                            row
+                            for row in load_connected_store_offers(session)
+                            if row.store_code in accessible_store_codes
+                            and str(row.offer.productline_id or "").strip() == plid
+                        ),
+                        None,
+                    )
+                    if own_store_match is None:
+                        raise HTTPException(
+                            status_code=404,
+                            detail=f"PLID{plid} 不在可访问的真正竞品或自有链接中",
+                        )
+                    url = f"https://www.takealot.com/p/PLID{plid}"
         finally:
             engine.dispose()
 
@@ -1720,7 +1972,7 @@ def create_app(project_root: Path | None = None) -> FastAPI:
             )
         except CollectionBatchBusyError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
-        if accepted and source == "manual_retry":
+        if accepted and source == "manual_retry" and is_true_competitor:
             audit_engine = create_engine_for_settings(settings)
             try:
                 create_schema(audit_engine)
@@ -1739,11 +1991,12 @@ def create_app(project_root: Path | None = None) -> FastAPI:
             finally:
                 audit_engine.dispose()
         competitor_logger.info(
-            "target_priority plid=%s user=%s batch=%s source=%s accepted=%s",
+            "target_priority plid=%s user=%s batch=%s source=%s target_type=%s accepted=%s",
             plid,
             user.username,
             status["batch_id"],
             source,
+            "competitor" if is_true_competitor else "own_store",
             accepted,
         )
         return {"ok": True, "accepted": accepted, "status": status}
@@ -2085,6 +2338,11 @@ def create_app(project_root: Path | None = None) -> FastAPI:
                 payload.request_id,
                 execute_collection,
             )
+        except asyncio.CancelledError as exc:
+            raise HTTPException(
+                status_code=409,
+                detail="采集已停止，当前浏览器探测已中断并关闭",
+            ) from exc
         except CompetitorNetworkError as exc:
             raise HTTPException(status_code=503, detail=str(exc)) from exc
         if reused:
@@ -2115,7 +2373,7 @@ def create_app(project_root: Path | None = None) -> FastAPI:
         }
 
     @app.post("/api/competitors/batch-events")
-    def competitor_batch_event(
+    async def competitor_batch_event(
         payload: CompetitorBatchEventRequest,
         request: Request,
     ) -> dict[str, object]:
@@ -2140,6 +2398,25 @@ def create_app(project_root: Path | None = None) -> FastAPI:
             )
         except CollectionBatchBusyError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
+        cancelled_request_id = (
+            str(status.get("current_request_id") or "")
+            if payload.event == "manual_stop"
+            else ""
+        )
+        if payload.event == "manual_stop":
+            cancelled = await collection_coordinator.cancel(cancelled_request_id)
+            # The cancelled request normally invalidates and closes the shared
+            # public browser through its lease.  Close once more here so a stop
+            # between links also leaves no reusable browser process behind.
+            await competitor_public_client.close()
+            status = collection_registry.status()
+            competitor_logger.info(
+                "batch_cancel batch=%s request=%s cancelled=%s user=%s",
+                payload.batch_id,
+                cancelled_request_id or "-",
+                cancelled,
+                user.username,
+            )
         effective_event = str(status["event"])
         if effective_event != payload.event:
             competitor_logger.info(
@@ -2400,6 +2677,8 @@ def _required_permission(path: str, method: str) -> str | tuple[str, ...] | None
         return REFRESH_RUN
     if path.startswith("/api/erp/logistics/links"):
         return STORE_VIEW if safe_method else LOGISTICS_MANAGE
+    if path.startswith("/api/erp/platform-warehouse"):
+        return STORE_VIEW if safe_method else LOGISTICS_MANAGE
     if path.startswith("/api/erp/keyword-traffic"):
         return STORE_VIEW
     if path.startswith("/api/erp/daily-report/export"):
@@ -2442,6 +2721,7 @@ def _requires_connected_store_access(path: str) -> bool:
                 "/api/erp/quadrants",
                 "/api/erp/risks",
                 "/api/erp/logistics",
+                "/api/erp/platform-warehouse",
                 "/api/erp/daily-report",
                 "/api/erp/exports",
             )
@@ -2638,6 +2918,22 @@ def _nft_download_url(report_date: date, name: str) -> str:
 
 def _is_loopback_request(request: Request) -> bool:
     return bool(request.client and request.client.host in {"127.0.0.1", "::1", "localhost"})
+
+
+def _require_platform_warehouse_loopback(request: Request) -> None:
+    if not _is_loopback_request(request):
+        raise HTTPException(
+            status_code=403,
+            detail="Seller Portal 登录、预审和写入只允许从 ERP 服务器本机执行",
+        )
+
+
+def _raise_platform_warehouse_portal_error(exc: PortalError) -> NoReturn:
+    if isinstance(exc, PortalDisabledError):
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    if isinstance(exc, PortalAuthenticationError):
+        raise HTTPException(status_code=401, detail=str(exc)) from exc
+    raise HTTPException(status_code=502, detail=str(exc)) from exc
 
 
 def _session_response(request: Request, issued: IssuedSession) -> Response:

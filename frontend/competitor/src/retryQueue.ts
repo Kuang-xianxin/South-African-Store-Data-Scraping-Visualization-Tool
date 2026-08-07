@@ -6,6 +6,25 @@ export interface RetryScheduleResult {
   position: number | null;
 }
 
+export function mergeUniqueTargetUrls(
+  ...groups: ReadonlyArray<ReadonlyArray<string>>
+): string[] {
+  const seen = new Set<string>();
+  const merged: string[] = [];
+  for (const group of groups) {
+    for (const rawUrl of group) {
+      const url = rawUrl.trim();
+      if (!url) continue;
+      const plid = url.match(/PLID(\d+)/i)?.[1];
+      const identity = plid ? `plid:${plid}` : `url:${url.toLocaleLowerCase()}`;
+      if (seen.has(identity)) continue;
+      seen.add(identity);
+      merged.push(url);
+    }
+  }
+  return merged;
+}
+
 export function retryGapForAttempt(attempt: number): number {
   if (!Number.isInteger(attempt) || attempt < 1) {
     throw new RangeError("Retry attempt must be a positive integer");

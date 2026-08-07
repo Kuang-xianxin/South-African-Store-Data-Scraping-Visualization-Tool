@@ -98,11 +98,13 @@ def _offer_stock_payload(
     variant_observations: list[VariantStockObservation],
     offer_observations: list[OfferStockObservation],
 ) -> dict[str, object]:
-    probe = (
-        _matching_buybox_stock(offer, variant_observations)
-        if offer.is_buybox
-        else _matching_offer_stock(offer, offer_observations)
-    )
+    # An unselected green buy-box card is still an independently probed follower
+    # offer.  Prefer that exact offer observation before falling back to the
+    # selected variant's main-buybox stock; otherwise the successful cart result
+    # is discarded merely because ``is_buybox`` is true.
+    probe = _matching_offer_stock(offer, offer_observations)
+    if probe is None and offer.is_buybox:
+        probe = _matching_buybox_stock(offer, variant_observations)
     if probe is None:
         return {
             "stock_state": competitor_offer_stock_state(

@@ -8,6 +8,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, replace
 from datetime import UTC, date, datetime
 from pathlib import Path
+from typing import cast
 from zoneinfo import ZoneInfo
 
 import pandas as pd
@@ -46,6 +47,7 @@ from takealot_ops.competitors.stock import (
     skipped_stock_probe,
 )
 from takealot_ops.competitors.own_store import (
+    ConnectedStoreOffer,
     connected_store_plids,
     load_connected_store_offer_points,
     load_connected_store_offers,
@@ -101,6 +103,7 @@ class CompetitorDataset:
     variants: pd.DataFrame
     store_current: pd.DataFrame = field(default_factory=pd.DataFrame)
     store_history: pd.DataFrame = field(default_factory=pd.DataFrame)
+    own_follower_events: list[dict[str, object]] = field(default_factory=list)
     available_start_date: date | None = None
     available_end_date: date | None = None
     selected_start_date: date | None = None
@@ -814,11 +817,18 @@ def load_competitor_dataset(
             and str(row.productline_id or "").strip() in selected_store_plids
         )
     ]
+    own_store_start_dates: dict[str, date] = {}
+    for row in store_baselines:
+        plid = str(row.productline_id or "").strip()
+        current_start = own_store_start_dates.get(plid)
+        if plid and (current_start is None or row.display_date < current_start):
+            own_store_start_dates[plid] = row.display_date
     active_plids = {target.plid for target in targets} - all_store_plids
     active_snapshots = [row for row in snapshots if row.plid in active_plids]
     store_snapshots = [row for row in snapshots if row.plid in selected_store_plids]
     snapshot_dates = [
         *(_competitor_display_date(row.collected_at) for row in active_snapshots),
+        *(_competitor_display_date(row.collected_at) for row in store_snapshots),
         *(row.display_date for row in store_baselines),
     ]
     available_start_date = min(snapshot_dates, default=None)
@@ -849,6 +859,19 @@ def load_competitor_dataset(
             or _competitor_display_date(row.collected_at) <= selected_end_date
         )
     ]
+    competitor_follower_timelines = _follower_seller_timelines(
+        active_snapshots,
+        selected_start_date=selected_start_date,
+        selected_end_date=selected_end_date,
+    )
+    store_follower_timelines = _follower_seller_timelines(
+        store_snapshots,
+        selected_start_date=selected_start_date,
+        selected_end_date=selected_end_date,
+        own_offer_ids_by_plid=own_offer_ids_by_plid,
+        own_skus_by_plid=own_skus_by_plid,
+        not_before_by_plid=own_store_start_dates,
+    )
 
     latest_by_plid: dict[str, CompetitorSnapshot] = {}
     snapshots_by_plid: dict[str, list[CompetitorSnapshot]] = {}
@@ -921,6 +944,7 @@ def load_competitor_dataset(
                 price_change=price_change,
                 price_signal=price_signal,
                 offer_rows=offer_rows,
+                follower_timeline=competitor_follower_timelines.get(plid),
             )
         )
     current = pd.DataFrame(current_rows)
@@ -978,6 +1002,7 @@ def load_competitor_dataset(
             store_names_by_code=store_names_by_code,
             own_offer_ids_by_plid=own_offer_ids_by_plid,
             own_skus_by_plid=own_skus_by_plid,
+            follower_timelines=store_follower_timelines,
         )
     )
     store_history = pd.DataFrame(
@@ -998,6 +1023,10 @@ def load_competitor_dataset(
         variants=variant_frame,
         store_current=store_current,
         store_history=store_history,
+        own_follower_events=_own_follower_event_rows(
+            selected_store_offers,
+            store_follower_timelines,
+        ),
         available_start_date=available_start_date,
         available_end_date=available_end_date,
         selected_start_date=selected_start_date,
@@ -1564,6 +1593,7 @@ def _snapshot_row(
     price_change: float | None = None,
     price_signal: str | None = None,
     offer_rows: list[dict[str, object]] | None = None,
+    follower_timeline: dict[str, object] | None = None,
     raw_history: bool = False,
 ) -> dict[str, object]:
     stock_text = _stock_text(row)
@@ -1596,6 +1626,7 @@ def _snapshot_row(
             if period_sales_min == period_sales_max
             else f"{period_sales_min}–{period_sales_max}"
         )
+    follower_timeline = follower_timeline or {}
     return {
         "来源": "competitor",
         "快照ID": row.id,
@@ -1643,6 +1674,21 @@ def _snapshot_row(
         "对比报价": offer_rows or [],
         "自有报价": [],
         "共享评论说明": None,
+        "跟卖发现日期": list(
+            cast(list[str], follower_timeline.get("跟卖发现日期", []))
+        ),
+        "新增跟卖卖家数": int(
+            cast(int, follower_timeline.get("新增跟卖卖家数", 0))
+        ),
+        "新增跟卖卖家": list(
+            cast(list[str], follower_timeline.get("新增跟卖卖家", []))
+        ),
+        "跟卖卖家明细": list(
+            cast(
+                list[dict[str, object]],
+                follower_timeline.get("跟卖卖家明细", []),
+            )
+        ),
     }
 
 
@@ -1674,6 +1720,7 @@ def _seller_api_offer_rows(
         history.sort(key=lambda row: (row.display_date, row.captured_at, row.id))
         oldest = history[0]
         latest = history[-1]
+        has_interval_comparison = len(history) > 1
         oldest_price = (
             float(oldest.selling_price) if oldest.selling_price is not None else None
         )
@@ -1682,12 +1729,12 @@ def _seller_api_offer_rows(
         )
         price_change = (
             latest_price - oldest_price
-            if oldest.id != latest.id
+            if has_interval_comparison
             and oldest_price is not None
             and latest_price is not None
             else None
         )
-        if raw_history or oldest.id == latest.id:
+        if raw_history or not has_interval_comparison:
             price_signal = "Seller API刷新"
         elif price_change is None:
             price_signal = "价格不可比"
@@ -1699,7 +1746,7 @@ def _seller_api_offer_rows(
             price_signal = "价格不变"
 
         stock_comparable = (
-            oldest.id != latest.id
+            has_interval_comparison
             and oldest.total_stock is not None
             and latest.total_stock is not None
         )
@@ -1710,7 +1757,7 @@ def _seller_api_offer_rows(
             and oldest.total_stock is not None
             else None
         )
-        if raw_history or oldest.id == latest.id:
+        if raw_history or not has_interval_comparison:
             stock_signal = "Seller API刷新"
         elif stock_change is None:
             stock_signal = "库存不可比"
@@ -1758,7 +1805,7 @@ def _seller_api_offer_rows(
                 "是否变体主报价": False,
                 "plid": str(latest.productline_id or ""),
                 "链接": f"https://www.takealot.com/p/PLID{latest.productline_id}",
-                "区间起始价格": oldest_price if oldest.id != latest.id else None,
+                "区间起始价格": oldest_price if has_interval_comparison else None,
                 "价格变化": price_change,
                 "价格信号": price_signal,
                 "区间起始库存状态": (
@@ -1767,7 +1814,7 @@ def _seller_api_offer_rows(
                     else None
                 ),
                 "区间起始库存数量": (
-                    oldest.total_stock if oldest.id != latest.id else None
+                    oldest.total_stock if has_interval_comparison else None
                 ),
                 "库存数量变化": stock_change,
                 "库存可比": stock_comparable,
@@ -1816,6 +1863,168 @@ def _store_follower_offer_rows(
     ]
 
 
+def _follower_seller_identity(
+    offer: Mapping[str, object],
+) -> tuple[str, str, str | None] | None:
+    seller_name = str(offer.get("卖家") or "未知卖家").strip() or "未知卖家"
+    normalized_name = " ".join(seller_name.casefold().split())
+    seller_id = str(offer.get("卖家ID") or "").strip() or None
+    known_name = (
+        normalized_name not in {"", "未知卖家", "unknown seller"}
+        and not normalized_name.startswith("卖家id ")
+    )
+    if known_name:
+        return f"name:{normalized_name}", seller_name, seller_id
+    if seller_id:
+        return f"id:{seller_id.casefold()}", seller_name, seller_id
+    offer_id = str(offer.get("offer_id") or "").strip()
+    if offer_id:
+        return f"offer:{offer_id.casefold()}", seller_name, None
+    return None
+
+
+def _follower_seller_timelines(
+    snapshots: list[CompetitorSnapshot],
+    *,
+    selected_start_date: date | None,
+    selected_end_date: date | None,
+    own_offer_ids_by_plid: dict[str, set[str]] | None = None,
+    own_skus_by_plid: dict[str, set[str]] | None = None,
+    not_before_by_plid: dict[str, date] | None = None,
+) -> dict[str, dict[str, object]]:
+    """Rebuild first-observed seller events from immutable public snapshots."""
+    first_seen: dict[tuple[str, str], date] = {}
+    selected: dict[str, dict[str, dict[str, object]]] = {}
+    own_store_mode = own_offer_ids_by_plid is not None or own_skus_by_plid is not None
+    own_offer_ids_by_plid = own_offer_ids_by_plid or {}
+    own_skus_by_plid = own_skus_by_plid or {}
+    not_before_by_plid = not_before_by_plid or {}
+
+    for snapshot in sorted(snapshots, key=lambda row: (row.collected_at, row.id)):
+        observed_date = _competitor_display_date(snapshot.collected_at)
+        not_before = not_before_by_plid.get(snapshot.plid)
+        if not_before is not None and observed_date < not_before:
+            continue
+        if own_store_mode:
+            offers = _store_follower_offer_rows(
+                snapshot,
+                snapshot,
+                own_offer_ids=own_offer_ids_by_plid.get(snapshot.plid, set()),
+                own_skus=own_skus_by_plid.get(snapshot.plid, set()),
+                raw_history=True,
+            )
+        else:
+            offers = [
+                offer
+                for offer in _interval_offer_rows(snapshot, snapshot, raw_history=True)
+                if bool(offer.get("是否跟卖"))
+            ]
+        sellers_in_snapshot: dict[str, tuple[str, str | None]] = {}
+        for offer in offers:
+            identity = _follower_seller_identity(offer)
+            if identity is None:
+                continue
+            key, seller_name, seller_id = identity
+            sellers_in_snapshot.setdefault(key, (seller_name, seller_id))
+            first_seen.setdefault((snapshot.plid, key), observed_date)
+
+        in_selected_range = (
+            (selected_start_date is None or observed_date >= selected_start_date)
+            and (selected_end_date is None or observed_date <= selected_end_date)
+        )
+        if not in_selected_range:
+            continue
+        for key, (seller_name, seller_id) in sellers_in_snapshot.items():
+            details_by_seller = selected.setdefault(snapshot.plid, {})
+            detail = details_by_seller.setdefault(
+                key,
+                {
+                    "卖家ID": seller_id,
+                    "卖家": seller_name,
+                    "首次发现日期": first_seen[(snapshot.plid, key)].isoformat(),
+                    "区间发现日期": set(),
+                    "区间观察次数": 0,
+                },
+            )
+            dates = detail["区间发现日期"]
+            assert isinstance(dates, set)
+            dates.add(observed_date.isoformat())
+            detail["区间观察次数"] = int(str(detail["区间观察次数"])) + 1
+
+    result: dict[str, dict[str, object]] = {}
+    for plid, seller_details in selected.items():
+        details: list[dict[str, object]] = []
+        observed_dates: set[str] = set()
+        new_seller_names: list[str] = []
+        for key, raw_detail in seller_details.items():
+            raw_dates = raw_detail["区间发现日期"]
+            assert isinstance(raw_dates, set)
+            dates = sorted(cast(set[str], raw_dates))
+            first_date = first_seen[(plid, key)]
+            is_new = (
+                (selected_start_date is None or first_date >= selected_start_date)
+                and (selected_end_date is None or first_date <= selected_end_date)
+            )
+            detail = {
+                **raw_detail,
+                "区间发现日期": dates,
+                "是否区间新增": is_new,
+            }
+            details.append(detail)
+            observed_dates.update(dates)
+            if is_new:
+                new_seller_names.append(str(raw_detail["卖家"]))
+        details.sort(key=lambda item: (str(item["首次发现日期"]), str(item["卖家"])))
+        result[plid] = {
+            "跟卖发现日期": sorted(observed_dates),
+            "新增跟卖卖家数": len(new_seller_names),
+            "新增跟卖卖家": sorted(set(new_seller_names)),
+            "跟卖卖家明细": details,
+        }
+    return result
+
+
+def _own_follower_event_rows(
+    connected_offers: list[ConnectedStoreOffer],
+    timelines: dict[str, dict[str, object]],
+) -> list[dict[str, object]]:
+    offers_by_plid: dict[str, list[ConnectedStoreOffer]] = {}
+    for item in connected_offers:
+        plid = str(item.offer.productline_id or "").strip()
+        if plid:
+            offers_by_plid.setdefault(plid, []).append(item)
+
+    events: list[dict[str, object]] = []
+    for plid, timeline in timelines.items():
+        dates = list(cast(list[str], timeline.get("跟卖发现日期", [])))
+        if not dates:
+            continue
+        own_offers = offers_by_plid.get(plid, [])
+        representative = own_offers[0] if own_offers else None
+        events.append(
+            {
+                "plid": plid,
+                "链接": f"https://www.takealot.com/p/PLID{plid}",
+                "商品": (
+                    representative.offer.title
+                    if representative is not None and representative.offer.title
+                    else f"PLID{plid}"
+                ),
+                "图片": representative.offer.image_url if representative is not None else None,
+                "店铺": sorted({item.store_name for item in own_offers}),
+                **timeline,
+            }
+        )
+    events.sort(
+        key=lambda item: (
+            str(cast(list[str], item["跟卖发现日期"])[-1]),
+            str(item["plid"]),
+        ),
+        reverse=True,
+    )
+    return events
+
+
 def _store_snapshot_rows(
     baselines: list[StoreOfferPoint],
     follower_snapshots: list[CompetitorSnapshot],
@@ -1825,6 +2034,7 @@ def _store_snapshot_rows(
     store_names_by_code: dict[str, str],
     own_offer_ids_by_plid: dict[str, set[str]],
     own_skus_by_plid: dict[str, set[str]],
+    follower_timelines: dict[str, dict[str, object]],
 ) -> list[dict[str, object]]:
     """Build own-store cards from every Seller API refresh plus follower offers."""
     selected_baselines = [
@@ -1865,6 +2075,42 @@ def _store_snapshot_rows(
             if stock_exact
             else None
         )
+        priced_offer_rows = [row for row in own_offer_rows if row["价格"] is not None]
+        price_comparable = bool(priced_offer_rows) and all(
+            row["区间起始价格"] is not None for row in priced_offer_rows
+        )
+        start_price = (
+            min(float(str(row["区间起始价格"])) for row in priced_offer_rows)
+            if price_comparable
+            else None
+        )
+        current_price = min(prices) if prices else None
+        aggregate_price_change = (
+            current_price - start_price
+            if current_price is not None and start_price is not None
+            else None
+        )
+        if aggregate_price_change is None:
+            aggregate_price_signal = (
+                "待建立价格基线"
+                if not any(row["区间起始价格"] is not None for row in priced_offer_rows)
+                else "价格不可比"
+            )
+        elif aggregate_price_change < 0:
+            aggregate_price_signal = "降价"
+        elif aggregate_price_change > 0:
+            aggregate_price_signal = "涨价"
+        else:
+            aggregate_price_signal = "价格不变"
+
+        aggregate_stock_comparable = bool(own_offer_rows) and all(
+            bool(row["库存可比"]) for row in own_offer_rows
+        )
+        aggregate_stock_change = (
+            sum(int(str(row["库存数量变化"])) for row in own_offer_rows)
+            if aggregate_stock_comparable
+            else None
+        )
 
         observations = followers_by_plid.get(plid, [])
         observations.sort(key=lambda row: row.collected_at, reverse=True)
@@ -1881,6 +2127,7 @@ def _store_snapshot_rows(
             else []
         )
         has_followers = bool(follower_rows)
+        follower_timeline = follower_timelines.get(plid, {})
         captured_at = max(row.captured_at for row in own_offers)
         public_collected_at = (
             latest_observation.collected_at if latest_observation is not None else None
@@ -1912,10 +2159,10 @@ def _store_snapshot_rows(
                 "图片": representative.image_url,
                 "采集时间": captured_at,
                 "当前卖家": "自有店铺（Seller API）",
-                "价格": min(prices) if prices else None,
-                "区间起始价格": None,
-                "价格变化": None,
-                "价格信号": "Seller API最新刷新",
+                "价格": current_price,
+                "区间起始价格": start_price,
+                "价格变化": aggregate_price_change,
+                "价格信号": aggregate_price_signal,
                 "库存上限": str(total_stock) if total_stock is not None else "接口未提供",
                 "库存数量": total_stock,
                 "库存精确": stock_exact,
@@ -1939,9 +2186,17 @@ def _store_snapshot_rows(
                 "观察期销量信号": "只看跟卖报价",
                 "观察期估算下限": None,
                 "观察期估算上限": None,
-                "库存净变化": None,
-                "库存净流入": None,
-                "库存净流出": None,
+                "库存净变化": aggregate_stock_change,
+                "库存净流入": (
+                    max(0, aggregate_stock_change)
+                    if aggregate_stock_change is not None
+                    else None
+                ),
+                "库存净流出": (
+                    max(0, -aggregate_stock_change)
+                    if aggregate_stock_change is not None
+                    else None
+                ),
                 "新增评论": (
                     max(0, latest_observation.review_count - oldest_observation.review_count)
                     if latest_observation is not None
@@ -1970,7 +2225,7 @@ def _store_snapshot_rows(
                 ),
                 "信号区间结束": public_collected_at,
                 "区间快照数": len(observations),
-                "库存可比": None,
+                "库存可比": aggregate_stock_comparable,
                 "链接": f"https://www.takealot.com/p/PLID{plid}",
                 "跟卖报价": follower_rows,
                 "对比报价": [*own_offer_rows, *follower_rows],
@@ -1994,6 +2249,21 @@ def _store_snapshot_rows(
                     "私有链接首次检查或评论数变化时单独同步，并作为商品共享信号展示。"
                     if latest_observation is not None
                     else "该私有链接等待首次公开页检查，尚未同步PLID商品评论。"
+                ),
+                "跟卖发现日期": list(
+                    cast(list[str], follower_timeline.get("跟卖发现日期", []))
+                ),
+                "新增跟卖卖家数": int(
+                    cast(int, follower_timeline.get("新增跟卖卖家数", 0))
+                ),
+                "新增跟卖卖家": list(
+                    cast(list[str], follower_timeline.get("新增跟卖卖家", []))
+                ),
+                "跟卖卖家明细": list(
+                    cast(
+                        list[dict[str, object]],
+                        follower_timeline.get("跟卖卖家明细", []),
+                    )
                 ),
             }
         )
@@ -2064,6 +2334,10 @@ def _store_baseline_history_row(
         "对比报价": own_rows,
         "自有报价": [],
         "共享评论说明": "该Seller API时间点未同时采集公开评论，评论曲线保持断点。",
+        "跟卖发现日期": [],
+        "新增跟卖卖家数": 0,
+        "新增跟卖卖家": [],
+        "跟卖卖家明细": [],
     }
 
 

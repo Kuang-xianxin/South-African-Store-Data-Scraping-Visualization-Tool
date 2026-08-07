@@ -231,7 +231,9 @@ def test_competitor_observation_persists_snapshot_and_deduplicated_reviews(
     }
 
 
-def test_follower_offer_stock_is_bound_to_its_exact_seller_offer(tmp_path: Path) -> None:
+def test_green_and_red_follower_stock_is_bound_to_its_exact_seller_offer(
+    tmp_path: Path,
+) -> None:
     engine = create_engine(f"sqlite:///{(tmp_path / 'offer-stock.db').as_posix()}")
     create_schema(engine)
     url = "https://www.takealot.com/example/PLID12345678"
@@ -268,11 +270,14 @@ def test_follower_offer_stock_is_bound_to_its_exact_seller_offer(tmp_path: Path)
         seller_name="Seller One",
         price=105.0,
         stock_status="In stock",
+        is_buybox=True,
         is_add_to_cart_available=True,
         plid="12345678",
         url=url,
         offer_id="other-buying-option-SKU-ONE",
         identity_key="offer:other-buying-option-sku-one",
+        buybox_rank=1,
+        is_follower_offer=True,
     )
     follower_two = replace(
         follower_one,
@@ -560,6 +565,7 @@ def test_own_store_product_is_separated_and_only_exposes_follower_offers(
         url=url,
         offer_id="follower-offer",
         identity_key="offer:follower-offer",
+        is_follower_offer=True,
     )
     product = CompetitorProduct(
         plid=plid,
@@ -667,7 +673,19 @@ def test_own_store_product_is_separated_and_only_exposes_follower_offers(
     item = dataset.store_current.iloc[0]
     assert item["来源"] == "own_store"
     assert item["价格"] == 95.0
+    assert item["区间起始价格"] == 100.0
+    assert item["价格变化"] == -5.0
+    assert item["价格信号"] == "降价"
     assert item["库存数量"] == 6
+    assert item["库存净变化"] == -1
+    assert item["库存净流出"] == 1
+    assert bool(item["库存可比"])
+    assert item["跟卖发现日期"] == ["2026-08-02"]
+    assert item["新增跟卖卖家数"] == 1
+    assert item["新增跟卖卖家"] == ["Follower Seller"]
+    assert item["跟卖卖家明细"][0]["首次发现日期"] == "2026-08-02"
+    assert dataset.own_follower_events[0]["plid"] == plid
+    assert dataset.own_follower_events[0]["跟卖发现日期"] == ["2026-08-02"]
     assert [offer["offer_id"] for offer in item["跟卖报价"]] == [
         "follower-offer"
     ]
@@ -720,6 +738,131 @@ def test_own_store_product_without_public_snapshot_waits_for_first_check(
     item = dataset.store_current.iloc[0]
     assert item["趋势判断"] == "等待首次检查"
     assert "等待后台轮巡首次检查" in item["判断说明"]
+
+
+def test_own_store_follower_history_keeps_dates_after_seller_disappears(
+    tmp_path: Path,
+) -> None:
+    engine = create_engine(f"sqlite:///{(tmp_path / 'store-follower-history.db').as_posix()}")
+    create_schema(engine)
+    plid = "33334444"
+    url = f"https://www.takealot.com/p/PLID{plid}"
+    own_offer = CompetitorOffer(
+        selected=True,
+        sku="OWN-HISTORY-SKU",
+        seller_id="own-history",
+        seller_name="Own History Store",
+        price=200.0,
+        stock_status="In stock",
+        is_buybox=True,
+        plid=plid,
+        url=url,
+        offer_id="own-history-offer",
+    )
+    follower_offer = CompetitorOffer(
+        selected=False,
+        sku="FOLLOWER-HISTORY-SKU",
+        seller_id="follower-history",
+        seller_name="History Follower",
+        price=190.0,
+        stock_status="In stock",
+        is_buybox=False,
+        plid=plid,
+        url=url,
+        offer_id="follower-history-offer",
+        identity_key="offer:follower-history-offer",
+        is_follower_offer=True,
+    )
+    captured_at = datetime(2026, 8, 1, 1, tzinfo=UTC)
+    with Session(engine) as session, session.begin():
+        session.add(
+            OfferCurrent(
+                offer_id="own-history-offer",
+                productline_id=plid,
+                title="Follower History Product",
+                selling_price=200,
+                total_stock=9,
+                captured_at=captured_at,
+            )
+        )
+        session.add(
+            StoreOfferBaseline(
+                display_date=date(2026, 8, 1),
+                offer_id="own-history-offer",
+                productline_id=plid,
+                sku="OWN-HISTORY-SKU",
+                title="Follower History Product",
+                selling_price=200,
+                status="buyable",
+                total_stock=9,
+                captured_at=captured_at,
+            )
+        )
+
+    for day, offers in (
+        (1, (own_offer,)),
+        (2, (own_offer, follower_offer)),
+        (3, (own_offer,)),
+    ):
+        collected_at = datetime(2026, 8, day, 1, tzinfo=UTC)
+        product = CompetitorProduct(
+            plid=plid,
+            url=url,
+            title="Follower History Product",
+            image_url=None,
+            sku="OWN-HISTORY-SKU",
+            seller_id="own-history",
+            seller_name="Own History Store",
+            price=200.0,
+            stock_status="In stock",
+            is_leadtime=False,
+            review_count=0,
+            rating=0.0,
+            offers=offers,
+            variants=(),
+        )
+        with Session(engine) as session, session.begin():
+            CompetitorRepository(session).save_observation(
+                product=product,
+                reviews=[],
+                review_summary=summarize_reviews([]),
+                stock=skipped_stock_probe(),
+                variant_stocks=[],
+                offer_stocks=(
+                    [OfferStockObservation(follower_offer, skipped_stock_probe())]
+                    if day == 2
+                    else []
+                ),
+                lifetime_sales=estimate_lifetime_sales(0),
+                signal=analyze_sales_signal(
+                    None,
+                    current_stock_quantity=None,
+                    current_stock_exact=False,
+                    current_review_count=0,
+                ),
+                collected_at=collected_at,
+                register_target=False,
+            )
+
+    full_range = load_competitor_dataset(
+        engine,
+        start_date=date(2026, 8, 1),
+        end_date=date(2026, 8, 3),
+    )
+    disappeared_range = load_competitor_dataset(
+        engine,
+        start_date=date(2026, 8, 3),
+        end_date=date(2026, 8, 3),
+    )
+    engine.dispose()
+
+    full_item = full_range.store_current.iloc[0]
+    assert full_item["跟卖报价"] == []
+    assert full_item["跟卖发现日期"] == ["2026-08-02"]
+    assert full_item["新增跟卖卖家"] == ["History Follower"]
+    assert full_range.own_follower_events[0]["跟卖发现日期"] == ["2026-08-02"]
+    assert full_range.own_follower_events[0]["跟卖卖家明细"][0]["是否区间新增"] is True
+    assert disappeared_range.own_follower_events == []
 
 
 def test_own_store_without_followers_still_exposes_reviews_and_variants(
@@ -867,6 +1010,7 @@ def test_competitor_signals_recompute_from_oldest_and_latest_in_date_range(
                 plid="12345678",
                 url="https://www.takealot.com/example/PLID12345678",
                 offer_id="offer-up",
+                is_follower_offer=True,
             ),
         ),
         variants=(
@@ -1000,6 +1144,12 @@ def test_competitor_signals_recompute_from_oldest_and_latest_in_date_range(
     assert all_signal["区间起始价格"] == 220.0
     assert all_signal["价格变化"] == -20.0
     assert all_signal["价格信号"] == "降价"
+    assert all_signal["跟卖发现日期"] == [
+        "2026-07-22",
+        "2026-07-23",
+        "2026-07-24",
+    ]
+    assert all_signal["新增跟卖卖家"] == ["Other Seller"]
     all_offers = {offer["offer_id"]: offer for offer in all_signal["跟卖报价"]}
     assert all_offers["offer-down"]["价格变化"] == -20.0
     assert all_offers["offer-down"]["价格信号"] == "降价"
@@ -1035,6 +1185,8 @@ def test_competitor_signals_recompute_from_oldest_and_latest_in_date_range(
     assert recent_signal["区间起始价格"] == 210.0
     assert recent_signal["价格变化"] == -10.0
     assert recent_signal["价格信号"] == "降价"
+    assert recent_signal["新增跟卖卖家数"] == 0
+    assert recent_signal["跟卖卖家明细"][0]["是否区间新增"] is False
     recent_offers = {offer["offer_id"]: offer for offer in recent_signal["跟卖报价"]}
     assert recent_offers["offer-down"]["价格变化"] == -10.0
     assert recent_offers["offer-down"]["库存数量变化"] == -4

@@ -11,7 +11,11 @@ from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
 from takealot_ops.competitors.api import CompetitorNetworkError
-from takealot_ops.competitors.batch import CollectionBatchBusyError
+from takealot_ops.competitors.batch import (
+    CollectionBatchBusyError,
+    CollectionBatchRegistry,
+    CollectionRequestCoordinator,
+)
 from takealot_ops.competitors.service import (
     CompetitorCollectionResult,
     CompetitorDiscoveredTarget,
@@ -179,6 +183,23 @@ def test_competitor_radar_returns_automatic_store_targets_and_separate_items(
         create_schema(engine)
         engine.dispose()
 
+        started_batch = client.post(
+            "/api/competitors/batch-events",
+            headers={"X-CSRF-Token": str(issued["csrf_token"])},
+            json={
+                "batch_id": "combined-batch",
+                "client_id": "combined-client",
+                "event": "start",
+                "completed": 0,
+                "total": 3,
+                "pending": 3,
+            },
+        )
+        private_priority = client.post(
+            "/api/competitors/targets/12345678/prioritize",
+            headers={"X-CSRF-Token": str(issued["csrf_token"])},
+        )
+
         automatic_targets = client.get("/api/competitors/store-targets")
         all_store_targets = client.get(
             "/api/competitors/store-targets?own_store_scope=all"
@@ -201,6 +222,10 @@ def test_competitor_radar_returns_automatic_store_targets_and_separate_items(
             json={"url": "https://www.takealot.com/p/PLID77777777"},
         )
 
+    assert started_batch.status_code == 200
+    assert private_priority.status_code == 200
+    assert private_priority.json()["accepted"] is True
+    assert private_priority.json()["status"]["priority_targets"][0]["plid"] == "12345678"
     assert automatic_targets.status_code == 200
     assert automatic_targets.json() == {
         "items": [
@@ -264,11 +289,13 @@ def test_competitor_radar_returns_automatic_store_targets_and_separate_items(
     assert {item["plid"] for item in overview.json()["store_items"]} == {
         "12345678",
     }
+    assert overview.json()["own_follower_events"] == []
     assert all_store_overview.status_code == 200
     assert {item["plid"] for item in all_store_overview.json()["store_items"]} == {
         "12345678",
         "87654321",
     }
+    assert all_store_overview.json()["own_follower_events"] == []
     assert all(item["来源"] == "own_store" for item in overview.json()["store_items"])
     assert private_add.status_code == 200
     assert private_add.json() == {
@@ -1496,6 +1523,65 @@ def test_collect_returns_locked_when_another_link_is_still_active(
 
     assert response.status_code == 423
     assert "阻止另一页面并发" in response.json()["detail"]
+
+
+def test_manual_stop_cancels_active_request_and_closes_shared_browser(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    database_path = tmp_path / "erp.db"
+    monkeypatch.setenv(
+        "TAKEALOT_DATABASE_URL",
+        f"sqlite:///{database_path.as_posix()}",
+    )
+    cancelled_requests: list[str | None] = []
+    browser_close_calls: list[bool] = []
+
+    def stopped_event(
+        _registry: CollectionBatchRegistry,
+        **_: object,
+    ) -> dict[str, object]:
+        return {
+            "event": "manual_stop",
+            "current_request_id": "request-stop",
+        }
+
+    async def cancel_request(
+        _coordinator: CollectionRequestCoordinator[object],
+        request_id: str | None,
+    ) -> bool:
+        cancelled_requests.append(request_id)
+        return True
+
+    async def close_browser(_client: object) -> None:
+        browser_close_calls.append(True)
+
+    monkeypatch.setattr(CollectionBatchRegistry, "event", stopped_event)
+    monkeypatch.setattr(CollectionRequestCoordinator, "cancel", cancel_request)
+    monkeypatch.setattr(
+        "takealot_ops.erp.web._SharedCompetitorPublicClient.close",
+        close_browser,
+    )
+    app = create_app(tmp_path)
+
+    with TestClient(app, client=("127.0.0.1", 50000)) as client:
+        session = _bootstrap(client)
+        response = client.post(
+            "/api/competitors/batch-events",
+            headers={"X-CSRF-Token": str(session["csrf_token"])},
+            json={
+                "batch_id": "batch-stop",
+                "client_id": "client-stop",
+                "event": "manual_stop",
+                "completed": 1,
+                "total": 3,
+                "pending": 2,
+            },
+        )
+
+        assert response.status_code == 200
+        assert cancelled_requests == ["request-stop"]
+        assert browser_close_calls == [True]
 
 
 def test_only_kxx_controls_batch_while_other_admin_can_add_and_prioritize(

@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
 import random
 import re
 import time
+from dataclasses import dataclass
 from pathlib import Path
 
+from playwright.async_api import BrowserContext
 from playwright.async_api import Error as PlaywrightError
 from playwright.async_api import Locator, Page, async_playwright
 
@@ -39,6 +42,17 @@ CUSTOMER_PURCHASE_LIMIT_PATTERN = re.compile(
     re.IGNORECASE,
 )
 CUSTOM_QUANTITY_INPUT = 'input[name="quantity"]:not([aria-hidden="true"]):visible'
+
+
+@dataclass(frozen=True)
+class _BuyboxOfferCandidate:
+    """One actionable, price-bearing option card in the product buy box."""
+
+    index: int
+    click_targets: tuple[Locator, ...]
+    state_targets: tuple[Locator, ...]
+    text: str
+    radio: Locator | None = None
 
 
 def skipped_stock_probe() -> StockProbeResult:
@@ -93,6 +107,7 @@ async def probe_stock(
             ],
         )
         page = context.pages[0] if context.pages else await context.new_page()
+        cancelled = False
         try:
             return await _probe_page_stock(
                 page,
@@ -100,13 +115,18 @@ async def probe_stock(
                 url=product.url,
                 title=product.title,
             )
+        except asyncio.CancelledError:
+            cancelled = True
+            await _close_stock_browser_context(context)
+            raise
         finally:
-            try:
-                await _clear_isolated_cart(page)
-            except Exception:
-                # The isolated profile is cleared again before the next probe.
-                pass
-            await context.close()
+            if not cancelled:
+                try:
+                    await _clear_isolated_cart(page)
+                except Exception:
+                    # The isolated profile is cleared again before the next probe.
+                    pass
+                await _close_stock_browser_context(context)
 
 
 async def probe_variant_stocks(
@@ -190,6 +210,7 @@ async def probe_product_stocks(
             page = context.pages[0] if context.pages else await context.new_page()
             try:
                 for variant in purchasable:
+                    cancelled = False
                     try:
                         results[variant.key] = await _probe_page_stock(
                             page,
@@ -197,6 +218,10 @@ async def probe_product_stocks(
                             url=variant.url,
                             title=variant.title,
                         )
+                    except asyncio.CancelledError:
+                        cancelled = True
+                        await _close_stock_browser_context(context)
+                        raise
                     except (OSError, RuntimeError, PlaywrightError) as exc:
                         results[variant.key] = StockProbeResult(
                             quantity=None,
@@ -205,11 +230,13 @@ async def probe_product_stocks(
                             note=str(exc),
                         )
                     finally:
-                        try:
-                            await _clear_isolated_cart(page)
-                        except Exception:
-                            pass
+                        if not cancelled:
+                            try:
+                                await _clear_isolated_cart(page)
+                            except Exception:
+                                pass
                 for index, offer in purchasable_offers:
+                    cancelled = False
                     try:
                         offer_results[index] = await (
                             _probe_page_buybox_offer_stock(
@@ -224,6 +251,10 @@ async def probe_product_stocks(
                                 offer=offer,
                             )
                         )
+                    except asyncio.CancelledError:
+                        cancelled = True
+                        await _close_stock_browser_context(context)
+                        raise
                     except (OSError, RuntimeError, PlaywrightError) as exc:
                         offer_results[index] = StockProbeResult(
                             quantity=None,
@@ -232,12 +263,13 @@ async def probe_product_stocks(
                             note=str(exc),
                         )
                     finally:
-                        try:
-                            await _clear_isolated_cart(page)
-                        except Exception:
-                            pass
+                        if not cancelled:
+                            try:
+                                await _clear_isolated_cart(page)
+                            except Exception:
+                                pass
             finally:
-                await context.close()
+                await _close_stock_browser_context(context)
 
     variant_observations = [
         VariantStockObservation(variant=variant, stock=results[variant.key])
@@ -249,6 +281,15 @@ async def probe_product_stocks(
         if probe_offer_buyboxes or offer.is_follower_offer
     ]
     return variant_observations, offer_observations
+
+
+async def _close_stock_browser_context(context: BrowserContext) -> None:
+    """Close the inventory browser even while its owning task is being cancelled."""
+    try:
+        await asyncio.shield(context.close())
+    except Exception:
+        # The target may already have closed as cancellation propagated.
+        pass
 
 
 async def _probe_page_stock(
@@ -375,25 +416,217 @@ async def _probe_page_buybox_offer_stock(
 
 
 async def _select_buybox_offer(page: Page, offer: CompetitorOffer) -> None:
-    """Select one exact radio option from Takealot's multi-offer main buy box."""
+    """Select one exact, price-verified option from the multi-offer buy box."""
     if offer.selected:
         return
     if offer.buybox_rank is None:
         raise RuntimeError("主购买区备选报价缺少可核验的选项位置")
-    radios = page.locator('main aside input[type="radio"]:visible')
-    deadline = time.monotonic() + 15
+
+    deadline = time.monotonic() + 20
+    click_attempt = 0
+    last_click_error = ""
+    last_candidates: list[_BuyboxOfferCandidate] = []
     while time.monotonic() < deadline:
-        if await radios.count() > offer.buybox_rank:
-            radio = radios.nth(offer.buybox_rank)
-            if not await radio.is_checked():
-                await radio.click()
-                await page.wait_for_timeout(1200)
-            if await radio.is_checked():
+        candidates = await _buybox_offer_candidates(page)
+        last_candidates = candidates
+        candidate = _choose_buybox_offer_candidate(candidates, offer)
+        if candidate is not None:
+            if await _buybox_candidate_is_selected(candidate):
                 return
+
+            await _dismiss_marketing_overlay(page)
+            await _dismiss_terms_modal(page)
+            click_target = candidate.click_targets[
+                min(click_attempt, len(candidate.click_targets) - 1)
+            ]
+            click_attempt += 1
+            try:
+                await click_target.click(timeout=5_000)
+            except PlaywrightError as exc:
+                last_click_error = _compact_playwright_error(exc)
+            else:
+                await page.wait_for_timeout(1200)
+                refreshed_candidates = await _buybox_offer_candidates(page)
+                last_candidates = refreshed_candidates
+                refreshed = _choose_buybox_offer_candidate(refreshed_candidates, offer)
+                if refreshed is not None and await _buybox_candidate_is_selected(
+                    refreshed
+                ):
+                    return
+                if await _dismiss_terms_modal(page):
+                    await page.wait_for_timeout(300)
         await page.wait_for_timeout(500)
+
+    diagnostic = await _buybox_candidate_diagnostic(last_candidates)
+    click_note = f"；最近点击错误：{last_click_error}" if last_click_error else ""
     raise RuntimeError(
-        f"无法切换到主购买区第 {offer.buybox_rank + 1} 个报价（{offer.offer_id or offer.sku}）"
+        f"无法切换到主购买区第 {offer.buybox_rank + 1} 个报价"
+        f"（{offer.offer_id or offer.sku}，预期价格 R {offer.price:,.2f}）"
+        f"；{diagnostic}{click_note}"
     )
+
+
+async def _buybox_offer_candidates(page: Page) -> list[_BuyboxOfferCandidate]:
+    """Return current offer-link cards, retaining the legacy radio fallback."""
+    buy_box = page.locator("main aside")
+    offer_links = buy_box.locator(
+        '[data-ref="offers-wrapper"] [data-ref="offer-link"][role="button"]:visible'
+    )
+    modern_candidates: list[_BuyboxOfferCandidate] = []
+    for index in range(await offer_links.count()):
+        offer_link = offer_links.nth(index)
+        if not await offer_link.is_visible():
+            continue
+        card = offer_link.locator('[data-ref="buybox-offer"]')
+        state_targets = [offer_link]
+        if await card.count() == 1:
+            state_targets.append(card)
+        click_targets: list[Locator] = []
+        radio_container = offer_link.locator('[data-ref="radio-container"]:visible')
+        if await radio_container.count() == 1 and await radio_container.is_visible():
+            click_targets.append(radio_container)
+        click_targets.append(offer_link)
+        modern_candidates.append(
+            _BuyboxOfferCandidate(
+                index=index,
+                click_targets=tuple(click_targets),
+                state_targets=tuple(state_targets),
+                text=" ".join((await offer_link.inner_text()).split()),
+            )
+        )
+    if modern_candidates:
+        return modern_candidates
+
+    radios = buy_box.locator('input[type="radio"]')
+    candidates: list[_BuyboxOfferCandidate] = []
+    for index in range(await radios.count()):
+        radio = radios.nth(index)
+        possible_targets: list[Locator] = [
+            radio.locator("xpath=ancestor::label[1]"),
+            radio.locator(
+                "xpath=ancestor::*["
+                "contains(concat(' ', normalize-space(@class), ' '), "
+                "' buying-choice-list-item ')][1]"
+            ),
+            radio.locator(
+                "xpath=ancestor::*["
+                "(@role='radio' or contains(@data-ref, 'buying-choice'))][1]"
+            ),
+            radio.locator(
+                "xpath=ancestor::*[count(.//input[@type='radio'])=1 "
+                "and contains(normalize-space(.), 'R')][1]"
+            ),
+        ]
+        radio_id = (await radio.get_attribute("id") or "").strip()
+        if radio_id:
+            safe_radio_id = radio_id.replace("\\", "\\\\").replace('"', '\\"')
+            possible_targets.insert(
+                1,
+                buy_box.locator(f'label[for="{safe_radio_id}"]:visible'),
+            )
+
+        visible_targets: list[Locator] = []
+        text_parts: list[str] = []
+        for target in possible_targets:
+            if await target.count() != 1 or not await target.is_visible():
+                continue
+            visible_targets.append(target)
+            text = " ".join((await target.inner_text()).split())
+            if text and text not in text_parts:
+                text_parts.append(text)
+        if await radio.is_visible():
+            visible_targets.append(radio)
+        if not visible_targets:
+            continue
+
+        candidates.append(
+            _BuyboxOfferCandidate(
+                index=index,
+                click_targets=tuple(visible_targets),
+                state_targets=(radio, *visible_targets),
+                text=" | ".join(text_parts),
+                radio=radio,
+            )
+        )
+    return candidates
+
+
+def _choose_buybox_offer_candidate(
+    candidates: list[_BuyboxOfferCandidate],
+    offer: CompetitorOffer,
+) -> _BuyboxOfferCandidate | None:
+    """Choose by API rank plus card price, with a unique-price rerender fallback."""
+    price_matches = [
+        candidate
+        for candidate in candidates
+        if _rand_price_matches(candidate.text, offer.price)
+    ]
+    expected_seller = _normalise_offer_text(offer.seller_name)
+    if (
+        expected_seller
+        and expected_seller not in {"未知卖家", "unknown seller"}
+        and not expected_seller.startswith("卖家id ")
+    ):
+        seller_matches = [
+            candidate
+            for candidate in price_matches
+            if expected_seller in _normalise_offer_text(candidate.text)
+        ]
+        if seller_matches:
+            price_matches = seller_matches
+
+    ranked = next(
+        (candidate for candidate in candidates if candidate.index == offer.buybox_rank),
+        None,
+    )
+    if ranked is not None and any(
+        candidate.index == ranked.index for candidate in price_matches
+    ):
+        return ranked
+    if len(price_matches) == 1:
+        return price_matches[0]
+    return None
+
+
+async def _buybox_candidate_is_selected(candidate: _BuyboxOfferCandidate) -> bool:
+    if candidate.radio is not None and await candidate.radio.is_checked():
+        return True
+    for target in candidate.state_targets:
+        for attribute in ("aria-checked", "data-selected", "data-checked"):
+            if (await target.get_attribute(attribute) or "").casefold() == "true":
+                return True
+        if (await target.get_attribute("data-state") or "").casefold() == "checked":
+            return True
+        classes = await target.get_attribute("class") or ""
+        if re.search(
+            r"(?:^|[\s_-])(?:is[\s_-])?(?:active|selected|checked)(?:[\s_-]|$)",
+            classes,
+            re.IGNORECASE,
+        ):
+            return True
+    return False
+
+
+async def _buybox_candidate_diagnostic(
+    candidates: list[_BuyboxOfferCandidate],
+) -> str:
+    if not candidates:
+        return "主购买区没有识别到可见且可操作的报价单选卡"
+    details: list[str] = []
+    for candidate in candidates[:4]:
+        selected = await _buybox_candidate_is_selected(candidate)
+        text = " ".join(candidate.text.split())[:120] or "卡片文字为空"
+        details.append(
+            f"第{candidate.index + 1}项 selected={'yes' if selected else 'no'}，{text}"
+        )
+    omitted = len(candidates) - len(details)
+    suffix = f"，另有{omitted}项" if omitted > 0 else ""
+    return f"识别到{len(candidates)}个可操作报价：{'；'.join(details)}{suffix}"
+
+
+def _compact_playwright_error(error: BaseException) -> str:
+    raw = " ".join(str(error).split())
+    return raw.split("Call log:", 1)[0].strip()[:180] or type(error).__name__
 
 
 def _stock_probe_failure_note(stage: str, error: BaseException) -> str:
@@ -430,9 +663,14 @@ def _find_browser_executable() -> Path:
 
 
 async def _dismiss_cookie(page: Page) -> None:
+    # Braze can arrive after the product DOM and cover the cookie action as well as
+    # the buy-box controls.  Remove only its known overlay elements before every
+    # cookie attempt so a fresh/persistent profile cannot stall for the full click
+    # timeout before offer selection starts.
+    await _dismiss_marketing_overlay(page)
     button = page.get_by_role("button", name="Got it", exact=True)
     if await button.count() == 1 and await button.is_visible():
-        await button.click()
+        await button.click(timeout=5_000)
 
 
 async def _wait_for_product(page: Page, plid: str, title: str) -> None:
@@ -544,7 +782,11 @@ def _normalise_offer_text(value: str | None) -> str:
 
 def _rand_price_matches(text: str, expected_price: float) -> bool:
     for raw_price in re.findall(
-        r"\bR\s*(\d[\d,]*(?:\.\d{1,2})?)\b",
+        # Takealot's buy-box innerText can join the current and struck-through
+        # prices without whitespace (for example ``R 999R 1,299``).  A trailing
+        # word boundary rejects ``999`` because both ``9`` and ``R`` are word
+        # characters, so only rule out continuation of the numeric token here.
+        r"\bR\s*(\d[\d,]*(?:\.\d{1,2})?)(?![\d,.])",
         text,
         re.IGNORECASE,
     ):

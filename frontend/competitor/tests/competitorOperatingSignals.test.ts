@@ -23,6 +23,7 @@ function item(overrides: Partial<CompetitorItem> = {}): CompetitorItem {
     新增评论: null,
     新增好评: null,
     新增差评: null,
+    新增跟卖卖家数: 0,
     跟卖报价: [],
     ...overrides,
   } as CompetitorItem;
@@ -40,6 +41,7 @@ test("operating signal options contain only the confirmed categories", () => {
     "好评增加",
     "差评增加",
     "库存减少且评论增加",
+    "新增跟卖卖家",
   ]);
 });
 
@@ -85,6 +87,7 @@ test("stock and PLID review increases produce standalone and combined signals", 
     新增评论: 4,
     新增好评: 3,
     新增差评: 1,
+    新增跟卖卖家数: 2,
   });
 
   assert.deepEqual(competitorOperatingSignals(changed), [
@@ -94,7 +97,9 @@ test("stock and PLID review increases produce standalone and combined signals", 
     "好评增加",
     "差评增加",
     "库存减少且评论增加",
+    "新增跟卖卖家",
   ]);
   assert.equal(matchesCompetitorOperatingSignal(changed, "好评增加"), true);
   assert.equal(matchesCompetitorOperatingSignal(changed, "库存减少且评论增加"), true);
+  assert.equal(matchesCompetitorOperatingSignal(changed, "新增跟卖卖家"), true);
 });
