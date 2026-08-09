@@ -69,6 +69,8 @@ def test_daily_schedule_defaults_to_china_time_after_platform_rollover() -> None
     assert "[string]$CompetitorCollectionAt = '09:00'" in script
     assert '$ChineseDailyUpdate = -join [char[]](' in script
     assert "0x5E97, 0x94FA, 0x6570, 0x636E" in script
+    assert '$ChineseErpStartup = -join [char[]](' in script
+    assert "0x767B, 0x5F55, 0x540E, 0x81EA" in script
 
 
 def test_launcher_rejects_arbitrary_bind_address_before_subprocess() -> None:

@@ -4,6 +4,22 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+$restartMutex = New-Object System.Threading.Mutex(
+    $false,
+    'Local\TakealotErpStartup'
+)
+$restartMutexAcquired = $false
+try {
+    try {
+        $restartMutexAcquired = $restartMutex.WaitOne([TimeSpan]::FromSeconds(120))
+    }
+    catch [System.Threading.AbandonedMutexException] {
+        $restartMutexAcquired = $true
+    }
+    if (-not $restartMutexAcquired) {
+        throw 'Another ERP startup or restart did not finish within 120 seconds.'
+    }
+
 $projectRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..")).Path
 $pythonPath = Join-Path $projectRoot ".venv\Scripts\python.exe"
 if (-not (Test-Path -LiteralPath $pythonPath -PathType Leaf)) {
@@ -32,11 +48,22 @@ function Import-UserEnvironmentVariableIfMissing {
 Import-UserEnvironmentVariableIfMissing -Name "DASHSCOPE_API_KEY"
 Import-UserEnvironmentVariableIfMissing -Name "ARK_API_KEY"
 
-$portText = & $pythonPath -c "from pathlib import Path; from takealot_ops.settings import DashboardSettings; print(DashboardSettings.from_env(Path.cwd()).dashboard_port)" 2>&1
-if ($LASTEXITCODE -ne 0) {
+$env:TAKEALOT_PROJECT_ROOT = $projectRoot
+Push-Location -LiteralPath $projectRoot
+try {
+    $portOutput = @(
+        & $pythonPath -c "from pathlib import Path; from takealot_ops.settings import DashboardSettings; print(DashboardSettings.from_env(Path.cwd()).dashboard_port)" 2>&1
+    )
+    $portExitCode = $LASTEXITCODE
+}
+finally {
+    Pop-Location
+}
+if ($portExitCode -ne 0) {
+    $portText = $portOutput -join ' '
     throw "Unable to read the ERP port: $portText"
 }
-$port = [int]($portText | Select-Object -Last 1)
+$port = [int]($portOutput | Select-Object -Last 1)
 
 $listeners = @(Get-NetTCPConnection -State Listen -LocalPort $port -ErrorAction SilentlyContinue)
 foreach ($listener in $listeners) {
@@ -101,3 +128,10 @@ if (-not $healthy) {
 }
 
 Write-Output "ERP restarted and passed health check: $healthUrl (launcher PID $($launcher.Id))"
+}
+finally {
+    if ($restartMutexAcquired) {
+        $restartMutex.ReleaseMutex()
+    }
+    $restartMutex.Dispose()
+}

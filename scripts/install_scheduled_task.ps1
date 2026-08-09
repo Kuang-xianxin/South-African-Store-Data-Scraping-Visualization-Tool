@@ -26,8 +26,12 @@ param(
 $ErrorActionPreference = 'Stop'
 $ResolvedProjectPath = (Resolve-Path -LiteralPath $ProjectPath).Path
 $PythonPath = Join-Path $ResolvedProjectPath '.venv\Scripts\python.exe'
+$ErpStartupScriptPath = Join-Path $ResolvedProjectPath 'scripts\ensure_erp_started.ps1'
 if (-not (Test-Path -LiteralPath $PythonPath -PathType Leaf)) {
     throw "Project Python environment not found: $PythonPath"
+}
+if (-not (Test-Path -LiteralPath $ErpStartupScriptPath -PathType Leaf)) {
+    throw "ERP startup script not found: $ErpStartupScriptPath"
 }
 
 $EscapedProjectPath = $ResolvedProjectPath.Replace("'", "''")
@@ -67,6 +71,9 @@ $ChineseCompetitorCollection = -join [char[]](
 $ChineseObsoleteFollowerTracking = -join [char[]](
     0x81EA, 0x6709, 0x5546, 0x54C1, 0x8DDF,
     0x5356, 0x81EA, 0x52A8, 0x8FFD, 0x8E2A
+)
+$ChineseErpStartup = -join [char[]](
+    0x767B, 0x5F55, 0x540E, 0x81EA, 0x52A8, 0x542F, 0x52A8
 )
 
 $TaskDefinitions = @(
@@ -120,3 +127,37 @@ foreach ($Definition in $TaskDefinitions) {
         -Force
     Write-Host "Installed $($Definition.Name) at $($Definition.At)"
 }
+
+$CurrentUser = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
+$StartupTaskName = "Takealot ERP $ChineseErpStartup"
+$StartupActionArguments = '-NoProfile -NonInteractive -WindowStyle Hidden ' +
+    "-ExecutionPolicy Bypass -File `"$ErpStartupScriptPath`""
+$StartupAction = New-ScheduledTaskAction `
+    -Execute 'powershell.exe' `
+    -Argument $StartupActionArguments `
+    -WorkingDirectory $ResolvedProjectPath
+$StartupTrigger = New-ScheduledTaskTrigger -AtLogOn -User $CurrentUser
+$StartupTrigger.Delay = 'PT30S'
+$StartupSettings = New-ScheduledTaskSettingsSet `
+    -StartWhenAvailable `
+    -MultipleInstances IgnoreNew `
+    -RestartCount 12 `
+    -RestartInterval (New-TimeSpan -Minutes 1) `
+    -ExecutionTimeLimit (New-TimeSpan -Minutes 5) `
+    -AllowStartIfOnBatteries `
+    -DontStopIfGoingOnBatteries
+$StartupPrincipal = New-ScheduledTaskPrincipal `
+    -UserId $CurrentUser `
+    -LogonType Interactive `
+    -RunLevel Limited
+$StartupTask = New-ScheduledTask `
+    -Action $StartupAction `
+    -Trigger $StartupTrigger `
+    -Settings $StartupSettings `
+    -Principal $StartupPrincipal `
+    -Description 'Ensure the formal ERP is healthy after the current Windows user signs in.'
+Register-ScheduledTask `
+    -TaskName $StartupTaskName `
+    -InputObject $StartupTask `
+    -Force
+Write-Host "Installed $StartupTaskName for $CurrentUser with a 30-second logon delay"

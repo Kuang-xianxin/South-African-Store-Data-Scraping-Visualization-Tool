@@ -222,7 +222,7 @@ def test_local_backup_retention_keeps_tiered_restore_points(tmp_path: Path) -> N
     assert not (backup_dir / f"{names[-1]}.json").exists()
 
 
-def test_scheduler_script_installs_three_captures_and_one_deadline() -> None:
+def test_scheduler_script_installs_daily_jobs_and_current_user_erp_startup() -> None:
     script = (PROJECT_ROOT / "scripts" / "install_scheduled_task.ps1").read_text(
         encoding="utf-8"
     )
@@ -236,6 +236,47 @@ def test_scheduler_script_installs_three_captures_and_one_deadline() -> None:
     assert "-RestartCount 3" in script
     assert "-RestartInterval (New-TimeSpan -Minutes 5)" in script
     assert "exit `$LASTEXITCODE" in script
+    assert "scripts\\ensure_erp_started.ps1" in script
+    assert "restart_erp.ps1" not in script
+    assert "New-ScheduledTaskTrigger -AtLogOn -User $CurrentUser" in script
+    assert "New-ScheduledTaskTrigger -AtStartup" not in script
+    assert "$StartupTrigger.Delay = 'PT30S'" in script
+    assert "-LogonType Interactive" in script
+    assert "-LogonType S4U" not in script
+    assert "-UserId 'SYSTEM'" not in script
+    assert "-RunLevel Limited" in script
+    assert "-MultipleInstances IgnoreNew" in script
+    assert "-WorkingDirectory $ResolvedProjectPath" in script
+    assert "-RestartCount 12" in script
+    assert "-RestartInterval (New-TimeSpan -Minutes 1)" in script
+    assert "-AllowStartIfOnBatteries" in script
+    assert "-DontStopIfGoingOnBatteries" in script
+
+
+def test_erp_startup_guard_is_idempotent_and_uses_formal_restart_chain() -> None:
+    script = (PROJECT_ROOT / "scripts" / "ensure_erp_started.ps1").read_text(
+        encoding="utf-8"
+    )
+
+    assert "Get-Service -Name 'MySQL80'" in script
+    assert "Invoke-RestMethod -Uri $HealthUrl" in script
+    assert "$HealthResponse.status -eq 'ok'" in script
+    assert "$HealthResponse.application -eq 'takealot-erp'" in script
+    assert "return" in script
+    assert "scripts\\restart_erp.ps1" in script
+    assert "& $RestartScriptPath -HealthTimeoutSeconds $HealthTimeoutSeconds" in script
+    assert "erp-startup.log" in script
+    assert "System.Threading.Mutex" in script
+    assert "Local\\TakealotErpStartup" in script
+    assert "$StartupMutex.WaitOne" in script
+
+    restart_script = (PROJECT_ROOT / "scripts" / "restart_erp.ps1").read_text(
+        encoding="utf-8"
+    )
+    assert "Local\\TakealotErpStartup" in restart_script
+    assert "$restartMutex.WaitOne" in restart_script
+    assert "$restartMutex.ReleaseMutex()" in restart_script
+    assert "Push-Location -LiteralPath $projectRoot" in restart_script
 
 
 def test_binlog_scheduler_requires_d_drive_and_continuous_restart() -> None:
