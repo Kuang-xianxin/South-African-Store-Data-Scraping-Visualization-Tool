@@ -712,9 +712,6 @@ export type PermissionKey =
   | "daily_report.view"
   | "daily_report.manage"
   | "daily_report.export"
-  | "reports.view"
-  | "reports.generate"
-  | "nft102.manage"
   | "refresh.run"
   | "users.manage";
 
@@ -860,37 +857,6 @@ export interface RiskPayload {
 export interface FreshnessPayload {
   last_collection_at: string | null;
   latest_metric_date: string | null;
-}
-
-export interface ExportFile {
-  kind: "html" | "excel" | "png";
-  label: string;
-  exists: boolean;
-  name: string;
-  download_url: string | null;
-}
-
-export interface ExportPayload {
-  as_of: string;
-  files: ExportFile[];
-  png_error?: string | null;
-}
-
-export interface NftInspection {
-  filename: string;
-  size_bytes: number;
-  sha256: string;
-  latest_report_date: string;
-  suggested_report_date: string;
-  product_columns: number;
-}
-
-export interface NftGeneration {
-  report_date: string;
-  workbook_name: string;
-  audit_name: string;
-  workbook_url: string;
-  audit_url: string;
 }
 
 export interface LogisticsStatusCount {

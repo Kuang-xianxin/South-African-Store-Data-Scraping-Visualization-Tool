@@ -25,7 +25,6 @@ import SearchRankingPage from "./pages/SearchRankingPage.vue";
 import OverviewPage from "./pages/OverviewPage.vue";
 import ProductsPage from "./pages/ProductsPage.vue";
 import QuadrantsPage from "./pages/QuadrantsPage.vue";
-import ReportsPage from "./pages/ReportsPage.vue";
 import RisksPage from "./pages/RisksPage.vue";
 import UsersPage from "./pages/UsersPage.vue";
 import {
@@ -54,7 +53,6 @@ type PageKey =
   | "platform-warehouse"
   | "competitors"
   | "daily-report"
-  | "reports"
   | "users";
 
 const storeScopedPages = new Set<PageKey>([
@@ -85,13 +83,12 @@ const basePages = [
   { key: "platform-warehouse", label: "约平台仓", hint: "补货草稿与 PO", mark: "08", permission: "store.view" },
   { key: "competitors", label: "竞品雷达", hint: "库存评论与销量", mark: "09", permission: "competitors.view" },
   { key: "daily-report", label: "运营日报", hint: "全周期核对与合并", mark: "10", permission: "daily_report.view" },
-  { key: "reports", label: "报表工作台", hint: "NFT102 续写", mark: "11", permission: "nft102.manage" },
 ] as const;
 const adminPage = {
   key: "users",
   label: "用户权限",
   hint: "账号与权限管理",
-  mark: "12",
+  mark: "11",
   permission: "users.manage",
 } as const;
 
@@ -146,7 +143,6 @@ const canControlCompetitorCollection = computed(
 );
 const canManageDailyReport = computed(() => hasPermission("daily_report.manage"));
 const canGenerateDailyReport = computed(() => hasPermission("daily_report.export"));
-const canUseNft102 = computed(() => hasPermission("nft102.manage"));
 const refreshCooldownRemaining = computed(() => {
   void refreshClock.value;
   if (!refreshStatus.value.cooldown_until) return 0;
@@ -218,7 +214,6 @@ const pageComponent = computed(() => {
     "platform-warehouse": PlatformWarehousePage,
     competitors: CompetitorsPage,
     "daily-report": DailyReportPage,
-    reports: ReportsPage,
     users: UsersPage,
   };
   return components[activePage.value.key as PageKey];
@@ -361,12 +356,6 @@ const activePageProps = computed(() => {
       ...common,
       canOperate: canManageDailyReport.value,
       canExport: canGenerateDailyReport.value,
-      onPermissionDenied: showPermissionDenied,
-    };
-  }
-  if (key === "reports") {
-    return {
-      canUseNft102: canUseNft102.value,
       onPermissionDenied: showPermissionDenied,
     };
   }
@@ -643,7 +632,6 @@ function initialPage(): PageKey {
       "logistics",
       "competitors",
       "daily-report",
-      "reports",
       "users",
     ];
     if (stored && allowed.includes(stored as PageKey)) return stored as PageKey;
@@ -781,7 +769,7 @@ function currentOperationsBusinessDate() {
           <label
             v-if="
               !selectedStorePending
-              && !['search-ranking', 'logistics', 'daily-report', 'reports', 'users'].includes(currentPage)
+              && !['search-ranking', 'logistics', 'daily-report', 'users'].includes(currentPage)
             "
           >
             <span>数据截止日期</span>

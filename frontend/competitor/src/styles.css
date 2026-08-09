@@ -3755,8 +3755,7 @@ button {
 
 .topbar-actions input,
 .compact-field input,
-.compact-field select,
-.inspection-grid input {
+.compact-field select {
   min-height: 39px;
   padding: 8px 11px;
   border: 1px solid var(--line);
@@ -3851,8 +3850,7 @@ button {
 }
 
 .panel-heading h3,
-.product-hero h3,
-.upload-panel h3 {
+.product-hero h3 {
   margin: 0;
   font-size: 1.18rem;
   letter-spacing: -0.025em;
@@ -5544,87 +5542,6 @@ button {
   line-height: 1.55;
 }
 
-.download-row a {
-  margin-top: 8px;
-  padding: 9px;
-  border: 0;
-  border-radius: 8px;
-  background: #e8f0df;
-  color: var(--green);
-  font-size: 0.69rem;
-  text-align: center;
-  text-decoration: none;
-}
-
-.nft-workspace {
-  display: grid;
-  grid-template-columns: 0.8fr 1.2fr;
-  gap: 18px;
-}
-
-.upload-panel > p:not(.section-kicker) {
-  margin: 10px 0 20px;
-  color: var(--muted);
-  font-size: 0.72rem;
-}
-
-.file-drop {
-  display: grid;
-  gap: 8px;
-  min-height: 170px;
-  place-content: center;
-  border: 1px dashed #aebcaf;
-  border-radius: 13px;
-  background: #f1f5ef;
-  text-align: center;
-  cursor: pointer;
-}
-
-.file-drop input {
-  position: absolute;
-  opacity: 0;
-  pointer-events: none;
-}
-
-.file-drop span {
-  color: var(--muted);
-  font-size: 0.67rem;
-}
-
-.inspection-grid {
-  display: grid;
-  grid-template-columns: repeat(2, 1fr);
-  gap: 11px;
-  margin: 18px 0;
-}
-
-.inspection-grid span,
-.inspection-grid label {
-  display: grid;
-  gap: 6px;
-  padding: 13px;
-  border-radius: 9px;
-  background: #f1f4f0;
-}
-
-.inspection-grid small {
-  color: var(--muted);
-}
-
-.action-button.full {
-  width: 100%;
-}
-
-.download-row {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 9px;
-}
-
-.muted {
-  opacity: 0.75;
-}
-
 .competitor-module {
   display: grid;
   grid-template-columns: minmax(0, 1fr);
@@ -5656,8 +5573,7 @@ button {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
-  .overview-grid,
-  .nft-workspace {
+  .overview-grid {
     grid-template-columns: 1fr;
   }
 
@@ -5745,8 +5661,7 @@ button {
     padding: 18px;
   }
 
-  .risk-list,
-  .inspection-grid {
+  .risk-list {
     grid-template-columns: 1fr;
   }
 

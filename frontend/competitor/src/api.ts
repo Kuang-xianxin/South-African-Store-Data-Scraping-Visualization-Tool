@@ -8,13 +8,10 @@ import type {
   CompetitorStoreTargetPayload,
   CompetitorTargetAuditPayload,
   CompetitorTargetItem,
-  ExportPayload,
   FreshnessPayload,
   LogisticsOverviewPayload,
   KeywordTrafficDetailPayload,
   KeywordTrafficListPayload,
-  NftGeneration,
-  NftInspection,
   AuthSession,
   AuthStatus,
   ManagedStore,
@@ -825,40 +822,6 @@ export async function refreshStoreData(): Promise<{
   refresh_status: RefreshStatus;
 }> {
   return request("/api/erp/refresh", { method: "POST" });
-}
-
-export async function fetchExports(asOf: string): Promise<ExportPayload> {
-  return request<ExportPayload>(`/api/erp/exports?${query(asOf)}`);
-}
-
-export async function generateExports(asOf: string): Promise<ExportPayload> {
-  return request<ExportPayload>("/api/erp/exports", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ as_of: asOf }),
-  });
-}
-
-export async function inspectNft102(file: File): Promise<NftInspection> {
-  const body = new FormData();
-  body.append("file", file);
-  return request<NftInspection>("/api/erp/nft102/inspect", {
-    method: "POST",
-    body,
-  });
-}
-
-export async function generateNft102(
-  file: File,
-  reportDate: string,
-): Promise<NftGeneration> {
-  const body = new FormData();
-  body.append("file", file);
-  body.append("report_date", reportDate);
-  return request<NftGeneration>("/api/erp/nft102/generate", {
-    method: "POST",
-    body,
-  });
 }
 
 export function fetchDailyReport(
