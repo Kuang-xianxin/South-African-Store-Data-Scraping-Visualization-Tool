@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import time
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -1761,14 +1762,17 @@ def test_manual_stop_cancels_active_request_and_closes_shared_browser(
     )
     cancelled_requests: list[str | None] = []
     browser_close_calls: list[bool] = []
+    cleanup_order: list[str] = []
 
-    def stopped_event(
+    def stopped_batch(
         _registry: CollectionBatchRegistry,
         **_: object,
     ) -> dict[str, object]:
         return {
+            "active": True,
             "event": "manual_stop",
             "current_request_id": "request-stop",
+            "source": "manual",
         }
 
     async def cancel_request(
@@ -1776,12 +1780,27 @@ def test_manual_stop_cancels_active_request_and_closes_shared_browser(
         request_id: str | None,
     ) -> bool:
         cancelled_requests.append(request_id)
+        cleanup_order.append("cancel")
         return True
 
     async def close_browser(_client: object) -> None:
         browser_close_calls.append(True)
+        cleanup_order.append("close")
 
-    monkeypatch.setattr(CollectionBatchRegistry, "event", stopped_event)
+    def complete_stop(
+        _registry: CollectionBatchRegistry,
+        **_: object,
+    ) -> dict[str, object]:
+        cleanup_order.append("release")
+        return {
+            "active": False,
+            "event": "manual_stop",
+            "current_request_id": None,
+            "source": "manual",
+        }
+
+    monkeypatch.setattr(CollectionBatchRegistry, "stop", stopped_batch)
+    monkeypatch.setattr(CollectionBatchRegistry, "complete_stop", complete_stop)
     monkeypatch.setattr(CollectionRequestCoordinator, "cancel", cancel_request)
     monkeypatch.setattr(
         "takealot_ops.erp.web._SharedCompetitorPublicClient.close",
@@ -1807,6 +1826,181 @@ def test_manual_stop_cancels_active_request_and_closes_shared_browser(
         assert response.status_code == 200
         assert cancelled_requests == ["request-stop"]
         assert browser_close_calls == [True]
+        assert cleanup_order == ["cancel", "close", "release"]
+
+
+def test_manual_stop_releases_batch_when_scheduled_journal_write_fails(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    database_path = tmp_path / "erp.db"
+    monkeypatch.setenv(
+        "TAKEALOT_DATABASE_URL",
+        f"sqlite:///{database_path.as_posix()}",
+    )
+    cleanup_order: list[str] = []
+
+    def stopped_batch(
+        _registry: CollectionBatchRegistry,
+        **_: object,
+    ) -> dict[str, object]:
+        return {
+            "active": True,
+            "event": "manual_stop",
+            "current_request_id": "request-stop",
+            "source": "scheduled",
+        }
+
+    async def fail_mark_stopped(*_: object, **__: object) -> bool:
+        cleanup_order.append("mark")
+        raise RuntimeError("scheduled journal unavailable")
+
+    async def cancel_request(*_: object, **__: object) -> bool:
+        cleanup_order.append("cancel")
+        return True
+
+    async def close_browser(*_: object, **__: object) -> None:
+        cleanup_order.append("close")
+
+    def complete_stop(*_: object, **__: object) -> dict[str, object]:
+        cleanup_order.append("release")
+        return {
+            "active": False,
+            "event": "manual_stop",
+            "current_request_id": None,
+            "source": "scheduled",
+        }
+
+    monkeypatch.setattr(CollectionBatchRegistry, "stop", stopped_batch)
+    monkeypatch.setattr(CollectionBatchRegistry, "complete_stop", complete_stop)
+    monkeypatch.setattr(CollectionRequestCoordinator, "cancel", cancel_request)
+    monkeypatch.setattr(
+        "takealot_ops.erp.web.ScheduledCompetitorBatchRunner.mark_stopped",
+        fail_mark_stopped,
+    )
+    monkeypatch.setattr(
+        "takealot_ops.erp.web._SharedCompetitorPublicClient.close",
+        close_browser,
+    )
+    app = create_app(tmp_path)
+
+    with TestClient(
+        app,
+        client=("127.0.0.1", 50000),
+        raise_server_exceptions=False,
+    ) as client:
+        session = _bootstrap(client)
+        response = client.post(
+            "/api/competitors/batch-stop",
+            headers={"X-CSRF-Token": str(session["csrf_token"])},
+            json={
+                "batch_id": "batch-stop",
+                "reason": "scheduled stop test",
+            },
+        )
+
+        assert response.status_code == 500
+        assert cleanup_order == ["mark", "cancel", "close", "release"]
+
+
+def test_loopback_schedule_starts_visible_batch_and_kxx_can_stop_it(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    database_path = tmp_path / "scheduled-visible.db"
+    monkeypatch.setenv(
+        "TAKEALOT_DATABASE_URL",
+        f"sqlite:///{database_path.as_posix()}",
+    )
+
+    class BlockingCollector:
+        def __init__(self, **_: object) -> None:
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_: object) -> None:
+            pass
+
+        async def collect(self, *_: object, **__: object) -> CompetitorCollectionResult:
+            import asyncio
+
+            await asyncio.Event().wait()
+            raise AssertionError("cancelled scheduled collection must not finish normally")
+
+    monkeypatch.setattr("takealot_ops.erp.web.CompetitorCollector", BlockingCollector)
+    app = create_app(tmp_path)
+
+    with TestClient(app, client=("127.0.0.1", 50000)) as client:
+        session = _bootstrap(client)
+        headers = {"X-CSRF-Token": str(session["csrf_token"])}
+        created = client.post(
+            "/api/competitors/targets",
+            headers=headers,
+            json={"url": "https://www.takealot.com/p/PLID12345678"},
+        )
+        assert created.status_code == 200
+
+        triggered = client.post("/api/internal/competitors/scheduled-trigger", json={})
+        assert triggered.status_code == 200
+        assert triggered.json()["accepted"] is True
+
+        deadline = time.monotonic() + 2
+        status: dict[str, object] = {}
+        while time.monotonic() < deadline:
+            status = client.get("/api/competitors/batch-status").json()
+            if status.get("active") and status.get("current_request_id"):
+                break
+            time.sleep(0.01)
+        assert status["source"] == "scheduled"
+        assert status["owner_display_name"] == "每日 09:00 自动任务"
+        assert status["total"] == 1
+        assert status["current_plid"] == "12345678"
+
+        stopped = client.post(
+            "/api/competitors/batch-stop",
+            headers=headers,
+            json={
+                "batch_id": status["batch_id"],
+                "reason": "scheduled stop test",
+            },
+        )
+        assert stopped.status_code == 200
+        stopped_status = stopped.json()["status"]
+        assert stopped_status["active"] is False
+        assert stopped_status["event"] == "manual_stop"
+        assert stopped_status["reason"] == "scheduled stop test"
+        assert app.state.scheduled_competitor_runner.status()["run_status"] == "stopped"
+
+        repeated_stop = client.post(
+            "/api/competitors/batch-stop",
+            headers=headers,
+            json={
+                "batch_id": status["batch_id"],
+                "reason": "duplicate stop must be idempotent",
+            },
+        )
+        assert repeated_stop.status_code == 200
+        assert repeated_stop.json()["status"]["reason"] == "scheduled stop test"
+
+        repeated = client.post("/api/internal/competitors/scheduled-trigger", json={})
+        assert repeated.status_code == 200
+        assert repeated.json()["accepted"] is False
+        assert repeated.json()["state"] == "already_handled"
+
+
+def test_schedule_trigger_rejects_non_loopback_client(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv(
+        "TAKEALOT_DATABASE_URL",
+        f"sqlite:///{(tmp_path / 'remote-trigger.db').as_posix()}",
+    )
+    app = create_app(tmp_path)
+
+    with TestClient(app, client=("192.0.2.10", 50000)) as client:
+        response = client.post("/api/internal/competitors/scheduled-trigger", json={})
+
+    assert response.status_code == 403
 
 
 def test_only_kxx_controls_batch_while_other_admin_can_add_and_prioritize(

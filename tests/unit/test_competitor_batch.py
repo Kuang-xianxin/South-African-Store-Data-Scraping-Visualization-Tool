@@ -219,7 +219,68 @@ def test_collection_batch_registry_waits_for_active_link_before_release() -> Non
         request_id="request-1",
         reason="browser closed",
     )
-    assert registry.status()["active"] is False
+    stopping = registry.status()
+    assert stopping["active"] is True
+    assert stopping["event"] == "manual_stop"
+    assert stopping["reason"] == "manual stop"
+
+    with pytest.raises(CollectionBatchBusyError):
+        registry.event(
+            batch_id="batch-2",
+            client_id="client-2",
+            event="start",
+            username="operator.two",
+            display_name="Operator Two",
+            completed=0,
+            total=1,
+            pending=1,
+            succeeded=0,
+            failed=0,
+            terminal=0,
+            reason="",
+        )
+
+    released = registry.complete_stop(batch_id="batch-1")
+    assert released["active"] is False
+
+
+def test_collection_batch_stop_between_links_holds_slot_until_cleanup() -> None:
+    registry = CollectionBatchRegistry()
+    registry.event(
+        batch_id="batch-1",
+        client_id="client-1",
+        event="start",
+        username="operator.one",
+        display_name="Operator One",
+        completed=1,
+        total=2,
+        pending=1,
+        succeeded=1,
+        failed=0,
+        terminal=0,
+        reason="between links",
+    )
+
+    stopping = registry.stop(batch_id="batch-1", reason="manual stop")
+    assert stopping["active"] is True
+    assert stopping["current_request_id"] is None
+    with pytest.raises(CollectionBatchBusyError):
+        registry.event(
+            batch_id="batch-2",
+            client_id="client-2",
+            event="start",
+            username="operator.two",
+            display_name="Operator Two",
+            completed=0,
+            total=1,
+            pending=1,
+            succeeded=0,
+            failed=0,
+            terminal=0,
+            reason="",
+        )
+
+    assert registry.complete_stop(batch_id="batch-1")["active"] is False
 
 
 @pytest.mark.parametrize(

@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import getpass
+import json
 import logging
 import os
 import sys
@@ -13,6 +14,8 @@ from collections.abc import Callable
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Sequence
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
 
 from sqlalchemy.orm import Session
 
@@ -27,6 +30,7 @@ from takealot_ops.binlog_archive import (
 )
 from takealot_ops.collectors import collect_offers, collect_sales
 from takealot_ops.competitors.auto_tracking import run_automatic_follower_tracking
+from takealot_ops.competitors.scheduled import register_scheduled_trigger
 from takealot_ops.competitors.service import CompetitorCollector, parse_competitor_urls
 from takealot_ops.dashboard.launcher import launch_dashboard, launch_legacy_dashboard
 from takealot_ops.domain import sast_date
@@ -213,6 +217,10 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="记录跟卖身份和价格，但跳过匿名购物车库存探测",
     )
+    commands.add_parser(
+        "trigger-competitor-collection",
+        help="登记并唤醒 ERP 内可见的每日竞品共享采集批次",
+    )
 
     verify = commands.add_parser("verify", help="检查数据库完整性和数据质量")
     verify.add_argument("--date", type=_parse_date, help="检查日期 YYYY-MM-DD")
@@ -319,6 +327,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 max_targets=args.max_targets,
                 skip_stock=args.skip_stock,
             )
+        elif args.command == "trigger-competitor-collection":
+            exit_code = _trigger_competitor_collection_command(project_root)
         elif args.command == "verify":
             exit_code = _run_store_targets(
                 project_root,
@@ -943,6 +953,36 @@ def _track_own_store_followers_command(
         f"候选 {result.available_targets}，本轮选择 {result.selected_targets}，"
         f"成功 {result.succeeded}，部分成功 {result.partial}，失败 {result.failed}。"
     )
+    return 0
+
+
+def _trigger_competitor_collection_command(project_root: Path) -> int:
+    """Persist today's request, then wake the local ERP without doing the crawl here."""
+    requested_for, created = register_scheduled_trigger(project_root)
+    settings = DashboardSettings.from_env(project_root)
+    endpoint = (
+        f"http://127.0.0.1:{settings.dashboard_port}"
+        "/api/internal/competitors/scheduled-trigger"
+    )
+    request = Request(
+        endpoint,
+        data=json.dumps({"requested_for": requested_for}).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urlopen(request, timeout=10) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except (HTTPError, URLError, TimeoutError, json.JSONDecodeError) as exc:
+        print(
+            f"已持久登记 {requested_for} 的竞品自动批次；ERP 暂未确认唤醒："
+            f"{type(exc).__name__}",
+            file=sys.stderr,
+        )
+        return EXIT_OPERATION
+    state = str(payload.get("state") or "accepted") if isinstance(payload, dict) else "accepted"
+    registration = "新登记" if created else "当日登记已存在"
+    print(f"竞品自动批次 {registration}：{requested_for}；ERP 状态：{state}。")
     return 0
 
 

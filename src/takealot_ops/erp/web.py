@@ -55,6 +55,14 @@ from takealot_ops.competitors.service import (
     load_competitor_dataset,
     load_competitor_link_health,
 )
+from takealot_ops.competitors.scheduled import (
+    SCHEDULED_CLIENT_ID,
+    SCHEDULED_OWNER_DISPLAY_NAME,
+    SCHEDULED_OWNER_USERNAME,
+    ScheduledCollectionAttempt,
+    ScheduledCollectionTarget,
+    ScheduledCompetitorBatchRunner,
+)
 from takealot_ops.dashboard.refresh import run_dashboard_refresh
 from takealot_ops.erp.auth import (
     SESSION_COOKIE,
@@ -243,6 +251,26 @@ class CompetitorBatchOptionsRequest(BaseModel):
         pattern=r"^[A-Za-z0-9_-]+$",
     )
     visible_browser: bool
+
+
+class CompetitorBatchStopRequest(BaseModel):
+    """Stop the currently visible shared batch without relying on a page checkpoint."""
+
+    batch_id: str = Field(
+        min_length=1,
+        max_length=80,
+        pattern=r"^[A-Za-z0-9_-]+$",
+    )
+    reason: str = Field(default="已由 kxx 手动停止采集", max_length=500)
+
+
+class ScheduledCompetitorTriggerRequest(BaseModel):
+    """Optional date written by the local Windows trigger command."""
+
+    requested_for: str | None = Field(
+        default=None,
+        pattern=r"^\d{4}-\d{2}-\d{2}$",
+    )
 
 
 class CompetitorBatchTakeoverRequest(BaseModel):
@@ -834,6 +862,7 @@ def create_app(project_root: Path | None = None) -> FastAPI:
     limiter = _LoginLimiter()
     competitor_logger = configure_collection_logger(root)
     collection_coordinator = CollectionRequestCoordinator[CompetitorCollectionResult]()
+    collection_stop_lock = asyncio.Lock()
     competitor_public_client = _SharedCompetitorPublicClient(max_uses=25)
     database_url = DashboardSettings.from_env(root).database_url
     collection_registry = CollectionBatchRegistry(
@@ -847,12 +876,17 @@ def create_app(project_root: Path | None = None) -> FastAPI:
     platform_warehouse = PlatformWarehouseService(root)
     search_ranking = SearchRankingService(root)
     search_ranking_lock = asyncio.Lock()
+    scheduled_competitor_runner: ScheduledCompetitorBatchRunner | None = None
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+        if scheduled_competitor_runner is not None:
+            scheduled_competitor_runner.start()
         try:
             yield
         finally:
+            if scheduled_competitor_runner is not None:
+                await scheduled_competitor_runner.close()
             await competitor_public_client.close()
             refresh_coordinator.close()
             product_thumbnails.close()
@@ -893,6 +927,7 @@ def create_app(project_root: Path | None = None) -> FastAPI:
             "/api/auth/session",
             "/api/auth/login",
             "/api/auth/bootstrap",
+            "/api/internal/competitors/scheduled-trigger",
         }
         if not path.startswith("/api/") or path in public_paths:
             return await call_next(request)
@@ -2744,17 +2779,15 @@ def create_app(project_root: Path | None = None) -> FastAPI:
             "variants": frame_records(variants),
         }
 
-    @app.post("/api/competitors/collect")
-    async def collect_competitor(
+    async def run_competitor_collection(
         payload: CollectCompetitorRequest,
-        request: Request,
-    ) -> dict[str, object]:
-        require_competitor_batch_controller(request)
+        user: UserIdentity,
+    ) -> CompetitorCollectionResult:
+        """Run one link through the shared registry/coordinator for page or schedule."""
         try:
             plid = extract_plid(payload.url)
         except ValueError as exc:
-            raise HTTPException(status_code=422, detail=str(exc)) from exc
-        user = request.state.erp_user
+            raise ValueError(str(exc)) from exc
         try:
             collection_registry.start_link(
                 batch_id=payload.batch_id,
@@ -2771,7 +2804,7 @@ def create_app(project_root: Path | None = None) -> FastAPI:
                 visible_browser=payload.visible_browser,
             )
         except CollectionBatchBusyError as exc:
-            raise HTTPException(status_code=423, detail=str(exc)) from exc
+            raise exc
         effective_with_stock_probe, effective_visible_browser = (
             collection_registry.collection_options(
                 batch_id=payload.batch_id,
@@ -2921,13 +2954,18 @@ def create_app(project_root: Path | None = None) -> FastAPI:
                 payload.request_id,
                 execute_collection,
             )
-        except asyncio.CancelledError as exc:
-            raise HTTPException(
-                status_code=409,
-                detail="采集已停止，当前浏览器探测已中断并关闭",
-            ) from exc
-        except CompetitorNetworkError as exc:
-            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        except asyncio.CancelledError:
+            raise
+        except BaseException as exc:
+            collection_registry.record_outcome(
+                batch_id=payload.batch_id,
+                plid=plid,
+                url=payload.url,
+                title=None,
+                message=_single_line(str(exc)) or type(exc).__name__,
+                succeeded=False,
+            )
+            raise
         if reused:
             competitor_logger.info(
                 "link_reused batch=%s request=%s item=%s/%s plid=%s",
@@ -2942,6 +2980,176 @@ def create_app(project_root: Path | None = None) -> FastAPI:
                 request_id=payload.request_id,
                 reason=_single_line(result.message),
             )
+        collection_registry.record_outcome(
+            batch_id=payload.batch_id,
+            plid=result.plid,
+            url=payload.url,
+            title=result.title,
+            message=result.message,
+            succeeded=result.succeeded,
+        )
+        return result
+
+    async def load_scheduled_competitor_targets() -> list[ScheduledCollectionTarget]:
+        def load() -> list[ScheduledCollectionTarget]:
+            settings = DashboardSettings.from_env(root)
+            engine = create_read_only_erp_engine(settings.database_url)
+            try:
+                with Session(engine) as session:
+                    own_plids = connected_store_plids(session)
+                    statement = select(CompetitorTarget).where(
+                        CompetitorTarget.active.is_(True)
+                    )
+                    if own_plids:
+                        statement = statement.where(CompetitorTarget.plid.not_in(own_plids))
+                    true_targets = session.scalars(
+                        statement.order_by(
+                            CompetitorTarget.created_at.asc(),
+                            CompetitorTarget.plid.asc(),
+                        )
+                    ).all()
+                    own_targets = sorted(connected_store_plids(session))
+                return [
+                    *[
+                        ScheduledCollectionTarget(plid=target.plid, url=target.url)
+                        for target in true_targets
+                    ],
+                    *[
+                        ScheduledCollectionTarget(
+                            plid=plid,
+                            url=f"https://www.takealot.com/p/PLID{plid}",
+                        )
+                        for plid in own_targets
+                    ],
+                ]
+            finally:
+                engine.dispose()
+
+        return await run_in_threadpool(load)
+
+    scheduled_user = UserIdentity(
+        id=0,
+        username=SCHEDULED_OWNER_USERNAME,
+        display_name=SCHEDULED_OWNER_DISPLAY_NAME,
+        role="system",
+        permissions=(COMPETITORS_COLLECT,),
+        permissions_customized=False,
+        all_stores=True,
+        assigned_store_ids=(),
+        accessible_stores=(),
+    )
+
+    async def collect_scheduled_target(
+        url: str,
+        batch_id: str,
+        request_id: str,
+        item_index: int,
+        total_items: int,
+        retry_kind: str | None,
+        retry_attempt: int | None,
+    ) -> ScheduledCollectionAttempt:
+        payload = CollectCompetitorRequest(
+            url=url,
+            with_stock_probe=True,
+            visible_browser=False,
+            batch_id=batch_id,
+            client_id=SCHEDULED_CLIENT_ID,
+            request_id=request_id,
+            item_index=item_index,
+            total_items=total_items,
+            retry_kind=retry_kind,
+            retry_attempt=retry_attempt,
+        )
+        try:
+            result = await run_competitor_collection(payload, scheduled_user)
+        except asyncio.CancelledError:
+            raise
+        except CompetitorNetworkError as exc:
+            return ScheduledCollectionAttempt(
+                plid=extract_plid(url),
+                title=None,
+                message=_single_line(str(exc)),
+                succeeded=False,
+                failure_kind="network",
+                retryable=True,
+            )
+        except Exception as exc:
+            competitor_logger.exception(
+                "scheduled_link_exception batch=%s request=%s item=%s/%s url=%s",
+                batch_id,
+                request_id,
+                item_index + 1,
+                total_items,
+                url,
+            )
+            return ScheduledCollectionAttempt(
+                plid=extract_plid(url),
+                title=None,
+                message=_single_line(str(exc)) or type(exc).__name__,
+                succeeded=False,
+                failure_kind="other",
+                retryable=True,
+            )
+        return ScheduledCollectionAttempt(
+            plid=result.plid,
+            title=result.title,
+            message=result.message,
+            succeeded=result.succeeded,
+            failure_kind=result.failure_kind,
+            retryable=result.retryable,
+            added_target_count=result.added_target_count,
+        )
+
+    scheduled_competitor_runner = ScheduledCompetitorBatchRunner(
+        registry=collection_registry,
+        journal_path=(
+            None
+            if database_url.startswith("sqlite")
+            else root / "logs" / "competitor-scheduled-batch.json"
+        ),
+        trigger_dir=root / "logs" / "competitor-scheduled-triggers",
+        load_targets=load_scheduled_competitor_targets,
+        collect_target=collect_scheduled_target,
+        logger=competitor_logger,
+    )
+    app.state.scheduled_competitor_runner = scheduled_competitor_runner
+
+    @app.post("/api/internal/competitors/scheduled-trigger")
+    async def trigger_scheduled_competitor_batch(
+        request: Request,
+        payload: ScheduledCompetitorTriggerRequest | None = None,
+    ) -> dict[str, object]:
+        if not _is_loopback_request(request):
+            raise HTTPException(
+                status_code=403,
+                detail="竞品自动批次只允许 Windows 计划任务从服务器本机触发",
+            )
+        try:
+            return await scheduled_competitor_runner.trigger(
+                payload.requested_for if payload is not None else None
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @app.post("/api/competitors/collect")
+    async def collect_competitor(
+        payload: CollectCompetitorRequest,
+        request: Request,
+    ) -> dict[str, object]:
+        require_competitor_batch_controller(request)
+        try:
+            result = await run_competitor_collection(payload, request.state.erp_user)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except CollectionBatchBusyError as exc:
+            raise HTTPException(status_code=423, detail=str(exc)) from exc
+        except asyncio.CancelledError as exc:
+            raise HTTPException(
+                status_code=409,
+                detail="采集已停止，当前浏览器探测已中断并关闭",
+            ) from exc
+        except CompetitorNetworkError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
         if not result.succeeded:
             status_code = _collection_failure_status(
                 result.failure_kind,
@@ -2955,6 +3163,59 @@ def create_app(project_root: Path | None = None) -> FastAPI:
             "added_target_count": result.added_target_count,
         }
 
+    async def stop_competitor_batch(
+        *,
+        batch_id: str,
+        reason: str,
+        stopped_by: str,
+    ) -> dict[str, object]:
+        async with collection_stop_lock:
+            try:
+                status = collection_registry.stop(batch_id=batch_id, reason=reason)
+            except CollectionBatchBusyError as exc:
+                raise HTTPException(status_code=409, detail=str(exc)) from exc
+            if not status.get("active") and status.get("event") == "manual_stop":
+                return status
+            cancelled_request_id = str(status.get("current_request_id") or "")
+            cancelled = False
+            try:
+                await scheduled_competitor_runner.mark_stopped(
+                    batch_id,
+                    stopped_by=stopped_by,
+                )
+            finally:
+                try:
+                    cancelled = await collection_coordinator.cancel(
+                        cancelled_request_id
+                    )
+                finally:
+                    try:
+                        await competitor_public_client.close()
+                    finally:
+                        status = collection_registry.complete_stop(batch_id=batch_id)
+            competitor_logger.info(
+                "batch_cancel batch=%s request=%s cancelled=%s user=%s source=%s",
+                batch_id,
+                cancelled_request_id or "-",
+                cancelled,
+                stopped_by,
+                status.get("source") or "manual",
+            )
+            return status
+
+    @app.post("/api/competitors/batch-stop")
+    async def stop_active_competitor_batch(
+        payload: CompetitorBatchStopRequest,
+        request: Request,
+    ) -> dict[str, object]:
+        require_competitor_batch_controller(request)
+        status = await stop_competitor_batch(
+            batch_id=payload.batch_id,
+            reason=payload.reason,
+            stopped_by=request.state.erp_user.username,
+        )
+        return {"ok": True, "status": status}
+
     @app.post("/api/competitors/batch-events")
     async def competitor_batch_event(
         payload: CompetitorBatchEventRequest,
@@ -2962,6 +3223,13 @@ def create_app(project_root: Path | None = None) -> FastAPI:
     ) -> dict[str, object]:
         require_competitor_batch_controller(request)
         user = request.state.erp_user
+        if payload.event == "manual_stop":
+            status = await stop_competitor_batch(
+                batch_id=payload.batch_id,
+                reason=payload.reason,
+                stopped_by=user.username,
+            )
+            return {"ok": True, "status": status}
         try:
             status = collection_registry.event(
                 batch_id=payload.batch_id,
@@ -2981,25 +3249,6 @@ def create_app(project_root: Path | None = None) -> FastAPI:
             )
         except CollectionBatchBusyError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
-        cancelled_request_id = (
-            str(status.get("current_request_id") or "")
-            if payload.event == "manual_stop"
-            else ""
-        )
-        if payload.event == "manual_stop":
-            cancelled = await collection_coordinator.cancel(cancelled_request_id)
-            # The cancelled request normally invalidates and closes the shared
-            # public browser through its lease.  Close once more here so a stop
-            # between links also leaves no reusable browser process behind.
-            await competitor_public_client.close()
-            status = collection_registry.status()
-            competitor_logger.info(
-                "batch_cancel batch=%s request=%s cancelled=%s user=%s",
-                payload.batch_id,
-                cancelled_request_id or "-",
-                cancelled,
-                user.username,
-            )
         effective_event = str(status["event"])
         if effective_event != payload.event:
             competitor_logger.info(

@@ -35,6 +35,7 @@ class CollectionBatchStatus:
     batch_id: str | None = None
     owner_username: str | None = None
     owner_display_name: str | None = None
+    source: str = "manual"
     event: str = "idle"
     completed: int = 0
     total: int = 0
@@ -54,9 +55,11 @@ class CollectionBatchStatus:
     reason: str = ""
     started_at: str | None = None
     updated_at: str | None = None
-    queued_targets: list[dict[str, str]] = field(default_factory=list)
-    priority_targets: list[dict[str, str]] = field(default_factory=list)
-    prioritized_targets: list[dict[str, str]] = field(default_factory=list)
+    queued_targets: list[dict[str, object]] = field(default_factory=list)
+    priority_targets: list[dict[str, object]] = field(default_factory=list)
+    prioritized_targets: list[dict[str, object]] = field(default_factory=list)
+    results: list[dict[str, object]] = field(default_factory=list)
+    errors: list[dict[str, str]] = field(default_factory=list)
 
 
 class CollectionBatchRegistry:
@@ -74,6 +77,53 @@ class CollectionBatchRegistry:
     def status(self) -> dict[str, object]:
         with self._lock:
             self._expire_if_abandoned()
+            return asdict(self._state)
+
+    def stop(self, *, batch_id: str, reason: str) -> dict[str, object]:
+        """Stop either a page-owned or scheduled batch without changing counters."""
+        with self._lock:
+            self._expire_if_abandoned()
+            if self._state.batch_id == batch_id and self._state.event == "manual_stop":
+                return asdict(self._state)
+            if not self._state.active or self._state.batch_id != batch_id:
+                raise CollectionBatchBusyError("当前竞品批次已结束或批次编号不匹配")
+            self._state.event = "manual_stop"
+            self._state.reason = reason
+            self._state.updated_at = _utc_iso()
+            self._takeover_client_id = None
+            self._state.takeover_pending = False
+            # Keep the global slot occupied until request cancellation *and*
+            # both browser cleanup paths have completed.  Releasing here lets
+            # another batch start while the old stop handler is still closing
+            # shared browser state.
+            self._release_after_request = True
+            self._persist_journal()
+            return asdict(self._state)
+
+    def complete_stop(self, *, batch_id: str) -> dict[str, object]:
+        """Release a stopped batch only after all asynchronous cleanup is done."""
+        with self._lock:
+            if (
+                self._state.batch_id == batch_id
+                and self._state.event == "manual_stop"
+                and not self._state.active
+            ):
+                return asdict(self._state)
+            if self._state.batch_id != batch_id or self._state.event != "manual_stop":
+                raise CollectionBatchBusyError("当前竞品批次停止状态已变化")
+            self._state.active = False
+            self._state.current_index = None
+            self._state.current_plid = None
+            self._state.current_request_id = None
+            self._state.current_stage = None
+            self._state.current_retry_kind = None
+            self._state.current_retry_attempt = None
+            self._state.takeover_pending = False
+            self._release_after_request = False
+            self._owner_client_id = None
+            self._takeover_client_id = None
+            self._state.updated_at = _utc_iso()
+            self._persist_journal()
             return asdict(self._state)
 
     def update_options(
@@ -148,11 +198,21 @@ class CollectionBatchRegistry:
                 return self._state.with_stock_probe, self._state.visible_browser
         return fallback_with_stock_probe, fallback_visible_browser
 
-    def enqueue_target(self, *, plid: str, url: str) -> bool:
+    def enqueue_target(
+        self,
+        *,
+        plid: str,
+        url: str,
+        batch_id: str | None = None,
+    ) -> bool:
         """Append a newly persisted target to the active batch tail."""
         with self._lock:
             self._expire_if_abandoned()
-            if not self._state.active or self._release_after_request:
+            if (
+                not self._state.active
+                or self._release_after_request
+                or (batch_id is not None and self._state.batch_id != batch_id)
+            ):
                 return False
             if self._state.current_plid == plid or any(
                 item["plid"] == plid for item in self._state.queued_targets
@@ -171,6 +231,48 @@ class CollectionBatchRegistry:
             self._state.updated_at = _utc_iso()
             self._persist_journal()
             return True
+
+    def record_outcome(
+        self,
+        *,
+        batch_id: str | None,
+        plid: str,
+        url: str,
+        title: str | None,
+        message: str,
+        succeeded: bool,
+    ) -> None:
+        """Publish per-link results so a scheduled batch has the same visible detail."""
+        if not batch_id or not plid:
+            return
+        with self._lock:
+            if self._state.batch_id != batch_id:
+                return
+            self._state.results = [
+                item for item in self._state.results if str(item.get("plid")) != plid
+            ]
+            self._state.errors = [
+                item for item in self._state.errors if item.get("plid") != plid
+            ]
+            if succeeded:
+                self._state.results.append(
+                    {
+                        "plid": plid,
+                        "url": url,
+                        "title": title or "",
+                        "message": message,
+                    }
+                )
+            else:
+                self._state.errors.append(
+                    {
+                        "plid": plid,
+                        "url": url,
+                        "message": message,
+                    }
+                )
+            self._state.updated_at = _utc_iso()
+            self._persist_journal()
 
     def prioritize_target(
         self,
@@ -239,6 +341,9 @@ class CollectionBatchRegistry:
         reason: str,
         with_stock_probe: bool = True,
         visible_browser: bool = False,
+        source: str = "manual",
+        results: list[dict[str, object]] | None = None,
+        errors: list[dict[str, str]] | None = None,
     ) -> dict[str, object]:
         with self._lock:
             self._expire_if_abandoned()
@@ -250,6 +355,7 @@ class CollectionBatchRegistry:
                 "auto_resume",
                 "progress",
                 "heartbeat",
+                "scheduled_pause",
             }
             if active_event and self._state.active and self._state.batch_id != batch_id:
                 raise CollectionBatchBusyError(self._busy_message())
@@ -264,6 +370,12 @@ class CollectionBatchRegistry:
                 raise CollectionBatchBusyError(self._busy_message())
             if active_event and self._state.batch_id == batch_id and self._release_after_request:
                 raise CollectionBatchBusyError("当前商品正在完成停止清理，请等待浏览器探测退出")
+            if (
+                self._release_after_request
+                and self._state.batch_id == batch_id
+                and event != "manual_stop"
+            ):
+                raise CollectionBatchBusyError("当前批次正在完成停止清理")
 
             now = _utc_iso()
             if active_event:
@@ -276,6 +388,7 @@ class CollectionBatchRegistry:
                         batch_id=batch_id,
                         owner_username=username,
                         owner_display_name=display_name,
+                        source=source,
                         event=event,
                         started_at=now,
                         with_stock_probe=with_stock_probe,
@@ -283,6 +396,17 @@ class CollectionBatchRegistry:
                         queued_targets=restored["queued_targets"],
                         priority_targets=restored["priority_targets"],
                         prioritized_targets=restored["prioritized_targets"],
+                        results=(
+                            [dict(item) for item in results]
+                            if results is not None
+                            else restored["results"]
+                        ),
+                        errors=[
+                            {str(key): str(value) for key, value in item.items()}
+                            for item in (
+                                errors if errors is not None else restored["errors"]
+                            )
+                        ],
                     )
                 self._state.active = True
                 self._state.event = event
@@ -312,6 +436,10 @@ class CollectionBatchRegistry:
                 self._state.failed = failed
                 self._state.terminal = terminal
                 self._state.reason = reason
+                if results is not None:
+                    self._state.results = [dict(item) for item in results]
+                if errors is not None:
+                    self._state.errors = [dict(item) for item in errors]
                 self._state.updated_at = now
                 if event == "completed" and pending == 0:
                     self._clear_journal()
@@ -341,6 +469,8 @@ class CollectionBatchRegistry:
             self._expire_if_abandoned()
             if self._state.active and self._state.batch_id != batch_id:
                 raise CollectionBatchBusyError(self._busy_message())
+            if self._release_after_request:
+                raise CollectionBatchBusyError("当前批次正在完成停止清理")
             if self._state.active and (
                 self._state.owner_username != username
                 or (self._owner_client_id is not None and client_id != self._owner_client_id)
@@ -433,11 +563,14 @@ class CollectionBatchRegistry:
                 self._state.current_stage = None
                 self._state.current_retry_kind = None
                 self._state.current_retry_attempt = None
-                self._state.reason = reason
+                releasing_after_manual_stop = (
+                    self._release_after_request
+                    and self._state.event == "manual_stop"
+                )
+                if not releasing_after_manual_stop:
+                    self._state.reason = reason
                 self._state.updated_at = _utc_iso()
                 if self._release_after_request:
-                    self._state.active = False
-                    self._release_after_request = False
                     self._takeover_client_id = None
                     self._state.takeover_pending = False
                 elif self._takeover_client_id is not None:
@@ -456,19 +589,27 @@ class CollectionBatchRegistry:
             return {}
         return payload if isinstance(payload, dict) else {}
 
-    def _journal_for_batch(self, batch_id: str) -> dict[str, list[dict[str, str]]]:
+    def _journal_for_batch(self, batch_id: str) -> dict[str, list[dict[str, object]]]:
         if self._journal.get("batch_id") != batch_id:
             self._journal = {}
             return {
                 "queued_targets": [],
                 "priority_targets": [],
                 "prioritized_targets": [],
+                "results": [],
+                "errors": [],
             }
-        result: dict[str, list[dict[str, str]]] = {}
-        for key in ("queued_targets", "priority_targets", "prioritized_targets"):
+        result: dict[str, list[dict[str, object]]] = {}
+        for key in (
+            "queued_targets",
+            "priority_targets",
+            "prioritized_targets",
+            "results",
+            "errors",
+        ):
             raw_items = self._journal.get(key)
             result[key] = [
-                {str(name): str(value) for name, value in item.items()}
+                {str(name): value for name, value in item.items()}
                 for item in raw_items
                 if isinstance(item, dict)
             ] if isinstance(raw_items, list) else []
@@ -482,6 +623,8 @@ class CollectionBatchRegistry:
             "queued_targets": self._state.queued_targets,
             "priority_targets": self._state.priority_targets,
             "prioritized_targets": self._state.prioritized_targets,
+            "results": self._state.results,
+            "errors": self._state.errors,
         }
         self._journal_path.parent.mkdir(parents=True, exist_ok=True)
         temporary_path = self._journal_path.with_suffix(
@@ -501,6 +644,7 @@ class CollectionBatchRegistry:
     def _expire_if_abandoned(self) -> None:
         if (
             not self._state.active
+            or self._release_after_request
             or self._state.current_request_id is not None
             or self._state.updated_at is None
         ):

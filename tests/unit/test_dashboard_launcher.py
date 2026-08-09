@@ -66,6 +66,7 @@ def test_daily_schedule_defaults_to_china_time_after_platform_rollover() -> None
     assert "[string]$EveningAt = '18:00'" in script
     assert "[string]$PreCloseAt = '09:00'" in script
     assert "[string]$DeadlineAt = '18:30'" in script
+    assert "[string]$CompetitorCollectionAt = '09:00'" in script
     assert '$ChineseDailyUpdate = -join [char[]](' in script
     assert "0x5E97, 0x94FA, 0x6570, 0x636E" in script
 

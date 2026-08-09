@@ -18,6 +18,7 @@ import {
   fetchCompetitors,
   logCompetitorBatchEvent,
   prioritizeCompetitorTarget,
+  stopCompetitorBatch,
   takeoverCompetitorBatch,
   updateCompetitorTarget,
   updateCompetitorBatchOptions,
@@ -262,6 +263,7 @@ const sharedBatchStatus = ref<CompetitorBatchStatus>({
   batch_id: null,
   owner_username: null,
   owner_display_name: null,
+  source: "manual",
   event: "idle",
   completed: 0,
   total: 0,
@@ -284,6 +286,8 @@ const sharedBatchStatus = ref<CompetitorBatchStatus>({
   queued_targets: [],
   priority_targets: [],
   prioritized_targets: [],
+  results: [],
+  errors: [],
 });
 const linkHealth = ref<CompetitorLinkHealthItem[]>([]);
 const linkHealthOpen = ref(false);
@@ -569,9 +573,15 @@ const sharedBatchBelongsToCurrentAccount = computed(
       === props.currentUsername?.toLowerCase(),
 );
 const sharedBatchOwnerLabel = computed(() => {
+  if (sharedBatchStatus.value.source === "scheduled") return "每日 09:00 自动任务";
   if (!sharedBatchBelongsToCurrentAccount.value) return sharedBatchOwner.value;
   return sharedBatchMatchesCheckpoint.value ? "本页面" : "本账号另一页面";
 });
+const sharedScheduledPause = computed(
+  () =>
+    sharedBatchStatus.value.source === "scheduled"
+    && sharedBatchStatus.value.event === "scheduled_pause",
+);
 const adoptablePendingCount = computed(() => {
   if (
     sharedBatchStatus.value.active
@@ -609,6 +619,9 @@ const sharedRetryProgress = computed(() => {
 });
 const collectionAlertTitle = computed(() => {
   if (sharedBatchStatus.value.active && !collecting.value) {
+    if (sharedBatchStatus.value.source === "scheduled") {
+      return "每日 09:00 自动采集正在运行";
+    }
     if (sharedBatchMatchesCheckpoint.value) return "正在恢复刷新前的采集任务";
     return sharedBatchBelongsToCurrentAccount.value
       ? "本账号另一页面正在采集"
@@ -805,30 +818,54 @@ const filteredReviews = computed(() => {
   });
   return [...result].sort(compareReviews);
 });
+const sharedBatchProgressIsAuthoritative = computed(
+  () =>
+    sharedBatchStatus.value.active
+    || sharedBatchStatus.value.source === "scheduled",
+);
 const displayedBatchCompleted = computed(() =>
-  sharedBatchStatus.value.active
+  sharedBatchProgressIsAuthoritative.value
     ? sharedBatchStatus.value.completed
     : completed.value,
 );
 const displayedBatchTotal = computed(() =>
-  sharedBatchStatus.value.active ? sharedBatchStatus.value.total : total.value,
+  sharedBatchProgressIsAuthoritative.value
+    ? sharedBatchStatus.value.total
+    : total.value,
 );
 const displayedBatchSucceeded = computed(() =>
-  sharedBatchStatus.value.active
+  sharedBatchProgressIsAuthoritative.value
     ? sharedBatchStatus.value.succeeded
     : collectionResults.value.length,
 );
 const displayedBatchFailed = computed(() =>
-  sharedBatchStatus.value.active
+  sharedBatchProgressIsAuthoritative.value
     ? sharedBatchStatus.value.failed
     : failedIndexes.value.length,
+);
+const sharedBatchDetailsAreAuthoritative = computed(
+  () => sharedBatchProgressIsAuthoritative.value,
+);
+const displayedCollectionResults = computed(() =>
+  sharedBatchDetailsAreAuthoritative.value
+    ? sharedBatchStatus.value.results
+    : collectionResults.value,
+);
+const displayedCollectionErrors = computed(() =>
+  sharedBatchDetailsAreAuthoritative.value
+    ? sharedBatchStatus.value.errors
+    : collectionErrors.value,
 );
 const hasDisplayedBatchProgress = computed(
   () =>
     sharedBatchStatus.value.active
+    || (
+      sharedBatchStatus.value.source === "scheduled"
+      && Boolean(sharedBatchStatus.value.batch_id)
+    )
     || Boolean(
-      collectionResults.value.length
-      || collectionErrors.value.length
+      displayedCollectionResults.value.length
+      || displayedCollectionErrors.value.length
       || batchUrls.value.length,
     ),
 );
@@ -900,12 +937,16 @@ const resumeQueue = computed<CollectionQueueItem[]>(() => {
 });
 const pendingResumeCount = computed(() => resumeQueue.value.length);
 const displayedBatchPending = computed(() =>
-  sharedBatchStatus.value.active
+  sharedBatchProgressIsAuthoritative.value
     ? sharedBatchStatus.value.pending
     : pendingResumeCount.value,
 );
-const showLocalCollectionDetails = computed(
-  () => !sharedBatchStatus.value.active || sharedBatchMatchesCheckpoint.value,
+const showCollectionDetails = computed(
+  () =>
+    Boolean(
+      displayedCollectionResults.value.length
+      || displayedCollectionErrors.value.length,
+    ),
 );
 const activeCollectionStatus = computed(() => {
   void collectionClock.value;
@@ -2963,20 +3004,28 @@ async function stopCollection() {
     );
     return;
   }
-  manualStopRequested.value = true;
+  const activeBatchId = sharedBatchStatus.value.active
+    ? sharedBatchStatus.value.batch_id
+    : batchId.value;
+  if (!activeBatchId) {
+    showCollectionNotice("当前没有可停止的竞品采集批次。");
+    return;
+  }
+  const scheduledBatch = sharedBatchStatus.value.source === "scheduled";
+  manualStopRequested.value = collecting.value;
   clearAutomaticResumeSchedule();
-  collectionStopReason.value =
-    "已手动停止；当前浏览器探测已中断并关闭，可以点击“继续失败/未完成”从断点恢复。";
-  persistCollectionCheckpoint();
+  collectionStopReason.value = scheduledBatch
+    ? "已手动中断今日 09:00 自动批次；今天不会再次自动启动，明天 09:00 照常。"
+    : "已手动停止；当前浏览器探测已中断并关闭，可以点击“继续失败/未完成”从断点恢复。";
+  if (collecting.value) persistCollectionCheckpoint();
   const activeController = abortController.value;
-  const stopRequest = recordBatchEvent(
-    "manual_stop",
+  const stopRequest = stopCompetitorBatch(
+    activeBatchId,
     collectionStopReason.value,
-    true,
   );
   activeController?.abort();
   try {
-    await stopRequest;
+    sharedBatchStatus.value = await stopRequest;
   } catch (error) {
     showCollectionNotice(
       error instanceof Error
@@ -3735,8 +3784,9 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
       <p class="method-note collection-scope-note">
         每次点击开始都会重新读取最新真正竞品清单，再装入全部有权店铺（管理员当前为六店）的全部
         自有链接，并按PLID去重后在同一个串行批次中采集；顶栏店铺只影响页面查看范围，不会缩小
-        手动采集范围。两类链接都可插队，断点继续保留原顺序。服务器每天00:30仍会对
-        {{ allStoreTrackingStoreCount }} 店 {{ allStoreTargetCount }} 个私有PLID执行独立全量巡检。
+        手动采集范围。两类链接都可插队，断点继续保留原顺序。服务器每天09:00会自动启动同一个
+        共享串行批次，读取全部活跃真正竞品和所有已接入店铺的当前自有PLID；所有账号看到相同进度，
+        kxx可随时停止，运行中发现的新链接会追加到队尾。
         自有商品价格与库存使用 Seller API，公开页只识别并探测排除自有Offer后的跟卖报价。
       </p>
       <div
@@ -3746,7 +3796,10 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
         aria-live="polite"
       >
         <div>
-          <strong>全员同步采集中 · {{ sharedBatchOwnerLabel }}</strong>
+          <strong>
+            {{ sharedScheduledPause ? "全员同步暂停中" : "全员同步采集中" }}
+            · {{ sharedBatchOwnerLabel }}
+          </strong>
           <span>
             已检查 {{ sharedBatchStatus.completed }}/{{ sharedBatchStatus.total }}
             · 成功 {{ sharedBatchStatus.succeeded }}
@@ -3757,6 +3810,9 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
           <small v-if="sharedBatchStatus.failed">
             未解决数量只在某条链接成功后减少；复探进行中数字可能暂时不变。
           </small>
+          <small v-if="sharedScheduledPause" class="collection-auto-resume-countdown">
+            {{ sharedBatchStatus.reason }}
+          </small>
         </div>
         <span v-if="sharedBatchStatus.current_plid" class="shared-current-plid">
           当前第 {{ (sharedBatchStatus.current_index ?? 0) + 1 }} 条 ·
@@ -3766,6 +3822,7 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
             {{ sharedBatchStatus.current_stage }}
           </small>
         </span>
+        <span v-else-if="sharedScheduledPause">网络暂停，等待自动续爬；kxx可随时停止</span>
         <span v-else>正在准备下一条商品</span>
       </div>
       <div class="collector-actions">
@@ -3840,7 +3897,7 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
         <button
           class="primary-button stop-button"
           @click="stopCollection"
-          v-if="props.canControlCollection && collecting"
+          v-if="props.canControlCollection && (collecting || sharedBatchStatus.active)"
         >
           停止采集
         </button>
@@ -3870,7 +3927,7 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
         </span>
       </div>
       <div
-        v-if="sharedBatchStatus.active || collecting || completed"
+        v-if="hasDisplayedBatchProgress"
         class="progress-track"
         aria-live="polite"
       >
@@ -3909,8 +3966,8 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
       </div>
       <details
         v-if="
-          showLocalCollectionDetails
-          && (collectionResults.length || collectionErrors.length)
+          showCollectionDetails
+          && (displayedCollectionResults.length || displayedCollectionErrors.length)
         "
         class="collection-task-detail collection-task-detail-panel"
       >
@@ -3919,17 +3976,20 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
             <strong>任务爬取详情</strong>
             <small>成功与待重试任务在同一面板内分组查看</small>
           </span>
-          <b>{{ collectionResults.length + collectionErrors.length }}</b>
+          <b>{{ displayedCollectionResults.length + displayedCollectionErrors.length }}</b>
         </summary>
         <div class="collection-task-detail-groups">
-          <section v-if="collectionResults.length" class="collection-task-detail-group success">
+          <section
+            v-if="displayedCollectionResults.length"
+            class="collection-task-detail-group success"
+          >
             <header>
               <strong>成功任务</strong>
-              <span>{{ collectionResults.length }} 个</span>
+              <span>{{ displayedCollectionResults.length }} 个</span>
             </header>
             <div class="collection-task-detail-list">
               <article
-                v-for="result in collectionResults"
+                v-for="result in displayedCollectionResults"
                 :key="result.plid"
                 class="collection-task-link-action"
                 tabindex="0"
@@ -3960,14 +4020,17 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
               </article>
             </div>
           </section>
-          <section v-if="collectionErrors.length" class="collection-task-detail-group retry">
+          <section
+            v-if="displayedCollectionErrors.length"
+            class="collection-task-detail-group retry"
+          >
             <header>
               <strong>待重试任务</strong>
-              <span>{{ collectionErrors.length }} 个</span>
+              <span>{{ displayedCollectionErrors.length }} 个</span>
             </header>
             <div class="collection-task-detail-list">
               <article
-                v-for="error in collectionErrors"
+                v-for="error in displayedCollectionErrors"
                 :key="`${error.plid}-${error.message}`"
                 :class="{ 'collection-task-link-action': Boolean(error.plid && error.url) }"
                 :tabindex="error.plid && error.url ? 0 : undefined"
@@ -5454,7 +5517,7 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
                   <span>无需加入真实竞品清单</span>
                 </div>
                 <p class="method-note">
-                  该 PLID 来自全部已接入店铺的 Seller API 当前 Offer，由服务器每天00:30全量检查跟卖；
+                  该 PLID 来自全部已接入店铺的 Seller API 当前 Offer，每天09:00自动纳入可见共享批次；
                   公开报价先排除全部自有 Offer ID/SKU，竞争卖家即使成为主报价也继续追踪。
                   公开变体只作为商品选项展示，不直接算作跟卖；首次或评论数变化时单独读取PLID共用评论。
                   删除或修改真实竞品清单不会影响这个自动目标。

@@ -438,6 +438,7 @@ export interface CompetitorBatchStatus {
   batch_id: string | null;
   owner_username: string | null;
   owner_display_name: string | null;
+  source: "manual" | "scheduled";
   event: string;
   completed: number;
   total: number;
@@ -475,6 +476,12 @@ export interface CompetitorBatchStatus {
     requested_at: string;
     requested_by: string;
     source: "manual" | "manual_retry" | "automatic";
+  }>;
+  results: Array<CollectResult & { url: string }>;
+  errors: Array<{
+    plid: string;
+    url: string;
+    message: string;
   }>;
 }
 
@@ -565,6 +572,21 @@ export function takeoverCompetitorBatch(
       body: JSON.stringify({ batch_id: batchId, client_id: clientId }),
     },
   );
+}
+
+export async function stopCompetitorBatch(
+  batchId: string,
+  reason: string,
+): Promise<CompetitorBatchStatus> {
+  const result = await request<{ ok: boolean; status: CompetitorBatchStatus }>(
+    "/api/competitors/batch-stop",
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ batch_id: batchId, reason }),
+    },
+  );
+  return result.status;
 }
 
 function query(asOf: string) {

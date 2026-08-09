@@ -6,6 +6,7 @@ from pathlib import Path
 from takealot_ops.cli import (
     _run_protected_daily_report_collection,
     _run_store_targets,
+    _trigger_competitor_collection_command,
     build_parser,
 )
 from takealot_ops.collectors import CollectionResult
@@ -21,6 +22,7 @@ def test_help_lists_all_commands(capsys) -> None:
     for command in (
         "collect",
         "collect-competitors",
+        "trigger-competitor-collection",
         "export",
         "daily-run",
         "backup-local",
@@ -147,4 +149,47 @@ def test_store_target_failure_skips_followup(tmp_path: Path) -> None:
         == 3
     )
     assert followed_up is False
+
+
+def test_competitor_schedule_command_persists_and_wakes_local_erp(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    requests: list[object] = []
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_: object) -> None:
+            pass
+
+        def read(self) -> bytes:
+            return b'{"ok": true, "accepted": true, "state": "accepted"}'
+
+    def fake_urlopen(request, *, timeout: int):
+        requests.append(request)
+        assert timeout == 10
+        return Response()
+
+    monkeypatch.setenv("TAKEALOT_DATABASE_URL", "sqlite://")
+    monkeypatch.setenv("TAKEALOT_DASHBOARD_PORT", "8765")
+    monkeypatch.setattr("takealot_ops.cli.urlopen", fake_urlopen)
+
+    assert _trigger_competitor_collection_command(tmp_path) == 0
+    assert _trigger_competitor_collection_command(tmp_path) == 0
+
+    trigger_files = list(
+        (tmp_path / "logs" / "competitor-scheduled-triggers").glob("*.json")
+    )
+    assert len(trigger_files) == 1
+    assert len(requests) == 2
+    assert requests[0].full_url == (
+        "http://127.0.0.1:8765/api/internal/competitors/scheduled-trigger"
+    )
+    assert b'"requested_for"' in requests[0].data
+    output = capsys.readouterr().out
+    assert "新登记" in output
+    assert "当日登记已存在" in output
 

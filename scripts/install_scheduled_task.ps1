@@ -20,7 +20,7 @@ param(
 
     [Parameter(Mandatory = $false)]
     [ValidatePattern('^(?:[01]\d|2[0-3]):[0-5]\d$')]
-    [string]$FollowerTrackingAt = '00:30'
+    [string]$CompetitorCollectionAt = '09:00'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -60,7 +60,11 @@ $ChinesePreCloseUpdate = -join [char[]](
 $ChineseDeadline = -join [char[]](
     0x8FD0, 0x8425, 0x65E5, 0x62A5, 0x5F85, 0x529E, 0x5FEB, 0x7167
 )
-$ChineseFollowerTracking = -join [char[]](
+$ChineseCompetitorCollection = -join [char[]](
+    0x7ADE, 0x54C1, 0x96F7, 0x8FBE,
+    0x6BCF, 0x65E5, 0x91C7, 0x96C6
+)
+$ChineseObsoleteFollowerTracking = -join [char[]](
     0x81EA, 0x6709, 0x5546, 0x54C1, 0x8DDF,
     0x5356, 0x81EA, 0x52A8, 0x8FFD, 0x8E2A
 )
@@ -91,12 +95,18 @@ $TaskDefinitions = @(
         Description = 'Snapshot unresolved report items and export confirmed work.'
     },
     @{
-        Name = "Takealot $ChineseFollowerTracking"
-        At = $FollowerTrackingAt
-        Arguments = 'track-own-store-followers --max-targets 0'
-        Description = 'Check every current cross-store deduplicated own-store PLID and record follower offers.'
+        Name = "Takealot $ChineseCompetitorCollection"
+        At = $CompetitorCollectionAt
+        Arguments = 'trigger-competitor-collection'
+        Description = 'Start the same visible shared competitor batch as the ERP Start button.'
     }
 )
+
+$ObsoleteTaskName = "Takealot $ChineseObsoleteFollowerTracking"
+if (Get-ScheduledTask -TaskName $ObsoleteTaskName -ErrorAction SilentlyContinue) {
+    Unregister-ScheduledTask -TaskName $ObsoleteTaskName -Confirm:$false
+    Write-Host "Removed obsolete hidden crawler task $ObsoleteTaskName"
+}
 
 foreach ($Definition in $TaskDefinitions) {
     $Action = New-TakealotTaskAction -CliArguments $Definition.Arguments
