@@ -25,7 +25,6 @@ import SearchRankingPage from "./pages/SearchRankingPage.vue";
 import OverviewPage from "./pages/OverviewPage.vue";
 import ProductsPage from "./pages/ProductsPage.vue";
 import QuadrantsPage from "./pages/QuadrantsPage.vue";
-import RisksPage from "./pages/RisksPage.vue";
 import UsersPage from "./pages/UsersPage.vue";
 import {
   templateLabels,
@@ -48,7 +47,6 @@ type PageKey =
   | "keyword-traffic"
   | "search-ranking"
   | "quadrants"
-  | "risks"
   | "logistics"
   | "platform-warehouse"
   | "competitors"
@@ -61,7 +59,6 @@ const storeScopedPages = new Set<PageKey>([
   "keyword-traffic",
   "search-ranking",
   "quadrants",
-  "risks",
   "logistics",
   "platform-warehouse",
   "daily-report",
@@ -78,17 +75,16 @@ const basePages = [
   { key: "keyword-traffic", label: "关键词流量", hint: "变更节点与趋势对比", mark: "03", permission: "store.view" },
   { key: "search-ranking", label: "搜索定位", hint: "图片热词与自然排名", mark: "04", permission: "store.view" },
   { key: "quadrants", label: "经营坐标", hint: "流量与下单分布", mark: "05", permission: "store.view" },
-  { key: "risks", label: "风险与质量", hint: "异常和数据质量", mark: "06", permission: "store.view" },
-  { key: "logistics", label: "物流管理", hint: "长睿与平台货件", mark: "07", permission: "store.view" },
-  { key: "platform-warehouse", label: "约平台仓", hint: "补货草稿与 PO", mark: "08", permission: "store.view" },
-  { key: "competitors", label: "竞品雷达", hint: "库存评论与销量", mark: "09", permission: "competitors.view" },
-  { key: "daily-report", label: "运营日报", hint: "全周期核对与合并", mark: "10", permission: "daily_report.view" },
+  { key: "logistics", label: "物流管理", hint: "长睿与平台货件", mark: "06", permission: "store.view" },
+  { key: "platform-warehouse", label: "约平台仓", hint: "补货草稿与 PO", mark: "07", permission: "store.view" },
+  { key: "competitors", label: "竞品雷达", hint: "库存评论与销量", mark: "08", permission: "competitors.view" },
+  { key: "daily-report", label: "运营日报", hint: "全周期核对与合并", mark: "09", permission: "daily_report.view" },
 ] as const;
 const adminPage = {
   key: "users",
   label: "用户权限",
   hint: "账号与权限管理",
-  mark: "11",
+  mark: "10",
   permission: "users.manage",
 } as const;
 
@@ -209,7 +205,6 @@ const pageComponent = computed(() => {
     "keyword-traffic": KeywordTrafficPage,
     "search-ranking": SearchRankingPage,
     quadrants: QuadrantsPage,
-    risks: RisksPage,
     logistics: LogisticsPage,
     "platform-warehouse": PlatformWarehousePage,
     competitors: CompetitorsPage,
@@ -628,7 +623,6 @@ function initialPage(): PageKey {
       "overview",
       "products",
       "quadrants",
-      "risks",
       "logistics",
       "competitors",
       "daily-report",

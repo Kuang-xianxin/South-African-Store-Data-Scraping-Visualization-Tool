@@ -307,7 +307,7 @@ function trafficPointTitle(point: StoreTrafficPoint) {
           <div>
             <span>全盘健康定位</span>
             <strong>{{ overallHealthText }}</strong>
-            <small>按缺货和数据完整性直接判断；数据异常暂只在风险与质量模块展示</small>
+            <small>按缺货和数据完整性直接判断；数据异常暂不在 ERP 前端展示</small>
           </div>
           <dl>
             <div>

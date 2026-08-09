@@ -64,7 +64,7 @@ export const permissionGroups: Array<{
 }> = [
   {
     title: "店铺经营",
-    description: "经营总览、关键词流量、风险质量、物流关联与平台仓草稿",
+    description: "经营总览、关键词流量、物流关联与平台仓草稿",
     permissions: [
       "store.view",
       "logistics.manage",

@@ -21,7 +21,6 @@ import type {
   ProductDetailPayload,
   ProductsPayload,
   QuadrantPayload,
-  RiskPayload,
   StoreOverviewPayload,
   SummaryPayload,
   DailyReportExport,
@@ -604,10 +603,6 @@ export async function fetchQuadrants(
   return request<QuadrantPayload>(
     `/api/erp/quadrants?${query(asOf)}&percentile=${percentile}`,
   );
-}
-
-export async function fetchRisks(asOf: string): Promise<RiskPayload> {
-  return request<RiskPayload>(`/api/erp/risks?${query(asOf)}`);
 }
 
 export function fetchKeywordTrafficProducts(
