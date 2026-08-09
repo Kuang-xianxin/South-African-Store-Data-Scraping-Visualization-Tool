@@ -537,7 +537,8 @@ export interface SearchRankingStatus {
   organic_page_size: number;
   columns_per_row: number;
   core_first_page_threshold: number;
-  opportunity_first_page_threshold: number;
+  opportunity_max_direct_competitors: number;
+  opportunity_max_organic_rank: number;
   position_scope: "organic_results_excluding_sponsored";
   passive_reads_are_local_only: boolean;
 }
@@ -553,6 +554,13 @@ export interface SearchRankingAnalysisSummary {
   created_at: string;
   completed_at: string | null;
   error: string | null;
+  vision_stage_completed: boolean;
+  usage: {
+    input_tokens?: number;
+    output_tokens?: number;
+    total_tokens?: number;
+  };
+  estimated_cost_cny: number | null;
   title_validation_status: string | null;
 }
 
@@ -580,6 +588,7 @@ export interface SearchRankingKeywordResult {
   relevance_status:
     | "accepted"
     | "opportunity"
+    | "comparison_resample"
     | "rejected_irrelevant"
     | "model_low_confidence";
   relevance_score: number;
@@ -594,16 +603,40 @@ export interface SearchRankingKeywordResult {
     first_page_same_type_ratio?: number;
     first_page_majority?: boolean;
     direct_competitor_count_first_page?: number;
+    direct_competitor_count_excluding_target_first_page?: number;
+    target_on_first_page?: boolean;
+    target_counted_as_direct_competitor?: boolean;
     core_threshold?: number;
     opportunity_threshold?: number;
-    candidate_source?: "image_precise" | "takealot_autocomplete";
-    intended_strategy?: "core" | "opportunity";
-    effective_strategy?: "core" | "opportunity" | "rejected_irrelevant";
+    opportunity_max_direct_competitors?: number;
+    opportunity_max_organic_rank?: number;
+    opportunity_candidate?: boolean;
+    opportunity_claims_safe?: boolean;
+    opportunity_qualified?: boolean;
+    opportunity_rejection_reasons?: string[];
+    stored_relevance_status?: SearchRankingKeywordResult["relevance_status"];
+    effective_relevance_status?: SearchRankingKeywordResult["relevance_status"];
+    candidate_source?:
+      | "image_precise"
+      | "takealot_autocomplete"
+      | "comparison_resample";
+    intended_strategy?: "core" | "opportunity" | "comparison";
+    intended_strategies?: Array<"core" | "opportunity" | "comparison">;
+    effective_strategy?:
+      | "core"
+      | "opportunity"
+      | "comparison_resample"
+      | "rejected_irrelevant";
+    comparison_baseline_rank?: number | null;
+    comparison_role?: string | null;
+    comparison_strategy?: SearchRankingTitleStrategyKey | string | null;
     autocomplete_seed?: string | null;
     autocomplete_seed_source?:
       | "image_shopper_root"
       | "image_need_state"
+      | "image_only_model"
       | "title_cross_check"
+      | "previous_analysis_baseline"
       | null;
     autocomplete_rank?: number | null;
     autocomplete_endpoint?: string | null;
@@ -626,6 +659,21 @@ export interface SearchRankingKeywordResult {
   observed_at: string;
 }
 
+export type SearchRankingTitleStrategyKey =
+  | "contiguous_core"
+  | "hot_term_coverage"
+  | "adjacent_opportunity";
+
+export interface SearchRankingTitleStrategy {
+  strategy: SearchRankingTitleStrategyKey;
+  label: string;
+  title: string | null;
+  available: boolean;
+  explanation: string;
+  evidence_keywords: string[];
+  evidence?: Record<string, unknown>;
+}
+
 export interface SearchRankingAnalysis extends SearchRankingAnalysisSummary {
   product_name: string | null;
   category: string | null;
@@ -633,6 +681,7 @@ export interface SearchRankingAnalysis extends SearchRankingAnalysisSummary {
     product_type_terms?: string[];
     distinctive_terms?: string[];
     exclusions?: string[];
+    title_strategies?: SearchRankingTitleStrategy[];
     opportunity_title_suggestion?: string | null;
     opportunity_title_reason?: string | null;
   };
@@ -649,9 +698,19 @@ export interface SearchRankingAnalysis extends SearchRankingAnalysisSummary {
   };
   provider_attempts?: Array<{
     provider: string;
-    status: "accepted" | "request_or_schema_failed" | "identity_conflict";
+    status:
+      | "accepted"
+      | "request_or_schema_failed"
+      | "identity_conflict"
+      | "cached_identity_conflict";
     reason?: string;
     source_title_similarity?: number;
+    usage?: {
+      input_tokens?: number;
+      output_tokens?: number;
+      total_tokens?: number;
+    };
+    estimated_cost_cny?: number | null;
   }>;
   usage: {
     input_tokens?: number;
@@ -663,12 +722,24 @@ export interface SearchRankingAnalysis extends SearchRankingAnalysisSummary {
   title_reason: string | null;
   opportunity_title_suggestion: string | null;
   opportunity_title_reason: string | null;
+  title_strategies?: SearchRankingTitleStrategy[];
   title_validation: {
     status?: string;
     causality?: "observational_only";
     guarantee?: boolean;
     note?: string;
+    matched_strategy?: SearchRankingTitleStrategyKey | string;
+    matched_suggestion?: string;
+    required_keywords?: string[];
+    missing_baseline_keywords?: string[];
+    missing_keywords?: string[];
     comparisons?: Array<{
+      keyword: string;
+      before_rank: number;
+      after_rank: number;
+      delta: number;
+    }>;
+    secondary_comparisons?: Array<{
       keyword: string;
       before_rank: number;
       after_rank: number;
@@ -697,6 +768,7 @@ export interface SearchRankingDetailPayload {
   status: SearchRankingStatus;
   product: SearchRankingProduct;
   analysis: SearchRankingAnalysis | null;
+  latest_attempt: SearchRankingAnalysisSummary | null;
   history: SearchRankingAnalysisSummary[];
 }
 
