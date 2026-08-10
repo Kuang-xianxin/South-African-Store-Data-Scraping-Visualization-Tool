@@ -13,6 +13,7 @@
     "test:competitor-opportunities": "node --experimental-strip-types --test tests/competitorFollowOpportunities.test.ts",
     "test:competitor-offers": "node --experimental-strip-types --test tests/competitorOfferHistory.test.ts",
     "test:collection-client": "node --experimental-strip-types --test tests/collectionClientClaim.test.ts",
+    "test:session-collection": "node --experimental-strip-types --test tests/sessionCollectionLifecycle.test.ts",
     "test:retry": "node --experimental-strip-types --test tests/retryQueue.test.ts"
   },
   "dependencies": {

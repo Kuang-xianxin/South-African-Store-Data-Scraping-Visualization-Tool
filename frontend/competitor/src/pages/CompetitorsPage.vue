@@ -2,6 +2,7 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 
 import {
+  AUTH_SESSION_ENDING_EVENT,
   ApiRequestError,
   addCompetitorPersonalWatchlistItem,
   collectCompetitor,
@@ -67,6 +68,11 @@ import {
   hasPersistentCollectionClientPeer,
   type CollectionClientMessage,
 } from "../collectionClientClaim";
+import {
+  collectionCheckpointIsRunning,
+  isCollectionSessionBoundaryStatus,
+  shouldPreserveActiveCollectionRequest,
+} from "../collectionRunLifecycle";
 import type {
   CollectResult,
   CompetitorDateRange,
@@ -256,6 +262,7 @@ const autoResumeAt = ref<number | null>(null);
 const autoResumeAttempting = ref(false);
 const restoredRunWasActive = ref(false);
 const manualStopRequested = ref(false);
+const collectionDetachRequested = ref(false);
 const takeoverBusy = ref(false);
 const adoptableCheckpoint = ref<CollectionCheckpoint | null>(null);
 const sharedBatchStatus = ref<CompetitorBatchStatus>({
@@ -1016,6 +1023,10 @@ const autoResumeCountdown = computed(() => {
 onMounted(async () => {
   window.addEventListener("keydown", handleWindowKeydown);
   window.addEventListener("beforeunload", closeCollectionClientChannel);
+  window.addEventListener(
+    AUTH_SESSION_ENDING_EVENT,
+    detachCollectionForSessionChange,
+  );
   const checkpoint = readCollectionCheckpoint();
   restoreCheckpointCollectionClientId(checkpoint);
   await ensureUniqueCollectionClientId();
@@ -1044,8 +1055,13 @@ onMounted(async () => {
 });
 
 onBeforeUnmount(() => {
+  detachCollectionForSessionChange();
   window.removeEventListener("keydown", handleWindowKeydown);
   window.removeEventListener("beforeunload", closeCollectionClientChannel);
+  window.removeEventListener(
+    AUTH_SESSION_ENDING_EVENT,
+    detachCollectionForSessionChange,
+  );
   closeCollectionClientChannel();
   if (sharedBatchTimer !== null) window.clearInterval(sharedBatchTimer);
   if (batchHeartbeatTimer !== null) window.clearInterval(batchHeartbeatTimer);
@@ -2185,7 +2201,11 @@ function persistCollectionCheckpoint() {
     visibleBrowser: visibleBrowser.value,
     savedAt: new Date().toISOString(),
     batchId: batchId.value,
-    running: collecting.value && !manualStopRequested.value,
+    running: collectionCheckpointIsRunning({
+      collecting: collecting.value,
+      manualStopRequested: manualStopRequested.value,
+      detachRequested: collectionDetachRequested.value,
+    }),
     activeIndex: activeIndex.value,
     activeRequestId: activeRequestId.value,
     stockUnprobedIndexes: stockUnprobedIndexes.value,
@@ -2371,6 +2391,7 @@ async function startCollection() {
     return;
   }
   if (collectionPreparing.value) return;
+  collectionDetachRequested.value = false;
   collectionPreparing.value = true;
   collectionErrors.value = [];
   try {
@@ -2378,6 +2399,7 @@ async function startCollection() {
       fetchCompetitorTargets(),
       fetchCompetitorStoreTargets("all"),
     ]);
+    if (collectionDetachRequested.value) return;
     targets.value = latestTargets;
     allStoreTargets.value = latestAllStoreTargetPayload.items;
     allStoreTargetCount.value = latestAllStoreTargetPayload.all_store_unique_count;
@@ -2406,6 +2428,7 @@ async function startCollection() {
 }
 
 async function startNewCollection(urls: string[], emptyMessage: string) {
+  if (collectionDetachRequested.value) return;
   if (sharedBatchStatus.value.active && !collecting.value) {
     if (sharedBatchMatchesCheckpoint.value && pendingResumeCount.value) {
       collectionStopReason.value =
@@ -2456,6 +2479,7 @@ async function startNewCollection(urls: string[], emptyMessage: string) {
 async function resumeCollection(
   mode: "resume" | "auto_resume" | "scheduled_resume" = "resume",
 ) {
+  if (collectionDetachRequested.value) return;
   if (!props.canControlCollection) {
     showCollectionNotice(
       "竞品批次的开始、继续和停止仅限 kxx 账号；当前账号仍可新增链接和插队。",
@@ -2667,6 +2691,7 @@ async function maybeAutoResumeScheduledCollection() {
   if (
     autoResumeAttempting.value
     || collecting.value
+    || collectionDetachRequested.value
     || autoResumeAt.value === null
     || Date.now() < autoResumeAt.value
   ) {
@@ -2768,7 +2793,9 @@ async function runCollection(
   } catch (error) {
     const message =
       error instanceof Error ? error.message : "暂时无法取得竞品采集权";
-    if (mode === "scheduled_resume") {
+    if (collectionDetachRequested.value) {
+      // Logout/session replacement already saved a resumable checkpoint.
+    } else if (mode === "scheduled_resume") {
       scheduleAutomaticResume(`${message}，本轮自动续爬未能启动。`);
     } else {
       collectionStopReason.value = message;
@@ -2780,11 +2807,15 @@ async function runCollection(
     return;
   }
   try {
-    while (!controller.signal.aborted && !collectionStopReason.value) {
+    while (
+      !controller.signal.aborted
+      && !collectionStopReason.value
+      && !collectionDetachRequested.value
+    ) {
       applyQueuedTargetsToRunQueue(queue, knownIndexes);
       applyPriorityTargetsToRunQueue(queue, cursor, knownIndexes);
       while (cursor < queue.length) {
-        if (controller.signal.aborted) break;
+        if (controller.signal.aborted || collectionDetachRequested.value) break;
         applyQueuedTargetsToRunQueue(queue, knownIndexes);
         applyPriorityTargetsToRunQueue(queue, cursor, knownIndexes);
         const {
@@ -2843,7 +2874,16 @@ async function runCollection(
           consecutiveConnectionFailureDetails = [];
           settled = true;
         } catch (error) {
-          if (controller.signal.aborted) break;
+          if (controller.signal.aborted || collectionDetachRequested.value) break;
+          if (
+            error instanceof ApiRequestError
+            && isCollectionSessionBoundaryStatus(error.status)
+          ) {
+            collectionDetachRequested.value = true;
+            controller.abort();
+            persistCollectionCheckpoint();
+            break;
+          }
           const message = error instanceof Error ? error.message : "采集失败";
           const leaseConflict =
             error instanceof ApiRequestError && error.status === 423;
@@ -2954,12 +2994,23 @@ async function runCollection(
           }
         } finally {
           if (settled && !priority) markAttempted(index);
-          activeIndex.value = null;
-          activeRequestId.value = null;
-          activeStartedAt.value = null;
+          if (
+            !shouldPreserveActiveCollectionRequest(
+              collectionDetachRequested.value,
+              settled,
+            )
+          ) {
+            activeIndex.value = null;
+            activeRequestId.value = null;
+            activeStartedAt.value = null;
+          }
           persistCollectionCheckpoint();
         }
-        if (batchLeaseConflict) break;
+        if (
+          batchLeaseConflict
+          || controller.signal.aborted
+          || collectionDetachRequested.value
+        ) break;
         await recordBatchEvent("progress");
         appendPendingItemsToRunQueue(queue, knownIndexes, cursor);
         if (collectionStopReason.value || controller.signal.aborted) break;
@@ -2969,6 +3020,7 @@ async function runCollection(
         batchLeaseConflict
         || controller.signal.aborted
         || collectionStopReason.value
+        || collectionDetachRequested.value
       ) break;
       await loadSharedBatchStatus();
       appendPendingItemsToRunQueue(queue, knownIndexes, cursor);
@@ -2976,9 +3028,14 @@ async function runCollection(
       applyPriorityTargetsToRunQueue(queue, cursor, knownIndexes);
       if (cursor >= queue.length) break;
     }
-    await Promise.all([loadOverview(), loadTargets()]);
+    if (!collectionDetachRequested.value) {
+      await Promise.all([loadOverview(), loadTargets()]);
+    }
   } finally {
-    if (batchLeaseConflict) {
+    if (collectionDetachRequested.value) {
+      // The server-side request is shielded and may still finish. Keep the
+      // request identity in the browser checkpoint so kxx can rejoin it.
+    } else if (batchLeaseConflict) {
       await loadSharedBatchStatus();
     } else if (!manualStopRequested.value && collectionStopReason.value) {
       await recordBatchEvent("paused", collectionStopReason.value);
@@ -2995,6 +3052,14 @@ async function runCollection(
     abortController.value = null;
     persistCollectionCheckpoint();
   }
+}
+
+function detachCollectionForSessionChange() {
+  if (!collecting.value && !collectionPreparing.value) return;
+  collectionDetachRequested.value = true;
+  if (!collecting.value) return;
+  persistCollectionCheckpoint();
+  abortController.value?.abort();
 }
 
 async function stopCollection() {

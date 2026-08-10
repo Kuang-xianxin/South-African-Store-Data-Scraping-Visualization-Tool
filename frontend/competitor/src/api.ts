@@ -35,9 +35,13 @@ import type {
   SearchRankingListPayload,
 } from "./types";
 import { templatePermissions } from "./permissions";
+import { AuthSessionRevision } from "./authSessionRevision";
 
 let csrfToken = "";
 let activeStoreCode = "current";
+const authSessionRevision = new AuthSessionRevision();
+
+export const AUTH_SESSION_ENDING_EVENT = "erp-auth-session-ending";
 
 export class ApiRequestError extends Error {
   constructor(
@@ -51,6 +55,7 @@ export class ApiRequestError extends Error {
 
 export function setAuthSession(session: AuthSession | null) {
   csrfToken = session?.csrf_token ?? "";
+  authSessionRevision.advance();
 }
 
 export function setActiveStoreCode(storeCode: string | null | undefined) {
@@ -96,6 +101,7 @@ function normalizeAuthSession(session: AuthSession): AuthSession {
 }
 
 async function request<T>(url: string, init?: RequestInit & { signal?: AbortSignal }): Promise<T> {
+  const requestAuthSessionRevision = authSessionRevision.snapshot();
   const headers = new Headers(init?.headers);
   const method = (init?.method ?? "GET").toUpperCase();
   if (!["GET", "HEAD", "OPTIONS"].includes(method) && csrfToken) {
@@ -121,6 +127,7 @@ async function request<T>(url: string, init?: RequestInit & { signal?: AbortSign
     if (
       response.status === 401
       && !["/api/auth/login", "/api/auth/session"].includes(url)
+      && authSessionRevision.isCurrent(requestAuthSessionRevision)
     ) {
       window.dispatchEvent(new CustomEvent("erp-auth-expired"));
     }

@@ -2,6 +2,7 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 
 import {
+  AUTH_SESSION_ENDING_EVENT,
   ApiRequestError,
   fetchAuthSession,
   fetchAuthStatus,
@@ -463,6 +464,7 @@ function acceptSession(next: AuthSession) {
 }
 
 function handleExpired() {
+  window.dispatchEvent(new CustomEvent(AUTH_SESSION_ENDING_EVENT));
   disconnectDailyReportEvents();
   session.value = null;
   selectedStoreId.value = null;
@@ -477,6 +479,7 @@ function handleExpired() {
 }
 
 async function signOut() {
+  window.dispatchEvent(new CustomEvent(AUTH_SESSION_ENDING_EVENT));
   try {
     await logout();
   } finally {
