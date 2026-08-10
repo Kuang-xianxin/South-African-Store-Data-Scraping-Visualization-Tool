@@ -21,7 +21,11 @@ ALLOWED_IMAGE_HOSTS = frozenset(
         "takealot.s3.amazonaws.com",
     }
 )
-ALLOWED_IMAGE_PATH_PREFIX = "/covers_images/"
+PRIMARY_IMAGE_PATH_PREFIX = "/covers_images/"
+THUMBNAIL_IMAGE_PATH_PREFIXES = (
+    "/covers_images/",
+    "/covers_tsins/",
+)
 DEFAULT_MAX_DIMENSION = 192
 SUPPORTED_MAX_DIMENSIONS = frozenset({192, 384, 640})
 DEFAULT_MAX_SOURCE_BYTES = 8 * 1024 * 1024
@@ -83,7 +87,7 @@ class ProductThumbnailCache:
         max_dimension: int = DEFAULT_MAX_DIMENSION,
     ) -> Path:
         """Return a cached thumbnail, creating it atomically when needed."""
-        trusted_url = trusted_product_image_url(image_url)
+        trusted_url = trusted_product_thumbnail_url(image_url)
         dimension = validated_thumbnail_dimension(max_dimension)
         cache_key = hashlib.sha256(
             f"jpeg-v2|{dimension}|{trusted_url}".encode()
@@ -210,7 +214,27 @@ class ProductThumbnailCache:
 
 
 def trusted_product_image_url(image_url: str) -> str:
-    """Validate and normalize the trusted Takealot image origins."""
+    """Validate one Seller Offers primary image used by search ranking."""
+    return _trusted_takealot_image_url(
+        image_url,
+        allowed_path_prefixes=(PRIMARY_IMAGE_PATH_PREFIX,),
+    )
+
+
+def trusted_product_thumbnail_url(image_url: str) -> str:
+    """Validate an official Takealot primary or legacy TSIN gallery image."""
+    return _trusted_takealot_image_url(
+        image_url,
+        allowed_path_prefixes=THUMBNAIL_IMAGE_PATH_PREFIXES,
+    )
+
+
+def _trusted_takealot_image_url(
+    image_url: str,
+    *,
+    allowed_path_prefixes: tuple[str, ...],
+) -> str:
+    """Validate and normalize a trusted Takealot image against exact path families."""
     candidate = image_url.strip()
     if not candidate or len(candidate) > 2048:
         raise ProductImageInputError("商品图片地址无效")
@@ -225,7 +249,7 @@ def trusted_product_image_url(image_url: str) -> str:
         or parsed.username is not None
         or parsed.password is not None
         or port not in {None, 80, 443}
-        or not parsed.path.startswith(ALLOWED_IMAGE_PATH_PREFIX)
+        or not parsed.path.startswith(allowed_path_prefixes)
         or parsed.query
         or parsed.fragment
     ):

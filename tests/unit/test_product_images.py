@@ -14,6 +14,7 @@ from takealot_ops.erp.product_images import (
     ProductImageUnavailableError,
     ProductThumbnailCache,
     trusted_product_image_url,
+    trusted_product_thumbnail_url,
     validated_thumbnail_dimension,
 )
 
@@ -137,6 +138,14 @@ def test_media_takealot_image_is_trusted_and_normalized() -> None:
     source = "http://media.takealot.com/covers_images/example/s-zoom.file"
 
     assert trusted_product_image_url(source) == source.replace("http://", "https://")
+
+
+def test_media_takealot_tsin_image_is_trusted_and_normalized() -> None:
+    source = "http://media.takealot.com/covers_tsins/61498554/61498554-1-zoom.jpeg"
+
+    assert trusted_product_thumbnail_url(source) == source.replace("http://", "https://")
+    with pytest.raises(ProductImageInputError):
+        trusted_product_image_url(source)
 
 
 @pytest.mark.parametrize("size", [0, 191, 193, 512, 641, 10_000])

@@ -83,6 +83,183 @@ def test_only_default_variant_falls_back_to_snapshot_product_image() -> None:
     )
 
 
+def test_own_store_variant_family_keeps_one_plid_card_and_exact_variant_images(
+    tmp_path: Path,
+) -> None:
+    engine = create_engine(f"sqlite:///{(tmp_path / 'own-store-variant-family.db').as_posix()}")
+    create_schema(engine)
+    plid = "102722716"
+    url = f"https://www.takealot.com/p/PLID{plid}"
+    captured_at = datetime(2026, 8, 10, 2, tzinfo=UTC)
+    black_image = "https://example.invalid/blanket-black.jpg"
+    grey_image = "https://example.invalid/blanket-grey.jpg"
+    variants = (
+        CompetitorVariant(
+            key="colour=black",
+            label="Black",
+            url=f"{url}?colour=black",
+            title="Blanket Family - Black",
+            sku="SKU-BLACK",
+            seller_id="own-seller",
+            seller_name="Current Store",
+            price=1320,
+            stock_status="In stock",
+            is_leadtime=False,
+            is_add_to_cart_available=True,
+            image_url=black_image,
+        ),
+        CompetitorVariant(
+            key="colour=grey",
+            label="Grey",
+            url=f"{url}?colour=grey",
+            title="Blanket Family - Grey",
+            sku="SKU-GREY",
+            seller_id="own-seller",
+            seller_name="Current Store",
+            price=1360,
+            stock_status="In stock",
+            is_leadtime=False,
+            is_add_to_cart_available=True,
+            image_url=grey_image,
+        ),
+    )
+    product = CompetitorProduct(
+        plid=plid,
+        url=url,
+        title="Infrared Sauna Blanket Family",
+        image_url=black_image,
+        sku="SKU-BLACK",
+        seller_id="own-seller",
+        seller_name="Current Store",
+        price=1320,
+        stock_status="In stock",
+        is_leadtime=False,
+        review_count=0,
+        rating=0,
+        offers=(
+            CompetitorOffer(
+                selected=True,
+                sku="SKU-BLACK",
+                seller_id="own-seller",
+                seller_name="Current Store",
+                price=1320,
+                stock_status="In stock",
+                is_buybox=True,
+                plid=plid,
+                url=f"{url}?colour=black",
+                offer_id="offer-black",
+                variant_key="colour=black",
+                variant_label="Black",
+            ),
+            CompetitorOffer(
+                selected=False,
+                sku="SKU-GREY",
+                seller_id="own-seller",
+                seller_name="Current Store",
+                price=1360,
+                stock_status="In stock",
+                is_buybox=True,
+                plid=plid,
+                url=f"{url}?colour=grey",
+                offer_id="offer-grey",
+                variant_key="colour=grey",
+                variant_label="Grey",
+            ),
+        ),
+        variants=variants,
+    )
+    skipped = skipped_stock_probe()
+    with Session(engine) as session, session.begin():
+        session.add_all(
+            [
+                OfferCurrent(
+                    offer_id="offer-black",
+                    productline_id=plid,
+                    tsin_id="TSIN-BLACK",
+                    sku="SKU-BLACK",
+                    title="Infrared Sauna Blanket Family - Black",
+                    image_url=black_image,
+                    selling_price=1320,
+                    total_stock=37,
+                    captured_at=captured_at,
+                ),
+                OfferCurrent(
+                    offer_id="offer-grey",
+                    productline_id=plid,
+                    tsin_id="TSIN-GREY",
+                    sku="SKU-GREY",
+                    title="Infrared Sauna Blanket Family - Grey",
+                    image_url=grey_image,
+                    selling_price=1360,
+                    total_stock=36,
+                    captured_at=captured_at,
+                ),
+                StoreOfferBaseline(
+                    display_date=date(2026, 8, 10),
+                    offer_id="offer-black",
+                    productline_id=plid,
+                    sku="SKU-BLACK",
+                    title="Infrared Sauna Blanket Family - Black",
+                    image_url=black_image,
+                    selling_price=1320,
+                    status="buyable",
+                    total_stock=37,
+                    captured_at=captured_at,
+                ),
+                StoreOfferBaseline(
+                    display_date=date(2026, 8, 10),
+                    offer_id="offer-grey",
+                    productline_id=plid,
+                    sku="SKU-GREY",
+                    title="Infrared Sauna Blanket Family - Grey",
+                    image_url=grey_image,
+                    selling_price=1360,
+                    status="buyable",
+                    total_stock=36,
+                    captured_at=captured_at,
+                ),
+            ]
+        )
+        CompetitorRepository(session).save_observation(
+            product=product,
+            reviews=[],
+            review_summary=summarize_reviews([]),
+            stock=skipped,
+            variant_stocks=[
+                VariantStockObservation(variant=variant, stock=skipped) for variant in variants
+            ],
+            offer_stocks=[],
+            lifetime_sales=estimate_lifetime_sales(0),
+            signal=analyze_sales_signal(
+                None,
+                current_stock_quantity=None,
+                current_stock_exact=False,
+                current_review_count=0,
+            ),
+            collected_at=captured_at,
+            register_target=False,
+        )
+
+    dataset = load_competitor_dataset(engine)
+    engine.dispose()
+
+    assert len(dataset.store_current) == 1
+    item = dataset.store_current.iloc[0]
+    assert item["plid"] == plid
+    assert item["商品"] == "Infrared Sauna Blanket Family"
+    assert item["图片"] == black_image
+    seller_api_offers = [offer for offer in item["对比报价"] if offer["报价来源"] == "seller_api"]
+    assert len(seller_api_offers) == 2
+    assert {offer["TSIN"]: offer["图片"] for offer in seller_api_offers} == {
+        "TSIN-BLACK": black_image,
+        "TSIN-GREY": grey_image,
+    }
+    assert {row["变体"]: row["图片"] for row in dataset.variants.to_dict(orient="records")} == {
+        "Black": black_image,
+        "Grey": grey_image,
+    }
+
+
 def test_competitor_observation_persists_snapshot_and_deduplicated_reviews(
     tmp_path: Path,
     monkeypatch,

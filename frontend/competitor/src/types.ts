@@ -5,6 +5,8 @@ export interface CompetitorOfferItem {
   卖家ID: string | null;
   卖家: string;
   SKU: string | null;
+  TSIN?: string | null;
+  图片?: string | null;
   价格: number | null;
   库存状态: string;
   库存原始状态: string;
@@ -175,11 +177,24 @@ export interface CompetitorTargetItem {
 export interface CompetitorPersonalWatchlistItem {
   plid: string;
   added_at: string;
+  source: "competitor" | "own_store";
+  library_ids: number[];
+}
+
+export interface PersonalWatchlistLibrary {
+  id: number;
+  name: string;
+  created_at: string;
+  updated_at: string;
+  item_count: number;
 }
 
 export interface CompetitorPersonalWatchlistPayload {
   items: CompetitorPersonalWatchlistItem[];
   count: number;
+  libraries: PersonalWatchlistLibrary[];
+  default_library_configured: boolean;
+  default_library_id: number | null;
 }
 
 export interface CompetitorTargetAuditItem {

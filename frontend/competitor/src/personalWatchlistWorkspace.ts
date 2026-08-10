@@ -7,6 +7,8 @@ import type {
 export interface PersonalWatchlistWorkspaceCard {
   plid: string;
   addedAt: string;
+  source: CompetitorPersonalWatchlistItem["source"];
+  libraryIds: number[];
   competitor: CompetitorItem | null;
   target: CompetitorTargetItem | null;
 }
@@ -21,6 +23,8 @@ export function buildPersonalWatchlistWorkspaceCards(
   return memberships.map((membership) => ({
     plid: membership.plid,
     addedAt: membership.added_at,
+    source: membership.source,
+    libraryIds: membership.library_ids,
     competitor: competitorsByPlid.get(membership.plid) ?? null,
     target: targetsByPlid.get(membership.plid) ?? null,
   }));

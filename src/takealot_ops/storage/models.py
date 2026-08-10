@@ -579,6 +579,85 @@ class CompetitorPersonalWatchlist(Base):
     )
 
 
+class OwnStorePersonalWatchlist(Base):
+    """One connected-store product saved to one account's personal watchlist."""
+
+    __tablename__ = "own_store_personal_watchlist"
+
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("erp_users.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    plid: Mapped[str] = mapped_column(String(30), primary_key=True)
+    added_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+    )
+
+
+class PersonalWatchlistLibrary(Base):
+    """One account-defined type library for organizing personal watchlist cards."""
+
+    __tablename__ = "personal_watchlist_libraries"
+    __table_args__ = (UniqueConstraint("user_id", "name", name="uq_watchlist_library_user_name"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("erp_users.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    name: Mapped[str] = mapped_column(String(40), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+    )
+
+
+class PersonalWatchlistLibraryItem(Base):
+    """Assign one personal watchlist PLID to one account-owned type library."""
+
+    __tablename__ = "personal_watchlist_library_items"
+
+    library_id: Mapped[int] = mapped_column(
+        ForeignKey("personal_watchlist_libraries.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    plid: Mapped[str] = mapped_column(String(30), primary_key=True)
+    added_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+    )
+
+
+class PersonalWatchlistPreference(Base):
+    """Persist whether an account selected a default type library or no library."""
+
+    __tablename__ = "personal_watchlist_preferences"
+
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("erp_users.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    default_configured: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+    )
+    default_library_id: Mapped[int | None] = mapped_column(
+        ForeignKey("personal_watchlist_libraries.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+    )
+
+
 class ErpSession(Base):
     """A revocable server-side ERP browser session."""
 

@@ -7,7 +7,9 @@ import {
   addCompetitorPersonalWatchlistItem,
   collectCompetitor,
   createCompetitorTarget,
+  createPersonalWatchlistLibrary,
   deleteCompetitorPersonalWatchlistItem,
+  deletePersonalWatchlistLibrary,
   deleteCompetitorTarget,
   fetchCompetitorBatchStatus,
   fetchCompetitorDetail,
@@ -19,10 +21,13 @@ import {
   fetchCompetitors,
   logCompetitorBatchEvent,
   prioritizeCompetitorTarget,
+  renamePersonalWatchlistLibrary,
   stopCompetitorBatch,
   takeoverCompetitorBatch,
   updateCompetitorTarget,
   updateCompetitorBatchOptions,
+  updatePersonalWatchlistItemLibraries,
+  updatePersonalWatchlistSettings,
   type CompetitorBatchStatus,
 } from "../api";
 import {
@@ -82,12 +87,14 @@ import type {
   CompetitorLinkHealthItem,
   CompetitorOfferItem,
   CompetitorPersonalWatchlistItem,
+  CompetitorPersonalWatchlistPayload,
   CompetitorTargetAuditItem,
   CompetitorTargetItem,
   CompetitorStoreTargetItem,
   CompetitorVariantItem,
   OwnFollowerHistoryItem,
   OwnStoreScope,
+  PersonalWatchlistLibrary,
 } from "../types";
 import { formatChinaDateTime } from "../time";
 
@@ -169,6 +176,7 @@ type CollectionRunMode =
   | "auto_resume"
   | "scheduled_resume";
 type TargetActionSource = "default" | "manual_retry";
+type PersonalWatchlistLibraryFilter = "all" | "unclassified" | number;
 
 const collectionCheckpointKey = "takealot-competitor-collection-v1";
 const collectionClientKey = "takealot-competitor-client-v1";
@@ -188,6 +196,22 @@ const personalWatchlistNotice = ref("");
 const personalWatchlistPage = ref(1);
 const personalWatchlistPageSize = 6;
 const personalWatchlistHighlightPlid = ref("");
+const personalWatchlistLibraries = ref<PersonalWatchlistLibrary[]>([]);
+const personalWatchlistDefaultConfigured = ref(false);
+const personalWatchlistDefaultLibraryId = ref<number | null>(null);
+const personalWatchlistLibraryFilter = ref<PersonalWatchlistLibraryFilter>("all");
+const personalWatchlistLibraryModalOpen = ref(false);
+const personalWatchlistLibraryAssignmentPlid = ref("");
+const personalWatchlistLibrarySelection = ref<number[]>([]);
+const personalWatchlistDefaultSelection = ref<number | null>(null);
+const personalWatchlistNewLibraryName = ref("");
+const personalWatchlistEditingLibraryId = ref<number | null>(null);
+const personalWatchlistEditingLibraryName = ref("");
+const personalWatchlistLibraryBusy = ref(false);
+const personalWatchlistLibraryError = ref("");
+const personalWatchlistLibraryNotice = ref("");
+const pendingTargetAfterLibrarySetup = ref("");
+const pendingPersonalWatchlistPlidAfterLibrarySetup = ref("");
 const storeTargets = ref<CompetitorStoreTargetItem[]>([]);
 const allStoreTargets = ref<CompetitorStoreTargetItem[]>([]);
 const ownStoreScope = computed<OwnStoreScope>(
@@ -363,6 +387,9 @@ const selectedOffer = computed(() => {
 const selectedOfferLink = computed(
   () => selectedOffer.value?.链接 || selected.value?.链接 || "#",
 );
+const selectedHeroImage = computed(
+  () => selectedOffer.value?.图片 || selected.value?.图片 || null,
+);
 const selectedSellerGroups = computed(() =>
   groupCompetitorOffersBySeller(selectedComparisonOffers.value, offerSort.value),
 );
@@ -504,15 +531,32 @@ const personalWatchlistCards = computed(() =>
   buildPersonalWatchlistWorkspaceCards(
     personalWatchlistItems.value,
     targets.value,
-    competitors.value,
+    allCompetitorItems.value,
   ),
 );
+const filteredPersonalWatchlistCards = computed(() => {
+  const filter = personalWatchlistLibraryFilter.value;
+  if (filter === "all") return personalWatchlistCards.value;
+  if (filter === "unclassified") {
+    return personalWatchlistCards.value.filter((card) => !card.libraryIds.length);
+  }
+  return personalWatchlistCards.value.filter((card) => card.libraryIds.includes(filter));
+});
+const unclassifiedPersonalWatchlistCount = computed(
+  () => personalWatchlistCards.value.filter((card) => !card.libraryIds.length).length,
+);
 const personalWatchlistPageCount = computed(() =>
-  Math.max(1, Math.ceil(personalWatchlistCards.value.length / personalWatchlistPageSize)),
+  Math.max(
+    1,
+    Math.ceil(filteredPersonalWatchlistCards.value.length / personalWatchlistPageSize),
+  ),
 );
 const pagedPersonalWatchlistCards = computed(() => {
   const start = (personalWatchlistPage.value - 1) * personalWatchlistPageSize;
-  return personalWatchlistCards.value.slice(start, start + personalWatchlistPageSize);
+  return filteredPersonalWatchlistCards.value.slice(
+    start,
+    start + personalWatchlistPageSize,
+  );
 });
 const selectedTarget = computed(
   () => targets.value.find((target) => target.plid === selectedPlid.value) ?? null,
@@ -1113,6 +1157,10 @@ watch(personalWatchlistPageCount, (pageCount) => {
   if (personalWatchlistPage.value > pageCount) personalWatchlistPage.value = pageCount;
 });
 
+watch(personalWatchlistLibraryFilter, () => {
+  personalWatchlistPage.value = 1;
+});
+
 watch(
   [
     competitorQuery,
@@ -1355,6 +1403,23 @@ function ownStoreNames(item: CompetitorItem): string {
     || ownStoreScopeLabel.value;
 }
 
+function ownStoreVariantCount(item: CompetitorItem): number {
+  const identities = comparisonOffers(item)
+    .filter((offer) => offer.报价来源 === "seller_api")
+    .map((offer) =>
+      String(
+        offer.TSIN
+        || offer.图片
+        || offer.变体键
+        || offer.SKU
+        || offer.offer_id
+        || offer.报价键,
+      ).trim(),
+    )
+    .filter(Boolean);
+  return new Set(identities).size;
+}
+
 function clearCompetitorFilters(): void {
   competitorQuery.value = "";
   competitorStockFilter.value = "全部";
@@ -1524,6 +1589,10 @@ function closeTargetAudit() {
 
 function handleWindowKeydown(event: KeyboardEvent) {
   if (event.key !== "Escape") return;
+  if (personalWatchlistLibraryModalOpen.value) {
+    closePersonalWatchlistLibraryModal();
+    return;
+  }
   if (targetActionOpen.value) {
     closeTargetAction();
     return;
@@ -1629,10 +1698,7 @@ async function loadTargets() {
       fetchCompetitorPersonalWatchlist(),
     ]);
     targets.value = loadedTargets;
-    personalWatchlistItems.value = personalWatchlistPayload.items;
-    personalWatchlistPlids.value = new Set(
-      personalWatchlistPayload.items.map((item) => item.plid),
-    );
+    applyPersonalWatchlistPayload(personalWatchlistPayload);
     storeTargets.value = storeTargetPayload.items;
     allStoreTargets.value = allStoreTargetPayload.items;
     storeTargetMembershipCount.value = storeTargetPayload.selected_membership_count;
@@ -1648,6 +1714,29 @@ async function loadTargets() {
   }
 }
 
+function applyPersonalWatchlistPayload(
+  payload: CompetitorPersonalWatchlistPayload,
+): void {
+  personalWatchlistItems.value = payload.items;
+  personalWatchlistPlids.value = new Set(payload.items.map((item) => item.plid));
+  personalWatchlistLibraries.value = payload.libraries;
+  personalWatchlistDefaultConfigured.value = payload.default_library_configured;
+  personalWatchlistDefaultLibraryId.value = payload.default_library_id;
+  personalWatchlistDefaultSelection.value = payload.default_library_id;
+  if (
+    typeof personalWatchlistLibraryFilter.value === "number"
+    && !payload.libraries.some(
+      (library) => library.id === personalWatchlistLibraryFilter.value,
+    )
+  ) {
+    personalWatchlistLibraryFilter.value = "all";
+  }
+}
+
+async function loadPersonalWatchlist(): Promise<void> {
+  applyPersonalWatchlistPayload(await fetchCompetitorPersonalWatchlist());
+}
+
 function setPersonalWatchlistLocal(
   plid: string,
   included: boolean,
@@ -1660,6 +1749,8 @@ function setPersonalWatchlistLocal(
     const nextMembership = membership ?? existing ?? {
       plid,
       added_at: new Date().toISOString(),
+      source: "competitor",
+      library_ids: [],
     };
     personalWatchlistItems.value = existing
       ? personalWatchlistItems.value.map((item) =>
@@ -1681,7 +1772,211 @@ async function persistPersonalWatchlistAddition(plid: string): Promise<boolean> 
   return result.created;
 }
 
+function personalWatchlistLibraryNames(
+  card: PersonalWatchlistWorkspaceCard,
+): string[] {
+  const selectedIds = new Set(card.libraryIds);
+  return personalWatchlistLibraries.value
+    .filter((library) => selectedIds.has(library.id))
+    .map((library) => library.name);
+}
+
+function openPersonalWatchlistLibrarySettings(): void {
+  personalWatchlistLibraryAssignmentPlid.value = "";
+  personalWatchlistLibrarySelection.value = [];
+  personalWatchlistDefaultSelection.value = personalWatchlistDefaultLibraryId.value;
+  personalWatchlistLibraryError.value = "";
+  personalWatchlistLibraryNotice.value = "";
+  personalWatchlistLibraryModalOpen.value = true;
+  document.body.style.overflow = "hidden";
+}
+
+function openPersonalWatchlistCardLibraries(
+  card: PersonalWatchlistWorkspaceCard,
+): void {
+  personalWatchlistLibraryAssignmentPlid.value = card.plid;
+  personalWatchlistLibrarySelection.value = [...card.libraryIds];
+  personalWatchlistDefaultSelection.value = personalWatchlistDefaultLibraryId.value;
+  personalWatchlistLibraryError.value = "";
+  personalWatchlistLibraryNotice.value = "";
+  personalWatchlistLibraryModalOpen.value = true;
+  document.body.style.overflow = "hidden";
+}
+
+function promptForPersonalWatchlistDefault(url: string): void {
+  pendingTargetAfterLibrarySetup.value = url;
+  openPersonalWatchlistLibrarySettings();
+  personalWatchlistLibraryNotice.value = (
+    "首次新增前，请选择一个默认类型库，或明确选择“不自动加入任何类型库”。"
+  );
+}
+
+function promptForPersonalWatchlistDefaultBeforeMembership(plid: string): void {
+  openPersonalWatchlistLibrarySettings();
+  pendingPersonalWatchlistPlidAfterLibrarySetup.value = plid;
+  personalWatchlistLibraryNotice.value = (
+    "首次加入个人监控池前，请选择一个默认类型库，或明确选择“不自动加入任何类型库”。"
+  );
+}
+
+function closePersonalWatchlistLibraryModal(): void {
+  personalWatchlistLibraryModalOpen.value = false;
+  personalWatchlistLibraryAssignmentPlid.value = "";
+  personalWatchlistLibrarySelection.value = [];
+  personalWatchlistEditingLibraryId.value = null;
+  personalWatchlistEditingLibraryName.value = "";
+  pendingTargetAfterLibrarySetup.value = "";
+  pendingPersonalWatchlistPlidAfterLibrarySetup.value = "";
+  document.body.style.overflow = "";
+}
+
+async function addPersonalWatchlistLibrary(): Promise<void> {
+  const name = personalWatchlistNewLibraryName.value.trim();
+  if (!name || personalWatchlistLibraryBusy.value) return;
+  personalWatchlistLibraryBusy.value = true;
+  personalWatchlistLibraryError.value = "";
+  try {
+    const result = await createPersonalWatchlistLibrary(name);
+    personalWatchlistLibraries.value = [
+      ...personalWatchlistLibraries.value,
+      result.library,
+    ];
+    personalWatchlistDefaultSelection.value = result.library.id;
+    personalWatchlistNewLibraryName.value = "";
+    personalWatchlistLibraryNotice.value = (
+      `类型库“${result.library.name}”已创建，并已选为待保存的默认类型库。`
+    );
+  } catch (error) {
+    personalWatchlistLibraryError.value =
+      error instanceof Error ? error.message : "创建类型库失败";
+  } finally {
+    personalWatchlistLibraryBusy.value = false;
+  }
+}
+
+function beginRenamePersonalWatchlistLibrary(library: PersonalWatchlistLibrary): void {
+  personalWatchlistEditingLibraryId.value = library.id;
+  personalWatchlistEditingLibraryName.value = library.name;
+  personalWatchlistLibraryError.value = "";
+}
+
+async function savePersonalWatchlistLibraryRename(): Promise<void> {
+  const libraryId = personalWatchlistEditingLibraryId.value;
+  const name = personalWatchlistEditingLibraryName.value.trim();
+  if (libraryId === null || !name || personalWatchlistLibraryBusy.value) return;
+  personalWatchlistLibraryBusy.value = true;
+  personalWatchlistLibraryError.value = "";
+  try {
+    const result = await renamePersonalWatchlistLibrary(libraryId, name);
+    personalWatchlistLibraries.value = personalWatchlistLibraries.value.map(
+      (library) => library.id === libraryId ? result.library : library,
+    );
+    personalWatchlistEditingLibraryId.value = null;
+    personalWatchlistEditingLibraryName.value = "";
+    personalWatchlistLibraryNotice.value = `类型库已重命名为“${result.library.name}”。`;
+  } catch (error) {
+    personalWatchlistLibraryError.value =
+      error instanceof Error ? error.message : "重命名类型库失败";
+  } finally {
+    personalWatchlistLibraryBusy.value = false;
+  }
+}
+
+async function removePersonalWatchlistLibrary(
+  library: PersonalWatchlistLibrary,
+): Promise<void> {
+  if (personalWatchlistLibraryBusy.value) return;
+  if (!window.confirm(`删除类型库“${library.name}”？商品仍保留在个人监控池。`)) return;
+  personalWatchlistLibraryBusy.value = true;
+  personalWatchlistLibraryError.value = "";
+  try {
+    await deletePersonalWatchlistLibrary(library.id);
+    personalWatchlistLibrarySelection.value = personalWatchlistLibrarySelection.value.filter(
+      (libraryId) => libraryId !== library.id,
+    );
+    await loadPersonalWatchlist();
+    personalWatchlistLibraryNotice.value = (
+      `类型库“${library.name}”已删除，监控池商品和采集历史未改变。`
+    );
+  } catch (error) {
+    personalWatchlistLibraryError.value =
+      error instanceof Error ? error.message : "删除类型库失败";
+  } finally {
+    personalWatchlistLibraryBusy.value = false;
+  }
+}
+
+function togglePersonalWatchlistLibrarySelection(libraryId: number): void {
+  const next = new Set(personalWatchlistLibrarySelection.value);
+  if (next.has(libraryId)) next.delete(libraryId);
+  else next.add(libraryId);
+  personalWatchlistLibrarySelection.value = [...next].sort((a, b) => a - b);
+}
+
+async function savePersonalWatchlistCardLibraries(): Promise<void> {
+  const plid = personalWatchlistLibraryAssignmentPlid.value;
+  if (!plid || personalWatchlistLibraryBusy.value) return;
+  personalWatchlistLibraryBusy.value = true;
+  personalWatchlistLibraryError.value = "";
+  try {
+    await updatePersonalWatchlistItemLibraries(
+      plid,
+      personalWatchlistLibrarySelection.value,
+    );
+    await loadPersonalWatchlist();
+    personalWatchlistLibraryNotice.value = `PLID${plid} 的类型库归类已保存。`;
+  } catch (error) {
+    personalWatchlistLibraryError.value =
+      error instanceof Error ? error.message : "保存商品类型库失败";
+  } finally {
+    personalWatchlistLibraryBusy.value = false;
+  }
+}
+
+async function savePersonalWatchlistDefault(): Promise<void> {
+  if (personalWatchlistLibraryBusy.value) return;
+  personalWatchlistLibraryBusy.value = true;
+  personalWatchlistLibraryError.value = "";
+  const pendingUrl = pendingTargetAfterLibrarySetup.value;
+  const pendingPlid = pendingPersonalWatchlistPlidAfterLibrarySetup.value;
+  try {
+    const result = await updatePersonalWatchlistSettings(
+      personalWatchlistDefaultSelection.value,
+    );
+    personalWatchlistDefaultConfigured.value = result.default_library_configured;
+    personalWatchlistDefaultLibraryId.value = result.default_library_id;
+    personalWatchlistLibraryNotice.value = result.default_library_id === null
+      ? "已设置为新增商品不自动加入任何类型库。"
+      : "默认类型库已保存，新增商品会自动归入该库。";
+    personalWatchlistLibraryModalOpen.value = false;
+    personalWatchlistLibraryAssignmentPlid.value = "";
+    pendingTargetAfterLibrarySetup.value = "";
+    pendingPersonalWatchlistPlidAfterLibrarySetup.value = "";
+    document.body.style.overflow = "";
+  } catch (error) {
+    personalWatchlistLibraryError.value =
+      error instanceof Error ? error.message : "保存默认类型库失败";
+    personalWatchlistLibraryBusy.value = false;
+    return;
+  }
+  personalWatchlistLibraryBusy.value = false;
+  if (pendingUrl) {
+    newTargetUrl.value = pendingUrl;
+    await addTarget();
+  } else if (pendingPlid) {
+    try {
+      await persistPersonalWatchlistAddition(pendingPlid);
+      personalWatchlistNotice.value = `PLID${pendingPlid} 已加入你的个人监控池。`;
+      await focusPersonalWatchlistCard(pendingPlid);
+    } catch (error) {
+      personalWatchlistError.value =
+        error instanceof Error ? error.message : "加入个人监控池失败";
+    }
+  }
+}
+
 async function focusPersonalWatchlistCard(plid: string): Promise<boolean> {
+  personalWatchlistLibraryFilter.value = "all";
   const page = personalWatchlistPageForPlid(
     personalWatchlistCards.value,
     plid,
@@ -1722,9 +2017,16 @@ function openPersonalWatchlistCard(card: PersonalWatchlistWorkspaceCard): void {
     return;
   }
   clearTargetManagerFeedback();
-  targetManagerNotice.value = card.target
-    ? `PLID${card.plid} 已在监控队列和你的个人监控池中，正在等待首次采集。`
-    : `PLID${card.plid} 当前只保留在你的个人监控池中；重新粘贴原链接可恢复全局监控。`;
+  if (card.source === "own_store") {
+    targetManagerNotice.value = (
+      `PLID${card.plid} 是自有店铺商品，已在个人监控池并持续参加每日跟卖巡检；`
+      + "公开快照完成后会在此补齐详情。"
+    );
+  } else {
+    targetManagerNotice.value = card.target
+      ? `PLID${card.plid} 已在监控队列和你的个人监控池中，正在等待首次采集。`
+      : `PLID${card.plid} 当前只保留在你的个人监控池中；重新粘贴原链接可恢复全局监控。`;
+  }
 }
 
 async function removeFromPersonalWatchlist(plid: string): Promise<void> {
@@ -1747,10 +2049,15 @@ async function removeFromPersonalWatchlist(plid: string): Promise<void> {
 
 async function toggleSelectedPersonalWatchlist(): Promise<void> {
   const item = selected.value;
-  if (!item || item.来源 !== "competitor" || personalWatchlistBusyPlid.value) return;
+  if (!item || personalWatchlistBusyPlid.value) return;
   const removing = personalWatchlistPlids.value.has(item.plid);
   if (removing) {
     await removeFromPersonalWatchlist(item.plid);
+    return;
+  }
+  if (!personalWatchlistDefaultConfigured.value) {
+    closeProductModal();
+    promptForPersonalWatchlistDefaultBeforeMembership(item.plid);
     return;
   }
   clearPersonalWatchlistFeedback();
@@ -1787,6 +2094,14 @@ async function addTarget() {
     return;
   }
   const plid = plidFromUrl(url);
+  if (
+    plid
+    && !personalWatchlistDefaultConfigured.value
+    && !personalWatchlistPlids.value.has(plid)
+  ) {
+    promptForPersonalWatchlistDefault(url);
+    return;
+  }
   const existingTarget = targets.value.find((target) => target.plid === plid);
   if (existingTarget) {
     targetManagerBusy.value = "add";
@@ -1808,19 +2123,30 @@ async function addTarget() {
     const result = await createCompetitorTarget(url);
     newTargetUrl.value = "";
     if (result.automatic_store_target) {
-      await Promise.all([loadTargets(), loadOverview()]);
+      if (result.personal_watchlist_member) {
+        setPersonalWatchlistLocal(
+          plid,
+          true,
+          result.personal_watchlist_item,
+        );
+      }
       const storeNames = result.store_names.join("、") || "已接入店铺";
       targetManagerNotice.value = (
-        `PLID${plid} 属于自有店铺（${storeNames}），无需加入真正竞品；`
-        + `系统已自动纳入${allStoreTargetCount.value}条私有链接的每日全量跟卖巡检。`
+        `PLID${plid} 属于自有店铺（${storeNames}），无需重复加入真正竞品；`
+        + `已加入你的个人监控池，并持续参加${allStoreTargetCount.value}条自有链接的每日全量跟卖巡检。`
       );
+      await focusPersonalWatchlistCard(plid);
       return;
     }
     if (!result.item) {
       throw new Error("新增接口未返回竞品记录，请刷新后重试");
     }
     if (result.personal_watchlist_member) {
-      setPersonalWatchlistLocal(result.item.plid, true);
+      setPersonalWatchlistLocal(
+        result.item.plid,
+        true,
+        result.personal_watchlist_item,
+      );
     }
     await loadTargets();
     if (props.isAdmin) await loadSharedBatchStatus();
@@ -3490,14 +3816,21 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
           {{ props.currentUsername || "当前账号" }} 的个人监控池
         </strong>
         <span>
-          这里直接展示你自己关注的真正竞品，不再跳到下方商品分区。粘贴链接会同时加入全局监控队列和当前账号个人池；
-          已有商品会自动定位到这里，其他账号看不到你的个人归类。
+          这里直接展示你关注的真正竞品和自有店铺商品。粘贴链接会自动识别来源并加入当前账号个人池；
+          真正竞品进入监控队列，自有商品沿用每日全量跟卖巡检，其他账号看不到你的个人归类和类型库。
         </span>
       </div>
       <div class="personal-watchlist-summary-count" aria-label="当前账号个人监控池商品数量">
         <strong>{{ personalWatchlistPlids.size }}</strong>
         <span>个我的商品</span>
       </div>
+      <button
+        type="button"
+        class="secondary-button personal-watchlist-library-settings-button"
+        @click="openPersonalWatchlistLibrarySettings"
+      >
+        类型库设置
+      </button>
       <form class="target-add-row personal-watchlist-quick-add" @submit.prevent="addTarget">
         <label for="personal-watchlist-link">新增监控链接</label>
         <input
@@ -3570,11 +3903,45 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
           </div>
           <span v-if="personalWatchlistCards.length">
             第 {{ personalWatchlistPage }}/{{ personalWatchlistPageCount }} 页 ·
-            共 {{ personalWatchlistCards.length }} 个
+            显示 {{ filteredPersonalWatchlistCards.length }} / 共
+            {{ personalWatchlistCards.length }} 个
           </span>
         </div>
 
-        <div v-if="personalWatchlistCards.length" class="personal-watchlist-product-grid">
+        <nav
+          v-if="personalWatchlistCards.length || personalWatchlistLibraries.length"
+          class="personal-watchlist-library-filter"
+          aria-label="按个人类型库筛选监控池商品"
+        >
+          <button
+            type="button"
+            :class="{ selected: personalWatchlistLibraryFilter === 'all' }"
+            @click="personalWatchlistLibraryFilter = 'all'"
+          >
+            全部 <small>{{ personalWatchlistCards.length }}</small>
+          </button>
+          <button
+            type="button"
+            :class="{ selected: personalWatchlistLibraryFilter === 'unclassified' }"
+            @click="personalWatchlistLibraryFilter = 'unclassified'"
+          >
+            未分类 <small>{{ unclassifiedPersonalWatchlistCount }}</small>
+          </button>
+          <button
+            v-for="library in personalWatchlistLibraries"
+            :key="`filter-${library.id}`"
+            type="button"
+            :class="{ selected: personalWatchlistLibraryFilter === library.id }"
+            @click="personalWatchlistLibraryFilter = library.id"
+          >
+            {{ library.name }} <small>{{ library.item_count }}</small>
+          </button>
+        </nav>
+
+        <div
+          v-if="filteredPersonalWatchlistCards.length"
+          class="personal-watchlist-product-grid"
+        >
           <article
             v-for="card in pagedPersonalWatchlistCards"
             :id="`personal-watchlist-card-${card.plid}`"
@@ -3608,16 +3975,33 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
                   class="personal-watchlist-location-badge"
                   role="status"
                 >已定位到此商品</strong>
-                <small :class="{ inactive: !card.target }">
-                  {{ card.target ? "已在监控队列" : "仅在个人监控池" }}
+                <small :class="{ inactive: card.source !== 'own_store' && !card.target }">
+                  {{
+                    card.source === "own_store"
+                      ? "自有店铺 · 每日巡检"
+                      : card.target
+                        ? "真正竞品 · 监控队列"
+                        : "真正竞品 · 仅个人池"
+                  }}
                 </small>
               </div>
               <h4>
                 {{ card.competitor?.商品 || card.target?.title || "等待首次采集" }}
               </h4>
+              <div class="personal-watchlist-library-chips">
+                <span
+                  v-for="libraryName in personalWatchlistLibraryNames(card)"
+                  :key="libraryName"
+                >{{ libraryName }}</span>
+                <small v-if="!personalWatchlistLibraryNames(card).length">未加入类型库</small>
+              </div>
               <p v-if="card.competitor">
                 主卖家 {{ card.competitor.当前卖家 || "未知" }} ·
-                {{ card.competitor.跟卖报价.length }} 个变体 / 报价
+                {{
+                  card.competitor.来源 === "own_store"
+                    ? ownStoreVariantCount(card.competitor)
+                    : card.competitor.跟卖报价.length
+                }} 个变体 / 报价
               </p>
               <p v-else-if="card.target">
                 已加入两个清单，首次采集完成后会在这里补齐商品、价格和库存。
@@ -3650,6 +4034,13 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
                   查看商品详情
                 </button>
                 <button
+                  type="button"
+                  class="secondary-button"
+                  @click.stop="openPersonalWatchlistCardLibraries(card)"
+                >
+                  设置类型库
+                </button>
+                <button
                   v-if="props.isAdmin && card.target"
                   type="button"
                   class="secondary-button"
@@ -3674,8 +4065,15 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
           </article>
         </div>
         <div v-else class="personal-watchlist-empty-state">
-          <strong>个人监控池暂无商品</strong>
-          <span>在上方粘贴 Takealot 链接，会同时加入监控队列和你的个人监控池。</span>
+          <strong>
+            {{ personalWatchlistCards.length ? "当前类型库暂无商品" : "个人监控池暂无商品" }}
+          </strong>
+          <span v-if="personalWatchlistCards.length">
+            可切换“全部”，或点击卡片上的“设置类型库”调整归类。
+          </span>
+          <span v-else>
+            在上方粘贴 Takealot 链接，系统会识别真正竞品或自有商品并加入你的个人监控池。
+          </span>
         </div>
         <div v-if="personalWatchlistPageCount > 1" class="personal-watchlist-pagination">
           <button
@@ -4577,6 +4975,208 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
 
     <Teleport to="body">
       <div
+        v-if="personalWatchlistLibraryModalOpen"
+        class="competitor-modal-backdrop personal-watchlist-library-backdrop"
+        @click.self="closePersonalWatchlistLibraryModal"
+      >
+        <section
+          class="personal-watchlist-library-modal"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="personal-watchlist-library-modal-title"
+        >
+          <header class="personal-watchlist-library-modal-header">
+            <div>
+              <p class="section-kicker">PERSONAL TYPE LIBRARIES</p>
+              <h2 id="personal-watchlist-library-modal-title">个人监控池类型库</h2>
+              <span>类型库、默认设置和商品归类仅当前账号可见。</span>
+            </div>
+            <button
+              type="button"
+              class="competitor-modal-close"
+              aria-label="关闭类型库设置"
+              @click="closePersonalWatchlistLibraryModal"
+            >×</button>
+          </header>
+
+          <div class="personal-watchlist-library-modal-body">
+            <p
+              v-if="personalWatchlistLibraryError"
+              class="target-manager-message error"
+              role="alert"
+            >{{ personalWatchlistLibraryError }}</p>
+            <p
+              v-if="personalWatchlistLibraryNotice"
+              class="target-manager-message success"
+              role="status"
+            >{{ personalWatchlistLibraryNotice }}</p>
+
+            <section
+              v-if="personalWatchlistLibraryAssignmentPlid"
+              class="personal-watchlist-library-section"
+            >
+              <div class="personal-watchlist-library-section-heading">
+                <div>
+                  <p class="section-kicker">CARD CLASSIFICATION</p>
+                  <h3>PLID{{ personalWatchlistLibraryAssignmentPlid }} 的类型库</h3>
+                </div>
+                <span>一张卡片可以同时加入多个类型库</span>
+              </div>
+              <div
+                v-if="personalWatchlistLibraries.length"
+                class="personal-watchlist-library-options"
+              >
+                <label
+                  v-for="library in personalWatchlistLibraries"
+                  :key="`assignment-${library.id}`"
+                >
+                  <input
+                    type="checkbox"
+                    :checked="personalWatchlistLibrarySelection.includes(library.id)"
+                    @change="togglePersonalWatchlistLibrarySelection(library.id)"
+                  />
+                  <span>{{ library.name }}</span>
+                  <small>{{ library.item_count }} 个商品</small>
+                </label>
+              </div>
+              <div v-else class="personal-watchlist-library-empty">
+                还没有类型库，可先在下方创建并命名。
+              </div>
+              <button
+                type="button"
+                class="primary-button"
+                :disabled="personalWatchlistLibraryBusy"
+                @click="savePersonalWatchlistCardLibraries"
+              >保存这张卡片的归类</button>
+            </section>
+
+            <section class="personal-watchlist-library-section">
+              <div class="personal-watchlist-library-section-heading">
+                <div>
+                  <p class="section-kicker">DEFAULT FOR NEW LINKS</p>
+                  <h3>新增链接默认归类</h3>
+                </div>
+                <span v-if="!personalWatchlistDefaultConfigured">首次新增前必须先选择一次</span>
+              </div>
+              <div class="personal-watchlist-library-options default-options">
+                <label>
+                  <input
+                    v-model="personalWatchlistDefaultSelection"
+                    type="radio"
+                    name="personal-watchlist-default-library"
+                    :value="null"
+                  />
+                  <span>不自动加入任何类型库</span>
+                  <small>商品仍会加入个人监控池</small>
+                </label>
+                <label
+                  v-for="library in personalWatchlistLibraries"
+                  :key="`default-${library.id}`"
+                >
+                  <input
+                    v-model="personalWatchlistDefaultSelection"
+                    type="radio"
+                    name="personal-watchlist-default-library"
+                    :value="library.id"
+                  />
+                  <span>{{ library.name }}</span>
+                  <small>{{ library.item_count }} 个商品</small>
+                </label>
+              </div>
+              <button
+                type="button"
+                class="primary-button"
+                :disabled="personalWatchlistLibraryBusy"
+                @click="savePersonalWatchlistDefault"
+              >
+                {{ pendingTargetAfterLibrarySetup || pendingPersonalWatchlistPlidAfterLibrarySetup
+                  ? "保存默认设置并继续加入"
+                  : "保存默认设置" }}
+              </button>
+            </section>
+
+            <section class="personal-watchlist-library-section">
+              <div class="personal-watchlist-library-section-heading">
+                <div>
+                  <p class="section-kicker">CUSTOM LIBRARIES</p>
+                  <h3>创建和管理类型库</h3>
+                </div>
+                <span>纯白自定义库，由当前账号自行命名</span>
+              </div>
+              <form
+                class="personal-watchlist-library-create"
+                @submit.prevent="addPersonalWatchlistLibrary"
+              >
+                <input
+                  v-model="personalWatchlistNewLibraryName"
+                  type="text"
+                  maxlength="40"
+                  placeholder="例如：重点跟进、医疗用品、下周复盘"
+                  :disabled="personalWatchlistLibraryBusy"
+                />
+                <button
+                  type="submit"
+                  class="secondary-button"
+                  :disabled="personalWatchlistLibraryBusy || !personalWatchlistNewLibraryName.trim()"
+                >创建类型库</button>
+              </form>
+              <div
+                v-if="personalWatchlistLibraries.length"
+                class="personal-watchlist-library-list"
+              >
+                <article
+                  v-for="library in personalWatchlistLibraries"
+                  :key="library.id"
+                >
+                  <template v-if="personalWatchlistEditingLibraryId === library.id">
+                    <input
+                      v-model="personalWatchlistEditingLibraryName"
+                      type="text"
+                      maxlength="40"
+                      :aria-label="`重命名类型库 ${library.name}`"
+                    />
+                    <button
+                      type="button"
+                      class="secondary-button"
+                      :disabled="personalWatchlistLibraryBusy || !personalWatchlistEditingLibraryName.trim()"
+                      @click="savePersonalWatchlistLibraryRename"
+                    >保存</button>
+                    <button
+                      type="button"
+                      class="secondary-button"
+                      @click="personalWatchlistEditingLibraryId = null"
+                    >取消</button>
+                  </template>
+                  <template v-else>
+                    <div>
+                      <strong>{{ library.name }}</strong>
+                      <span>{{ library.item_count }} 个商品</span>
+                    </div>
+                    <button
+                      type="button"
+                      class="secondary-button"
+                      @click="beginRenamePersonalWatchlistLibrary(library)"
+                    >重命名</button>
+                    <button
+                      type="button"
+                      class="secondary-button danger"
+                      :disabled="personalWatchlistLibraryBusy"
+                      @click="removePersonalWatchlistLibrary(library)"
+                    >删除</button>
+                  </template>
+                </article>
+              </div>
+              <div v-else class="personal-watchlist-library-empty">
+                当前账号还没有类型库。
+              </div>
+            </section>
+          </div>
+        </section>
+      </div>
+    </Teleport>
+
+    <Teleport to="body">
+      <div
         v-if="targetActionOpen"
         class="competitor-modal-backdrop target-action-modal-backdrop"
         @click.self="closeTargetAction"
@@ -5064,7 +5664,7 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
                     <p>
                       {{ item.自有报价.length }} 个自有 Offer ·
                       {{ followerSellerCount(item) }} 个跟卖卖家 ·
-                      {{ item.跟卖报价.length }} 个变体 / 报价
+                      {{ ownStoreVariantCount(item) }} 个自有变体
                     </p>
                   </div>
                 </div>
@@ -5296,14 +5896,14 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
             <div class="competitor-modal-identity">
               <div class="competitor-product-image hero-image">
                 <img
-                  v-if="canShowCompetitorImage(selected.图片)"
-                  :src="competitorImageUrl(selected.图片)"
-                  :alt="`${selected.商品} 商品图片`"
+                  v-if="canShowCompetitorImage(selectedHeroImage)"
+                  :src="competitorImageUrl(selectedHeroImage)"
+                  :alt="`${selected.商品} ${selectedOffer?.变体 || ''} 商品图片`"
                   width="192"
                   height="192"
                   decoding="async"
                   fetchpriority="high"
-                  @error="markCompetitorImageFailed(selected.图片)"
+                  @error="markCompetitorImageFailed(selectedHeroImage)"
                 />
                 <span v-else>暂无图片</span>
               </div>
@@ -5336,7 +5936,6 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
           </header>
 
           <section
-            v-if="selected.来源 === 'competitor'"
             class="personal-watchlist-banner"
             :class="{ 'is-member': selectedInPersonalWatchlist }"
             aria-label="个人监控池操作"
@@ -5347,7 +5946,7 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
                 {{ selectedInPersonalWatchlist ? "已在你的个人监控池" : "尚未加入你的个人监控池" }}
               </strong>
               <span>
-                仅当前账号可见，用于个人筛选；加入或删除都不会启动、停止全局每日采集，也不会删除历史。
+                仅当前账号可见，用于个人筛选和类型库归类；加入或删除都不会启动、停止全局每日采集，也不会删除历史。
               </span>
               <small
                 v-if="personalWatchlistError"

@@ -837,6 +837,11 @@ def load_competitor_dataset(
     store_names_by_code = {
         item.store_code: item.store_name for item in selected_store_offers
     }
+    store_tsin_by_offer = {
+        (item.store_code, str(item.offer.offer_id)): item.offer.tsin_id
+        for item in selected_store_offers
+        if item.offer.tsin_id
+    }
     store_baselines = [
         row
         for row in store_baselines
@@ -1031,6 +1036,7 @@ def load_competitor_dataset(
             own_offer_ids_by_plid=own_offer_ids_by_plid,
             own_skus_by_plid=own_skus_by_plid,
             follower_timelines=store_follower_timelines,
+            store_tsin_by_offer=store_tsin_by_offer,
         )
     )
     store_history = pd.DataFrame(
@@ -1297,6 +1303,9 @@ def _variant_offer_mapping(
         _normalized_offer_scope(variant.sku)
         and _normalized_offer_scope(variant.sku) == _normalized_offer_scope(snapshot.sku)
     )
+    image_url = variant.image_url
+    if image_url is None and variant.variant_key == "default":
+        image_url = snapshot.image_url
     return {
         "selected": selected,
         "sku": variant.sku or "",
@@ -1312,6 +1321,7 @@ def _variant_offer_mapping(
         "condition": None,
         "variant_key": variant.variant_key,
         "variant_label": variant.variant_label,
+        "image_url": image_url,
         "identity_key": _variant_offer_identity(variant),
         "buybox_rank": None,
         "is_follower_offer": False,
@@ -1617,6 +1627,8 @@ def _interval_offer_rows(
                 "卖家ID": str(offer.get("seller_id") or "").strip() or None,
                 "卖家": str(offer.get("seller_name") or "未知卖家"),
                 "SKU": str(offer.get("sku") or "").strip() or None,
+                "TSIN": str(offer.get("tsin_id") or "").strip() or None,
+                "图片": str(offer.get("image_url") or "").strip() or None,
                 "价格": latest_price,
                 "库存状态": stock_state,
                 "库存原始状态": str(offer.get("stock_status") or "未知"),
@@ -1874,6 +1886,7 @@ def _seller_api_offer_rows(
                 "卖家ID": store_code,
                 "卖家": store_name,
                 "SKU": latest.sku,
+                "图片": latest.image_url,
                 "价格": latest_price,
                 "库存状态": stock_state,
                 "库存原始状态": latest.status or "未知",
@@ -2118,6 +2131,7 @@ def _store_snapshot_rows(
     own_offer_ids_by_plid: dict[str, set[str]],
     own_skus_by_plid: dict[str, set[str]],
     follower_timelines: dict[str, dict[str, object]],
+    store_tsin_by_offer: dict[tuple[str, str], str],
 ) -> list[dict[str, object]]:
     """Build own-store cards from every Seller API refresh plus follower offers."""
     selected_baselines = [
@@ -2146,6 +2160,13 @@ def _store_snapshot_rows(
             plid_baselines,
             store_names_by_code=store_names_by_code,
         )
+        for own_offer_row in own_offer_rows:
+            own_offer_row["TSIN"] = store_tsin_by_offer.get(
+                (
+                    str(own_offer_row["卖家ID"]),
+                    str(own_offer_row["offer_id"]),
+                )
+            )
         representative = next(
             (row for row in own_offers if row.selling_price is not None),
             own_offers[0],
@@ -2238,8 +2259,16 @@ def _store_snapshot_rows(
                 "来源": "own_store",
                 "快照ID": -representative.id,
                 "plid": plid,
-                "商品": representative.title or f"PLID{plid}",
-                "图片": representative.image_url,
+                "商品": (
+                    latest_observation.title
+                    if latest_observation is not None and latest_observation.title
+                    else representative.title or f"PLID{plid}"
+                ),
+                "图片": (
+                    latest_observation.image_url
+                    if latest_observation is not None and latest_observation.image_url
+                    else representative.image_url
+                ),
                 "采集时间": captured_at,
                 "当前卖家": "自有店铺（Seller API）",
                 "价格": current_price,

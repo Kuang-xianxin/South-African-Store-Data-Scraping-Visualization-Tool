@@ -258,6 +258,19 @@ def test_competitor_radar_returns_automatic_store_targets_and_separate_items(
         competitor_targets = client.get("/api/competitors/targets")
         overview = client.get("/api/competitors")
         all_store_overview = client.get("/api/competitors?own_store_scope=all")
+        own_default_library_response = client.post(
+            "/api/competitors/personal-watchlist/libraries",
+            headers={"X-CSRF-Token": str(issued["csrf_token"])},
+            json={"name": "Own Products"},
+        )
+        assert own_default_library_response.status_code == 200
+        own_default_library_id = own_default_library_response.json()["library"]["id"]
+        own_default_saved = client.put(
+            "/api/competitors/personal-watchlist/settings",
+            headers={"X-CSRF-Token": str(issued["csrf_token"])},
+            json={"default_library_id": own_default_library_id},
+        )
+        assert own_default_saved.status_code == 200
         private_add = client.post(
             "/api/competitors/targets",
             headers={"X-CSRF-Token": str(issued["csrf_token"])},
@@ -268,6 +281,7 @@ def test_competitor_radar_returns_automatic_store_targets_and_separate_items(
             headers={"X-CSRF-Token": str(issued["csrf_token"])},
             json={"url": "https://www.takealot.com/p/PLID77777777"},
         )
+        private_watchlist = client.get("/api/competitors/personal-watchlist")
 
     assert started_batch.status_code == 200
     assert private_priority.status_code == 200
@@ -345,13 +359,26 @@ def test_competitor_radar_returns_automatic_store_targets_and_separate_items(
     assert all_store_overview.json()["own_follower_events"] == []
     assert all(item["来源"] == "own_store" for item in overview.json()["store_items"])
     assert private_add.status_code == 200
-    assert private_add.json() == {
+    private_payload = private_add.json()
+    assert private_payload | {"personal_watchlist_item": None} == {
         "item": None,
         "queued_to_active_batch": False,
         "automatic_store_target": True,
         "store_names": ["Beta Store"],
-        "personal_watchlist_member": False,
+        "personal_watchlist_member": True,
+        "personal_watchlist_item": None,
     }
+    assert private_payload["personal_watchlist_item"] | {"added_at": None} == {
+        "plid": "87654321",
+        "added_at": None,
+        "source": "own_store",
+        "library_ids": [own_default_library_id],
+    }
+    assert private_watchlist.status_code == 200
+    assert any(
+        item["plid"] == "87654321" and item["source"] == "own_store"
+        for item in private_watchlist.json()["items"]
+    )
     assert competitor_add.status_code == 200
     assert competitor_add.json()["item"]["plid"] == "77777777"
     assert competitor_add.json()["automatic_store_target"] is False
@@ -2785,9 +2812,14 @@ def test_competitor_personal_watchlist_is_account_scoped_and_viewer_editable(
                 {
                     "plid": "12345678",
                     "added_at": created.json()["item"]["created_at"],
+                    "source": "competitor",
+                    "library_ids": [],
                 }
             ],
             "count": 1,
+            "libraries": [],
+            "default_library_configured": False,
+            "default_library_id": None,
         }
         for username, role in (
             ("selection.watchlist", "selection"),
@@ -2890,6 +2922,200 @@ def test_competitor_personal_watchlist_is_account_scoped_and_viewer_editable(
                 "/api/competitors/personal-watchlist"
             ).json()["items"]
         ] == ["12345678"]
+
+
+def test_personal_watchlist_type_libraries_are_account_scoped_and_multi_selectable(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    database_path = tmp_path / "erp-personal-watchlist-libraries.db"
+    monkeypatch.setenv(
+        "TAKEALOT_DATABASE_URL",
+        f"sqlite:///{database_path.as_posix()}",
+    )
+    app = create_app(tmp_path)
+
+    with TestClient(app, client=("127.0.0.1", 50000)) as admin:
+        session = _bootstrap(admin)
+        csrf = str(session["csrf_token"])
+        headers = {"X-CSRF-Token": csrf}
+        viewer_user = admin.post(
+            "/api/auth/users",
+            headers=headers,
+            json={
+                "username": "viewer.libraries",
+                "display_name": "Viewer Libraries",
+                "password": "watchlist-password-123",
+                "role": "viewer",
+            },
+        )
+        assert viewer_user.status_code == 200
+
+        focus_response = admin.post(
+            "/api/competitors/personal-watchlist/libraries",
+            headers=headers,
+            json={"name": "  Focus   Items  "},
+        )
+        secondary_response = admin.post(
+            "/api/competitors/personal-watchlist/libraries",
+            headers=headers,
+            json={"name": "Secondary"},
+        )
+        assert focus_response.status_code == 200
+        assert secondary_response.status_code == 200
+        focus_library = focus_response.json()["library"]
+        secondary_library = secondary_response.json()["library"]
+        assert focus_library["name"] == "Focus Items"
+        duplicate = admin.post(
+            "/api/competitors/personal-watchlist/libraries",
+            headers=headers,
+            json={"name": "focus items"},
+        )
+        assert duplicate.status_code == 409
+
+        renamed = admin.patch(
+            f"/api/competitors/personal-watchlist/libraries/{secondary_library['id']}",
+            headers=headers,
+            json={"name": "Price Changes"},
+        )
+        assert renamed.status_code == 200
+        assert renamed.json()["library"]["name"] == "Price Changes"
+        default_saved = admin.put(
+            "/api/competitors/personal-watchlist/settings",
+            headers=headers,
+            json={"default_library_id": focus_library["id"]},
+        )
+        assert default_saved.json() == {
+            "default_library_configured": True,
+            "default_library_id": focus_library["id"],
+        }
+
+        created = admin.post(
+            "/api/competitors/targets",
+            headers=headers,
+            json={"url": "https://www.takealot.com/example/PLID12345678"},
+        )
+        assert created.status_code == 200
+        assert created.json()["personal_watchlist_item"]["library_ids"] == [focus_library["id"]]
+        assigned = admin.put(
+            "/api/competitors/personal-watchlist/12345678/libraries",
+            headers=headers,
+            json={
+                "library_ids": [
+                    secondary_library["id"],
+                    focus_library["id"],
+                    secondary_library["id"],
+                ]
+            },
+        )
+        assert assigned.status_code == 200
+        assert assigned.json()["library_ids"] == sorted(
+            [focus_library["id"], secondary_library["id"]]
+        )
+        admin_payload = admin.get("/api/competitors/personal-watchlist").json()
+        assert admin_payload["items"][0]["library_ids"] == sorted(
+            [focus_library["id"], secondary_library["id"]]
+        )
+        assert {item["name"]: item["item_count"] for item in admin_payload["libraries"]} == {
+            "Focus Items": 1,
+            "Price Changes": 1,
+        }
+
+    with TestClient(app, client=("192.168.1.8", 50001)) as viewer:
+        login = viewer.post(
+            "/api/auth/login",
+            json={
+                "username": "viewer.libraries",
+                "password": "watchlist-password-123",
+            },
+        )
+        assert login.status_code == 200
+        viewer_headers = {"X-CSRF-Token": str(login.json()["csrf_token"])}
+        assert viewer.get("/api/competitors/personal-watchlist").json()["libraries"] == []
+        assert (
+            viewer.patch(
+                f"/api/competitors/personal-watchlist/libraries/{focus_library['id']}",
+                headers=viewer_headers,
+                json={"name": "Hijacked"},
+            ).status_code
+            == 404
+        )
+        assert (
+            viewer.put(
+                "/api/competitors/personal-watchlist/settings",
+                headers=viewer_headers,
+                json={"default_library_id": focus_library["id"]},
+            ).status_code
+            == 404
+        )
+        added = viewer.put(
+            "/api/competitors/personal-watchlist/12345678",
+            headers=viewer_headers,
+        )
+        assert added.status_code == 200
+        assert added.json()["item"]["library_ids"] == []
+        assert (
+            viewer.put(
+                "/api/competitors/personal-watchlist/12345678/libraries",
+                headers=viewer_headers,
+                json={"library_ids": [focus_library["id"]]},
+            ).status_code
+            == 404
+        )
+
+    with TestClient(app, client=("127.0.0.1", 50002)) as admin:
+        login = admin.post(
+            "/api/auth/login",
+            json={"username": "kxx", "password": "pass-123"},
+        )
+        assert login.status_code == 200
+        headers = {"X-CSRF-Token": str(login.json()["csrf_token"])}
+        deleted_secondary = admin.delete(
+            f"/api/competitors/personal-watchlist/libraries/{secondary_library['id']}",
+            headers=headers,
+        )
+        assert deleted_secondary.status_code == 200
+        assert deleted_secondary.json() == {
+            "ok": True,
+            "default_library_configured": True,
+            "default_library_id": focus_library["id"],
+        }
+        explicitly_unclassified = admin.put(
+            "/api/competitors/personal-watchlist/settings",
+            headers=headers,
+            json={"default_library_id": None},
+        )
+        assert explicitly_unclassified.json() == {
+            "default_library_configured": True,
+            "default_library_id": None,
+        }
+        admin.put(
+            "/api/competitors/personal-watchlist/settings",
+            headers=headers,
+            json={"default_library_id": focus_library["id"]},
+        )
+        deleted_default = admin.delete(
+            f"/api/competitors/personal-watchlist/libraries/{focus_library['id']}",
+            headers=headers,
+        )
+        assert deleted_default.json() == {
+            "ok": True,
+            "default_library_configured": False,
+            "default_library_id": None,
+        }
+        payload_after_library_delete = admin.get("/api/competitors/personal-watchlist").json()
+        assert payload_after_library_delete["count"] == 1
+        assert payload_after_library_delete["items"][0]["library_ids"] == []
+        assert payload_after_library_delete["default_library_configured"] is False
+        removed = admin.delete(
+            "/api/competitors/personal-watchlist/12345678",
+            headers=headers,
+        )
+        assert removed.json()["removed"] is True
+        assert admin.get("/api/competitors/personal-watchlist").json()["count"] == 0
+        assert [item["plid"] for item in admin.get("/api/competitors/targets").json()["items"]] == [
+            "12345678"
+        ]
 
 
 def test_competitor_manual_retry_priority_is_audited_once(

@@ -90,3 +90,36 @@ test("the personal pool is a standalone top workspace with direct card location"
     /\.competitor-module\.admin-priority-layout > \.shared-management-panel/,
   );
 });
+
+test("personal type libraries are account-local, multi-selectable and require a first default choice", () => {
+  assert.match(pageSource, /openPersonalWatchlistLibrarySettings/);
+  assert.match(pageSource, /openPersonalWatchlistCardLibraries\(card\)/);
+  assert.match(pageSource, /togglePersonalWatchlistLibrarySelection\(library\.id\)/);
+  assert.match(pageSource, /updatePersonalWatchlistItemLibraries/);
+  assert.match(pageSource, /promptForPersonalWatchlistDefault\(url\)/);
+  assert.match(pageSource, /!personalWatchlistDefaultConfigured\.value/);
+  assert.match(pageSource, /personalWatchlistDefaultSelection\.value/);
+  assert.match(pageSource, /:value="null"/);
+  assert.match(pageSource, /filteredPersonalWatchlistCards/);
+  assert.match(pageSource, /personalWatchlistLibraryFilter === library\.id/);
+  assert.match(pageSource, /unclassifiedPersonalWatchlistCount/);
+  assert.match(styleSource, /\.personal-watchlist-library-modal\s*\{/);
+  assert.match(styleSource, /\.personal-watchlist-library-filter\s*\{/);
+  assert.match(styleSource, /background:\s*#fff/);
+});
+
+test("own-store quick add avoids the full overview reload and selected offers drive the hero image", () => {
+  const ownStoreBranchStart = pageSource.indexOf("if (result.automatic_store_target)");
+  const ownStoreBranchEnd = pageSource.indexOf("if (!result.item)", ownStoreBranchStart);
+  assert.ok(ownStoreBranchStart >= 0);
+  assert.ok(ownStoreBranchEnd > ownStoreBranchStart);
+  const ownStoreBranch = pageSource.slice(ownStoreBranchStart, ownStoreBranchEnd);
+  assert.match(ownStoreBranch, /setPersonalWatchlistLocal/);
+  assert.match(ownStoreBranch, /focusPersonalWatchlistCard/);
+  assert.doesNotMatch(ownStoreBranch, /loadOverview/);
+  assert.match(pageSource, /const selectedHeroImage = computed/);
+  assert.match(pageSource, /selectedOffer\.value\?\./);
+  assert.match(pageSource, /canShowCompetitorImage\(selectedHeroImage\)/);
+  assert.match(pageSource, /ownStoreVariantCount\(item\)/);
+  assert.match(pageSource, /offer\.TSIN/);
+});

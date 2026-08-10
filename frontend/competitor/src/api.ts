@@ -5,6 +5,7 @@ import type {
   CompetitorOverview,
   CompetitorPersonalWatchlistItem,
   CompetitorPersonalWatchlistPayload,
+  PersonalWatchlistLibrary,
   CompetitorStoreTargetPayload,
   CompetitorTargetAuditPayload,
   CompetitorTargetItem,
@@ -311,6 +312,70 @@ export function deleteCompetitorPersonalWatchlistItem(
   });
 }
 
+export function createPersonalWatchlistLibrary(
+  name: string,
+): Promise<{ library: PersonalWatchlistLibrary }> {
+  return request("/api/competitors/personal-watchlist/libraries", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name }),
+  });
+}
+
+export function renamePersonalWatchlistLibrary(
+  libraryId: number,
+  name: string,
+): Promise<{ library: PersonalWatchlistLibrary }> {
+  return request(
+    `/api/competitors/personal-watchlist/libraries/${encodeURIComponent(libraryId)}`,
+    {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name }),
+    },
+  );
+}
+
+export function deletePersonalWatchlistLibrary(
+  libraryId: number,
+): Promise<{
+  ok: boolean;
+  default_library_configured: boolean;
+  default_library_id: number | null;
+}> {
+  return request(
+    `/api/competitors/personal-watchlist/libraries/${encodeURIComponent(libraryId)}`,
+    { method: "DELETE" },
+  );
+}
+
+export function updatePersonalWatchlistSettings(
+  defaultLibraryId: number | null,
+): Promise<{
+  default_library_configured: boolean;
+  default_library_id: number | null;
+}> {
+  return request("/api/competitors/personal-watchlist/settings", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ default_library_id: defaultLibraryId }),
+  });
+}
+
+export function updatePersonalWatchlistItemLibraries(
+  plid: string,
+  libraryIds: number[],
+): Promise<{ plid: string; library_ids: number[] }> {
+  return request(
+    `/api/competitors/personal-watchlist/${encodeURIComponent(plid)}/libraries`,
+    {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ library_ids: libraryIds }),
+    },
+  );
+}
+
 export async function fetchCompetitorStoreTargets(
   ownStoreScope: OwnStoreScope = "current",
 ): Promise<CompetitorStoreTargetPayload> {
@@ -328,6 +393,7 @@ export async function createCompetitorTarget(
   automatic_store_target: boolean;
   store_names: string[];
   personal_watchlist_member: boolean;
+  personal_watchlist_item: CompetitorPersonalWatchlistItem;
 }> {
   return request("/api/competitors/targets", {
     method: "POST",

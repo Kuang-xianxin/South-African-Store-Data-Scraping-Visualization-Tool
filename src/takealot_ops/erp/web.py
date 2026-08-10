@@ -174,6 +174,10 @@ from takealot_ops.storage.models import (
     ErpUser,
     ErpUserStore,
     OfferCurrent,
+    OwnStorePersonalWatchlist,
+    PersonalWatchlistLibrary,
+    PersonalWatchlistLibraryItem,
+    PersonalWatchlistPreference,
 )
 from takealot_ops.storage.store_context import (
     STORE_CODE_HEADER,
@@ -292,6 +296,24 @@ class CompetitorTargetRequest(BaseModel):
     """One persisted Takealot competitor product URL."""
 
     url: str = Field(min_length=1, max_length=2000)
+
+
+class PersonalWatchlistLibraryRequest(BaseModel):
+    """Create or rename one current-account watchlist type library."""
+
+    name: str = Field(min_length=1, max_length=40)
+
+
+class PersonalWatchlistSettingsRequest(BaseModel):
+    """Persist the selected default library, including explicit no-library."""
+
+    default_library_id: int | None = Field(default=None, ge=1)
+
+
+class PersonalWatchlistLibraryAssignmentsRequest(BaseModel):
+    """Replace one personal watchlist card's current-account library membership."""
+
+    library_ids: list[int] = Field(default_factory=list, max_length=100)
 
 
 class CompetitorTargetPriorityRequest(BaseModel):
@@ -2264,42 +2286,274 @@ def create_app(project_root: Path | None = None) -> FastAPI:
     def competitor_personal_watchlist(
         request: Request,
     ) -> dict[str, object]:
-        """Return only the current account's saved true competitors."""
+        """Return the current account's saved competitors, own products and libraries."""
         user = request.state.erp_user
         settings = DashboardSettings.from_env(root)
         engine = create_read_only_erp_engine(settings.database_url)
         try:
             with Session(engine) as session:
-                store_plids = connected_store_plids(session)
-                statement = select(CompetitorPersonalWatchlist).where(
-                    CompetitorPersonalWatchlist.user_id == user.id
-                )
-                if store_plids:
-                    statement = statement.where(
-                        CompetitorPersonalWatchlist.plid.not_in(store_plids)
-                    )
-                items = session.scalars(
-                    statement.order_by(
-                        CompetitorPersonalWatchlist.added_at.desc(),
-                        CompetitorPersonalWatchlist.plid.asc(),
-                    )
-                ).all()
-                return {
-                    "items": [
-                        _competitor_personal_watchlist_payload(item)
-                        for item in items
-                    ],
-                    "count": len(items),
-                }
+                return _personal_watchlist_payload(session, user_id=user.id)
         finally:
             engine.dispose()
+
+    @app.post("/api/competitors/personal-watchlist/libraries")
+    def create_personal_watchlist_library(
+        payload: PersonalWatchlistLibraryRequest,
+        request: Request,
+    ) -> dict[str, object]:
+        user = request.state.erp_user
+        name = _validated_personal_watchlist_library_name(payload.name)
+        settings = DashboardSettings.from_env(root)
+        engine = create_engine_for_settings(settings)
+        try:
+            create_schema(engine)
+            with Session(engine) as session:
+                existing_names = session.scalars(
+                    select(PersonalWatchlistLibrary.name).where(
+                        PersonalWatchlistLibrary.user_id == user.id
+                    )
+                ).all()
+                if any(existing.casefold() == name.casefold() for existing in existing_names):
+                    raise HTTPException(status_code=409, detail=f"类型库“{name}”已存在")
+                now = datetime.now(UTC)
+                library = PersonalWatchlistLibrary(
+                    user_id=user.id,
+                    name=name,
+                    created_at=now,
+                    updated_at=now,
+                )
+                session.add(library)
+                session.flush()
+                result = {
+                    "id": library.id,
+                    "name": library.name,
+                    "created_at": library.created_at.isoformat(),
+                    "updated_at": library.updated_at.isoformat(),
+                    "item_count": 0,
+                }
+                session.commit()
+        finally:
+            engine.dispose()
+        competitor_logger.info(
+            "personal_watchlist_library action=create id=%s user=%s",
+            result["id"],
+            user.username,
+        )
+        return {"library": result}
+
+    @app.patch("/api/competitors/personal-watchlist/libraries/{library_id}")
+    def rename_personal_watchlist_library(
+        library_id: int,
+        payload: PersonalWatchlistLibraryRequest,
+        request: Request,
+    ) -> dict[str, object]:
+        user = request.state.erp_user
+        name = _validated_personal_watchlist_library_name(payload.name)
+        settings = DashboardSettings.from_env(root)
+        engine = create_engine_for_settings(settings)
+        try:
+            create_schema(engine)
+            with Session(engine) as session:
+                library = session.get(PersonalWatchlistLibrary, library_id)
+                if library is None or library.user_id != user.id:
+                    raise HTTPException(status_code=404, detail="未找到当前账号的类型库")
+                siblings = session.scalars(
+                    select(PersonalWatchlistLibrary).where(
+                        PersonalWatchlistLibrary.user_id == user.id,
+                        PersonalWatchlistLibrary.id != library_id,
+                    )
+                ).all()
+                if any(item.name.casefold() == name.casefold() for item in siblings):
+                    raise HTTPException(status_code=409, detail=f"类型库“{name}”已存在")
+                library.name = name
+                library.updated_at = datetime.now(UTC)
+                item_count = len(
+                    session.scalars(
+                        select(PersonalWatchlistLibraryItem).where(
+                            PersonalWatchlistLibraryItem.library_id == library.id
+                        )
+                    ).all()
+                )
+                result = {
+                    "id": library.id,
+                    "name": library.name,
+                    "created_at": library.created_at.isoformat(),
+                    "updated_at": library.updated_at.isoformat(),
+                    "item_count": item_count,
+                }
+                session.commit()
+        finally:
+            engine.dispose()
+        competitor_logger.info(
+            "personal_watchlist_library action=rename id=%s user=%s",
+            library_id,
+            user.username,
+        )
+        return {"library": result}
+
+    @app.delete("/api/competitors/personal-watchlist/libraries/{library_id}")
+    def delete_personal_watchlist_library(
+        library_id: int,
+        request: Request,
+    ) -> dict[str, object]:
+        user = request.state.erp_user
+        settings = DashboardSettings.from_env(root)
+        engine = create_engine_for_settings(settings)
+        try:
+            create_schema(engine)
+            with Session(engine) as session:
+                library = session.get(PersonalWatchlistLibrary, library_id)
+                if library is None or library.user_id != user.id:
+                    raise HTTPException(status_code=404, detail="未找到当前账号的类型库")
+                preference = session.get(PersonalWatchlistPreference, user.id)
+                default_was_deleted = bool(
+                    preference is not None and preference.default_library_id == library_id
+                )
+                default_library_configured = bool(
+                    preference is not None and preference.default_configured
+                )
+                default_library_id = (
+                    preference.default_library_id if preference is not None else None
+                )
+                if default_was_deleted and preference is not None:
+                    preference.default_library_id = None
+                    preference.default_configured = False
+                    preference.updated_at = datetime.now(UTC)
+                    default_library_configured = False
+                    default_library_id = None
+                session.delete(library)
+                session.commit()
+        finally:
+            engine.dispose()
+        competitor_logger.info(
+            "personal_watchlist_library action=delete id=%s user=%s",
+            library_id,
+            user.username,
+        )
+        return {
+            "ok": True,
+            "default_library_configured": default_library_configured,
+            "default_library_id": default_library_id,
+        }
+
+    @app.put("/api/competitors/personal-watchlist/settings")
+    def update_personal_watchlist_settings(
+        payload: PersonalWatchlistSettingsRequest,
+        request: Request,
+    ) -> dict[str, object]:
+        user = request.state.erp_user
+        settings = DashboardSettings.from_env(root)
+        engine = create_engine_for_settings(settings)
+        try:
+            create_schema(engine)
+            with Session(engine) as session:
+                if payload.default_library_id is not None:
+                    library = session.get(
+                        PersonalWatchlistLibrary,
+                        payload.default_library_id,
+                    )
+                    if library is None or library.user_id != user.id:
+                        raise HTTPException(
+                            status_code=404,
+                            detail="未找到当前账号选择的默认类型库",
+                        )
+                preference = session.get(PersonalWatchlistPreference, user.id)
+                now = datetime.now(UTC)
+                if preference is None:
+                    preference = PersonalWatchlistPreference(
+                        user_id=user.id,
+                        default_configured=True,
+                        default_library_id=payload.default_library_id,
+                        updated_at=now,
+                    )
+                    session.add(preference)
+                else:
+                    preference.default_configured = True
+                    preference.default_library_id = payload.default_library_id
+                    preference.updated_at = now
+                session.commit()
+        finally:
+            engine.dispose()
+        competitor_logger.info(
+            "personal_watchlist_settings action=default user=%s library_id=%s",
+            user.username,
+            payload.default_library_id,
+        )
+        return {
+            "default_library_configured": True,
+            "default_library_id": payload.default_library_id,
+        }
+
+    @app.put("/api/competitors/personal-watchlist/{plid}/libraries")
+    def update_personal_watchlist_item_libraries(
+        plid: str,
+        payload: PersonalWatchlistLibraryAssignmentsRequest,
+        request: Request,
+    ) -> dict[str, object]:
+        normalized_plid = _validated_competitor_plid(plid)
+        user = request.state.erp_user
+        selected_library_ids = sorted(set(payload.library_ids))
+        settings = DashboardSettings.from_env(root)
+        engine = create_engine_for_settings(settings)
+        try:
+            create_schema(engine)
+            with Session(engine) as session:
+                if not _personal_watchlist_membership_exists(
+                    session,
+                    user_id=user.id,
+                    plid=normalized_plid,
+                ):
+                    raise HTTPException(status_code=404, detail="该商品不在你的个人监控池")
+                selected_libraries = (
+                    session.scalars(
+                        select(PersonalWatchlistLibrary).where(
+                            PersonalWatchlistLibrary.user_id == user.id,
+                            PersonalWatchlistLibrary.id.in_(selected_library_ids),
+                        )
+                    ).all()
+                    if selected_library_ids
+                    else []
+                )
+                if len(selected_libraries) != len(selected_library_ids):
+                    raise HTTPException(status_code=404, detail="包含不属于当前账号的类型库")
+                current_ids = _personal_watchlist_library_ids_for_plid(
+                    session,
+                    user_id=user.id,
+                    plid=normalized_plid,
+                )
+                for library_id in set(current_ids) - set(selected_library_ids):
+                    assignment = session.get(
+                        PersonalWatchlistLibraryItem,
+                        (library_id, normalized_plid),
+                    )
+                    if assignment is not None:
+                        session.delete(assignment)
+                now = datetime.now(UTC)
+                for library_id in set(selected_library_ids) - set(current_ids):
+                    session.add(
+                        PersonalWatchlistLibraryItem(
+                            library_id=library_id,
+                            plid=normalized_plid,
+                            added_at=now,
+                        )
+                    )
+                session.commit()
+        finally:
+            engine.dispose()
+        competitor_logger.info(
+            "personal_watchlist_library action=assign plid=%s user=%s library_ids=%s",
+            normalized_plid,
+            user.username,
+            selected_library_ids,
+        )
+        return {"plid": normalized_plid, "library_ids": selected_library_ids}
 
     @app.put("/api/competitors/personal-watchlist/{plid}")
     def add_competitor_personal_watchlist_item(
         plid: str,
         request: Request,
     ) -> dict[str, object]:
-        """Idempotently save one true competitor for the current account."""
+        """Idempotently save one true competitor or connected-store product."""
         normalized_plid = _validated_competitor_plid(plid)
         user = request.state.erp_user
         settings = DashboardSettings.from_env(root)
@@ -2308,24 +2562,51 @@ def create_app(project_root: Path | None = None) -> FastAPI:
             create_schema(engine)
             with Session(engine) as session:
                 target = session.get(CompetitorTarget, normalized_plid)
-                if target is None:
+                private_store_rows = load_connected_store_offers(
+                    session,
+                    plids={normalized_plid},
+                )
+                now = datetime.now(UTC)
+                item: CompetitorPersonalWatchlist | OwnStorePersonalWatchlist
+                if private_store_rows:
+                    item, created = _ensure_own_store_personal_watchlist_item(
+                        session,
+                        user_id=user.id,
+                        plid=normalized_plid,
+                        added_at=now,
+                    )
+                    source: Literal["competitor", "own_store"] = "own_store"
+                elif target is not None:
+                    item, created = _ensure_competitor_personal_watchlist_item(
+                        session,
+                        user_id=user.id,
+                        plid=normalized_plid,
+                        added_at=now,
+                    )
+                    source = "competitor"
+                else:
                     raise HTTPException(
                         status_code=404,
-                        detail=f"PLID{normalized_plid} 不是真正竞品记录",
+                        detail=f"PLID{normalized_plid} 不在真正竞品或自有店铺清单中",
                     )
-                if normalized_plid in connected_store_plids(session):
-                    raise HTTPException(
-                        status_code=409,
-                        detail="自有店铺商品不加入个人竞品监控池",
-                    )
-                item, created = _ensure_competitor_personal_watchlist_item(
+                _assign_default_personal_watchlist_library(
                     session,
                     user_id=user.id,
                     plid=normalized_plid,
-                    added_at=datetime.now(UTC),
+                    added_at=now,
+                    membership_created=created,
+                )
+                session.flush()
+                result = _personal_watchlist_item_payload(
+                    item,
+                    source=source,
+                    library_ids=_personal_watchlist_library_ids_for_plid(
+                        session,
+                        user_id=user.id,
+                        plid=normalized_plid,
+                    ),
                 )
                 session.commit()
-                result = _competitor_personal_watchlist_payload(item)
         finally:
             engine.dispose()
         competitor_logger.info(
@@ -2357,6 +2638,18 @@ def create_app(project_root: Path | None = None) -> FastAPI:
                 if item is not None:
                     session.delete(item)
                     removed = True
+                own_store_item = session.get(
+                    OwnStorePersonalWatchlist,
+                    (user.id, normalized_plid),
+                )
+                if own_store_item is not None:
+                    session.delete(own_store_item)
+                    removed = True
+                _remove_personal_watchlist_library_assignments(
+                    session,
+                    user_id=user.id,
+                    plid=normalized_plid,
+                )
                 session.commit()
         finally:
             engine.dispose()
@@ -2381,28 +2674,64 @@ def create_app(project_root: Path | None = None) -> FastAPI:
             create_schema(engine)
             now = datetime.now(UTC)
             with Session(engine) as session:
-                private_store_rows = [
-                    row
-                    for row in load_connected_store_offers(session)
-                    if str(row.offer.productline_id or "").strip() == plid
-                ]
+                personal_item: CompetitorPersonalWatchlist | OwnStorePersonalWatchlist
+                private_store_rows = load_connected_store_offers(
+                    session,
+                    plids={plid},
+                )
                 if private_store_rows:
-                    return {
-                        "item": None,
-                        "queued_to_active_batch": False,
-                        "automatic_store_target": True,
-                        "store_names": sorted(
-                            {row.store_name for row in private_store_rows}
-                        ),
-                        "personal_watchlist_member": False,
-                    }
-                target = session.get(CompetitorTarget, plid)
-                if target is not None and target.active:
-                    _, personal_created = _ensure_competitor_personal_watchlist_item(
+                    personal_item, personal_created = _ensure_own_store_personal_watchlist_item(
                         session,
                         user_id=user.id,
                         plid=plid,
                         added_at=now,
+                    )
+                    _assign_default_personal_watchlist_library(
+                        session,
+                        user_id=user.id,
+                        plid=plid,
+                        added_at=now,
+                        membership_created=personal_created,
+                    )
+                    session.flush()
+                    personal_payload = _personal_watchlist_item_payload(
+                        personal_item,
+                        source="own_store",
+                        library_ids=_personal_watchlist_library_ids_for_plid(
+                            session,
+                            user_id=user.id,
+                            plid=plid,
+                        ),
+                    )
+                    session.commit()
+                    competitor_logger.info(
+                        "personal_watchlist action=auto_add_own_store plid=%s user=%s created=%s",
+                        plid,
+                        user.username,
+                        personal_created,
+                    )
+                    return {
+                        "item": None,
+                        "queued_to_active_batch": False,
+                        "automatic_store_target": True,
+                        "store_names": sorted({row.store_name for row in private_store_rows}),
+                        "personal_watchlist_member": True,
+                        "personal_watchlist_item": personal_payload,
+                    }
+                target = session.get(CompetitorTarget, plid)
+                if target is not None and target.active:
+                    personal_item, personal_created = _ensure_competitor_personal_watchlist_item(
+                        session,
+                        user_id=user.id,
+                        plid=plid,
+                        added_at=now,
+                    )
+                    _assign_default_personal_watchlist_library(
+                        session,
+                        user_id=user.id,
+                        plid=plid,
+                        added_at=now,
+                        membership_created=personal_created,
                     )
                     session.commit()
                     competitor_logger.info(
@@ -2441,11 +2770,28 @@ def create_app(project_root: Path | None = None) -> FastAPI:
                     )
                 )
                 session.flush()
-                _ensure_competitor_personal_watchlist_item(
+                personal_item, personal_created = _ensure_competitor_personal_watchlist_item(
                     session,
                     user_id=user.id,
                     plid=plid,
                     added_at=now,
+                )
+                _assign_default_personal_watchlist_library(
+                    session,
+                    user_id=user.id,
+                    plid=plid,
+                    added_at=now,
+                    membership_created=personal_created,
+                )
+                session.flush()
+                personal_payload = _personal_watchlist_item_payload(
+                    personal_item,
+                    source="competitor",
+                    library_ids=_personal_watchlist_library_ids_for_plid(
+                        session,
+                        user_id=user.id,
+                        plid=plid,
+                    ),
                 )
                 session.commit()
                 result = _competitor_target_payload(
@@ -2467,6 +2813,7 @@ def create_app(project_root: Path | None = None) -> FastAPI:
             "automatic_store_target": False,
             "store_names": [],
             "personal_watchlist_member": True,
+            "personal_watchlist_item": personal_payload,
         }
 
     @app.patch("/api/competitors/targets/{plid}")
@@ -3360,7 +3707,14 @@ def _ensure_competitor_personal_watchlist_item(
 ) -> tuple[CompetitorPersonalWatchlist, bool]:
     item = session.get(CompetitorPersonalWatchlist, (user_id, plid))
     if item is not None:
+        own_store_item = session.get(OwnStorePersonalWatchlist, (user_id, plid))
+        if own_store_item is not None:
+            session.delete(own_store_item)
         return item, False
+    own_store_item = session.get(OwnStorePersonalWatchlist, (user_id, plid))
+    if own_store_item is not None:
+        added_at = own_store_item.added_at
+        session.delete(own_store_item)
     item = CompetitorPersonalWatchlist(
         user_id=user_id,
         plid=plid,
@@ -3370,13 +3724,222 @@ def _ensure_competitor_personal_watchlist_item(
     return item, True
 
 
-def _competitor_personal_watchlist_payload(
-    item: CompetitorPersonalWatchlist,
+def _ensure_own_store_personal_watchlist_item(
+    session: Session,
+    *,
+    user_id: int,
+    plid: str,
+    added_at: datetime,
+) -> tuple[OwnStorePersonalWatchlist, bool]:
+    item = session.get(OwnStorePersonalWatchlist, (user_id, plid))
+    if item is not None:
+        competitor_item = session.get(CompetitorPersonalWatchlist, (user_id, plid))
+        if competitor_item is not None:
+            session.delete(competitor_item)
+        return item, False
+    competitor_item = session.get(CompetitorPersonalWatchlist, (user_id, plid))
+    if competitor_item is not None:
+        added_at = competitor_item.added_at
+        session.delete(competitor_item)
+    item = OwnStorePersonalWatchlist(
+        user_id=user_id,
+        plid=plid,
+        added_at=added_at,
+    )
+    session.add(item)
+    return item, True
+
+
+def _assign_default_personal_watchlist_library(
+    session: Session,
+    *,
+    user_id: int,
+    plid: str,
+    added_at: datetime,
+    membership_created: bool,
+) -> None:
+    if not membership_created:
+        return
+    preference = session.get(PersonalWatchlistPreference, user_id)
+    if (
+        preference is None
+        or not preference.default_configured
+        or preference.default_library_id is None
+    ):
+        return
+    library = session.get(PersonalWatchlistLibrary, preference.default_library_id)
+    if library is None or library.user_id != user_id:
+        return
+    assignment = session.get(
+        PersonalWatchlistLibraryItem,
+        (library.id, plid),
+    )
+    if assignment is None:
+        session.add(
+            PersonalWatchlistLibraryItem(
+                library_id=library.id,
+                plid=plid,
+                added_at=added_at,
+            )
+        )
+
+
+def _personal_watchlist_library_ids_for_plid(
+    session: Session,
+    *,
+    user_id: int,
+    plid: str,
+) -> list[int]:
+    return sorted(
+        session.scalars(
+            select(PersonalWatchlistLibraryItem.library_id)
+            .join(
+                PersonalWatchlistLibrary,
+                PersonalWatchlistLibrary.id == PersonalWatchlistLibraryItem.library_id,
+            )
+            .where(
+                PersonalWatchlistLibrary.user_id == user_id,
+                PersonalWatchlistLibraryItem.plid == plid,
+            )
+        ).all()
+    )
+
+
+def _personal_watchlist_item_payload(
+    item: CompetitorPersonalWatchlist | OwnStorePersonalWatchlist,
+    *,
+    source: Literal["competitor", "own_store"],
+    library_ids: Sequence[int] = (),
 ) -> dict[str, object]:
     return {
         "plid": item.plid,
         "added_at": item.added_at.isoformat(),
+        "source": source,
+        "library_ids": list(library_ids),
     }
+
+
+def _personal_watchlist_payload(
+    session: Session,
+    *,
+    user_id: int,
+) -> dict[str, object]:
+    competitor_items = session.scalars(
+        select(CompetitorPersonalWatchlist).where(CompetitorPersonalWatchlist.user_id == user_id)
+    ).all()
+    own_store_items = session.scalars(
+        select(OwnStorePersonalWatchlist).where(OwnStorePersonalWatchlist.user_id == user_id)
+    ).all()
+    libraries = session.scalars(
+        select(PersonalWatchlistLibrary)
+        .where(PersonalWatchlistLibrary.user_id == user_id)
+        .order_by(
+            PersonalWatchlistLibrary.created_at.asc(),
+            PersonalWatchlistLibrary.id.asc(),
+        )
+    ).all()
+    library_ids = [library.id for library in libraries]
+    assignments = (
+        session.scalars(
+            select(PersonalWatchlistLibraryItem).where(
+                PersonalWatchlistLibraryItem.library_id.in_(library_ids)
+            )
+        ).all()
+        if library_ids
+        else []
+    )
+    assignments_by_plid: dict[str, list[int]] = defaultdict(list)
+    item_counts: dict[int, int] = defaultdict(int)
+    for assignment in assignments:
+        assignments_by_plid[assignment.plid].append(assignment.library_id)
+        item_counts[assignment.library_id] += 1
+
+    membership_rows: dict[
+        str,
+        tuple[
+            CompetitorPersonalWatchlist | OwnStorePersonalWatchlist,
+            Literal["competitor", "own_store"],
+        ],
+    ] = {item.plid: (item, "competitor") for item in competitor_items}
+    membership_rows.update({item.plid: (item, "own_store") for item in own_store_items})
+    ordered_memberships = sorted(
+        membership_rows.values(),
+        key=lambda row: (row[0].added_at, row[0].plid),
+        reverse=True,
+    )
+    preference = session.get(PersonalWatchlistPreference, user_id)
+    default_library_id = (
+        preference.default_library_id
+        if preference is not None and preference.default_library_id in library_ids
+        else None
+    )
+    return {
+        "items": [
+            _personal_watchlist_item_payload(
+                item,
+                source=source,
+                library_ids=sorted(assignments_by_plid[item.plid]),
+            )
+            for item, source in ordered_memberships
+        ],
+        "count": len(ordered_memberships),
+        "libraries": [
+            {
+                "id": library.id,
+                "name": library.name,
+                "created_at": library.created_at.isoformat(),
+                "updated_at": library.updated_at.isoformat(),
+                "item_count": item_counts[library.id],
+            }
+            for library in libraries
+        ],
+        "default_library_configured": bool(
+            preference is not None and preference.default_configured
+        ),
+        "default_library_id": default_library_id,
+    }
+
+
+def _validated_personal_watchlist_library_name(value: str) -> str:
+    name = " ".join(value.split())
+    if not name:
+        raise HTTPException(status_code=422, detail="类型库名称不能为空")
+    if len(name) > 40:
+        raise HTTPException(status_code=422, detail="类型库名称不能超过40个字符")
+    return name
+
+
+def _personal_watchlist_membership_exists(
+    session: Session,
+    *,
+    user_id: int,
+    plid: str,
+) -> bool:
+    return (
+        session.get(CompetitorPersonalWatchlist, (user_id, plid)) is not None
+        or session.get(OwnStorePersonalWatchlist, (user_id, plid)) is not None
+    )
+
+
+def _remove_personal_watchlist_library_assignments(
+    session: Session,
+    *,
+    user_id: int,
+    plid: str,
+) -> None:
+    library_ids = session.scalars(
+        select(PersonalWatchlistLibrary.id).where(PersonalWatchlistLibrary.user_id == user_id)
+    ).all()
+    if not library_ids:
+        return
+    assignments = session.scalars(
+        select(PersonalWatchlistLibraryItem).where(
+            PersonalWatchlistLibraryItem.library_id.in_(library_ids),
+            PersonalWatchlistLibraryItem.plid == plid,
+        )
+    ).all()
+    for assignment in assignments:
+        session.delete(assignment)
 
 
 def _competitor_target_payload(
