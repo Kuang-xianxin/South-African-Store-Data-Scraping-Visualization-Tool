@@ -1333,6 +1333,12 @@ textarea.link-input-error-pulse {
   box-shadow: 0 8px 22px rgba(24, 37, 31, 0.06);
 }
 
+.competitor-module.admin-priority-layout > .shared-management-panel {
+  border: 2px solid rgba(232, 118, 60, 0.42);
+  background: linear-gradient(120deg, #fffaf5, #f8f1e8 58%, #fff);
+  box-shadow: 0 14px 34px rgba(155, 81, 42, 0.13);
+}
+
 .personal-watchlist-summary-copy {
   display: grid;
   gap: 4px;
@@ -5070,6 +5076,26 @@ button {
 
 .competitor-module > .module-footer {
   order: 7;
+}
+
+.competitor-module.admin-priority-layout > .collector {
+  order: 2;
+}
+
+.competitor-module.admin-priority-layout > .metrics {
+  order: 3;
+}
+
+.competitor-module.admin-priority-layout > .link-health-panel {
+  order: 4;
+}
+
+.competitor-module.admin-priority-layout > .personal-operator-workspace {
+  order: 5;
+}
+
+.competitor-module.admin-priority-layout > .overview {
+  order: 6;
 }
 
 .competitor-module > * {

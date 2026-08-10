@@ -3351,7 +3351,10 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
 </script>
 
 <template>
-  <div class="competitor-module">
+  <div
+    class="competitor-module"
+    :class="{ 'admin-priority-layout': props.isAdmin }"
+  >
     <header class="hero">
       <div>
         <p class="eyebrow">TAKEALOT MARKET INTELLIGENCE</p>
@@ -3368,7 +3371,7 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
 
     <section
       class="panel personal-watchlist-summary-card personal-operator-workspace"
-      :class="{ 'operator-primary': !props.canControlCollection }"
+      :class="{ 'operator-primary': !props.isAdmin }"
       aria-labelledby="personal-watchlist-workspace-title"
     >
       <div class="personal-watchlist-summary-copy">
@@ -3463,7 +3466,7 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
     >
       <div class="section-heading">
         <div>
-          <p class="section-kicker">共享采集与管理</p>
+          <p class="section-kicker">管理员核心工作区</p>
           <h2>全局链接与批次</h2>
         </div>
         <p class="section-note">

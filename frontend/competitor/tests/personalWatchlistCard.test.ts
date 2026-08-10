@@ -11,7 +11,7 @@ const styleSource = readFileSync(
   "utf8",
 );
 
-test("the current account workspace comes before shared collection management", () => {
+test("competitor workspaces keep role-specific priorities", () => {
   const workspaceIndex = pageSource.indexOf("personal-operator-workspace");
   const sharedManagementIndex = pageSource.indexOf("shared-management-panel");
   assert.ok(workspaceIndex >= 0);
@@ -24,6 +24,15 @@ test("the current account workspace comes before shared collection management", 
   assert.match(pageSource, /加入我的监控池/);
   assert.match(pageSource, /togglePersonalWatchlistWorkspace/);
   assert.match(pageSource, /全局链接与批次/);
+  assert.match(pageSource, /管理员核心工作区/);
+  assert.match(
+    pageSource,
+    /class="competitor-module"\s+:class="\{ 'admin-priority-layout': props\.isAdmin \}"/,
+  );
+  assert.match(
+    pageSource,
+    /:class="\{ 'operator-primary': !props\.isAdmin \}"/,
+  );
   assert.match(
     pageSource,
     /v-if="props\.isAdmin"\s+class="collector panel shared-management-panel"/,
@@ -47,5 +56,29 @@ test("the current account workspace comes before shared collection management", 
   assert.match(
     styleSource,
     /\.competitor-module > \.collector\s*\{\s*order: 5;/,
+  );
+  assert.match(
+    styleSource,
+    /\.competitor-module\.admin-priority-layout > \.collector\s*\{\s*order: 2;/,
+  );
+  assert.match(
+    styleSource,
+    /\.competitor-module\.admin-priority-layout > \.metrics\s*\{\s*order: 3;/,
+  );
+  assert.match(
+    styleSource,
+    /\.competitor-module\.admin-priority-layout > \.link-health-panel\s*\{\s*order: 4;/,
+  );
+  assert.match(
+    styleSource,
+    /\.competitor-module\.admin-priority-layout > \.personal-operator-workspace\s*\{\s*order: 5;/,
+  );
+  assert.match(
+    styleSource,
+    /\.competitor-module\.admin-priority-layout > \.overview\s*\{\s*order: 6;/,
+  );
+  assert.match(
+    styleSource,
+    /\.competitor-module\.admin-priority-layout > \.shared-management-panel/,
   );
 });
