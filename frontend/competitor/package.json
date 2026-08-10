@@ -15,7 +15,7 @@
     "test:collection-client": "node --experimental-strip-types --test tests/collectionClientClaim.test.ts",
     "test:session-collection": "node --experimental-strip-types --test tests/sessionCollectionLifecycle.test.ts",
     "test:batch-options": "node --experimental-strip-types --test tests/collectionBatchOptions.test.ts",
-    "test:personal-watchlist": "node --experimental-strip-types --test tests/personalWatchlistCard.test.ts",
+    "test:personal-watchlist": "node --experimental-strip-types --test tests/personalWatchlistCard.test.ts tests/personalWatchlistWorkspace.test.ts",
     "test:retry": "node --experimental-strip-types --test tests/retryQueue.test.ts"
   },
   "dependencies": {

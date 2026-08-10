@@ -1282,7 +1282,7 @@ textarea.link-input-error-pulse {
 
 .personal-watchlist-summary-card {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto minmax(170px, auto);
+  grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
   gap: 16px;
   margin: 14px 0 0;
@@ -1322,9 +1322,212 @@ textarea.link-input-error-pulse {
 }
 
 .personal-operator-workspace > .target-manager-message,
-.personal-operator-workspace > .target-duplicate-notice {
+.personal-operator-workspace > .target-duplicate-notice,
+.personal-operator-workspace > .personal-watchlist-board {
   grid-column: 1 / -1;
   margin: 0;
+}
+
+.personal-watchlist-board {
+  display: grid;
+  gap: 14px;
+  padding: 18px;
+  border: 1px solid #bfd7c6;
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.8);
+}
+
+.personal-watchlist-board-heading,
+.personal-watchlist-product-actions,
+.personal-watchlist-pagination {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.personal-watchlist-board-heading h3 {
+  margin: 0;
+  color: #154f34;
+  font-size: 1.05rem;
+}
+
+.personal-watchlist-board-heading > span,
+.personal-watchlist-pagination > span {
+  color: var(--muted);
+  font-size: 0.68rem;
+  font-weight: 750;
+}
+
+.personal-watchlist-product-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.personal-watchlist-product-card {
+  display: grid;
+  grid-template-columns: 88px minmax(0, 1fr);
+  gap: 13px;
+  min-width: 0;
+  padding: 13px;
+  border: 1px solid #d5e2d9;
+  border-radius: 15px;
+  outline: none;
+  background: #fff;
+  box-shadow: 0 7px 20px rgba(20, 54, 39, 0.05);
+  transition:
+    border-color 150ms ease,
+    box-shadow 150ms ease,
+    transform 150ms ease;
+}
+
+.personal-watchlist-product-card.has-detail {
+  cursor: pointer;
+}
+
+.personal-watchlist-product-card.has-detail:hover {
+  border-color: #83ac91;
+  box-shadow: 0 13px 28px rgba(20, 71, 48, 0.1);
+  transform: translateY(-1px);
+}
+
+.personal-watchlist-product-card:focus-visible {
+  border-color: var(--green);
+  box-shadow: 0 0 0 3px rgba(42, 112, 83, 0.16);
+}
+
+.personal-watchlist-product-card.is-highlighted {
+  border-color: #d88324;
+  background: linear-gradient(110deg, #fff1cf, #fff 62%);
+  box-shadow:
+    0 0 0 4px rgba(216, 131, 36, 0.2),
+    0 18px 42px rgba(148, 83, 18, 0.2);
+  animation: personal-watchlist-card-pulse 900ms ease-in-out 4;
+}
+
+.personal-watchlist-product-image {
+  width: 88px;
+  height: 88px;
+  border-radius: 12px;
+}
+
+.personal-watchlist-product-body {
+  display: grid;
+  align-content: start;
+  gap: 7px;
+  min-width: 0;
+}
+
+.personal-watchlist-product-meta {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 0.62rem;
+  font-weight: 750;
+}
+
+.personal-watchlist-product-meta > small {
+  margin-left: auto;
+  padding: 3px 7px;
+  border-radius: 999px;
+  background: #e5f3e8;
+  color: #165f3c;
+  font-weight: 800;
+}
+
+.personal-watchlist-product-meta > small.inactive {
+  background: #f5e7df;
+  color: #9a4c36;
+}
+
+.personal-watchlist-location-badge {
+  padding: 3px 7px;
+  border-radius: 999px;
+  background: #d88324;
+  color: #fff;
+  font-size: 0.6rem;
+  font-weight: 850;
+}
+
+.personal-watchlist-product-body h4 {
+  margin: 0;
+  font-size: 0.82rem;
+  line-height: 1.35;
+}
+
+.personal-watchlist-product-body > p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.65rem;
+  line-height: 1.45;
+}
+
+.personal-watchlist-product-metrics {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.personal-watchlist-product-metrics > span {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+  padding: 7px;
+  border-radius: 9px;
+  background: #f2f6f2;
+}
+
+.personal-watchlist-product-metrics small {
+  color: var(--muted);
+  font-size: 0.56rem;
+}
+
+.personal-watchlist-product-metrics strong {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font-size: 0.65rem;
+}
+
+.personal-watchlist-product-actions {
+  align-items: flex-end;
+  flex-wrap: wrap;
+  margin-top: 2px;
+}
+
+.personal-watchlist-product-actions > span {
+  flex: 1 1 100%;
+  color: var(--muted);
+  font-size: 0.58rem;
+}
+
+.personal-watchlist-product-actions button {
+  flex: 1 1 auto;
+  padding: 7px 9px;
+  font-size: 0.62rem;
+}
+
+.personal-watchlist-empty-state {
+  display: grid;
+  gap: 4px;
+  min-height: 110px;
+  place-content: center;
+  color: var(--muted);
+  text-align: center;
+}
+
+.personal-watchlist-empty-state strong {
+  color: var(--ink);
+}
+
+.personal-watchlist-empty-state span {
+  font-size: 0.68rem;
+}
+
+.personal-watchlist-pagination {
+  justify-content: center;
 }
 
 .shared-management-panel {
@@ -1378,39 +1581,6 @@ textarea.link-input-error-pulse {
   font-weight: 750;
 }
 
-.personal-watchlist-summary-action {
-  min-width: 170px;
-  padding: 11px 14px;
-  border: 1px solid #176542;
-  border-radius: 10px;
-  background: #176542;
-  color: #fff;
-  font: inherit;
-  font-size: 0.72rem;
-  font-weight: 850;
-  cursor: pointer;
-  box-shadow: 0 8px 18px rgba(23, 101, 66, 0.18);
-}
-
-.personal-watchlist-summary-action:hover,
-.personal-watchlist-summary-action.active {
-  background: #0f5134;
-}
-
-.personal-watchlist-summary-action.active {
-  border-color: #a45b49;
-  background: #fff;
-  color: #98422f;
-  box-shadow: none;
-}
-
-.personal-watchlist-summary-action:disabled {
-  border-color: #b8c8bd;
-  background: #e7eee9;
-  color: #788b7f;
-  cursor: default;
-  box-shadow: none;
-}
 
 .follow-opportunity-summary {
   display: grid;
@@ -1661,29 +1831,6 @@ textarea.link-input-error-pulse {
   box-shadow: 0 0 0 3px rgba(42, 112, 83, 0.14);
 }
 
-.competitor-status-card.duplicate-target-highlight {
-  border-color: #d88324;
-  background:
-    linear-gradient(110deg, rgba(255, 244, 218, 0.94), rgba(255, 255, 255, 0.98) 58%);
-  box-shadow:
-    0 0 0 4px rgba(216, 131, 36, 0.2),
-    0 18px 42px rgba(148, 83, 18, 0.2);
-  animation: duplicate-target-card-pulse 900ms ease-in-out 4;
-}
-
-.duplicate-target-highlight-badge {
-  display: inline-flex;
-  align-items: center;
-  padding: 4px 9px;
-  border-radius: 999px;
-  background: #d88324;
-  color: #fff;
-  font-size: 0.62rem;
-  font-weight: 850;
-  letter-spacing: 0.04em;
-  box-shadow: 0 5px 14px rgba(148, 83, 18, 0.24);
-}
-
 .personal-watchlist-badge {
   display: inline-flex;
   align-items: center;
@@ -1697,7 +1844,7 @@ textarea.link-input-error-pulse {
   letter-spacing: 0.03em;
 }
 
-@keyframes duplicate-target-card-pulse {
+@keyframes personal-watchlist-card-pulse {
   0%,
   100% {
     box-shadow:
@@ -1713,7 +1860,7 @@ textarea.link-input-error-pulse {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .competitor-status-card.duplicate-target-highlight {
+  .personal-watchlist-product-card.is-highlighted {
     animation: none;
   }
 }
@@ -5079,19 +5226,19 @@ button {
 }
 
 .competitor-module.admin-priority-layout > .collector {
-  order: 2;
-}
-
-.competitor-module.admin-priority-layout > .metrics {
   order: 3;
 }
 
-.competitor-module.admin-priority-layout > .link-health-panel {
+.competitor-module.admin-priority-layout > .metrics {
   order: 4;
 }
 
-.competitor-module.admin-priority-layout > .personal-operator-workspace {
+.competitor-module.admin-priority-layout > .link-health-panel {
   order: 5;
+}
+
+.competitor-module.admin-priority-layout > .personal-operator-workspace {
+  order: 2;
 }
 
 .competitor-module.admin-priority-layout > .overview {
@@ -5283,6 +5430,10 @@ button {
     grid-column: 1 / -1;
   }
 
+  .personal-watchlist-product-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
   .personal-watchlist-quick-add {
     grid-template-columns: minmax(0, 1fr) auto;
   }
@@ -5375,10 +5526,6 @@ button {
     border-left: 0;
   }
 
-  .personal-watchlist-summary-action {
-    width: 100%;
-  }
-
   .personal-watchlist-quick-add {
     grid-template-columns: 1fr;
   }
@@ -5389,6 +5536,28 @@ button {
 
   .personal-watchlist-quick-add button {
     width: 100%;
+  }
+
+  .personal-watchlist-board {
+    padding: 12px;
+  }
+
+  .personal-watchlist-board-heading {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .personal-watchlist-product-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .personal-watchlist-product-card {
+    grid-template-columns: 74px minmax(0, 1fr);
+  }
+
+  .personal-watchlist-product-image {
+    width: 74px;
+    height: 74px;
   }
 
   .follow-opportunity-copy {

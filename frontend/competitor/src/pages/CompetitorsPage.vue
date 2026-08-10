@@ -60,6 +60,11 @@ import {
 } from "../competitorFollowOpportunities";
 import { PRODUCT_IMAGE_SIZE, productThumbnailUrl } from "../productImages";
 import {
+  buildPersonalWatchlistWorkspaceCards,
+  personalWatchlistPageForPlid,
+  type PersonalWatchlistWorkspaceCard,
+} from "../personalWatchlistWorkspace";
+import {
   MAX_AUTOMATIC_RETRY_ATTEMPTS,
   mergeUniqueTargetUrls,
   scheduleRetryAfterGap,
@@ -81,6 +86,7 @@ import type {
   CompetitorItem,
   CompetitorLinkHealthItem,
   CompetitorOfferItem,
+  CompetitorPersonalWatchlistItem,
   CompetitorTargetAuditItem,
   CompetitorTargetItem,
   CompetitorStoreTargetItem,
@@ -179,10 +185,14 @@ const collectionClientInstanceId = collectionId("client");
 let collectionClientChannel: BroadcastChannel | null = null;
 const rawUrls = ref("");
 const targets = ref<CompetitorTargetItem[]>([]);
+const personalWatchlistItems = ref<CompetitorPersonalWatchlistItem[]>([]);
 const personalWatchlistPlids = ref<Set<string>>(new Set());
 const personalWatchlistBusyPlid = ref("");
 const personalWatchlistError = ref("");
 const personalWatchlistNotice = ref("");
+const personalWatchlistPage = ref(1);
+const personalWatchlistPageSize = 6;
+const personalWatchlistHighlightPlid = ref("");
 const storeTargets = ref<CompetitorStoreTargetItem[]>([]);
 const allStoreTargets = ref<CompetitorStoreTargetItem[]>([]);
 const ownStoreScope = computed<OwnStoreScope>(
@@ -212,7 +222,6 @@ const duplicateTarget = ref<{
   hasHistory: boolean;
   personalWatchlistCreated: boolean;
 } | null>(null);
-const duplicateTargetHighlightPlid = ref("");
 const editingTargetPlid = ref("");
 const editingTargetUrl = ref("");
 const targetAuditItems = ref<CompetitorTargetAuditItem[]>([]);
@@ -495,6 +504,20 @@ const offerTrendXAxisTicks = computed(() => {
 const competitorsByPlid = computed(
   () => new Map(allCompetitorItems.value.map((item) => [item.plid, item])),
 );
+const personalWatchlistCards = computed(() =>
+  buildPersonalWatchlistWorkspaceCards(
+    personalWatchlistItems.value,
+    targets.value,
+    competitors.value,
+  ),
+);
+const personalWatchlistPageCount = computed(() =>
+  Math.max(1, Math.ceil(personalWatchlistCards.value.length / personalWatchlistPageSize)),
+);
+const pagedPersonalWatchlistCards = computed(() => {
+  const start = (personalWatchlistPage.value - 1) * personalWatchlistPageSize;
+  return personalWatchlistCards.value.slice(start, start + personalWatchlistPageSize);
+});
 const selectedTarget = computed(
   () => targets.value.find((target) => target.plid === selectedPlid.value) ?? null,
 );
@@ -1078,8 +1101,8 @@ onBeforeUnmount(() => {
   if (sharedBatchTimer !== null) window.clearInterval(sharedBatchTimer);
   if (batchHeartbeatTimer !== null) window.clearInterval(batchHeartbeatTimer);
   if (collectionClockTimer !== null) window.clearInterval(collectionClockTimer);
-  if (duplicateTargetHighlightTimer !== null) {
-    window.clearTimeout(duplicateTargetHighlightTimer);
+  if (personalWatchlistHighlightTimer !== null) {
+    window.clearTimeout(personalWatchlistHighlightTimer);
   }
   document.body.style.overflow = "";
 });
@@ -1087,7 +1110,7 @@ onBeforeUnmount(() => {
 let sharedBatchTimer: number | null = null;
 let batchHeartbeatTimer: number | null = null;
 let collectionClockTimer: number | null = null;
-let duplicateTargetHighlightTimer: number | null = null;
+let personalWatchlistHighlightTimer: number | null = null;
 
 watch([targetQuery, targetPageSize], () => {
   targetPage.value = 1;
@@ -1095,6 +1118,10 @@ watch([targetQuery, targetPageSize], () => {
 
 watch(targetPageCount, (pageCount) => {
   if (targetPage.value > pageCount) targetPage.value = pageCount;
+});
+
+watch(personalWatchlistPageCount, (pageCount) => {
+  if (personalWatchlistPage.value > pageCount) personalWatchlistPage.value = pageCount;
 });
 
 watch(
@@ -1559,6 +1586,7 @@ async function loadTargets() {
       fetchCompetitorPersonalWatchlist(),
     ]);
     targets.value = loadedTargets;
+    personalWatchlistItems.value = personalWatchlistPayload.items;
     personalWatchlistPlids.value = new Set(
       personalWatchlistPayload.items.map((item) => item.plid),
     );
@@ -1577,36 +1605,118 @@ async function loadTargets() {
   }
 }
 
-function setPersonalWatchlistLocal(plid: string, included: boolean): void {
+function setPersonalWatchlistLocal(
+  plid: string,
+  included: boolean,
+  membership?: CompetitorPersonalWatchlistItem,
+): void {
   const next = new Set(personalWatchlistPlids.value);
-  if (included) next.add(plid);
-  else next.delete(plid);
+  if (included) {
+    next.add(plid);
+    const existing = personalWatchlistItems.value.find((item) => item.plid === plid);
+    const nextMembership = membership ?? existing ?? {
+      plid,
+      added_at: new Date().toISOString(),
+    };
+    personalWatchlistItems.value = existing
+      ? personalWatchlistItems.value.map((item) =>
+        item.plid === plid ? nextMembership : item,
+      )
+      : [nextMembership, ...personalWatchlistItems.value];
+  } else {
+    next.delete(plid);
+    personalWatchlistItems.value = personalWatchlistItems.value.filter(
+      (item) => item.plid !== plid,
+    );
+  }
   personalWatchlistPlids.value = next;
 }
 
 async function persistPersonalWatchlistAddition(plid: string): Promise<boolean> {
   const result = await addCompetitorPersonalWatchlistItem(plid);
-  setPersonalWatchlistLocal(plid, true);
+  setPersonalWatchlistLocal(plid, true, result.item);
   return result.created;
+}
+
+async function focusPersonalWatchlistCard(plid: string): Promise<boolean> {
+  const page = personalWatchlistPageForPlid(
+    personalWatchlistCards.value,
+    plid,
+    personalWatchlistPageSize,
+  );
+  if (page === null) {
+    targetManagerError.value = `PLID${plid} 已加入个人监控池，但暂时无法显示对应卡片`;
+    return false;
+  }
+  personalWatchlistPage.value = page;
+  await nextTick();
+  const card = document.getElementById(`personal-watchlist-card-${plid}`);
+  if (!card) {
+    targetManagerError.value = `PLID${plid} 已加入个人监控池，但对应卡片尚未加载`;
+    return false;
+  }
+  if (personalWatchlistHighlightTimer !== null) {
+    window.clearTimeout(personalWatchlistHighlightTimer);
+  }
+  personalWatchlistHighlightPlid.value = "";
+  await nextTick();
+  personalWatchlistHighlightPlid.value = plid;
+  personalWatchlistHighlightTimer = window.setTimeout(() => {
+    if (personalWatchlistHighlightPlid.value === plid) {
+      personalWatchlistHighlightPlid.value = "";
+    }
+    personalWatchlistHighlightTimer = null;
+  }, 4_500);
+  await nextTick();
+  card.scrollIntoView({ behavior: "smooth", block: "center" });
+  card.focus({ preventScroll: true });
+  return true;
+}
+
+function openPersonalWatchlistCard(card: PersonalWatchlistWorkspaceCard): void {
+  if (card.competitor) {
+    openProductModal(card.competitor);
+    return;
+  }
+  clearTargetManagerFeedback();
+  targetManagerNotice.value = card.target
+    ? `PLID${card.plid} 已在监控队列和你的个人监控池中，正在等待首次采集。`
+    : `PLID${card.plid} 当前只保留在你的个人监控池中；重新粘贴原链接可恢复全局监控。`;
+}
+
+async function removeFromPersonalWatchlist(plid: string): Promise<void> {
+  if (personalWatchlistBusyPlid.value) return;
+  clearPersonalWatchlistFeedback();
+  personalWatchlistBusyPlid.value = plid;
+  try {
+    await deleteCompetitorPersonalWatchlistItem(plid);
+    setPersonalWatchlistLocal(plid, false);
+    personalWatchlistNotice.value = (
+      `PLID${plid} 已从你的个人监控池删除；全局监控队列、每日采集和历史记录不受影响。`
+    );
+  } catch (error) {
+    personalWatchlistError.value =
+      error instanceof Error ? error.message : "更新个人监控池失败";
+  } finally {
+    personalWatchlistBusyPlid.value = "";
+  }
 }
 
 async function toggleSelectedPersonalWatchlist(): Promise<void> {
   const item = selected.value;
   if (!item || item.来源 !== "competitor" || personalWatchlistBusyPlid.value) return;
   const removing = personalWatchlistPlids.value.has(item.plid);
+  if (removing) {
+    await removeFromPersonalWatchlist(item.plid);
+    return;
+  }
   clearPersonalWatchlistFeedback();
   personalWatchlistBusyPlid.value = item.plid;
   try {
-    if (removing) {
-      await deleteCompetitorPersonalWatchlistItem(item.plid);
-      setPersonalWatchlistLocal(item.plid, false);
-      personalWatchlistNotice.value = (
-        `PLID${item.plid} 已从你的个人监控池删除；全局每日采集和历史记录不受影响。`
-      );
-    } else {
-      await persistPersonalWatchlistAddition(item.plid);
-      personalWatchlistNotice.value = `PLID${item.plid} 已加入你的个人监控池。`;
-    }
+    await persistPersonalWatchlistAddition(item.plid);
+    closeProductModal();
+    personalWatchlistNotice.value = `PLID${item.plid} 已加入你的个人监控池并定位到对应卡片。`;
+    await focusPersonalWatchlistCard(item.plid);
   } catch (error) {
     personalWatchlistError.value =
       error instanceof Error ? error.message : "更新个人监控池失败";
@@ -1639,10 +1749,12 @@ async function addTarget() {
     targetManagerBusy.value = "add";
     try {
       const personalWatchlistCreated = await persistPersonalWatchlistAddition(plid);
+      newTargetUrl.value = "";
       showDuplicateTarget(existingTarget, personalWatchlistCreated);
+      await focusPersonalWatchlistCard(plid);
     } catch (error) {
       targetManagerError.value =
-        error instanceof Error ? error.message : "加入个人监控池失败";
+        error instanceof Error ? error.message : "加入监控队列和个人监控池失败";
     } finally {
       targetManagerBusy.value = "";
     }
@@ -1670,8 +1782,9 @@ async function addTarget() {
     await loadTargets();
     if (props.isAdmin) await loadSharedBatchStatus();
     targetManagerNotice.value = result.queued_to_active_batch
-      ? `PLID${result.item.plid} 已保存并自动加入你的个人监控池，同时追加到当前运行批次队尾；断点中的原任务顺序保持不变。`
-      : `PLID${result.item.plid} 已保存并自动加入你的个人监控池，将进入下一次采集清单。`;
+      ? `PLID${result.item.plid} 已加入监控队列和你的个人监控池，同时追加到当前运行批次队尾；断点中的原任务顺序保持不变。`
+      : `PLID${result.item.plid} 已加入监控队列和你的个人监控池，将进入下一次采集清单。`;
+    await focusPersonalWatchlistCard(result.item.plid);
   } catch (error) {
     if (error instanceof ApiRequestError && error.status === 409 && plid) {
       let personalWatchlistCreated = false;
@@ -1686,7 +1799,9 @@ async function addTarget() {
       }
       const duplicate = targets.value.find((target) => target.plid === plid);
       if (duplicate) {
+        newTargetUrl.value = "";
         showDuplicateTarget(duplicate, personalWatchlistCreated);
+        await focusPersonalWatchlistCard(plid);
         return;
       }
     }
@@ -1701,17 +1816,6 @@ function clearTargetManagerFeedback() {
   targetManagerError.value = "";
   targetManagerNotice.value = "";
   duplicateTarget.value = null;
-}
-
-async function togglePersonalWatchlistWorkspace() {
-  competitorSourceView.value = "competitor";
-  personalWatchlistFilter.value =
-    personalWatchlistFilter.value === "我的监控池" ? "全部" : "我的监控池";
-  await nextTick();
-  document.getElementById("true-competitor-panel")?.scrollIntoView({
-    behavior: "smooth",
-    block: "start",
-  });
 }
 
 function showDuplicateTarget(
@@ -1729,48 +1833,11 @@ function showDuplicateTarget(
 
 async function jumpToDuplicateTarget() {
   const duplicate = duplicateTarget.value;
-  if (!duplicate?.hasHistory) return;
-  clearCompetitorFilters();
-  competitorSourceView.value = "competitor";
-  if (!competitors.value.some((item) => item.plid === duplicate.plid)) {
-    const availableStart = competitorDateRange.value.available_start;
-    const availableEnd = competitorDateRange.value.available_end;
-    rangeStartDate.value = availableStart ?? "";
-    rangeEndDate.value = availableEnd ?? "";
-    appliedStartDate.value = rangeStartDate.value;
-    appliedEndDate.value = rangeEndDate.value;
-    await loadOverview();
+  if (!duplicate) return;
+  if (!personalWatchlistPlids.value.has(duplicate.plid)) {
+    await persistPersonalWatchlistAddition(duplicate.plid);
   }
-  await nextTick();
-  selectedPlid.value = duplicate.plid;
-  const duplicateIndex = sortedCompetitors.value.findIndex(
-    (item) => item.plid === duplicate.plid,
-  );
-  if (duplicateIndex >= 0) {
-    competitorPage.value =
-      Math.floor(duplicateIndex / competitorPageSize.value) + 1;
-  }
-  await nextTick();
-  const row = document.getElementById(`competitor-row-${duplicate.plid}`);
-  if (!row) {
-    targetManagerError.value = "已有历史记录，但当前观察区间没有可显示的商品卡片";
-    return;
-  }
-  if (duplicateTargetHighlightTimer !== null) {
-    window.clearTimeout(duplicateTargetHighlightTimer);
-  }
-  duplicateTargetHighlightPlid.value = "";
-  await nextTick();
-  duplicateTargetHighlightPlid.value = duplicate.plid;
-  duplicateTargetHighlightTimer = window.setTimeout(() => {
-    if (duplicateTargetHighlightPlid.value === duplicate.plid) {
-      duplicateTargetHighlightPlid.value = "";
-    }
-    duplicateTargetHighlightTimer = null;
-  }, 4_500);
-  await nextTick();
-  row.scrollIntoView({ behavior: "smooth", block: "center" });
-  row.focus({ preventScroll: true });
+  await focusPersonalWatchlistCard(duplicate.plid);
 }
 
 function beginEditTarget(target: CompetitorTargetItem) {
@@ -3380,40 +3447,21 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
           {{ props.currentUsername || "当前账号" }} 的个人监控池
         </strong>
         <span>
-          先处理你自己关注的真正竞品。粘贴新链接会自动加入当前账号的个人池，同时纳入共享每日采集；
-          其他账号看不到你的个人归类，加入或删除也不会影响全局历史和采集。
+          这里直接展示你自己关注的真正竞品，不再跳到下方商品分区。粘贴链接会同时加入全局监控队列和当前账号个人池；
+          已有商品会自动定位到这里，其他账号看不到你的个人归类。
         </span>
       </div>
       <div class="personal-watchlist-summary-count" aria-label="当前账号个人监控池商品数量">
         <strong>{{ personalWatchlistPlids.size }}</strong>
         <span>个我的商品</span>
       </div>
-      <button
-        type="button"
-        class="personal-watchlist-summary-action"
-        :class="{ active: personalWatchlistFilter === '我的监控池' }"
-        :aria-pressed="personalWatchlistFilter === '我的监控池'"
-        :disabled="
-          personalWatchlistPlids.size === 0
-          && personalWatchlistFilter !== '我的监控池'
-        "
-        @click="togglePersonalWatchlistWorkspace"
-      >
-        {{
-          personalWatchlistFilter === "我的监控池"
-            ? "返回全部真正竞品"
-            : personalWatchlistPlids.size
-              ? "查看我的个人监控池"
-              : "监控池暂无商品"
-        }}
-      </button>
       <form class="target-add-row personal-watchlist-quick-add" @submit.prevent="addTarget">
-        <label for="personal-watchlist-link">加入我负责的竞品</label>
+        <label for="personal-watchlist-link">新增监控链接</label>
         <input
           id="personal-watchlist-link"
           v-model="newTargetUrl"
           type="url"
-          aria-label="新增 Takealot 竞品链接并加入个人监控池"
+          aria-label="新增 Takealot 竞品链接并同时加入监控队列和个人监控池"
           placeholder="粘贴 Takealot 商品链接，例如 https://www.takealot.com/.../PLID12345678"
           :disabled="targetManagerBusy === 'add' || !props.canOperate"
           @input="clearTargetManagerFeedback"
@@ -3423,7 +3471,11 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
           type="submit"
           :disabled="targetManagerBusy === 'add' || !props.canOperate"
         >
-          {{ targetManagerBusy === "add" ? "正在加入…" : "加入我的监控池" }}
+          {{
+            targetManagerBusy === "add"
+              ? "正在加入…"
+              : "加入监控队列和我的监控池"
+          }}
         </button>
       </form>
       <p v-if="targetManagerError" class="target-manager-message error" role="alert">
@@ -3438,7 +3490,7 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
           {{
             duplicateTarget.hasHistory
               ? "该链接已在监控清单中，并已纳入每日采集且已有历史记录。"
-              : "链接表单中已有这个链接。"
+              : "该链接已在监控队列中，正在等待首次采集。"
           }}
           {{
             duplicateTarget.personalWatchlistCreated
@@ -3447,17 +3499,157 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
           }}
         </span>
         <button
-          v-if="duplicateTarget.hasHistory"
           class="secondary-button"
           type="button"
           @click="jumpToDuplicateTarget"
         >
-          查看对应商品
+          定位到我的监控池
         </button>
       </div>
       <p v-if="targetManagerNotice" class="target-manager-message success" role="status">
         {{ targetManagerNotice }}
       </p>
+      <p v-if="personalWatchlistError" class="target-manager-message error" role="alert">
+        {{ personalWatchlistError }}
+      </p>
+      <p v-if="personalWatchlistNotice" class="target-manager-message success" role="status">
+        {{ personalWatchlistNotice }}
+      </p>
+
+      <section
+        class="personal-watchlist-board"
+        aria-labelledby="personal-watchlist-board-title"
+      >
+        <div class="personal-watchlist-board-heading">
+          <div>
+            <p class="section-kicker">MY PERSONAL WATCHLIST</p>
+            <h3 id="personal-watchlist-board-title">个人监控池商品</h3>
+          </div>
+          <span v-if="personalWatchlistCards.length">
+            第 {{ personalWatchlistPage }}/{{ personalWatchlistPageCount }} 页 ·
+            共 {{ personalWatchlistCards.length }} 个
+          </span>
+        </div>
+
+        <div v-if="personalWatchlistCards.length" class="personal-watchlist-product-grid">
+          <article
+            v-for="card in pagedPersonalWatchlistCards"
+            :id="`personal-watchlist-card-${card.plid}`"
+            :key="card.plid"
+            class="personal-watchlist-product-card"
+            :class="{
+              'has-detail': Boolean(card.competitor),
+              'is-highlighted': personalWatchlistHighlightPlid === card.plid,
+            }"
+            tabindex="-1"
+            @click="openPersonalWatchlistCard(card)"
+          >
+            <div class="competitor-product-image personal-watchlist-product-image">
+              <img
+                v-if="card.competitor && canShowCompetitorImage(card.competitor.图片)"
+                :src="competitorImageUrl(card.competitor.图片)"
+                :alt="`${card.competitor.商品} 商品图片`"
+                width="192"
+                height="192"
+                loading="lazy"
+                decoding="async"
+                @error="markCompetitorImageFailed(card.competitor.图片)"
+              />
+              <span v-else>暂无图片</span>
+            </div>
+            <div class="personal-watchlist-product-body">
+              <div class="personal-watchlist-product-meta">
+                <span>PLID{{ card.plid }}</span>
+                <strong
+                  v-if="personalWatchlistHighlightPlid === card.plid"
+                  class="personal-watchlist-location-badge"
+                  role="status"
+                >已定位到此商品</strong>
+                <small :class="{ inactive: !card.target }">
+                  {{ card.target ? "已在监控队列" : "仅在个人监控池" }}
+                </small>
+              </div>
+              <h4>
+                {{ card.competitor?.商品 || card.target?.title || "等待首次采集" }}
+              </h4>
+              <p v-if="card.competitor">
+                主卖家 {{ card.competitor.当前卖家 || "未知" }} ·
+                {{ card.competitor.跟卖报价.length }} 个变体 / 报价
+              </p>
+              <p v-else-if="card.target">
+                已加入两个清单，首次采集完成后会在这里补齐商品、价格和库存。
+              </p>
+              <p v-else>
+                个人归类仍保留；如需恢复全局采集，请重新粘贴原商品链接。
+              </p>
+              <div v-if="card.competitor" class="personal-watchlist-product-metrics">
+                <span>
+                  <small>当前价格</small>
+                  <strong>{{ formatCurrency(card.competitor.价格) }}</strong>
+                </span>
+                <span>
+                  <small>当前库存</small>
+                  <strong>{{ card.competitor.库存上限 }}</strong>
+                </span>
+                <span>
+                  <small>最近采集</small>
+                  <strong>{{ formatChinaDateTime(card.competitor.采集时间) }}</strong>
+                </span>
+              </div>
+              <div class="personal-watchlist-product-actions">
+                <span>加入时间 {{ formatChinaDateTime(card.addedAt) }}</span>
+                <button
+                  v-if="card.competitor"
+                  type="button"
+                  class="secondary-button"
+                  @click.stop="openProductModal(card.competitor)"
+                >
+                  查看商品详情
+                </button>
+                <button
+                  v-if="props.isAdmin && card.target"
+                  type="button"
+                  class="secondary-button"
+                  @click.stop="openTargetActionForLink(card.plid, card.target.url)"
+                >
+                  监控队列操作
+                </button>
+                <button
+                  type="button"
+                  class="secondary-button danger"
+                  :disabled="Boolean(personalWatchlistBusyPlid)"
+                  @click.stop="removeFromPersonalWatchlist(card.plid)"
+                >
+                  {{
+                    personalWatchlistBusyPlid === card.plid
+                      ? "正在移除…"
+                      : "从个人池移除"
+                  }}
+                </button>
+              </div>
+            </div>
+          </article>
+        </div>
+        <div v-else class="personal-watchlist-empty-state">
+          <strong>个人监控池暂无商品</strong>
+          <span>在上方粘贴 Takealot 链接，会同时加入监控队列和你的个人监控池。</span>
+        </div>
+        <div v-if="personalWatchlistPageCount > 1" class="personal-watchlist-pagination">
+          <button
+            type="button"
+            class="secondary-button"
+            :disabled="personalWatchlistPage <= 1"
+            @click="personalWatchlistPage -= 1"
+          >上一页</button>
+          <span>第 {{ personalWatchlistPage }} / {{ personalWatchlistPageCount }} 页</span>
+          <button
+            type="button"
+            class="secondary-button"
+            :disabled="personalWatchlistPage >= personalWatchlistPageCount"
+            @click="personalWatchlistPage += 1"
+          >下一页</button>
+        </div>
+      </section>
     </section>
 
     <section
@@ -4971,14 +5163,12 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
             v-memo="[
               item,
               selectedPlid === item.plid,
-              duplicateTargetHighlightPlid === item.plid,
               personalWatchlistPlids.has(item.plid),
               failedCompetitorImages.has(item.图片 || ''),
             ]"
             class="competitor-status-card"
             :class="{
               selected: selectedPlid === item.plid,
-              'duplicate-target-highlight': duplicateTargetHighlightPlid === item.plid,
             }"
             tabindex="0"
             role="button"
@@ -5007,11 +5197,6 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
                   <div class="competitor-status-eyebrow">
                     <span>PLID{{ item.plid }}</span>
                     <span>{{ formatChinaDateTime(item.采集时间) }}</span>
-                    <strong
-                      v-if="duplicateTargetHighlightPlid === item.plid"
-                      class="duplicate-target-highlight-badge"
-                      role="status"
-                    >已定位到此商品</strong>
                     <strong
                       v-if="personalWatchlistPlids.has(item.plid)"
                       class="personal-watchlist-badge"
