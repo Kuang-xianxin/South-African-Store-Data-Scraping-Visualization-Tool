@@ -53,11 +53,6 @@ import {
   matchesCompetitorSearch,
   matchesCompetitorSearchValues,
 } from "../competitorSearch";
-import {
-  matchesFollowSellingOpportunity,
-  summarizeFollowSellingOpportunities,
-  type FollowSellingOpportunityFilter,
-} from "../competitorFollowOpportunities";
 import { PRODUCT_IMAGE_SIZE, productThumbnailUrl } from "../productImages";
 import {
   buildPersonalWatchlistWorkspaceCards,
@@ -247,6 +242,8 @@ const detail = ref<CompetitorDetail>({ history: [], reviews: [], variants: [] })
 const detailModalOpen = ref(false);
 const detailLoading = ref(false);
 const detailError = ref("");
+const competitorDetailCache = new Map<string, CompetitorDetail>();
+const competitorDetailCacheLimit = 24;
 const loading = ref(true);
 const collecting = ref(false);
 const collectionPreparing = ref(false);
@@ -321,7 +318,6 @@ const competitorStockFilter = ref<"全部" | "有货" | "没货" | "未探测">(
 const followerPresenceFilter = ref<"全部" | "有被跟卖" | "未发现跟卖">("全部");
 const personalWatchlistFilter = ref<"全部" | "我的监控池">("全部");
 const competitorSignalFilter = ref<CompetitorOperatingSignal>("全部");
-const followSellingOpportunityFilter = ref<FollowSellingOpportunityFilter>("全部");
 const competitorSourceView = ref<"competitor" | "own_store">("competitor");
 const competitorPage = ref(1);
 const storeCompetitorPage = ref(1);
@@ -688,9 +684,6 @@ const targetActionIsManualRetry = computed(
   () => targetActionSource.value === "manual_retry",
 );
 const competitorSignalOptions = COMPETITOR_OPERATING_SIGNAL_OPTIONS;
-const followSellingOpportunitySummary = computed(() =>
-  summarizeFollowSellingOpportunities(competitors.value),
-);
 const filteredCompetitors = computed(() => {
   return competitors.value.filter(matchesCompetitorFilters);
 });
@@ -755,9 +748,6 @@ function matchesCompetitorFilters(item: CompetitorItem) {
     if (followerPresenceFilter.value === "有被跟卖" && !hasFollowers) return false;
     if (followerPresenceFilter.value === "未发现跟卖" && hasFollowers) return false;
   }
-  if (!matchesFollowSellingOpportunity(item, followSellingOpportunityFilter.value)) {
-    return false;
-  }
   return matchesCompetitorOperatingSignal(item, competitorSignalFilter.value);
 }
 const competitorPageCount = computed(() =>
@@ -786,7 +776,6 @@ const competitorFiltersActive = computed(
       competitorSourceView.value === "competitor"
       && personalWatchlistFilter.value !== "全部"
     )
-    || followSellingOpportunityFilter.value !== "全部"
     || competitorSignalFilter.value !== "全部",
 );
 const exactStockCount = computed(
@@ -1130,7 +1119,6 @@ watch(
     competitorStockFilter,
     followerPresenceFilter,
     personalWatchlistFilter,
-    followSellingOpportunityFilter,
     competitorSignalFilter,
     competitorListSortDirection,
     competitorPageSize,
@@ -1148,13 +1136,66 @@ watch(storeCompetitorPageCount, (pageCount) => {
   if (storeCompetitorPage.value > pageCount) storeCompetitorPage.value = pageCount;
 });
 
+function competitorDetailCacheKey(
+  plid: string,
+  start: string,
+  end: string,
+  scope: OwnStoreScope,
+): string {
+  return [
+    plid,
+    start,
+    end,
+    scope,
+    props.currentStoreName ?? "",
+    selected.value?.采集时间 ?? "",
+  ].join("\u001f");
+}
+
+function cachedCompetitorDetail(key: string): CompetitorDetail | undefined {
+  const cached = competitorDetailCache.get(key);
+  if (!cached) return undefined;
+  competitorDetailCache.delete(key);
+  competitorDetailCache.set(key, cached);
+  return cached;
+}
+
+function cacheCompetitorDetail(key: string, value: CompetitorDetail): void {
+  competitorDetailCache.delete(key);
+  competitorDetailCache.set(key, value);
+  if (competitorDetailCache.size <= competitorDetailCacheLimit) return;
+  const oldestKey = competitorDetailCache.keys().next().value;
+  if (oldestKey !== undefined) competitorDetailCache.delete(oldestKey);
+}
+
 let detailRequestId = 0;
 watch(
-  [selectedPlid, appliedStartDate, appliedEndDate, ownStoreScope],
-  async ([plid, start, end, scope]) => {
+  [
+    detailModalOpen,
+    selectedPlid,
+    appliedStartDate,
+    appliedEndDate,
+    ownStoreScope,
+    () => selected.value?.采集时间 ?? "",
+    () => props.currentStoreName ?? "",
+  ],
+  async ([modalOpen, plid, start, end, scope]) => {
     const requestId = ++detailRequestId;
     if (!plid) {
       detail.value = { history: [], reviews: [], variants: [] };
+      detailLoading.value = false;
+      detailError.value = "";
+      return;
+    }
+    if (!modalOpen) {
+      detailLoading.value = false;
+      detailError.value = "";
+      return;
+    }
+    const cacheKey = competitorDetailCacheKey(plid, start, end, scope);
+    const cached = cachedCompetitorDetail(cacheKey);
+    if (cached) {
+      detail.value = cached;
       detailLoading.value = false;
       detailError.value = "";
       return;
@@ -1163,7 +1204,10 @@ watch(
     detailError.value = "";
     try {
       const result = await fetchCompetitorDetail(plid, start, end, scope);
-      if (requestId === detailRequestId) detail.value = result;
+      if (requestId === detailRequestId) {
+        detail.value = result;
+        cacheCompetitorDetail(cacheKey, result);
+      }
     } catch (error) {
       if (requestId === detailRequestId) {
         detailError.value = error instanceof Error ? error.message : "读取商品详情失败";
@@ -1316,7 +1360,6 @@ function clearCompetitorFilters(): void {
   competitorStockFilter.value = "全部";
   followerPresenceFilter.value = "全部";
   personalWatchlistFilter.value = "全部";
-  followSellingOpportunityFilter.value = "全部";
   competitorSignalFilter.value = "全部";
 }
 
@@ -4774,18 +4817,6 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
             v-if="competitorSourceView === 'competitor'"
             class="competitor-filter-field"
           >
-            <span>可跟卖机会</span>
-            <select v-model="followSellingOpportunityFilter">
-              <option value="全部">全部竞品</option>
-              <option value="可跟卖机会">全部可跟卖机会</option>
-              <option value="全部报价售罄">全部报价售罄</option>
-              <option value="暂无卖家报价">暂无卖家报价</option>
-            </select>
-          </label>
-          <label
-            v-if="competitorSourceView === 'competitor'"
-            class="competitor-filter-field"
-          >
             <span>个人监控池</span>
             <select v-model="personalWatchlistFilter">
               <option value="全部">全部竞品</option>
@@ -5114,48 +5145,15 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
               <h3>真正竞品</h3>
             </div>
             <span>
-              共 {{ filteredCompetitors.length }} 条 · 可跟卖机会
-              {{ followSellingOpportunitySummary.total }} 条 · 我的监控池
+              共 {{ filteredCompetitors.length }} 条 · 我的监控池
               {{ personalWatchlistPlids.size }} 条
             </span>
           </div>
-          <div class="follow-opportunity-summary" aria-label="可跟卖机会统计">
-            <div class="follow-opportunity-copy">
-              <strong>可跟卖机会</strong>
-              <span>
-                只统计最新成功快照；采集失败、旧快照缺报价明细或库存未知都不会误判。
-              </span>
-            </div>
-            <button
-              type="button"
-              :class="{ active: followSellingOpportunityFilter === '可跟卖机会' }"
-              @click="followSellingOpportunityFilter = '可跟卖机会'"
-            >
-              <strong>{{ followSellingOpportunitySummary.total }}</strong>
-              <span>全部机会</span>
-            </button>
-            <button
-              type="button"
-              :class="{ active: followSellingOpportunityFilter === '全部报价售罄' }"
-              @click="followSellingOpportunityFilter = '全部报价售罄'"
-            >
-              <strong>{{ followSellingOpportunitySummary.soldOut }}</strong>
-              <span>全部报价售罄</span>
-            </button>
-            <button
-              type="button"
-              :class="{ active: followSellingOpportunityFilter === '暂无卖家报价' }"
-              @click="followSellingOpportunityFilter = '暂无卖家报价'"
-            >
-              <strong>{{ followSellingOpportunitySummary.noSeller }}</strong>
-              <span>暂无卖家报价</span>
-            </button>
+          <div v-if="!filteredCompetitors.length" class="empty-state competitor-filter-empty">
+            <strong>没有符合条件的竞品</strong>
+            <span>可以调整关键词、个人监控池、库存状态或经营信号。</span>
           </div>
-        <div v-if="!filteredCompetitors.length" class="empty-state competitor-filter-empty">
-          <strong>没有符合条件的竞品</strong>
-          <span>可以调整关键词、个人监控池、库存状态、可跟卖机会或经营信号。</span>
-        </div>
-        <div v-else class="competitor-status-list">
+          <div v-else class="competitor-status-list">
           <article
             v-for="item in pagedCompetitors"
             :key="item.plid"
@@ -5201,13 +5199,6 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
                       v-if="personalWatchlistPlids.has(item.plid)"
                       class="personal-watchlist-badge"
                     >我的监控池</strong>
-                    <strong
-                      v-if="item.跟卖机会类型"
-                      class="follow-opportunity-badge"
-                      :title="item.跟卖机会说明"
-                    >
-                      {{ item.跟卖机会类型 }}
-                    </strong>
                   </div>
                   <h3>{{ item.商品 }}</h3>
                   <p>{{ followerSellerCount(item) }} 个卖家 · {{ item.跟卖报价.length }} 个变体 / 报价 · 主卖家 {{ item.当前卖家 || "未知" }}</p>

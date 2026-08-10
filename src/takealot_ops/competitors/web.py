@@ -76,7 +76,12 @@ def create_app(project_root: Path | None = None) -> FastAPI:
         start_date: date | None = Query(default=None),
         end_date: date | None = Query(default=None),
     ) -> dict[str, list[dict[str, Any]]]:
-        dataset = _load_dataset(root, start_date=start_date, end_date=end_date)
+        dataset = _load_dataset(
+            root,
+            start_date=start_date,
+            end_date=end_date,
+            plids={plid},
+        )
         history = dataset.history
         reviews = dataset.reviews
         variants = dataset.variants
@@ -165,6 +170,7 @@ def _load_dataset(
     *,
     start_date: date | None = None,
     end_date: date | None = None,
+    plids: set[str] | None = None,
 ) -> CompetitorDataset:
     if start_date is not None and end_date is not None and start_date > end_date:
         raise HTTPException(status_code=422, detail="开始日期不能晚于结束日期")
@@ -186,6 +192,7 @@ def _load_dataset(
                 engine,
                 start_date=start_date,
                 end_date=end_date,
+                plids=plids,
             )
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc

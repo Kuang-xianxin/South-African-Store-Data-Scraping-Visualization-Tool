@@ -1581,63 +1581,6 @@ textarea.link-input-error-pulse {
   font-weight: 750;
 }
 
-
-.follow-opportunity-summary {
-  display: grid;
-  grid-template-columns: minmax(280px, 1fr) repeat(3, minmax(112px, 0.32fr));
-  gap: 10px;
-  margin: 14px 0;
-  padding: 12px;
-  border: 1px solid #d7e5dc;
-  border-radius: 14px;
-  background: #f5f9f5;
-}
-
-.follow-opportunity-copy {
-  display: grid;
-  align-content: center;
-  gap: 4px;
-  padding: 0 6px;
-}
-
-.follow-opportunity-copy strong {
-  color: var(--green);
-  font-size: 0.82rem;
-}
-
-.follow-opportunity-copy span {
-  color: var(--muted);
-  font-size: 0.64rem;
-  line-height: 1.45;
-}
-
-.follow-opportunity-summary button {
-  display: grid;
-  gap: 2px;
-  padding: 10px;
-  border: 1px solid #cfddd3;
-  border-radius: 11px;
-  color: var(--ink);
-  background: #fff;
-  cursor: pointer;
-}
-
-.follow-opportunity-summary button:hover,
-.follow-opportunity-summary button.active {
-  border-color: #78a68b;
-  color: var(--green);
-  background: #edf6ef;
-}
-
-.follow-opportunity-summary button strong {
-  font-size: 1rem;
-}
-
-.follow-opportunity-summary button span {
-  font-size: 0.62rem;
-  font-weight: 700;
-}
-
 .competitor-source-heading-actions {
   display: flex;
   align-items: center;
@@ -1906,15 +1849,6 @@ textarea.link-input-error-pulse {
   color: var(--muted);
   font-size: 0.64rem;
   font-weight: 800;
-}
-
-.follow-opportunity-badge {
-  padding: 2px 7px;
-  border: 1px solid #e5b861;
-  border-radius: 999px;
-  color: #8a5600;
-  background: #fff5d9;
-  font-size: 0.59rem;
 }
 
 .competitor-status-title h3 {
@@ -5442,14 +5376,6 @@ button {
     grid-column: 1 / -1;
   }
 
-  .follow-opportunity-summary {
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-  }
-
-  .follow-opportunity-copy {
-    grid-column: 1 / -1;
-  }
-
   .competitor-offer-row {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
@@ -5509,10 +5435,6 @@ button {
     padding: 8px;
   }
 
-  .follow-opportunity-summary {
-    grid-template-columns: 1fr;
-  }
-
   .personal-watchlist-summary-card {
     grid-template-columns: 1fr;
   }
@@ -5558,10 +5480,6 @@ button {
   .personal-watchlist-product-image {
     width: 74px;
     height: 74px;
-  }
-
-  .follow-opportunity-copy {
-    grid-column: auto;
   }
 
   .competitor-modal {

@@ -6,7 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, event
 from sqlalchemy.orm import Session
 
 from takealot_ops.competitors.domain import (
@@ -229,6 +229,105 @@ def test_competitor_observation_persists_snapshot_and_deduplicated_reviews(
     assert {variant["图片"] for variant in detail["variants"]} == {
         "https://example.invalid/laser-lipo-black.jpg"
     }
+
+
+def test_targeted_competitor_dataset_filters_detail_queries_by_plid(tmp_path: Path) -> None:
+    engine = create_engine(f"sqlite:///{(tmp_path / 'targeted-detail.db').as_posix()}")
+    create_schema(engine)
+    collected_at = datetime(2026, 8, 10, 8, tzinfo=UTC)
+
+    for index, plid in enumerate(("101163999", "99999999"), start=1):
+        variant = CompetitorVariant(
+            key="default",
+            label="默认款",
+            url=f"https://www.takealot.com/example/PLID{plid}",
+            title=f"Product {index}",
+            sku=f"SKU-{index}",
+            seller_id=f"seller-{index}",
+            seller_name=f"Seller {index}",
+            price=float(100 + index),
+            stock_status="In stock",
+            is_leadtime=False,
+            is_add_to_cart_available=True,
+        )
+        product = CompetitorProduct(
+            plid=plid,
+            url=variant.url,
+            title=variant.title,
+            image_url=None,
+            sku=variant.sku,
+            seller_id=variant.seller_id,
+            seller_name=variant.seller_name,
+            price=variant.price,
+            stock_status=variant.stock_status,
+            is_leadtime=False,
+            review_count=1,
+            rating=5.0,
+            offers=(),
+            variants=(variant,),
+        )
+        review = CompetitorReviewRecord(
+            review_id=f"review-{index}",
+            rating=5,
+            title="Good",
+            body="Works",
+            customer_name="Buyer",
+            review_date="2026-08-10",
+        )
+        stock = StockProbeResult(
+            quantity=index,
+            exact=True,
+            method="test",
+            note="test",
+        )
+        with Session(engine) as session, session.begin():
+            CompetitorRepository(session).save_observation(
+                product=product,
+                reviews=[review],
+                review_summary=summarize_reviews([review]),
+                stock=stock,
+                variant_stocks=[VariantStockObservation(variant=variant, stock=stock)],
+                lifetime_sales=estimate_lifetime_sales(product.review_count),
+                signal=analyze_sales_signal(
+                    None,
+                    current_stock_quantity=stock.quantity,
+                    current_stock_exact=True,
+                    current_review_count=product.review_count,
+                ),
+                collected_at=collected_at,
+            )
+
+    statements: list[str] = []
+
+    def capture_statement(
+        _connection,
+        _cursor,
+        statement: str,
+        _parameters,
+        _context,
+        _executemany,
+    ) -> None:
+        statements.append(statement.casefold())
+
+    event.listen(engine, "before_cursor_execute", capture_statement)
+    dataset = load_competitor_dataset(engine, plids={"101163999"})
+    event.remove(engine, "before_cursor_execute", capture_statement)
+    engine.dispose()
+
+    for frame in (dataset.current, dataset.history, dataset.reviews, dataset.variants):
+        assert set(frame["plid"].astype(str)) == {"101163999"}
+    for table in (
+        "competitor_snapshots",
+        "competitor_reviews",
+        "competitor_variant_snapshots",
+    ):
+        matching_queries = [
+            statement
+            for statement in statements
+            if f"from {table}" in statement and statement.lstrip().startswith("select")
+        ]
+        assert matching_queries
+        assert all(".plid in (" in statement for statement in matching_queries)
 
 
 def test_latest_snapshot_classifies_only_explicit_follow_selling_opportunities(

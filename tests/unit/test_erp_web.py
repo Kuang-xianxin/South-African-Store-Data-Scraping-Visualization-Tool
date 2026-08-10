@@ -7,6 +7,7 @@ from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
+import pandas as pd
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, select
@@ -75,6 +76,49 @@ def _create_operator(
         },
     )
     assert response.status_code == 200
+
+
+def test_competitor_detail_requests_only_the_selected_plid(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    calls: list[dict[str, object]] = []
+    database_path = tmp_path / "detail-route.db"
+    monkeypatch.setenv(
+        "TAKEALOT_DATABASE_URL",
+        f"sqlite:///{database_path.as_posix()}",
+    )
+
+    def load_detail_dataset(_root: Path, **kwargs):
+        calls.append(kwargs)
+        return SimpleNamespace(
+            history=pd.DataFrame(),
+            reviews=pd.DataFrame(),
+            variants=pd.DataFrame(),
+            store_current=pd.DataFrame(),
+            store_history=pd.DataFrame(),
+        )
+
+    monkeypatch.setattr(
+        "takealot_ops.erp.web._load_competitor_dataset",
+        load_detail_dataset,
+    )
+    app = create_app(tmp_path)
+
+    with TestClient(app, client=("127.0.0.1", 50000)) as client:
+        _bootstrap(client)
+        response = client.get("/api/competitors/101163999")
+
+    assert response.status_code == 200
+    assert response.json() == {"history": [], "reviews": [], "variants": []}
+    assert calls == [
+        {
+            "start_date": None,
+            "end_date": None,
+            "own_store_codes": {"current"},
+            "plids": {"101163999"},
+        }
+    ]
 
 
 def test_competitor_radar_returns_automatic_store_targets_and_separate_items(

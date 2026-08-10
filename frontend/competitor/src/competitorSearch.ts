@@ -28,8 +28,6 @@ export function matchesCompetitorSearch(
       item.库存上限,
       item.趋势判断,
       item.价格信号,
-      item.跟卖机会类型,
-      item.跟卖机会说明,
       ...(item.自有报价 ?? []).flatMap((offer) => [
         offer.offer_id,
         offer.店铺,

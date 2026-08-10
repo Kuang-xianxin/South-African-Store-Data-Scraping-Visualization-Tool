@@ -730,6 +730,7 @@ def load_competitor_dataset(
     start_date: date | None = None,
     end_date: date | None = None,
     own_store_codes: set[str] | None = None,
+    plids: set[str] | None = None,
 ) -> CompetitorDataset:
     """Load competitor views and recompute signals across the selected interval.
 
@@ -740,35 +741,62 @@ def load_competitor_dataset(
     """
     if start_date is not None and end_date is not None and start_date > end_date:
         raise ValueError("开始日期不能晚于结束日期")
+    normalized_plids = (
+        {str(plid).strip() for plid in plids if str(plid).strip()}
+        if plids is not None
+        else None
+    )
+    if normalized_plids is not None and not normalized_plids:
+        return CompetitorDataset(
+            current=pd.DataFrame(),
+            history=pd.DataFrame(),
+            reviews=pd.DataFrame(),
+            variants=pd.DataFrame(),
+            selected_start_date=start_date,
+            selected_end_date=end_date,
+        )
     try:
         with Session(engine) as session:
-            targets = list(
-                session.scalars(
-                    select(CompetitorTarget)
-                    .where(CompetitorTarget.active.is_(True))
-                    .order_by(CompetitorTarget.updated_at.desc())
-                )
+            target_statement = (
+                select(CompetitorTarget)
+                .where(CompetitorTarget.active.is_(True))
+                .order_by(CompetitorTarget.updated_at.desc())
             )
-            snapshots = list(
-                session.scalars(
-                    select(CompetitorSnapshot).order_by(CompetitorSnapshot.collected_at.desc())
-                )
+            snapshot_statement = select(CompetitorSnapshot).order_by(
+                CompetitorSnapshot.collected_at.desc()
             )
-            reviews = list(
-                session.scalars(
-                    select(CompetitorReview).order_by(CompetitorReview.review_date.desc())
-                )
+            review_statement = select(CompetitorReview).order_by(
+                CompetitorReview.review_date.desc()
             )
-            variants = list(
-                session.scalars(
-                    select(CompetitorVariantSnapshot).order_by(
-                        CompetitorVariantSnapshot.collected_at.desc(),
-                        CompetitorVariantSnapshot.id.asc(),
-                    )
-                )
+            variant_statement = select(CompetitorVariantSnapshot).order_by(
+                CompetitorVariantSnapshot.collected_at.desc(),
+                CompetitorVariantSnapshot.id.asc(),
             )
-            connected_store_offers = load_connected_store_offers(session)
-            store_baselines = load_connected_store_offer_points(session)
+            if normalized_plids is not None:
+                target_statement = target_statement.where(
+                    CompetitorTarget.plid.in_(normalized_plids)
+                )
+                snapshot_statement = snapshot_statement.where(
+                    CompetitorSnapshot.plid.in_(normalized_plids)
+                )
+                review_statement = review_statement.where(
+                    CompetitorReview.plid.in_(normalized_plids)
+                )
+                variant_statement = variant_statement.where(
+                    CompetitorVariantSnapshot.plid.in_(normalized_plids)
+                )
+            targets = list(session.scalars(target_statement))
+            snapshots = list(session.scalars(snapshot_statement))
+            reviews = list(session.scalars(review_statement))
+            variants = list(session.scalars(variant_statement))
+            connected_store_offers = load_connected_store_offers(
+                session,
+                plids=normalized_plids,
+            )
+            store_baselines = load_connected_store_offer_points(
+                session,
+                plids=normalized_plids,
+            )
     except SQLAlchemyError:
         return CompetitorDataset(
             current=pd.DataFrame(),
