@@ -796,6 +796,55 @@ def _aggregate_platform_inventory(
     return result
 
 
+def _aggregate_store_revenue_series(
+    store_series: Mapping[str, Sequence[Mapping[str, Any]]],
+    *,
+    limit: int = 30,
+) -> list[dict[str, Any]]:
+    """Combine store revenue by SAST metric date without filling missing stores."""
+    store_count = len(store_series)
+    values_by_store: dict[str, dict[str, float | None]] = {}
+    metric_dates: set[str] = set()
+    for store_code, series in store_series.items():
+        values: dict[str, float | None] = {}
+        for row in series:
+            metric_date = str(row.get("metric_date") or "").strip()
+            if not metric_date:
+                continue
+            raw_revenue = row.get("ordered_revenue")
+            try:
+                revenue = None if raw_revenue is None else float(raw_revenue)
+            except (TypeError, ValueError):
+                revenue = None
+            values[metric_date] = revenue
+            metric_dates.add(metric_date)
+        values_by_store[store_code] = values
+
+    selected_dates = sorted(metric_dates)[-limit:]
+    result: list[dict[str, Any]] = []
+    for metric_date in selected_dates:
+        revenues: list[float] = []
+        for values in values_by_store.values():
+            revenue = values.get(metric_date)
+            if revenue is not None:
+                revenues.append(revenue)
+        covered_store_count = len(revenues)
+        result.append(
+            {
+                "metric_date": metric_date,
+                "total_ordered_revenue": (
+                    round(sum(revenues), 2)
+                    if store_count > 0 and covered_store_count == store_count
+                    else None
+                ),
+                "covered_store_count": covered_store_count,
+                "store_count": store_count,
+                "missing_store_count": store_count - covered_store_count,
+            }
+        )
+    return result
+
+
 def _store_health(item: Mapping[str, Any]) -> dict[str, Any]:
     """Classify one store from explicit risk and completeness signals only."""
     business_reasons: list[str] = []
@@ -1291,6 +1340,7 @@ def create_app(project_root: Path | None = None) -> FastAPI:
             if store.active and store.data_connected
         )
         items: list[dict[str, Any]] = []
+        revenue_series_by_store: dict[str, Sequence[Mapping[str, Any]]] = {}
         engine = create_read_only_erp_engine(settings.database_url)
         try:
             try:
@@ -1314,6 +1364,7 @@ def create_app(project_root: Path | None = None) -> FastAPI:
                         inventory = _store_inventory_snapshot(engine)
                     except SQLAlchemyError:
                         inventory = _empty_store_inventory()
+                revenue_series_by_store[store.code] = payload.get("sales_series", [])
                 item = {
                     "store_code": store.code,
                     "store_name": store.display_name,
@@ -1344,6 +1395,9 @@ def create_app(project_root: Path | None = None) -> FastAPI:
             "as_of": as_of.isoformat(),
             "store_count": len(items),
             "health_summary": _health_rollup(items),
+            "sales_revenue_series": _aggregate_store_revenue_series(
+                revenue_series_by_store
+            ),
             "logistics": {
                 "overseas_warehouse": overseas_inventory,
                 "platform_warehouse": _aggregate_platform_inventory(items),

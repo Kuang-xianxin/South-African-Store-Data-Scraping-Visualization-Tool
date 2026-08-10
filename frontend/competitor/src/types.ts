@@ -397,6 +397,14 @@ export interface PlatformWarehouseSummary extends StoreInventorySummary {
   store_count_with_offers: number;
 }
 
+export interface MultiStoreRevenuePoint {
+  metric_date: string;
+  total_ordered_revenue: number | null;
+  covered_store_count: number;
+  store_count: number;
+  missing_store_count: number;
+}
+
 export interface StoreOverviewPayload {
   as_of: string;
   store_count: number;
@@ -409,6 +417,7 @@ export interface StoreOverviewPayload {
     overseas_warehouse: OverseasWarehouseSummary;
     platform_warehouse: PlatformWarehouseSummary;
   };
+  sales_revenue_series: MultiStoreRevenuePoint[];
   stores: StoreOverviewItem[];
 }
 

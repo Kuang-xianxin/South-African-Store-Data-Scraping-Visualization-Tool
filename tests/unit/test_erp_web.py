@@ -980,6 +980,26 @@ def test_store_summary_compares_only_accessible_connected_stores(
                     "selling_products": 3 * multiplier,
                     "stockout_products": multiplier,
                 },
+                "sales_series": [
+                    {
+                        "metric_date": "2026-08-05",
+                        "ordered_units": 5 * multiplier,
+                        "effective_units": 5 * multiplier,
+                        "ordered_revenue": 500 * multiplier,
+                    },
+                    *(
+                        [
+                            {
+                                "metric_date": "2026-08-06",
+                                "ordered_units": 10,
+                                "effective_units": 10,
+                                "ordered_revenue": 1000,
+                            }
+                        ]
+                        if store_code == "current"
+                        else []
+                    ),
+                ],
             }
 
         def fake_traffic_series(_engine, *, as_of):
@@ -1071,6 +1091,22 @@ def test_store_summary_compares_only_accessible_connected_stores(
             "data_gap": 0,
             "healthy": 0,
         }
+        assert payload["sales_revenue_series"] == [
+            {
+                "metric_date": "2026-08-05",
+                "total_ordered_revenue": 1500.0,
+                "covered_store_count": 2,
+                "store_count": 2,
+                "missing_store_count": 0,
+            },
+            {
+                "metric_date": "2026-08-06",
+                "total_ordered_revenue": None,
+                "covered_store_count": 1,
+                "store_count": 2,
+                "missing_store_count": 1,
+            },
+        ]
         assert payload["logistics"]["overseas_warehouse"]["stock_total"] == 100
         assert payload["logistics"]["platform_warehouse"] == {
             "captured_at": "2026-08-07T01:00:00",

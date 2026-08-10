@@ -4,6 +4,7 @@ import { computed, ref, watch } from "vue";
 import { fetchStoreOverview, fetchSummary } from "../api";
 import { formatChinaDateTime } from "../time";
 import type {
+  MultiStoreRevenuePoint,
   StoreOperator,
   StoreOverviewPayload,
   StoreTrafficPoint,
@@ -132,6 +133,56 @@ const storeTotals = computed(() => ({
   stockouts: aggregateKpi("stockout_products", true),
 }));
 
+const REVENUE_WIDTH = 760;
+const REVENUE_HEIGHT = 250;
+const REVENUE_LEFT = 76;
+const REVENUE_RIGHT = 18;
+const REVENUE_TOP = 20;
+const REVENUE_BOTTOM = 38;
+
+const revenueChart = computed(() => {
+  const source = storeData.value?.sales_revenue_series ?? [];
+  const values = source
+    .map((point) => point.total_ordered_revenue)
+    .filter((value): value is number => value !== null);
+  if (!source.length) {
+    return { dots: [], segments: [], ticks: [], labels: [] };
+  }
+  const maximum = Math.max(1, ...(values.map((value) => value * 1.08)));
+  const plotWidth = REVENUE_WIDTH - REVENUE_LEFT - REVENUE_RIGHT;
+  const plotHeight = REVENUE_HEIGHT - REVENUE_TOP - REVENUE_BOTTOM;
+  const x = (index: number) =>
+    REVENUE_LEFT
+    + (source.length === 1 ? plotWidth / 2 : (index / (source.length - 1)) * plotWidth);
+  const y = (value: number) => REVENUE_TOP + ((maximum - value) / maximum) * plotHeight;
+  const dots = source.map((point, index) => ({
+    point,
+    value: point.total_ordered_revenue,
+    x: x(index),
+    y: point.total_ordered_revenue === null
+      ? REVENUE_TOP + plotHeight
+      : y(point.total_ordered_revenue),
+  }));
+  const segments: string[] = [];
+  for (let index = 1; index < dots.length; index += 1) {
+    const previous = dots[index - 1];
+    const current = dots[index];
+    if (previous.value === null || current.value === null) continue;
+    segments.push(`${previous.x},${previous.y} ${current.x},${current.y}`);
+  }
+  const ticks = [maximum, maximum / 2, 0].map((value) => ({
+    value,
+    y: y(value),
+  }));
+  const labelEvery = Math.max(1, Math.ceil(source.length / 6));
+  const labels = dots.filter((_, index) =>
+    index === 0 || index === dots.length - 1 || index % labelEvery === 0,
+  );
+  return { dots, segments, ticks, labels };
+});
+
+const latestRevenuePoint = computed(() => storeData.value?.sales_revenue_series.at(-1) ?? null);
+
 const overallHealthText = computed(() => {
   const summary = storeData.value?.health_summary;
   if (!summary) return "正在核对健康信号";
@@ -244,6 +295,22 @@ function day(value: string) {
   return value.slice(5);
 }
 
+function compactCurrency(value: number) {
+  return new Intl.NumberFormat("en-ZA", {
+    style: "currency",
+    currency: "ZAR",
+    notation: "compact",
+    maximumFractionDigits: 1,
+  }).format(value);
+}
+
+function revenuePointTitle(point: MultiStoreRevenuePoint) {
+  if (point.total_ordered_revenue !== null) {
+    return `${point.metric_date}（南非业务日）：${point.store_count} 店下单金额合计 ${currency(point.total_ordered_revenue)}；店铺覆盖 ${point.covered_store_count}/${point.store_count}`;
+  }
+  return `${point.metric_date}（南非业务日）：仅返回 ${point.covered_store_count}/${point.store_count} 家店铺，缺失 ${point.missing_store_count} 家；未展示不完整合计`;
+}
+
 function trafficSlotLabel(slot: string) {
   return ({ morning: "早间采集", evening: "晚间采集", manual: "手动刷新" } as Record<string, string>)[slot]
     ?? slot;
@@ -347,6 +414,86 @@ function trafficPointTitle(point: StoreTrafficPoint) {
             <small>{{ coverageLabel(storeTotals.stockouts.coverage, storeTotals.stockouts.total) }}</small>
           </article>
         </div>
+
+        <section class="revenue-command" aria-labelledby="multi-store-revenue-title">
+          <div class="logistics-command-heading revenue-heading">
+            <div>
+              <p class="section-kicker">30 DAY REVENUE</p>
+              <h4 id="multi-store-revenue-title">{{ storeData.store_count }} 店总销售额趋势</h4>
+            </div>
+            <span>南非业务日 · Seller Sales 订单行金额</span>
+          </div>
+          <p class="revenue-definition">
+            每个点汇总当前账号可见且已接入店铺的 <code>ordered_revenue</code>。
+            只有全部店铺都返回该业务日金额时才绘制总额；缺失店铺不补 0，也不展示部分合计。
+          </p>
+          <div v-if="!storeData.sales_revenue_series.length" class="state-card slim">
+            暂无跨店销售额趋势数据。
+          </div>
+          <template v-else>
+            <div
+              class="revenue-latest"
+              :class="{ incomplete: latestRevenuePoint?.total_ordered_revenue === null }"
+            >
+              <strong>{{ currency(latestRevenuePoint?.total_ordered_revenue) }}</strong>
+              <span v-if="latestRevenuePoint?.total_ordered_revenue !== null">
+                {{ latestRevenuePoint?.metric_date }} · 店铺覆盖
+                {{ latestRevenuePoint?.covered_store_count }}/{{ latestRevenuePoint?.store_count }} 家
+              </span>
+              <span v-else>
+                {{ latestRevenuePoint?.metric_date }} · 仅返回
+                {{ latestRevenuePoint?.covered_store_count }}/{{ latestRevenuePoint?.store_count }} 家，
+                缺失 {{ latestRevenuePoint?.missing_store_count }} 家，折线保留断点
+              </span>
+            </div>
+            <div class="traffic-chart-scroll">
+              <svg
+                class="traffic-chart"
+                :viewBox="`0 0 ${REVENUE_WIDTH} ${REVENUE_HEIGHT}`"
+                role="img"
+                aria-labelledby="multi-store-revenue-svg-title multi-store-revenue-svg-description"
+              >
+                <title id="multi-store-revenue-svg-title">可见店铺每日总销售额折线图</title>
+                <desc id="multi-store-revenue-svg-description">绿色折线仅连接店铺覆盖完整的南非业务日；任一店铺缺失时保留断点。</desc>
+                <g class="traffic-grid">
+                  <template v-for="tick in revenueChart.ticks" :key="tick.y">
+                    <line :x1="REVENUE_LEFT" :x2="REVENUE_WIDTH - REVENUE_RIGHT" :y1="tick.y" :y2="tick.y" />
+                    <text :x="REVENUE_LEFT - 10" :y="tick.y + 4">{{ compactCurrency(tick.value) }}</text>
+                  </template>
+                </g>
+                <polyline
+                  v-for="(segment, index) in revenueChart.segments"
+                  :key="`revenue-${index}`"
+                  class="revenue-line"
+                  :points="segment"
+                />
+                <g v-for="dot in revenueChart.dots" :key="dot.point.metric_date">
+                  <circle
+                    :class="['revenue-dot', { missing: dot.value === null }]"
+                    :cx="dot.x"
+                    :cy="dot.y"
+                    :r="dot.value === null ? 5 : 4"
+                    tabindex="0"
+                  >
+                    <title>{{ revenuePointTitle(dot.point) }}</title>
+                  </circle>
+                </g>
+                <g class="traffic-axis-labels">
+                  <text
+                    v-for="label in revenueChart.labels"
+                    :key="label.point.metric_date"
+                    :x="label.x"
+                    :y="REVENUE_HEIGHT - 12"
+                  >{{ day(label.point.metric_date) }}</text>
+                </g>
+              </svg>
+            </div>
+            <div class="traffic-legend revenue-legend">
+              <span><i></i>全部可见店铺完整</span>
+              <span><i class="missing"></i>店铺缺失，未展示部分合计</span>
+            </div>
+          </template>
+        </section>
 
         <section class="logistics-command" aria-labelledby="logistics-command-title">
           <div class="logistics-command-heading">
@@ -915,6 +1062,78 @@ function trafficPointTitle(point: StoreTrafficPoint) {
 
 .multi-total-grid .multi-total-alert {
   border-top: 3px solid var(--erp-red);
+}
+
+.revenue-command {
+  margin-bottom: 14px;
+  padding: 16px;
+  border: 1px solid rgba(55, 93, 74, 0.18);
+  border-radius: 13px;
+  background: rgba(255, 255, 255, 0.78);
+}
+
+.revenue-heading {
+  margin-bottom: 8px;
+}
+
+.revenue-definition {
+  margin: 0 0 12px;
+  color: var(--muted);
+  font-size: 0.7rem;
+  line-height: 1.7;
+}
+
+.revenue-latest {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 8px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: rgba(238, 243, 238, 0.8);
+}
+
+.revenue-latest strong {
+  color: var(--green);
+  font-family: "Cascadia Mono", Consolas, monospace;
+  font-size: clamp(1.35rem, 3vw, 2rem);
+}
+
+.revenue-latest span {
+  color: var(--muted);
+  font-size: 0.68rem;
+  text-align: right;
+}
+
+.revenue-latest.incomplete strong,
+.revenue-latest.incomplete span {
+  color: #9a6420;
+}
+
+.revenue-line {
+  fill: none;
+  stroke: var(--green);
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 3;
+}
+
+.revenue-dot {
+  fill: var(--erp-accent);
+  stroke: var(--green);
+  stroke-width: 2;
+}
+
+.revenue-dot.missing {
+  fill: #fff3d8;
+  stroke: #c88224;
+}
+
+.revenue-dot:focus {
+  outline: none;
+  stroke: #162d24;
+  stroke-width: 4;
 }
 
 .logistics-command {
