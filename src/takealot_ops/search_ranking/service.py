@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 import re
+import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
@@ -41,13 +42,17 @@ from takealot_ops.storage.models import (
 )
 
 
-PROMPT_VERSION = "takealot-v4-image-narrow"
+PROMPT_VERSION = "takealot-v5-shopper-path"
 ORGANIC_PAGE_SIZE = 36
 DESKTOP_COLUMNS = 4
 TITLE_MAX_LENGTH = 160
 ORGANIC_RESULT_TYPE = "product_views"
 AUTOCOMPLETE_RESULT_LIMIT = 5
-AUTOCOMPLETE_SEED_LIMIT = 6
+AUTOCOMPLETE_SEED_LIMIT = 8
+AUTOCOMPLETE_CORE_STATE_LIMIT = 6
+AUTOCOMPLETE_OPPORTUNITY_STATE_LIMIT = 2
+SHOPPER_JOURNEY_CANDIDATE_POOL_LIMIT = 10
+RESULT_PAGE_LEARNING_MIN_MATCHES = 2
 CORE_MAJORITY_FLOOR = 0.51
 OPPORTUNITY_MAX_DIRECT_COMPETITORS = 2
 OPPORTUNITY_MAX_ORGANIC_RANK = 72
@@ -469,6 +474,94 @@ class VisionClient(Protocol):
     ) -> VisionCallResult: ...
 
 
+class SearchPublicClient(Protocol):
+    async def fetch_search_suggestions(self, keyword: str) -> list[str]: ...
+
+    async def fetch_search_first_page(
+        self,
+        keyword: str,
+    ) -> tuple[str, dict[str, Any]]: ...
+
+    async def fetch_search_next_page(
+        self,
+        request_url: str,
+        after: str,
+    ) -> dict[str, Any]: ...
+
+
+class _PublicRequestThrottle:
+    """Serialize public requests across concurrent manual analyses in this ERP."""
+
+    def __init__(
+        self,
+        *,
+        minimum_interval_seconds: float,
+        clock: Callable[[], float] = time.monotonic,
+        sleep: Callable[[float], Any] = asyncio.sleep,
+    ) -> None:
+        self._minimum_interval_seconds = max(0.0, minimum_interval_seconds)
+        self._clock = clock
+        self._sleep = sleep
+        self._last_request_started_at: float | None = None
+        self._lock = asyncio.Lock()
+
+    async def wait(self) -> None:
+        async with self._lock:
+            now = self._clock()
+            if self._last_request_started_at is not None:
+                remaining = self._minimum_interval_seconds - (
+                    now - self._last_request_started_at
+                )
+                if remaining > 0:
+                    await self._sleep(remaining)
+                    now = self._clock()
+            self._last_request_started_at = now
+
+
+class _PacedSearchClient:
+    """Route every public Takealot call through a shared minimum-interval gate."""
+
+    def __init__(
+        self,
+        client: SearchPublicClient,
+        *,
+        minimum_interval_seconds: float,
+        clock: Callable[[], float] = time.monotonic,
+        sleep: Callable[[float], Any] = asyncio.sleep,
+        throttle: _PublicRequestThrottle | None = None,
+    ) -> None:
+        self._client = client
+        self._throttle = throttle or _PublicRequestThrottle(
+            minimum_interval_seconds=minimum_interval_seconds,
+            clock=clock,
+            sleep=sleep,
+        )
+        self.request_count = 0
+
+    async def _pace(self) -> None:
+        await self._throttle.wait()
+        self.request_count += 1
+
+    async def fetch_search_suggestions(self, keyword: str) -> list[str]:
+        await self._pace()
+        return await self._client.fetch_search_suggestions(keyword)
+
+    async def fetch_search_first_page(
+        self,
+        keyword: str,
+    ) -> tuple[str, dict[str, Any]]:
+        await self._pace()
+        return await self._client.fetch_search_first_page(keyword)
+
+    async def fetch_search_next_page(
+        self,
+        request_url: str,
+        after: str,
+    ) -> dict[str, Any]:
+        await self._pace()
+        return await self._client.fetch_search_next_page(request_url, after)
+
+
 class OpenAICompatibleProductVisionClient:
     """Cross-vendor multimodal chat client with forced schema tools and fallback."""
 
@@ -754,6 +847,11 @@ class SearchKeywordCandidate:
     comparison_baseline_rank: int | None = None
     comparison_role: str | None = None
     comparison_strategy: str | None = None
+    journey_type: str | None = None
+    journey_root: str | None = None
+    journey_path: tuple[str, ...] = ()
+    journey_depth: int = 0
+    journey_parent_query: str | None = None
 
 
 class SearchRankingService:
@@ -776,6 +874,9 @@ class SearchRankingService:
         self._search_client_factory = search_client_factory or (
             lambda: CompetitorPublicClient(timeout_seconds=45.0)
         )
+        self._public_request_throttle = _PublicRequestThrottle(
+            minimum_interval_seconds=self.runtime.page_delay_seconds,
+        )
 
     def status_payload(self) -> dict[str, Any]:
         primary = self.runtime.primary_provider
@@ -792,6 +893,10 @@ class SearchRankingService:
             "pricing_snapshot_date": PRICING_SNAPSHOT_DATE,
             "max_pages": self.runtime.max_pages,
             "max_keywords": self.runtime.max_keywords,
+            "autocomplete_path_state_limit": AUTOCOMPLETE_SEED_LIMIT,
+            "search_query_attempt_limit": self.runtime.max_keywords,
+            "public_request_min_interval_seconds": self.runtime.page_delay_seconds,
+            "operation_scope": "manual_single_offer_one_click",
             "offer_max_age_hours": self.runtime.offer_max_age_hours,
             "image_max_dimension": self.runtime.image_max_dimension,
             "organic_page_size": ORGANIC_PAGE_SIZE,
@@ -1101,6 +1206,13 @@ class SearchRankingService:
                 vision_payload["provider_attempts"] = provider_attempts
             observations: list[KeywordObservation] = []
             autocomplete_checks: list[dict[str, Any]] = []
+            shopper_journey: dict[str, Any] = {
+                "mode": "manual_single_offer_one_click",
+                "autocomplete_state_limit": AUTOCOMPLETE_SEED_LIMIT,
+                "search_query_attempt_limit": self.runtime.max_keywords,
+                "public_request_min_interval_seconds": self.runtime.page_delay_seconds,
+                "steps": [],
+            }
             if profile.confidence < self.runtime.confidence_threshold:
                 candidates = _precise_candidates(
                     profile,
@@ -1123,8 +1235,13 @@ class SearchRankingService:
                     expected_image_url=image_url,
                 )
                 async with self._search_client_factory() as search_client:
-                    candidates, autocomplete_checks = await _discover_keyword_candidates(
+                    paced_search_client = _PacedSearchClient(
                         search_client,
+                        minimum_interval_seconds=self.runtime.page_delay_seconds,
+                        throttle=self._public_request_throttle,
+                    )
+                    candidates, autocomplete_checks = await _discover_keyword_candidates(
+                        paced_search_client,
                         profile=profile,
                         source_title=title,
                         title_reference_terms=recognition["title_reference_terms"],
@@ -1136,22 +1253,21 @@ class SearchRankingService:
                         current_title=title,
                         max_keywords=self.runtime.max_keywords,
                     )
-                    for order, candidate in enumerate(candidates, start=1):
-                        observations.append(
-                            await _collect_keyword_observation(
-                                search_client,
-                                candidate=candidate,
-                                candidate_order=order,
-                                target_plid=plid,
-                                profile=profile,
-                                max_pages=self.runtime.max_pages,
-                                relevance_threshold=self.runtime.relevance_threshold,
-                                page_delay_seconds=self.runtime.page_delay_seconds,
-                                source_title=title,
-                            )
-                        )
-                        if order < len(candidates) and self.runtime.page_delay_seconds:
-                            await asyncio.sleep(self.runtime.page_delay_seconds)
+                    observations, journey_steps = await _collect_shopper_journey(
+                        paced_search_client,
+                        candidates=candidates,
+                        autocomplete_checks=autocomplete_checks,
+                        target_plid=plid,
+                        profile=profile,
+                        max_pages=self.runtime.max_pages,
+                        max_keywords=self.runtime.max_keywords,
+                        relevance_threshold=self.runtime.relevance_threshold,
+                        source_title=title,
+                    )
+                    shopper_journey["steps"] = journey_steps
+                    shopper_journey["public_request_count"] = (
+                        paced_search_client.request_count
+                    )
 
             with Session(engine) as session, session.begin():
                 persisted_analysis = session.get(SearchRankingAnalysis, analysis_id)
@@ -1177,6 +1293,9 @@ class SearchRankingService:
                     accepted_keywords=accepted_title_keywords,
                     hot_term_keywords=hot_term_title_keywords,
                     opportunity_keywords=opportunity_title_keywords,
+                    keyword_journey_evidence=_title_keyword_journey_evidence(
+                        observations
+                    ),
                 )
                 opportunity_title_suggestion = title_strategies[2]["title"]
                 profile_payload = profile.model_dump(mode="json")
@@ -1195,6 +1314,7 @@ class SearchRankingService:
                 vision_payload["profile"] = profile_payload
                 vision_payload["recognition"] = recognition
                 vision_payload["autocomplete_checks"] = autocomplete_checks
+                vision_payload["shopper_journey"] = shopper_journey
                 persisted_analysis.vision_payload = vision_payload
                 persisted_analysis.title_suggestion = title_suggestion
                 persisted_analysis.title_reason = title_reason
@@ -1268,7 +1388,7 @@ class SearchRankingService:
 
 
 async def _collect_keyword_observation(
-    client: CompetitorPublicClient,
+    client: SearchPublicClient,
     *,
     candidate: SearchKeywordCandidate,
     candidate_order: int,
@@ -1290,6 +1410,11 @@ async def _collect_keyword_observation(
     ]
     score = sum(relevant_flags) / len(relevant_flags) if relevant_flags else 0.0
     matched_count = sum(relevant_flags)
+    matched_result_titles = [
+        title
+        for title, relevant in zip(first_page_titles, relevant_flags, strict=True)
+        if relevant
+    ]
     evaluated_count = len(relevant_flags)
     core_threshold = max(relevance_threshold, CORE_MAJORITY_FLOOR)
     provenance = _candidate_provenance(candidate)
@@ -1366,6 +1491,31 @@ async def _collect_keyword_observation(
         "candidate_rationale": candidate.rationale,
         "candidate_source": candidate.candidate_source,
         "intended_strategy": candidate.intended_strategy,
+        "journey_type": candidate.journey_type,
+        "journey_root": candidate.journey_root,
+        "journey_path": list(candidate.journey_path),
+        "journey_depth": candidate.journey_depth,
+        "journey_parent_query": candidate.journey_parent_query,
+        "journey_types": list(
+            dict.fromkeys(
+                str(item.get("journey_type") or "")
+                for item in provenance
+                if str(item.get("journey_type") or "")
+            )
+        ),
+        "journey_roots": list(
+            dict.fromkeys(
+                str(item.get("journey_root") or "")
+                for item in provenance
+                if str(item.get("journey_root") or "")
+            )
+        ),
+        "journey_paths": [
+            list(raw_path)
+            for item in provenance
+            if isinstance((raw_path := item.get("journey_path")), list)
+            and raw_path
+        ],
         "candidate_provenance": [dict(item) for item in provenance],
         "intended_strategies": list(
             dict.fromkeys(
@@ -1403,6 +1553,7 @@ async def _collect_keyword_observation(
         "validation_terms": validation_terms,
         "profile_distinctive_terms": list(profile.distinctive_terms),
         "top_result_titles": first_page_titles[:5],
+        "matched_result_titles": matched_result_titles[:8],
         "matched_top_results": matched_count,
         "evaluated_top_results": evaluated_count,
         "matched_first_page_results": matched_count,
@@ -1575,6 +1726,304 @@ async def _collect_keyword_observation(
         target_url=found_target_url,
         observed_at=observed_at,
     )
+
+
+async def _collect_shopper_journey(
+    client: SearchPublicClient,
+    *,
+    candidates: list[SearchKeywordCandidate],
+    autocomplete_checks: list[dict[str, Any]],
+    target_plid: str,
+    profile: VisionProfile,
+    max_pages: int,
+    max_keywords: int,
+    relevance_threshold: float,
+    source_title: str,
+) -> tuple[list[KeywordObservation], list[dict[str, Any]]]:
+    """Validate a bounded shopper path while preserving one-click operator UX."""
+
+    queue = list(candidates)
+    observations: list[KeywordObservation] = []
+    journey_steps: list[dict[str, Any]] = []
+    attempted_queries: set[str] = set()
+    learned_from_result_page = False
+    comparison_mode = any(
+        candidate.comparison_role in {"primary", "secondary"}
+        or candidate.candidate_source == "comparison_resample"
+        for candidate in queue
+    )
+    while queue and len(observations) < max_keywords:
+        candidate = queue.pop(0)
+        normalized = " ".join(candidate.phrase.split()).casefold()
+        if not normalized or normalized in attempted_queries:
+            continue
+        attempted_queries.add(normalized)
+        observation = await _collect_keyword_observation(
+            client,
+            candidate=candidate,
+            candidate_order=len(observations) + 1,
+            target_plid=target_plid,
+            profile=profile,
+            max_pages=max_pages,
+            relevance_threshold=relevance_threshold,
+            # The shared wrapper already spaces autocomplete, first-page, and
+            # cursor requests. Do not add a second delay between cursor pages.
+            page_delay_seconds=0,
+            source_title=source_title,
+        )
+        observations.append(observation)
+        journey_steps.append(
+            {
+                "query": observation.keyword,
+                "journey_type": candidate.journey_type,
+                "shopper_root": candidate.journey_root,
+                "path": list(candidate.journey_path),
+                "parent_query": candidate.journey_parent_query,
+                "result": observation.relevance_status,
+                "first_page_same_type_ratio": observation.relevance_score,
+                "target_found": observation.found,
+                "pages_scanned": observation.pages_scanned,
+            }
+        )
+        if (
+            comparison_mode
+            or learned_from_result_page
+            or observation.relevance_status != "rejected_irrelevant"
+            or candidate.intended_strategy != "core"
+        ):
+            continue
+        remaining_slots = max_keywords - len(observations)
+        pending_opportunity = any(
+            _candidate_has_intended_strategy(item, "opportunity")
+            and " ".join(item.phrase.split()).casefold() not in attempted_queries
+            for item in queue
+        )
+        if remaining_slots <= int(pending_opportunity):
+            continue
+        learned_seed = _result_page_learning_seed(
+            observation,
+            profile=profile,
+            source_title=source_title,
+        )
+        if not learned_seed:
+            continue
+        learned_seed_already_checked = any(
+            " ".join(str(item.get("seed") or "").split()).casefold()
+            == " ".join(learned_seed.split()).casefold()
+            for item in autocomplete_checks
+        )
+        if (
+            len(autocomplete_checks) >= AUTOCOMPLETE_SEED_LIMIT
+            and not learned_seed_already_checked
+        ):
+            continue
+        learned_candidates = await _result_page_learning_candidates(
+            client,
+            seed=learned_seed,
+            parent_candidate=candidate,
+            profile=profile,
+            source_title=source_title,
+            autocomplete_checks=autocomplete_checks,
+        )
+        learned_candidates = [
+            item
+            for item in learned_candidates
+            if " ".join(item.phrase.split()).casefold() not in attempted_queries
+        ]
+        if not learned_candidates:
+            continue
+        learned_from_result_page = True
+        queue[0:0] = learned_candidates
+    return observations, journey_steps
+
+
+def _candidate_has_intended_strategy(
+    candidate: SearchKeywordCandidate,
+    intended_strategy: str,
+) -> bool:
+    return any(
+        str(item.get("intended_strategy") or "") == intended_strategy
+        for item in _candidate_provenance(candidate)
+    )
+
+
+def _result_page_learning_seed(
+    observation: KeywordObservation,
+    *,
+    profile: VisionProfile,
+    source_title: str,
+) -> str | None:
+    evidence = observation.validation_evidence
+    raw_titles = evidence.get("matched_result_titles")
+    if not isinstance(raw_titles, list) or len(raw_titles) < RESULT_PAGE_LEARNING_MIN_MATCHES:
+        return None
+    primary_tokens = [
+        _canonical_token(token)
+        for token in TOKEN_PATTERN.findall(profile.product_type_terms[0].casefold())
+    ]
+    if not primary_tokens:
+        return None
+    counts: dict[str, int] = {}
+    display: dict[str, str] = {}
+    for raw_title in raw_titles:
+        title_tokens = TOKEN_PATTERN.findall(str(raw_title).casefold())
+        canonical_title_tokens = [_canonical_token(token) for token in title_tokens]
+        for start in range(len(title_tokens) - len(primary_tokens) + 1):
+            if canonical_title_tokens[start : start + len(primary_tokens)] != primary_tokens:
+                continue
+            phrase_tokens = title_tokens[start : start + len(primary_tokens)]
+            if len(primary_tokens) == 1:
+                if start == 0:
+                    continue
+                prefix = canonical_title_tokens[start - 1]
+                if (
+                    not prefix
+                    or prefix in TITLE_CONNECTOR_TOKENS
+                    or prefix.isdigit()
+                ):
+                    continue
+                phrase_tokens = title_tokens[start - 1 : start + 1]
+            phrase = " ".join(phrase_tokens)
+            normalized = " ".join(phrase.casefold().split())
+            meaningful_phrase_tokens = (
+                _canonical_tokens(phrase) - TITLE_CONNECTOR_TOKENS
+            )
+            if (
+                not meaningful_phrase_tokens
+                or not meaningful_phrase_tokens.issubset(
+                    _canonical_tokens(source_title)
+                )
+                or not _keyword_claims_supported(phrase, source_title)
+            ):
+                continue
+            phrase_canonical_tokens = _canonical_tokens(phrase)
+            if any(
+                (excluded := _canonical_tokens(exclusion))
+                and excluded.issubset(phrase_canonical_tokens)
+                for exclusion in profile.exclusions
+            ):
+                continue
+            counts[normalized] = counts.get(normalized, 0) + 1
+            display.setdefault(normalized, phrase)
+            break
+    qualified = [
+        (count, len(TOKEN_PATTERN.findall(key)), key)
+        for key, count in counts.items()
+        if count >= RESULT_PAGE_LEARNING_MIN_MATCHES
+        and key != observation.keyword.casefold()
+    ]
+    if not qualified:
+        return None
+    _, _, selected = max(qualified, key=lambda item: (item[0], item[1], item[2]))
+    return display[selected]
+
+
+async def _result_page_learning_candidates(
+    client: SearchPublicClient,
+    *,
+    seed: str,
+    parent_candidate: SearchKeywordCandidate,
+    profile: VisionProfile,
+    source_title: str,
+    autocomplete_checks: list[dict[str, Any]],
+) -> list[SearchKeywordCandidate]:
+    normalized_seed = " ".join(seed.split())
+    existing_check = next(
+        (
+            item
+            for item in autocomplete_checks
+            if " ".join(str(item.get("seed") or "").split()).casefold()
+            == normalized_seed.casefold()
+            and item.get("status") == "observed"
+        ),
+        None,
+    )
+    try:
+        suggestions = (
+            [str(item) for item in existing_check.get("suggestions", [])]
+            if isinstance(existing_check, Mapping)
+            else (
+                await client.fetch_search_suggestions(normalized_seed)
+            )[:AUTOCOMPLETE_RESULT_LIMIT]
+        )
+    except Exception as exc:
+        autocomplete_checks.append(
+            {
+                "seed": normalized_seed,
+                "seed_source": "result_page_learning",
+                "shopper_root": normalized_seed,
+                "input_state": normalized_seed,
+                "journey_path": [*parent_candidate.journey_path, normalized_seed],
+                "journey_type": "result_page_learning",
+                "status": "unavailable",
+                "error_type": type(exc).__name__,
+            }
+        )
+        return []
+    if existing_check is None:
+        autocomplete_checks.append(
+            {
+                "seed": normalized_seed,
+                "seed_source": "result_page_learning",
+                "seed_sources": ["result_page_learning"],
+                "intended_strategies": ["core"],
+                "shopper_root": normalized_seed,
+                "input_state": normalized_seed,
+                "journey_path": [*parent_candidate.journey_path, normalized_seed],
+                "journey_type": "result_page_learning",
+                "journey_depth": parent_candidate.journey_depth + 1,
+                "status": "observed",
+                "suggestions": suggestions,
+                "parent_query": parent_candidate.phrase,
+            }
+        )
+    ranked: list[tuple[float, int, str]] = []
+    for rank, phrase in enumerate(suggestions, start=1):
+        fit = _autocomplete_fit_score(phrase, profile, source_title=source_title)
+        if fit <= 0 or not _candidate_has_primary_shape(phrase, profile):
+            continue
+        ranked.append((fit, rank, " ".join(phrase.split())))
+    output: list[SearchKeywordCandidate] = []
+    for _, rank, phrase in sorted(ranked, key=lambda item: (-item[0], item[1]))[:2]:
+        path = tuple(
+            dict.fromkeys(
+                (*parent_candidate.journey_path, normalized_seed, phrase)
+            )
+        )
+        output.append(
+            SearchKeywordCandidate(
+                phrase=phrase,
+                rationale=(
+                    "上一条搜索页出现少量同形态商品，系统从这些结果标题提炼词根，"
+                    "再使用 Takealot 当时的真实补全验证"
+                ),
+                candidate_source="takealot_autocomplete",
+                intended_strategy="core",
+                seed=normalized_seed,
+                seed_source="result_page_learning",
+                autocomplete_rank=rank,
+                journey_type="result_page_learning",
+                journey_root=normalized_seed,
+                journey_path=path,
+                journey_depth=parent_candidate.journey_depth + 1,
+                journey_parent_query=parent_candidate.phrase,
+                candidate_provenance=(
+                    {
+                        "candidate_source": "takealot_autocomplete",
+                        "intended_strategy": "core",
+                        "seed": normalized_seed,
+                        "seed_source": "result_page_learning",
+                        "autocomplete_rank": rank,
+                        "journey_type": "result_page_learning",
+                        "journey_root": normalized_seed,
+                        "journey_path": list(path),
+                        "journey_depth": parent_candidate.journey_depth + 1,
+                        "journey_parent_query": parent_candidate.phrase,
+                    },
+                ),
+            )
+        )
+    return output
 
 
 def _search_products(payload: Mapping[str, Any]) -> tuple[list[dict[str, str]], Mapping[str, Any]]:
@@ -1943,12 +2392,20 @@ def _title_strategy_keywords(
     *,
     profile_distinctive_terms: list[str] | None = None,
 ) -> tuple[list[str], list[str], list[str]]:
+    accepted_rows = [item for item in results if item.relevance_status == "accepted"]
+    accepted_rows.sort(
+        key=lambda item: (
+            _title_journey_priority(item.validation_evidence),
+            item.candidate_order,
+            item.keyword.casefold(),
+        )
+    )
     accepted_title_keywords = _title_supported_keywords(
-        [item.keyword for item in results if item.relevance_status == "accepted"],
+        [item.keyword for item in accepted_rows],
         source_title,
     )
     accepted_keys = {keyword.casefold() for keyword in accepted_title_keywords}
-    autocomplete_rows: list[tuple[int, int, str]] = []
+    autocomplete_rows: list[tuple[int, int, str, tuple[str, ...]]] = []
     opportunity_title_keywords: list[str] = []
     for item in results:
         evidence = (
@@ -1979,7 +2436,12 @@ def _title_strategy_keywords(
             and autocomplete_rank is not None
         ):
             autocomplete_rows.append(
-                (autocomplete_rank, item.candidate_order, item.keyword)
+                (
+                    autocomplete_rank,
+                    item.candidate_order,
+                    item.keyword,
+                    _journey_roots_from_evidence(evidence),
+                )
             )
         if item.relevance_status != "opportunity":
             continue
@@ -2001,18 +2463,96 @@ def _title_strategy_keywords(
         )
         if gate["opportunity_qualified"]:
             opportunity_title_keywords.append(item.keyword)
-    hot_term_keywords = [
-        keyword
-        for _, _, keyword in sorted(
-            autocomplete_rows,
-            key=lambda item: (item[0], item[1], item[2].casefold()),
-        )
-    ]
+    ranked_autocomplete_rows = sorted(
+        autocomplete_rows,
+        key=lambda item: (item[0], item[1], item[2].casefold()),
+    )
+    hot_term_keywords: list[str] = []
+    used_roots: set[str] = set()
+    deferred_rows: list[tuple[int, int, str, tuple[str, ...]]] = []
+    for row in ranked_autocomplete_rows:
+        roots = set(row[3])
+        if roots and not roots.issubset(used_roots):
+            hot_term_keywords.append(row[2])
+            used_roots.update(roots)
+        else:
+            deferred_rows.append(row)
+    hot_term_keywords.extend(row[2] for row in deferred_rows)
     return (
         accepted_title_keywords,
         hot_term_keywords,
         opportunity_title_keywords,
     )
+
+
+def _title_journey_priority(evidence: Mapping[str, Any] | Any) -> int:
+    if not isinstance(evidence, Mapping):
+        return 4
+    journey_types = set(_journey_types_from_evidence(evidence))
+    if "known_long_tail" in journey_types:
+        return 0
+    if journey_types & {
+        "first_instinct_autocomplete",
+        "switched_instinct_root",
+        "autocomplete_backtrack",
+    }:
+        return 1
+    if "result_page_learning" in journey_types:
+        return 2
+    return 3
+
+
+def _journey_types_from_evidence(evidence: Mapping[str, Any]) -> tuple[str, ...]:
+    output: list[str] = []
+    top_level = str(evidence.get("journey_type") or "")
+    if top_level:
+        output.append(top_level)
+    for source in _evidence_candidate_provenance(evidence):
+        journey_type = str(source.get("journey_type") or "")
+        if journey_type and journey_type not in output:
+            output.append(journey_type)
+    return tuple(output)
+
+
+def _journey_roots_from_evidence(evidence: Mapping[str, Any]) -> tuple[str, ...]:
+    output: list[str] = []
+    top_level = " ".join(str(evidence.get("journey_root") or "").split())
+    if top_level:
+        output.append(top_level)
+    for source in _evidence_candidate_provenance(evidence):
+        root = " ".join(str(source.get("journey_root") or "").split())
+        if root and root not in output:
+            output.append(root)
+    return tuple(output)
+
+
+def _title_keyword_journey_evidence(
+    results: list[KeywordObservation] | list[SearchRankingKeywordResult],
+) -> dict[str, dict[str, Any]]:
+    output: dict[str, dict[str, Any]] = {}
+    for item in results:
+        evidence = (
+            item.validation_evidence
+            if isinstance(item.validation_evidence, Mapping)
+            else {}
+        )
+        paths: list[list[str]] = []
+        raw_path = evidence.get("journey_path")
+        if isinstance(raw_path, list) and raw_path:
+            paths.append([str(value) for value in raw_path if str(value).strip()])
+        for source in _evidence_candidate_provenance(evidence):
+            raw_source_path = source.get("journey_path")
+            if not isinstance(raw_source_path, list):
+                continue
+            path = [str(value) for value in raw_source_path if str(value).strip()]
+            if path and path not in paths:
+                paths.append(path)
+        output[item.keyword.casefold()] = {
+            "journey_types": list(_journey_types_from_evidence(evidence)),
+            "shopper_roots": list(_journey_roots_from_evidence(evidence)),
+            "paths": paths,
+        }
+    return output
 
 
 def _cross_check_image_profile(
@@ -2130,11 +2670,19 @@ def _precise_candidates(
                 candidate_source="image_precise",
                 intended_strategy="core",
                 seed_source="image_only_model",
+                journey_type="known_long_tail",
+                journey_root=phrase,
+                journey_path=(phrase,),
+                journey_depth=0,
                 candidate_provenance=(
                     {
                         "candidate_source": "image_precise",
                         "intended_strategy": "core",
                         "seed_source": "image_only_model",
+                        "journey_type": "known_long_tail",
+                        "journey_root": phrase,
+                        "journey_path": [phrase],
+                        "journey_depth": 0,
                     },
                 ),
             )
@@ -2143,7 +2691,7 @@ def _precise_candidates(
 
 
 async def _discover_keyword_candidates(
-    client: CompetitorPublicClient,
+    client: SearchPublicClient,
     *,
     profile: VisionProfile,
     source_title: str,
@@ -2172,18 +2720,98 @@ async def _discover_keyword_candidates(
         (candidate, "image_need_state", "opportunity")
         for candidate in profile.opportunity_seeds
     ]
-    seed_specs = _group_seed_specs(
+    root_specs = _group_seed_specs(
         [
             *_unique_seed_specs(core_seeds)[:4],
             *_unique_seed_specs(opportunity_seeds)[:2],
+        ]
+    )
+    core_state_specs: list[
+        tuple[
+            KeywordCandidate,
+            tuple[tuple[str, str], ...],
+            str,
+            tuple[str, ...],
+            int,
+            int,
+        ]
+    ] = []
+    opportunity_state_specs: list[
+        tuple[
+            KeywordCandidate,
+            tuple[tuple[str, str], ...],
+            str,
+            tuple[str, ...],
+            int,
+            int,
+        ]
+    ] = []
+    core_root_order = 0
+    opportunity_root_order = 0
+    for seed, seed_intents in root_specs:
+        core_intents = tuple(item for item in seed_intents if item[1] == "core")
+        opportunity_intents = tuple(
+            item for item in seed_intents if item[1] == "opportunity"
+        )
+        if core_intents and core_root_order < 4:
+            image_led = any(item[0] == "image_shopper_root" for item in core_intents)
+            path_states = _autocomplete_path_states(
+                seed.phrase,
+                include_typing_milestones=image_led,
+            )
+            for state_order, input_state in enumerate(path_states):
+                core_state_specs.append(
+                    (
+                        seed,
+                        core_intents,
+                        input_state,
+                        path_states[: state_order + 1],
+                        core_root_order,
+                        state_order,
+                    )
+                )
+            core_root_order += 1
+        if (
+            opportunity_intents
+            and opportunity_root_order < AUTOCOMPLETE_OPPORTUNITY_STATE_LIMIT
+        ):
+            normalized_seed = " ".join(seed.phrase.split())
+            opportunity_state_specs.append(
+                (
+                    seed,
+                    opportunity_intents,
+                    normalized_seed,
+                    (normalized_seed,),
+                    opportunity_root_order,
+                    0,
+                )
+            )
+            opportunity_root_order += 1
+    seed_specs = _group_autocomplete_state_specs(
+        [
+            *core_state_specs[:AUTOCOMPLETE_CORE_STATE_LIMIT],
+            *opportunity_state_specs[:AUTOCOMPLETE_OPPORTUNITY_STATE_LIMIT],
         ]
     )[:AUTOCOMPLETE_SEED_LIMIT]
 
     autocomplete: list[tuple[float, SearchKeywordCandidate]] = []
     checks: list[dict[str, Any]] = []
-    for seed_order, (seed, seed_intents) in enumerate(seed_specs):
-        normalized_seed = " ".join(seed.phrase.split())
+    for seed_order, (
+        seed,
+        seed_intents,
+        input_state,
+        journey_path,
+        root_order,
+        state_order,
+    ) in enumerate(seed_specs):
+        normalized_seed = " ".join(input_state.split())
         primary_seed_source, primary_strategy = seed_intents[0]
+        primary_journey_type = _autocomplete_journey_type(
+            seed_source=primary_seed_source,
+            intended_strategy=primary_strategy,
+            root_order=root_order,
+            autocomplete_rank=1,
+        )
         try:
             suggestions = (
                 await client.fetch_search_suggestions(normalized_seed)
@@ -2193,6 +2821,11 @@ async def _discover_keyword_candidates(
                 {
                     "seed": normalized_seed,
                     "seed_source": primary_seed_source,
+                    "shopper_root": " ".join(seed.phrase.split()),
+                    "input_state": normalized_seed,
+                    "journey_path": list(journey_path),
+                    "journey_type": primary_journey_type,
+                    "journey_depth": state_order,
                     "seed_sources": list(
                         dict.fromkeys(item[0] for item in seed_intents)
                     ),
@@ -2208,6 +2841,11 @@ async def _discover_keyword_candidates(
             {
                 "seed": normalized_seed,
                 "seed_source": primary_seed_source,
+                "shopper_root": " ".join(seed.phrase.split()),
+                "input_state": normalized_seed,
+                "journey_path": list(journey_path),
+                "journey_type": primary_journey_type,
+                "journey_depth": state_order,
                 "seed_sources": list(
                     dict.fromkeys(item[0] for item in seed_intents)
                 ),
@@ -2222,9 +2860,21 @@ async def _discover_keyword_candidates(
             fit = _autocomplete_fit_score(phrase, profile, source_title=source_title)
             if fit <= 0:
                 continue
+            candidate_journey_type = _autocomplete_journey_type(
+                seed_source=primary_seed_source,
+                intended_strategy=primary_strategy,
+                root_order=root_order,
+                autocomplete_rank=rank,
+            )
+            candidate_journey_path = tuple(
+                dict.fromkeys((*journey_path, " ".join(phrase.split())))
+            )
             autocomplete.append(
                 (
-                    fit - (rank * 0.01) - (seed_order * 0.001),
+                    fit
+                    - (rank * 0.01)
+                    - (seed_order * 0.001)
+                    - (state_order * 0.0001),
                     SearchKeywordCandidate(
                         phrase=phrase,
                         rationale=seed.rationale.strip(),
@@ -2233,6 +2883,10 @@ async def _discover_keyword_candidates(
                         seed=normalized_seed,
                         seed_source=primary_seed_source,
                         autocomplete_rank=rank,
+                        journey_type=candidate_journey_type,
+                        journey_root=" ".join(seed.phrase.split()),
+                        journey_path=candidate_journey_path,
+                        journey_depth=state_order,
                         candidate_provenance=tuple(
                             {
                                 "candidate_source": "takealot_autocomplete",
@@ -2240,6 +2894,15 @@ async def _discover_keyword_candidates(
                                 "seed": normalized_seed,
                                 "seed_source": seed_source,
                                 "autocomplete_rank": rank,
+                                "journey_type": _autocomplete_journey_type(
+                                    seed_source=seed_source,
+                                    intended_strategy=intended_strategy,
+                                    root_order=root_order,
+                                    autocomplete_rank=rank,
+                                ),
+                                "journey_root": " ".join(seed.phrase.split()),
+                                "journey_path": list(candidate_journey_path),
+                                "journey_depth": state_order,
                             }
                             for seed_source, intended_strategy in seed_intents
                         ),
@@ -2277,17 +2940,21 @@ async def _discover_keyword_candidates(
         )
     ]
     selected: list[SearchKeywordCandidate] = []
+    pool_limit = min(
+        SHOPPER_JOURNEY_CANDIDATE_POOL_LIMIT,
+        max(max_keywords + 4, max_keywords),
+    )
     primary_core_pool = narrow_core_autocomplete or core_autocomplete
     if primary_core_pool:
-        _append_unique_candidate(selected, primary_core_pool[0], max_keywords)
+        _append_unique_candidate(selected, primary_core_pool[0], pool_limit)
     if precise:
-        _append_unique_candidate(selected, precise[0], max_keywords)
+        _append_unique_candidate(selected, precise[0], pool_limit)
     if opportunity_autocomplete and max_keywords >= 3:
         # Reserve one measured adjacent-demand query so the third strategy can be
         # evaluated instead of letting similar core variants consume every slot.
-        _append_unique_candidate(selected, opportunity_autocomplete[0], max_keywords)
+        _append_unique_candidate(selected, opportunity_autocomplete[0], pool_limit)
     if len(primary_core_pool) > 1 and max_keywords >= 3:
-        _append_unique_candidate(selected, primary_core_pool[1], max_keywords)
+        _append_unique_candidate(selected, primary_core_pool[1], pool_limit)
     if max_keywords >= 4:
         used_seeds = {item.seed.casefold() for item in selected if item.seed}
         diverse_broad = next(
@@ -2299,17 +2966,109 @@ async def _discover_keyword_candidates(
             None,
         )
         if diverse_broad is not None:
-            _append_unique_candidate(selected, diverse_broad, max_keywords)
+            _append_unique_candidate(selected, diverse_broad, pool_limit)
         elif opportunity_autocomplete:
-            _append_unique_candidate(selected, opportunity_autocomplete[0], max_keywords)
+            _append_unique_candidate(selected, opportunity_autocomplete[0], pool_limit)
     for candidate in (
         *narrow_core_autocomplete,
         *broad_core_autocomplete,
         *precise,
         *opportunity_autocomplete,
     ):
-        _append_unique_candidate(selected, candidate, max_keywords)
+        _append_unique_candidate(selected, candidate, pool_limit)
     return selected, checks
+
+
+def _autocomplete_path_states(
+    phrase: str,
+    *,
+    include_typing_milestones: bool,
+) -> tuple[str, ...]:
+    normalized = " ".join(phrase.split())
+    tokens = normalized.split()
+    if not normalized or not include_typing_milestones or len(tokens) == 1:
+        return (normalized,) if normalized else ()
+    output: list[str] = []
+    if len(tokens[0]) >= 3:
+        output.append(tokens[0])
+    for index in range(1, len(tokens)):
+        milestone = " ".join([*tokens[:index], tokens[index][0]])
+        if milestone not in output:
+            output.append(milestone)
+    if normalized not in output:
+        output.append(normalized)
+    return tuple(output)
+
+
+def _autocomplete_journey_type(
+    *,
+    seed_source: str,
+    intended_strategy: str,
+    root_order: int,
+    autocomplete_rank: int,
+) -> str:
+    if intended_strategy == "opportunity":
+        return "adjacent_opportunity"
+    if seed_source == "title_cross_check":
+        return "title_cross_check"
+    if autocomplete_rank > 1:
+        return "autocomplete_backtrack"
+    if root_order > 0:
+        return "switched_instinct_root"
+    return "first_instinct_autocomplete"
+
+
+def _group_autocomplete_state_specs(
+    specs: list[
+        tuple[
+            KeywordCandidate,
+            tuple[tuple[str, str], ...],
+            str,
+            tuple[str, ...],
+            int,
+            int,
+        ]
+    ],
+) -> list[
+    tuple[
+        KeywordCandidate,
+        tuple[tuple[str, str], ...],
+        str,
+        tuple[str, ...],
+        int,
+        int,
+    ]
+]:
+    output: list[
+        tuple[
+            KeywordCandidate,
+            list[tuple[str, str]],
+            str,
+            tuple[str, ...],
+            int,
+            int,
+        ]
+    ] = []
+    indexes: dict[str, int] = {}
+    for seed, intents, input_state, path, root_order, state_order in specs:
+        normalized = " ".join(input_state.split()).casefold()
+        if not normalized:
+            continue
+        index = indexes.get(normalized)
+        if index is None:
+            indexes[normalized] = len(output)
+            output.append(
+                (seed, list(intents), input_state, path, root_order, state_order)
+            )
+            continue
+        existing = output[index]
+        for intent in intents:
+            if intent not in existing[1]:
+                existing[1].append(intent)
+    return [
+        (seed, tuple(intents), input_state, path, root_order, state_order)
+        for seed, intents, input_state, path, root_order, state_order in output
+    ]
 
 
 def _unique_seed_specs(
@@ -2452,6 +3211,11 @@ def _candidate_provenance(candidate: SearchKeywordCandidate) -> tuple[dict[str, 
             "seed": candidate.seed,
             "seed_source": candidate.seed_source,
             "autocomplete_rank": candidate.autocomplete_rank,
+            "journey_type": candidate.journey_type,
+            "journey_root": candidate.journey_root,
+            "journey_path": list(candidate.journey_path),
+            "journey_depth": candidate.journey_depth,
+            "journey_parent_query": candidate.journey_parent_query,
         },
     )
 
@@ -2461,7 +3225,7 @@ def _merged_candidate_provenance(
     second: SearchKeywordCandidate,
 ) -> tuple[dict[str, Any], ...]:
     output: list[dict[str, Any]] = []
-    seen: set[tuple[str, str, str, str, int | None]] = set()
+    seen: set[tuple[str, str, str, str, int | None, str, str]] = set()
     for raw in (*_candidate_provenance(first), *_candidate_provenance(second)):
         item = dict(raw)
         key = (
@@ -2470,6 +3234,8 @@ def _merged_candidate_provenance(
             str(item.get("seed") or ""),
             str(item.get("seed_source") or ""),
             _optional_int(item.get("autocomplete_rank")),
+            str(item.get("journey_type") or ""),
+            str(item.get("journey_root") or ""),
         )
         if key in seen:
             continue
@@ -2942,7 +3708,7 @@ def _inject_comparison_resample_candidates(
 ) -> list[SearchKeywordCandidate]:
     matched_strategy = _matched_previous_strategy(previous, current_title)
     if matched_strategy is None or previous is None:
-        return candidates[:max_keywords]
+        return candidates
     ranks = _baseline_ranks(previous)
     primary_keywords = _strategy_required_keywords(
         matched_strategy,
@@ -3127,6 +3893,7 @@ def _build_title_strategies(
     accepted_keywords: list[str],
     hot_term_keywords: list[str],
     opportunity_keywords: list[str],
+    keyword_journey_evidence: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     """Return three evidence-bounded title tactics with stable API keys."""
     safe_accepted_keywords = _title_supported_keywords(
@@ -3174,6 +3941,42 @@ def _build_title_strategies(
             or opportunity_title.casefold() != hot_title.casefold()
         )
     )
+    journey_evidence = keyword_journey_evidence or {}
+
+    def strategy_evidence(keywords: list[str]) -> dict[str, Any]:
+        keyword_rows = [
+            dict(journey_evidence[keyword.casefold()])
+            for keyword in keywords
+            if keyword.casefold() in journey_evidence
+        ]
+        journey_types = list(
+            dict.fromkeys(
+                str(journey_type)
+                for row in keyword_rows
+                for journey_type in row.get("journey_types", [])
+                if str(journey_type)
+            )
+        )
+        shopper_roots = list(
+            dict.fromkeys(
+                str(root)
+                for row in keyword_rows
+                for root in row.get("shopper_roots", [])
+                if str(root)
+            )
+        )
+        paths = [
+            path
+            for row in keyword_rows
+            for path in row.get("paths", [])
+            if isinstance(path, list) and path
+        ]
+        return {
+            "journey_types": journey_types,
+            "shopper_roots": shopper_roots,
+            "paths": paths,
+        }
+
     return [
         {
             "strategy": "contiguous_core",
@@ -3181,12 +3984,13 @@ def _build_title_strategies(
             "title": core_title if core_available else None,
             "available": core_available,
             "explanation": (
-                "把首个通过首页同类验证的完整词组连续前置，卖点和参数后置；"
+                "优先把已知长尾直接验证，或证据最明确且通过完整首页同类验证的词组连续前置，卖点和参数后置；"
                 "修改后仍需按相同词复采，不能保证排名前移。"
                 if core_available
                 else "本轮没有通过首页同类验证的核心词，因此不生成连续词组版。"
             ),
             "evidence_keywords": safe_accepted_keywords[:1],
+            "evidence": strategy_evidence(safe_accepted_keywords[:1]),
         },
         {
             "strategy": "hot_term_coverage",
@@ -3194,12 +3998,16 @@ def _build_title_strategies(
             "title": hot_title if hot_available else None,
             "available": hot_available,
             "explanation": (
-                "只合并已通过相关性验证且真实出现在 Takealot 搜索框补全中的词；"
+                "合并已通过相关性验证且真实出现在 Takealot 搜索框补全中的类目表达，"
+                "优先覆盖不同第一直觉词根的入口，不足时才使用同根的其他真实补全；"
                 "补全顺序不是搜索量，修改后仍需复采。"
                 if hot_available
                 else "本轮没有形成与完整连续词组版不同，且同时满足标题支持、相关性通过和真实补全证据的类目词版本。"
             ),
             "evidence_keywords": mergeable_hot_keywords[:3] if hot_available else [],
+            "evidence": strategy_evidence(
+                mergeable_hot_keywords[:3] if hot_available else []
+            ),
         },
         {
             "strategy": "adjacent_opportunity",
@@ -3218,6 +4026,7 @@ def _build_title_strategies(
                 )
             ),
             "evidence_keywords": safe_opportunity_keywords[:1],
+            "evidence": strategy_evidence(safe_opportunity_keywords[:1]),
         },
     ]
 
@@ -3472,6 +4281,7 @@ def _analysis_payload(
         accepted_keywords=accepted_title_keywords,
         hot_term_keywords=hot_term_title_keywords,
         opportunity_keywords=opportunity_title_keywords,
+        keyword_journey_evidence=_title_keyword_journey_evidence(results),
     )
     opportunity_title_suggestion = title_strategies[2]["title"]
     profile["title_suggestion"] = title_suggestion
@@ -3493,6 +4303,9 @@ def _analysis_payload(
         ),
         "autocomplete_checks": (
             vision.get("autocomplete_checks", []) if isinstance(vision, dict) else []
+        ),
+        "shopper_journey": (
+            vision.get("shopper_journey", {}) if isinstance(vision, dict) else {}
         ),
         "provider_attempts": (
             vision.get("provider_attempts", []) if isinstance(vision, dict) else []
@@ -3801,9 +4614,12 @@ must be a concise 2-7 word identity, never an SEO title.
 Return three deliberately different groups of South African English shopper wording:
 1. keywords: 2-5 precise 2-6 word long-tail queries for shoppers who already know the
    target product type.
-2. autocomplete_seeds: 2-5 short 1-3 word roots a less certain shopper would naturally
-   type before choosing a Takealot search-box completion, such as a product noun, use,
-   room, device, or locally natural term. These are roots, not invented completions.
+2. autocomplete_seeds: 2-5 distinct short 1-3 word first-instinct roots a less certain
+   South African shopper would type before knowing the product's long-tail name. Cover
+   different plausible entry instincts such as the visible noun, use, room, connected
+   device, or locally natural everyday wording. Do not return completed long-tail queries
+   here and do not predict what Takealot will complete; the next stage reads the platform's
+   live completions at bounded typing milestones.
 3. opportunity_seeds: 1-3 relevant adjacent need-state roots where this product could
    satisfy the same buyer even if the direct product type may be less crowded. Relevance
    is mandatory; do not force an unrelated traffic lane.

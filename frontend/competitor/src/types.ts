@@ -547,6 +547,10 @@ export interface SearchRankingStatus {
   pricing_snapshot_date: string;
   max_pages: number;
   max_keywords: number;
+  autocomplete_path_state_limit: number;
+  search_query_attempt_limit: number;
+  public_request_min_interval_seconds: number;
+  operation_scope: "manual_single_offer_one_click";
   offer_max_age_hours: number;
   image_max_dimension: number;
   organic_page_size: number;
@@ -611,6 +615,7 @@ export interface SearchRankingKeywordResult {
     candidate_rationale?: string;
     validation_terms?: string[];
     top_result_titles?: string[];
+    matched_result_titles?: string[];
     matched_top_results?: number;
     evaluated_top_results?: number;
     matched_first_page_results?: number;
@@ -651,12 +656,29 @@ export interface SearchRankingKeywordResult {
       | "image_need_state"
       | "image_only_model"
       | "title_cross_check"
+      | "result_page_learning"
       | "previous_analysis_baseline"
       | null;
     autocomplete_rank?: number | null;
     autocomplete_endpoint?: string | null;
     autocomplete_is_search_volume?: boolean;
     demand_signal_note?: string;
+    journey_type?:
+      | "known_long_tail"
+      | "first_instinct_autocomplete"
+      | "autocomplete_backtrack"
+      | "switched_instinct_root"
+      | "result_page_learning"
+      | "title_cross_check"
+      | "adjacent_opportunity"
+      | null;
+    journey_root?: string | null;
+    journey_path?: string[];
+    journey_types?: string[];
+    journey_roots?: string[];
+    journey_paths?: string[][];
+    journey_depth?: number;
+    journey_parent_query?: string | null;
     api_version?: string | null;
     reason?: string;
   };
@@ -710,6 +732,36 @@ export interface SearchRankingAnalysis extends SearchRankingAnalysisSummary {
     source_title_similarity?: number;
     title_reference_terms?: string[];
     title_reference_role?: "post_recognition_cross_check_only";
+  };
+  autocomplete_checks?: Array<{
+    seed: string;
+    seed_source?: string;
+    shopper_root?: string;
+    input_state?: string;
+    journey_path?: string[];
+    journey_type?: string;
+    journey_depth?: number;
+    status: "observed" | "unavailable" | "reused_observed";
+    suggestions?: string[];
+    parent_query?: string;
+  }>;
+  shopper_journey?: {
+    mode?: "manual_single_offer_one_click";
+    autocomplete_state_limit?: number;
+    search_query_attempt_limit?: number;
+    public_request_min_interval_seconds?: number;
+    public_request_count?: number;
+    steps?: Array<{
+      query: string;
+      journey_type?: string | null;
+      shopper_root?: string | null;
+      path?: string[];
+      parent_query?: string | null;
+      result?: SearchRankingKeywordResult["relevance_status"];
+      first_page_same_type_ratio?: number;
+      target_found?: boolean;
+      pages_scanned?: number;
+    }>;
   };
   provider_attempts?: Array<{
     provider: string;

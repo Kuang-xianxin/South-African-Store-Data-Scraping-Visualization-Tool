@@ -22,20 +22,26 @@ from takealot_ops.search_ranking.service import (
     SearchRankingService,
     VisionCallResult,
     VisionProfile,
+    _PacedSearchClient,
+    _PublicRequestThrottle,
     _append_unique_candidate,
     _analysis_payload,
+    _autocomplete_path_states,
     _build_hot_term_title_suggestion,
     _build_title_suggestion,
     _build_title_strategies,
     _collect_keyword_observation,
+    _collect_shopper_journey,
     _cross_check_image_profile,
     _discover_keyword_candidates,
     _inject_comparison_resample_candidates,
     _opportunity_gate_from_result,
     _opportunity_phrase_safety,
     _previous_analysis_snapshot,
+    _result_page_learning_seed,
     _search_products,
     _title_validation,
+    _title_strategy_keywords,
     _validated_chat_profile,
 )
 from takealot_ops.search_ranking import service as search_ranking_service
@@ -112,6 +118,98 @@ class FakeVisionClient:
 
 def test_prompt_version_fits_persisted_column() -> None:
     assert len(PROMPT_VERSION) <= 30
+
+
+def test_autocomplete_path_states_follow_real_typing_milestones() -> None:
+    assert _autocomplete_path_states(
+        "rgb light",
+        include_typing_milestones=True,
+    ) == ("rgb", "rgb l", "rgb light")
+    assert _autocomplete_path_states(
+        "tv light",
+        include_typing_milestones=True,
+    ) == ("tv l", "tv light")
+    assert _autocomplete_path_states(
+        "ambient light",
+        include_typing_milestones=False,
+    ) == ("ambient light",)
+
+
+@pytest.mark.asyncio
+async def test_public_search_pacer_spaces_autocomplete_and_both_page_requests() -> None:
+    class UnderlyingClient:
+        async def fetch_search_suggestions(self, keyword: str) -> list[str]:
+            return [keyword]
+
+        async def fetch_search_first_page(
+            self,
+            keyword: str,
+        ) -> tuple[str, dict[str, Any]]:
+            return _search_url(keyword), {}
+
+        async def fetch_search_next_page(
+            self,
+            request_url: str,
+            after: str,
+        ) -> dict[str, Any]:
+            del request_url, after
+            return {}
+
+    clock_values = iter([0.0, 0.2, 1.0, 1.1, 2.0])
+    sleeps: list[float] = []
+
+    async def fake_sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+
+    client = _PacedSearchClient(
+        UnderlyingClient(),  # type: ignore[arg-type]
+        minimum_interval_seconds=1.0,
+        clock=lambda: next(clock_values),
+        sleep=fake_sleep,
+    )
+
+    await client.fetch_search_suggestions("rgb")
+    await client.fetch_search_first_page("rgb light bar")
+    await client.fetch_search_next_page(_search_url("rgb light bar"), "next")
+
+    assert sleeps == pytest.approx([0.8, 0.9])
+    assert client.request_count == 3
+
+
+@pytest.mark.asyncio
+async def test_concurrent_analysis_clients_share_one_public_request_throttle() -> None:
+    class UnderlyingClient:
+        async def fetch_search_suggestions(self, keyword: str) -> list[str]:
+            return [keyword]
+
+    clock_values = iter([0.0, 0.25, 1.0])
+    sleeps: list[float] = []
+
+    async def fake_sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+
+    throttle = _PublicRequestThrottle(
+        minimum_interval_seconds=1.0,
+        clock=lambda: next(clock_values),
+        sleep=fake_sleep,
+    )
+    first = _PacedSearchClient(
+        UnderlyingClient(),  # type: ignore[arg-type]
+        minimum_interval_seconds=1.0,
+        throttle=throttle,
+    )
+    second = _PacedSearchClient(
+        UnderlyingClient(),  # type: ignore[arg-type]
+        minimum_interval_seconds=1.0,
+        throttle=throttle,
+    )
+
+    await first.fetch_search_suggestions("rgb")
+    await second.fetch_search_suggestions("ambient")
+
+    assert sleeps == pytest.approx([0.75])
+    assert first.request_count == 1
+    assert second.request_count == 1
 
 
 def test_qwen_string_candidate_arrays_are_normalized_before_validation() -> None:
@@ -429,6 +527,12 @@ async def test_service_validates_keywords_locates_cursor_page_and_reuses_vision(
     assert first["analysis"]["usage"]["total_tokens"] == 200
     assert first["analysis"]["provider"] == "qwen"
     assert first["analysis"]["estimated_cost_cny"] == 0.00088
+    assert first["status"]["operation_scope"] == "manual_single_offer_one_click"
+    assert first["status"]["autocomplete_path_state_limit"] == 8
+    assert first["analysis"]["shopper_journey"]["mode"] == (
+        "manual_single_offer_one_click"
+    )
+    assert first["analysis"]["shopper_journey"]["public_request_count"] > 0
     title_strategies = first["analysis"]["title_strategies"]
     assert [item["strategy"] for item in title_strategies] == [
         "contiguous_core",
@@ -440,6 +544,7 @@ async def test_service_validates_keywords_locates_cursor_page_and_reuses_vision(
     assert all(item["explanation"] for item in title_strategies)
     assert len({item["explanation"] for item in title_strategies}) == 3
     assert all(item["evidence_keywords"] for item in title_strategies)
+    assert all("journey_types" in item["evidence"] for item in title_strategies)
     assert title_strategies[0]["title"].startswith("Wireless Mouse")
     assert title_strategies[1]["title"].startswith("Wireless Gaming Mouse")
     assert title_strategies[1]["title"] != title_strategies[0]["title"]
@@ -827,6 +932,70 @@ def test_hot_term_strategy_merges_overlapping_phrases_without_keyword_stutter() 
 
     assert suggestion == "Wireless Gaming Mouse Silent Rechargeable"
     assert all(character.isalnum() or character == " " for character in suggestion)
+
+
+def test_title_keywords_prioritize_known_long_tail_and_diverse_instinct_roots() -> None:
+    rows = [
+        _observation(
+            "rgb light bars",
+            5,
+            validation_evidence={
+                "journey_type": "first_instinct_autocomplete",
+                "journey_root": "rgb light",
+                "candidate_provenance": [
+                    {
+                        "candidate_source": "takealot_autocomplete",
+                        "autocomplete_rank": 1,
+                        "journey_type": "first_instinct_autocomplete",
+                        "journey_root": "rgb light",
+                    },
+                    {
+                        "candidate_source": "image_precise",
+                        "journey_type": "known_long_tail",
+                        "journey_root": "rgb light bars",
+                    },
+                ],
+            },
+        ),
+        _observation(
+            "rgb led light bars",
+            6,
+            validation_evidence={
+                "candidate_provenance": [
+                    {
+                        "candidate_source": "takealot_autocomplete",
+                        "autocomplete_rank": 2,
+                        "journey_type": "autocomplete_backtrack",
+                        "journey_root": "rgb light",
+                    }
+                ]
+            },
+        ),
+        _observation(
+            "gaming light bars",
+            7,
+            validation_evidence={
+                "candidate_provenance": [
+                    {
+                        "candidate_source": "takealot_autocomplete",
+                        "autocomplete_rank": 3,
+                        "journey_type": "switched_instinct_root",
+                        "journey_root": "gaming light",
+                    }
+                ]
+            },
+        ),
+    ]
+
+    accepted, hot_terms, opportunity = _title_strategy_keywords(
+        rows,
+        "RGB LED Gaming Light Bars",
+    )
+
+    assert accepted[0] == "rgb light bars"
+    assert hot_terms[:2] == ["rgb light bars", "gaming light bars"]
+    assert hot_terms[2] == "rgb led light bars"
+    assert opportunity == []
 
 
 @pytest.mark.parametrize(
@@ -1585,6 +1754,211 @@ async def test_same_seed_core_and_opportunity_is_requested_once_with_both_proven
 
 
 @pytest.mark.asyncio
+async def test_discovery_reads_bounded_first_instinct_typing_paths() -> None:
+    profile = VisionProfile(
+        product_name="RGB light bars",
+        category="Lighting",
+        product_type_terms=["light bars"],
+        distinctive_terms=["rgb", "ambient"],
+        keywords=[
+            KeywordCandidate(phrase="rgb light bars", rationale="Known long tail"),
+            KeywordCandidate(phrase="ambient light bars", rationale="Known use"),
+        ],
+        autocomplete_seeds=[
+            KeywordCandidate(phrase="rgb light", rationale="First colour instinct"),
+            KeywordCandidate(phrase="ambient light", rationale="First use instinct"),
+        ],
+        opportunity_seeds=[
+            KeywordCandidate(phrase="gaming lights", rationale="Adjacent gaming use")
+        ],
+        exclusions=["light bulb", "led strip"],
+        confidence=0.95,
+        title_suggestion="RGB Light Bars Ambient Lighting",
+        title_reason="Image-only suggestion",
+    )
+
+    class PathSuggestionClient:
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+
+        async def fetch_search_suggestions(self, keyword: str) -> list[str]:
+            self.calls.append(keyword)
+            suggestions = {
+                "rgb": ["rgb lights"],
+                "rgb l": ["rgb light bar"],
+                "rgb light": ["rgb light bar"],
+                "ambient": ["ambient lights for room"],
+                "ambient l": ["ambient light bars"],
+                "ambient light": ["ambient light bars"],
+                "gaming lights": ["gaming light bars"],
+            }
+            return suggestions.get(keyword, [])
+
+    client = PathSuggestionClient()
+    candidates, checks = await _discover_keyword_candidates(
+        client,  # type: ignore[arg-type]
+        profile=profile,
+        source_title="RGB LED Light Bars TV Backlight Ambient Lighting Gaming Desk",
+        title_reference_terms=[],
+        max_keywords=4,
+    )
+    rgb_candidate = next(item for item in candidates if item.phrase == "rgb light bar")
+
+    assert client.calls == [
+        "rgb",
+        "rgb l",
+        "rgb light",
+        "ambient",
+        "ambient l",
+        "ambient light",
+        "gaming lights",
+    ]
+    assert len(checks) <= 8
+    assert rgb_candidate.journey_root == "rgb light"
+    assert rgb_candidate.journey_path == ("rgb", "rgb l", "rgb light bar")
+    assert any(
+        item["input_state"] == "rgb l"
+        and item["journey_path"] == ["rgb", "rgb l"]
+        for item in checks
+    )
+
+
+@pytest.mark.asyncio
+async def test_rejected_page_can_learn_one_supported_seed_then_validate_live_completion() -> None:
+    profile = VisionProfile(
+        product_name="RGB light bars",
+        category="Lighting",
+        product_type_terms=["light bars"],
+        distinctive_terms=["rgb", "ambient"],
+        keywords=[
+            KeywordCandidate(phrase="rgb light bars", rationale="Known long tail"),
+            KeywordCandidate(phrase="tv light bars", rationale="Known TV use"),
+        ],
+        autocomplete_seeds=[
+            KeywordCandidate(phrase="ambient", rationale="First use instinct"),
+            KeywordCandidate(phrase="rgb", rationale="First colour instinct"),
+        ],
+        opportunity_seeds=[
+            KeywordCandidate(phrase="gaming lights", rationale="Adjacent use")
+        ],
+        exclusions=["light bulb", "led strip"],
+        confidence=0.95,
+        title_suggestion="RGB Light Bars Ambient Lighting",
+        title_reason="Image-only suggestion",
+    )
+
+    class ResultLearningClient:
+        def __init__(self) -> None:
+            self.suggestion_calls: list[str] = []
+            self.search_calls: list[str] = []
+
+        async def fetch_search_suggestions(self, keyword: str) -> list[str]:
+            self.suggestion_calls.append(keyword)
+            return ["rgb light bars"] if keyword.casefold() == "light bars" else []
+
+        async def fetch_search_first_page(
+            self,
+            keyword: str,
+        ) -> tuple[str, dict[str, Any]]:
+            self.search_calls.append(keyword)
+            if keyword == "ambient lighting":
+                products = [
+                    ("71000001", "RGB Light Bars for Desk"),
+                    ("71000002", "LED Light Bars for TV"),
+                ]
+                products.extend(
+                    (str(72_000_000 + index), f"Ambient Light Bulb {index}")
+                    for index in range(34)
+                )
+                return _search_url(keyword), _payload(products, after="", total=90)
+            products = [("12345678", "RGB LED Light Bars TV Backlight")]
+            products.extend(
+                (str(73_000_000 + index), f"RGB Light Bars Model {index}")
+                for index in range(35)
+            )
+            return _search_url(keyword), _payload(products, after="", total=120)
+
+        async def fetch_search_next_page(
+            self,
+            request_url: str,
+            after: str,
+        ) -> dict[str, Any]:
+            raise AssertionError((request_url, after))
+
+    client = ResultLearningClient()
+    autocomplete_checks: list[dict[str, Any]] = []
+    observations, steps = await _collect_shopper_journey(
+        client,  # type: ignore[arg-type]
+        candidates=[
+            SearchKeywordCandidate(
+                phrase="ambient lighting",
+                rationale="Broad first completion",
+                candidate_source="takealot_autocomplete",
+                intended_strategy="core",
+                seed="ambient",
+                seed_source="image_shopper_root",
+                autocomplete_rank=1,
+                journey_type="first_instinct_autocomplete",
+                journey_root="ambient",
+                journey_path=("ambient", "ambient lighting"),
+            )
+        ],
+        autocomplete_checks=autocomplete_checks,
+        target_plid="12345678",
+        profile=profile,
+        max_pages=2,
+        max_keywords=3,
+        relevance_threshold=0.60,
+        source_title="RGB LED Light Bars TV Backlight Ambient Lighting",
+    )
+
+    assert [item.relevance_status for item in observations] == [
+        "rejected_irrelevant",
+        "accepted",
+    ]
+    assert client.suggestion_calls == ["light bars"]
+    assert client.search_calls == ["ambient lighting", "rgb light bars"]
+    assert observations[1].validation_evidence["journey_type"] == (
+        "result_page_learning"
+    )
+    assert observations[1].validation_evidence["journey_parent_query"] == (
+        "ambient lighting"
+    )
+    assert steps[1]["path"][-2:] == ["light bars", "rgb light bars"]
+    assert autocomplete_checks[0]["seed_source"] == "result_page_learning"
+
+    capped_client = ResultLearningClient()
+    capped_checks = [
+        {"seed": f"already-checked-{index}", "status": "observed"}
+        for index in range(8)
+    ]
+    capped_observations, _ = await _collect_shopper_journey(
+        capped_client,  # type: ignore[arg-type]
+        candidates=[
+            SearchKeywordCandidate(
+                phrase="ambient lighting",
+                rationale="Broad first completion",
+                candidate_source="takealot_autocomplete",
+                intended_strategy="core",
+                journey_type="first_instinct_autocomplete",
+                journey_root="ambient",
+                journey_path=("ambient", "ambient lighting"),
+            )
+        ],
+        autocomplete_checks=capped_checks,
+        target_plid="12345678",
+        profile=profile,
+        max_pages=2,
+        max_keywords=3,
+        relevance_threshold=0.60,
+        source_title="RGB LED Light Bars TV Backlight Ambient Lighting",
+    )
+    assert len(capped_observations) == 1
+    assert capped_client.suggestion_calls == []
+    assert len(capped_checks) == 8
+
+
+@pytest.mark.asyncio
 async def test_blue_ocean_candidate_requires_low_competition_and_early_target() -> None:
     observation = await _collect_keyword_observation(
         OpportunityGateSearchClient(
@@ -2152,6 +2526,40 @@ def _observation(
         target_url=None,
         observed_at=datetime(2026, 8, 7),
     )
+
+
+def test_result_page_learning_never_adopts_an_unsupported_competitor_brand() -> None:
+    profile = _opportunity_profile()
+    branded = _observation(
+        "computer accessory",
+        None,
+        relevance_status="rejected_irrelevant",
+        validation_evidence={
+            "matched_result_titles": ["Acme Mouse", "Acme Mouse Pro"]
+        },
+    )
+    supported = _observation(
+        "computer accessory",
+        None,
+        relevance_status="rejected_irrelevant",
+        validation_evidence={
+            "matched_result_titles": ["Wireless Mouse", "Wireless Mouse Silent"]
+        },
+    )
+
+    assert (
+        _result_page_learning_seed(
+            branded,
+            profile=profile,
+            source_title="Wireless Gaming Mouse",
+        )
+        is None
+    )
+    assert _result_page_learning_seed(
+        supported,
+        profile=profile,
+        source_title="Wireless Gaming Mouse",
+    ) == "wireless mouse"
 
 
 def test_web_reads_local_status_and_missing_key_never_starts_external_search(

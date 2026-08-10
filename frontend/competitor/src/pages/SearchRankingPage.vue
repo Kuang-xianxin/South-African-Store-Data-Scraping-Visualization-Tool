@@ -260,10 +260,39 @@ function sourceLabel(item: SearchRankingKeywordResult) {
     || evidence.comparison_baseline_rank != null
     ? " · 同时用于上一轮打法的同词复采"
     : "";
+  const journeyTypes = new Set([
+    ...(evidence.journey_types ?? []),
+    ...(evidence.journey_type ? [evidence.journey_type] : []),
+  ]);
+  if (journeyTypes.has("result_page_learning")) {
+    return `从上一条偏差搜索页的同形态商品标题提炼词根，再取 Takealot 真实补全第 ${evidence.autocomplete_rank ?? "—"} 项${resampleSuffix}`;
+  }
+  if (journeyTypes.has("autocomplete_backtrack")) {
+    return `第一直觉词补全不止一种，本词模拟删词或回退后改选第 ${evidence.autocomplete_rank ?? "—"} 项${resampleSuffix}`;
+  }
+  if (journeyTypes.has("switched_instinct_root")) {
+    return `更换第一直觉词根“${evidence.journey_root ?? evidence.autocomplete_seed ?? "—"}”后取得的真实补全${resampleSuffix}`;
+  }
+  if (journeyTypes.has("adjacent_opportunity")) {
+    return `相邻需求词根“${evidence.journey_root ?? evidence.autocomplete_seed ?? "—"}”的 Takealot 真实补全${resampleSuffix}`;
+  }
+  if (journeyTypes.has("known_long_tail") && !evidence.autocomplete_rank) {
+    return `目标明确买家会直接输入的长尾词，由图片识别提出并经完整搜索页验证${resampleSuffix}`;
+  }
   if (evidence.autocomplete_rank && evidence.autocomplete_seed) {
-    return `Takealot 补全 · 输入“${evidence.autocomplete_seed}”后的第 ${evidence.autocomplete_rank} 项${resampleSuffix}`;
+    const directAlso = journeyTypes.has("known_long_tail") ? " · 同时命中图片长尾词" : "";
+    return `第一直觉输入“${evidence.autocomplete_seed}”后的 Takealot 第 ${evidence.autocomplete_rank} 项${directAlso}${resampleSuffix}`;
   }
   return `图片独立识别的精准词${resampleSuffix}`;
+}
+
+function journeyPathLabel(item: SearchRankingKeywordResult) {
+  const evidence = item.validation_evidence;
+  const path = evidence.journey_path?.length
+    ? evidence.journey_path
+    : evidence.journey_paths?.find((candidate) => candidate.length) ?? [];
+  const compact = path.filter((value, index) => value && value !== path[index - 1]);
+  return compact.length > 1 ? `模拟输入路径：${compact.join(" → ")}` : "";
 }
 
 function validationStatusLabel(status: string | null | undefined) {
@@ -326,12 +355,12 @@ function errorMessage(caught: unknown, fallback: string) {
   <div class="ranking-page">
     <section class="method-banner">
       <div>
-        <p>IMAGE IDENTITY → TAKEALOT AUTOCOMPLETE → FIRST-PAGE FIT → ORGANIC POSITION</p>
-        <h2>图片独立识别，再由平台补全与完整第一页共同验词</h2>
+        <p>IMAGE IDENTITY → SHOPPER PATHS → LIVE AUTOCOMPLETE → PAGE FIT → POSITION</p>
+        <h2>一次点击，自动模拟买家从直觉词到正确类目页的有限搜索路径</h2>
         <span>
           只有当前店铺授权 Seller Offers 中仍为 buyable、明确有可售库存且快照新鲜的链接才会进入；
-          模型阶段看不到主标题和 SKU，识别完成后才用标题交叉核对，并用 Takealot 搜索框补全与自然结果验证。
-          普通查看不会调用模型或访问平台。
+          模型阶段看不到主标题和 SKU，只提出已知长尾与多个第一直觉词根。平台补全不由模型猜造，后台会读取当时真实补全，
+          必要时自动改选补全、换词根，或从偏差结果页的同形态标题提炼一个新词根再验证。普通查看不会调用模型或访问平台。
         </span>
       </div>
       <dl v-if="listPayload">
@@ -340,6 +369,14 @@ function errorMessage(caught: unknown, fallback: string) {
           <dt>跨厂商备用</dt><dd>{{ listPayload.status.fallback_provider_label }} · {{ listPayload.status.fallback_model }}</dd>
         </div>
         <div><dt>单词最多扫描</dt><dd>{{ listPayload.status.max_pages }} 页</dd></div>
+        <div>
+          <dt>单品探索上限</dt>
+          <dd>补全状态 {{ listPayload.status.autocomplete_path_state_limit }} 个 · 搜索词 {{ listPayload.status.search_query_attempt_limit }} 个</dd>
+        </div>
+        <div>
+          <dt>公开请求节流</dt>
+          <dd>相邻请求至少 {{ listPayload.status.public_request_min_interval_seconds }} 秒</dd>
+        </div>
         <div>
           <dt>自然排名坐标</dt>
           <dd>默认相关性序列 · 平台游标页最多 36 个自然商品 · 页内四列坐标</dd>
@@ -434,7 +471,8 @@ function errorMessage(caught: unknown, fallback: string) {
           </section>
 
           <p v-if="analyzing" class="running-note">
-            系统会先再次确认链接仍自有在售，再独立识别图片、读取 Takealot 补全并逐词验证；同一主图优先复用模型结果。
+            只处理当前这一个商品。系统会先再次确认链接仍自有在售，再独立识别图片，并在后台一次完成已知长尾、第一直觉补全、有限回退与换根验证；
+            所有补全和搜索页公开请求共用间隔，同一主图优先复用模型结果。
           </p>
           <p v-if="detail && !detail.status.configured" class="config-note">
             当前仅可查看历史结果。服务端未配置 DASHSCOPE_API_KEY / ARK_API_KEY，点击时不会产生费用或外部请求。
@@ -514,6 +552,7 @@ function errorMessage(caught: unknown, fallback: string) {
                       <span class="strategy-badge">{{ strategyLabel(item) }}</span>
                       <a :href="item.search_url" target="_blank" rel="noreferrer">{{ item.keyword }}</a>
                       <small class="query-source">{{ sourceLabel(item) }}</small>
+                      <small v-if="journeyPathLabel(item)" class="query-path">{{ journeyPathLabel(item) }}</small>
                       <span v-if="!item.found">{{ resultLabel(item) }}</span>
                     </div>
                     <strong v-if="item.found" class="keyword-position">
@@ -558,6 +597,10 @@ function errorMessage(caught: unknown, fallback: string) {
                 {{ detail?.status.opportunity_max_organic_rank ?? 72 }} 个自然位置内实际找到本商品，且按窄形态标题词判定、扣除本商品后首页直接同类不超过
                 {{ detail?.status.opportunity_max_direct_competitors ?? 2 }} 个。
                 “补全第几项”只是平台搜索意图证据，不是公开搜索量；“平台返回商品数”只代表供给规模，也不是热度。
+                本模块只在运营人工选择一个商品并点击后运行；一次运行最多读取
+                {{ detail?.status.autocomplete_path_state_limit ?? 8 }} 个补全输入状态、验证
+                {{ detail?.status.search_query_attempt_limit ?? 4 }} 个搜索词，全部公开请求相邻至少
+                {{ detail?.status.public_request_min_interval_seconds ?? 1.5 }} 秒，不会自动遍历全店。
                 第几页来自平台 after 游标页；每个游标页最多纳入 36 个自然商品，页内从左到右每行四项。
                 跨页自然排名只按实际纳入的自然商品连续累计；若页内有被排除的赞助或非商品记录，不会机械地用页码乘以 36。
                 广告并非靠样式猜测；程序只纳入平台搜索 API 的 products.results 中 type=product_views 且未带 sponsored/promoted 标记的项目，其他赞助或推荐区不计入。
@@ -599,7 +642,7 @@ function errorMessage(caught: unknown, fallback: string) {
                     完整短语优先是低风险写法，不代表平台公开了连续词组加权规则。
                   </small>
                   <small v-else-if="strategy.strategy === 'hot_term_coverage'" class="strategy-boundary">
-                    Takealot 补全仅作为平台搜索意图证据，不等同于公开搜索量。
+                    优先覆盖不同第一直觉入口；每个词都必须来自当时真实补全并通过类目页验证。补全不是公开搜索量。
                   </small>
                   <small v-else class="strategy-boundary">
                     入选前必须实际搜到本商品，并通过按窄形态标题词核算的首页低竞争门槛；
@@ -669,7 +712,7 @@ function errorMessage(caught: unknown, fallback: string) {
           <section v-else class="first-run">
             <p>NO RANKING EVIDENCE YET</p>
             <h3>这个商品还没有搜索定位记录</h3>
-            <span>首次运行会识别主图、生成少量精确候选词，并用真实 Takealot 搜索结果逐个验收。</span>
+            <span>首次运行只处理当前商品：识别主图后自动验证已知长尾、多个第一直觉补全及有限回退路径，再给出位置和三种标题打法。</span>
           </section>
         </template>
         <div v-else class="detail-loading">请选择一个商品</div>
@@ -735,6 +778,7 @@ dt { color: #738078; font-size: 12px; } dd { margin: 0; font-weight: 750; }
 .keyword-card.comparison_resample .strategy-badge { background: #50708c; }
 .keyword-card.rejected_irrelevant .strategy-badge, .keyword-card.model_low_confidence .strategy-badge { background: #a85d35; }
 .query-source { color: #5f7166; font-weight: 700; }
+.query-path { color: #7a6a4b; font-weight: 650; }
 .keyword-main > strong { color: #235c45; white-space: nowrap; }.keyword-position { display: grid; gap: 4px; text-align: right; }.keyword-position > span { color: #194f3a; font-size: 15px; font-weight: 850; }.keyword-position > small { color: #65746b; font-size: 12px; font-weight: 700; }.keyword-card dl { display: flex; gap: 28px; margin: 14px 0 8px; }.keyword-card dl div { display: grid; gap: 3px; }
 .keyword-card p { margin: 7px 0; color: #4e5c53; }.keyword-card small, .position-notice, .causality-note { color: #6e7a72; line-height: 1.6; }
 .position-notice, .causality-note { margin: 0; padding: 12px 14px; border-radius: 9px; background: #f3f5f3; font-size: 12px; }

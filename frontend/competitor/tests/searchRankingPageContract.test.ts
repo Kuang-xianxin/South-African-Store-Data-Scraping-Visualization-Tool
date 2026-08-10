@@ -75,3 +75,21 @@ test("attributes ranking validation to the previously adopted strategy", () => {
   assert.match(pageSource, /上一轮实际采用：/);
   assert.match(pageSource, /不代表本轮三张候选卡已经采用/);
 });
+
+test("keeps one manual product action while explaining bounded shopper paths", () => {
+  assert.equal(pageSource.match(/@click="runAnalysis"/g)?.length, 1);
+  assert.match(pageSource, /一次点击，自动模拟买家从直觉词到正确类目页的有限搜索路径/);
+  assert.match(pageSource, /只处理当前这一个商品/);
+  assert.match(pageSource, /不会自动遍历全店/);
+  assert.match(pageSource, /模拟输入路径/);
+});
+
+test("declares request pacing and shopper-journey evidence", () => {
+  assert.match(statusTypeSource, /autocomplete_path_state_limit: number;/);
+  assert.match(statusTypeSource, /search_query_attempt_limit: number;/);
+  assert.match(statusTypeSource, /public_request_min_interval_seconds: number;/);
+  assert.match(statusTypeSource, /operation_scope: "manual_single_offer_one_click";/);
+  assert.match(analysisTypeSource, /autocomplete_checks\?: Array/);
+  assert.match(analysisTypeSource, /shopper_journey\?: \{/);
+  assert.match(pageSource, /所有补全和搜索页公开请求共用间隔/);
+});
