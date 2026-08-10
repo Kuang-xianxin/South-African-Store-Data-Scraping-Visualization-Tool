@@ -1280,6 +1280,132 @@ textarea.link-input-error-pulse {
   font-weight: 700;
 }
 
+.personal-watchlist-summary-card {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(170px, auto);
+  align-items: center;
+  gap: 16px;
+  margin: 14px 0 0;
+  padding: 16px 18px;
+  border: 2px solid #8ebba1;
+  border-radius: 15px;
+  background: linear-gradient(120deg, #f4fbf5, #e7f3e9 58%, #fff);
+  box-shadow: 0 10px 28px rgba(23, 101, 66, 0.1);
+}
+
+.personal-operator-workspace {
+  margin: 0;
+  padding: 24px;
+  border-color: #74aa8b;
+  border-radius: 22px;
+  background: linear-gradient(120deg, #f2fbf4, #e2f1e6 58%, #fff);
+}
+
+.personal-operator-workspace.operator-primary {
+  border-color: #3e8e65;
+  box-shadow: 0 14px 34px rgba(23, 101, 66, 0.16);
+}
+
+.personal-watchlist-quick-add {
+  grid-column: 1 / -1;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  padding-top: 16px;
+  border-top: 1px solid #c6ddcd;
+}
+
+.personal-watchlist-quick-add label {
+  color: #165f3c;
+  font-size: 0.72rem;
+  font-weight: 850;
+  white-space: nowrap;
+}
+
+.personal-operator-workspace > .target-manager-message,
+.personal-operator-workspace > .target-duplicate-notice {
+  grid-column: 1 / -1;
+  margin: 0;
+}
+
+.shared-management-panel {
+  border-color: rgba(24, 37, 31, 0.08);
+  background: rgba(247, 249, 246, 0.84);
+  box-shadow: 0 8px 22px rgba(24, 37, 31, 0.06);
+}
+
+.personal-watchlist-summary-copy {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.personal-watchlist-summary-copy > strong {
+  color: #165f3c;
+  font-size: 0.92rem;
+}
+
+.personal-watchlist-summary-copy > span {
+  color: var(--muted);
+  font-size: 0.68rem;
+  line-height: 1.5;
+}
+
+.personal-watchlist-summary-count {
+  display: grid;
+  min-width: 88px;
+  padding: 8px 14px;
+  border-right: 1px solid #c6ddcd;
+  border-left: 1px solid #c6ddcd;
+  text-align: center;
+}
+
+.personal-watchlist-summary-count strong {
+  color: #165f3c;
+  font-size: 1.35rem;
+  line-height: 1;
+}
+
+.personal-watchlist-summary-count span {
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 0.62rem;
+  font-weight: 750;
+}
+
+.personal-watchlist-summary-action {
+  min-width: 170px;
+  padding: 11px 14px;
+  border: 1px solid #176542;
+  border-radius: 10px;
+  background: #176542;
+  color: #fff;
+  font: inherit;
+  font-size: 0.72rem;
+  font-weight: 850;
+  cursor: pointer;
+  box-shadow: 0 8px 18px rgba(23, 101, 66, 0.18);
+}
+
+.personal-watchlist-summary-action:hover,
+.personal-watchlist-summary-action.active {
+  background: #0f5134;
+}
+
+.personal-watchlist-summary-action.active {
+  border-color: #a45b49;
+  background: #fff;
+  color: #98422f;
+  box-shadow: none;
+}
+
+.personal-watchlist-summary-action:disabled {
+  border-color: #b8c8bd;
+  background: #e7eee9;
+  color: #788b7f;
+  cursor: default;
+  box-shadow: none;
+}
+
 .follow-opportunity-summary {
   display: grid;
   grid-template-columns: minmax(280px, 1fr) repeat(3, minmax(112px, 0.32fr));
@@ -4914,6 +5040,38 @@ button {
   gap: 18px;
 }
 
+.competitor-module > .hero {
+  order: 0;
+}
+
+.competitor-module > .error-banner {
+  order: 1;
+}
+
+.competitor-module > .personal-operator-workspace {
+  order: 2;
+}
+
+.competitor-module > .overview {
+  order: 3;
+}
+
+.competitor-module > .metrics {
+  order: 4;
+}
+
+.competitor-module > .collector {
+  order: 5;
+}
+
+.competitor-module > .link-health-panel {
+  order: 6;
+}
+
+.competitor-module > .module-footer {
+  order: 7;
+}
+
 .competitor-module > * {
   min-width: 0;
 }
@@ -5091,6 +5249,22 @@ button {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
+  .personal-watchlist-summary-card {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+
+  .personal-watchlist-summary-copy {
+    grid-column: 1 / -1;
+  }
+
+  .personal-watchlist-quick-add {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+
+  .personal-watchlist-quick-add label {
+    grid-column: 1 / -1;
+  }
+
   .follow-opportunity-summary {
     grid-template-columns: repeat(3, minmax(0, 1fr));
   }
@@ -5160,6 +5334,35 @@ button {
 
   .follow-opportunity-summary {
     grid-template-columns: 1fr;
+  }
+
+  .personal-watchlist-summary-card {
+    grid-template-columns: 1fr;
+  }
+
+  .personal-watchlist-summary-copy {
+    grid-column: auto;
+  }
+
+  .personal-watchlist-summary-count {
+    border-right: 0;
+    border-left: 0;
+  }
+
+  .personal-watchlist-summary-action {
+    width: 100%;
+  }
+
+  .personal-watchlist-quick-add {
+    grid-template-columns: 1fr;
+  }
+
+  .personal-watchlist-quick-add label {
+    grid-column: auto;
+  }
+
+  .personal-watchlist-quick-add button {
+    width: 100%;
   }
 
   .follow-opportunity-copy {

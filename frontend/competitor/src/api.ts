@@ -36,10 +36,16 @@ import type {
 } from "./types";
 import { templatePermissions } from "./permissions";
 import { AuthSessionRevision } from "./authSessionRevision";
+import {
+  getActiveStoreCode,
+  setActiveStoreCode,
+  withStoreContext,
+} from "./storeContext";
 
 let csrfToken = "";
-let activeStoreCode = "current";
 const authSessionRevision = new AuthSessionRevision();
+
+export { setActiveStoreCode, withStoreContext };
 
 export const AUTH_SESSION_ENDING_EVENT = "erp-auth-session-ending";
 
@@ -56,15 +62,6 @@ export class ApiRequestError extends Error {
 export function setAuthSession(session: AuthSession | null) {
   csrfToken = session?.csrf_token ?? "";
   authSessionRevision.advance();
-}
-
-export function setActiveStoreCode(storeCode: string | null | undefined) {
-  activeStoreCode = storeCode?.trim().toLowerCase() || "current";
-}
-
-export function withStoreContext(url: string): string {
-  const separator = url.includes("?") ? "&" : "?";
-  return `${url}${separator}store_code=${encodeURIComponent(activeStoreCode)}`;
 }
 
 function normalizeAuthSession(session: AuthSession): AuthSession {
@@ -107,7 +104,7 @@ async function request<T>(url: string, init?: RequestInit & { signal?: AbortSign
   if (!["GET", "HEAD", "OPTIONS"].includes(method) && csrfToken) {
     headers.set("X-CSRF-Token", csrfToken);
   }
-  headers.set("X-Store-Code", activeStoreCode);
+  headers.set("X-Store-Code", getActiveStoreCode());
   let response: Response;
   try {
     response = await fetch(url, {

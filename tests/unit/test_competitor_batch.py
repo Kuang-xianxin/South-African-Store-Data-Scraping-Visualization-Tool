@@ -512,6 +512,73 @@ def test_collection_batch_registry_syncs_visible_browser_for_next_link() -> None
         )
 
 
+def test_kxx_updates_and_restores_scheduled_batch_visible_browser(
+    tmp_path: Path,
+) -> None:
+    journal_path = tmp_path / "competitor-batch-queue.json"
+    registry = CollectionBatchRegistry(journal_path)
+    registry.event(
+        batch_id="scheduled-20260810-test",
+        client_id="scheduled-runner",
+        event="start",
+        username="scheduled-task",
+        display_name="每日 09:00 自动任务",
+        completed=0,
+        total=2,
+        pending=2,
+        succeeded=0,
+        failed=0,
+        terminal=0,
+        reason="",
+        visible_browser=False,
+        source="scheduled",
+    )
+    current_link_options = registry.collection_options(
+        batch_id="scheduled-20260810-test",
+        fallback_with_stock_probe=True,
+        fallback_visible_browser=False,
+    )
+
+    status = registry.update_options(
+        batch_id="scheduled-20260810-test",
+        username="kxx",
+        visible_browser=True,
+    )
+
+    assert current_link_options == (True, False)
+    assert status["visible_browser"] is True
+    assert registry.collection_options(
+        batch_id="scheduled-20260810-test",
+        fallback_with_stock_probe=True,
+        fallback_visible_browser=False,
+    ) == (True, True)
+    with pytest.raises(CollectionBatchBusyError, match="每日 09:00 自动任务"):
+        registry.update_options(
+            batch_id="scheduled-20260810-test",
+            username="another.admin",
+            visible_browser=False,
+        )
+
+    restored_registry = CollectionBatchRegistry(journal_path)
+    restored = restored_registry.event(
+        batch_id="scheduled-20260810-test",
+        client_id="scheduled-runner",
+        event="resume",
+        username="scheduled-task",
+        display_name="每日 09:00 自动任务",
+        completed=0,
+        total=2,
+        pending=2,
+        succeeded=0,
+        failed=0,
+        terminal=0,
+        reason="ERP 重启后恢复",
+        visible_browser=False,
+        source="scheduled",
+    )
+    assert restored["visible_browser"] is True
+
+
 def test_collection_batch_registry_appends_new_targets_to_active_tail() -> None:
     registry = CollectionBatchRegistry()
     registry.event(

@@ -1,3 +1,5 @@
+import { withStoreContext } from "./storeContext";
+
 export const PRODUCT_IMAGE_SIZE = {
   list: 192,
   detail: 640,
@@ -16,5 +18,5 @@ export function productThumbnailUrl(
     image_url: normalized,
     size: String(size),
   });
-  return `/api/erp/product-thumbnail?${query.toString()}`;
+  return withStoreContext(`/api/erp/product-thumbnail?${query.toString()}`);
 }

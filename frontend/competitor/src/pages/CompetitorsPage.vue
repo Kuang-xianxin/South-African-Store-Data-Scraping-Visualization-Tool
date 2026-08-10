@@ -73,6 +73,7 @@ import {
   isCollectionSessionBoundaryStatus,
   shouldPreserveActiveCollectionRequest,
 } from "../collectionRunLifecycle";
+import { canUpdateVisibleBrowserForBatch } from "../collectionBatchOptions";
 import type {
   CollectResult,
   CompetitorDateRange,
@@ -93,6 +94,7 @@ defineOptions({ name: "CompetitorsPage" });
 const props = defineProps<{
   canOperate?: boolean;
   canControlCollection?: boolean;
+  isAdmin?: boolean;
   currentUsername?: string;
   currentStoreName?: string;
   accessibleConnectedStoreCount?: number;
@@ -579,6 +581,13 @@ const sharedBatchBelongsToCurrentAccount = computed(
     && sharedBatchStatus.value.owner_username?.toLowerCase()
       === props.currentUsername?.toLowerCase(),
 );
+const canUpdateVisibleBrowser = computed(() =>
+  canUpdateVisibleBrowserForBatch(
+    Boolean(props.canControlCollection),
+    props.currentUsername,
+    sharedBatchStatus.value,
+  ),
+);
 const sharedBatchOwnerLabel = computed(() => {
   if (sharedBatchStatus.value.source === "scheduled") return "每日 09:00 自动任务";
   if (!sharedBatchBelongsToCurrentAccount.value) return sharedBatchOwner.value;
@@ -1022,35 +1031,38 @@ const autoResumeCountdown = computed(() => {
 
 onMounted(async () => {
   window.addEventListener("keydown", handleWindowKeydown);
-  window.addEventListener("beforeunload", closeCollectionClientChannel);
-  window.addEventListener(
-    AUTH_SESSION_ENDING_EVENT,
-    detachCollectionForSessionChange,
-  );
-  const checkpoint = readCollectionCheckpoint();
-  restoreCheckpointCollectionClientId(checkpoint);
-  await ensureUniqueCollectionClientId();
-  await Promise.all([
-    loadOverview(),
-    loadTargets(),
-    loadSharedBatchStatus(),
-  ]);
-  if (checkpoint) await restoreCollectionCheckpoint(checkpoint);
-  sharedBatchTimer = window.setInterval(
-    () => void loadSharedBatchStatus(),
-    2_000,
-  );
-  batchHeartbeatTimer = window.setInterval(() => {
-    if (collecting.value) void recordBatchEvent("heartbeat");
-  }, 10_000);
-  collectionClockTimer = window.setInterval(() => {
-    collectionClock.value = Date.now();
-    void maybeAutoResumeScheduledCollection();
-  }, 1_000);
-  if (restoredRunWasActive.value) {
-    void resumeInterruptedCollection();
-  } else {
-    void maybeAutoResumeScheduledCollection();
+  let checkpoint: CollectionCheckpoint | null = null;
+  if (props.isAdmin) {
+    window.addEventListener("beforeunload", closeCollectionClientChannel);
+    window.addEventListener(
+      AUTH_SESSION_ENDING_EVENT,
+      detachCollectionForSessionChange,
+    );
+    checkpoint = readCollectionCheckpoint();
+    restoreCheckpointCollectionClientId(checkpoint);
+    await ensureUniqueCollectionClientId();
+  }
+  const initialRequests: Array<Promise<void>> = [loadOverview(), loadTargets()];
+  if (props.isAdmin) initialRequests.push(loadSharedBatchStatus());
+  await Promise.all(initialRequests);
+  if (props.isAdmin) {
+    if (checkpoint) await restoreCollectionCheckpoint(checkpoint);
+    sharedBatchTimer = window.setInterval(
+      () => void loadSharedBatchStatus(),
+      2_000,
+    );
+    batchHeartbeatTimer = window.setInterval(() => {
+      if (collecting.value) void recordBatchEvent("heartbeat");
+    }, 10_000);
+    collectionClockTimer = window.setInterval(() => {
+      collectionClock.value = Date.now();
+      void maybeAutoResumeScheduledCollection();
+    }, 1_000);
+    if (restoredRunWasActive.value) {
+      void resumeInterruptedCollection();
+    } else {
+      void maybeAutoResumeScheduledCollection();
+    }
   }
 });
 
@@ -1467,7 +1479,7 @@ async function loadOverview() {
         appliedEndDate.value,
         ownStoreScope.value,
       ),
-      fetchCompetitorLinkHealth(),
+      props.isAdmin ? fetchCompetitorLinkHealth() : Promise.resolve([]),
     ]);
     competitors.value = overview.items;
     storeCompetitors.value = overview.store_items;
@@ -1505,8 +1517,11 @@ async function loadSharedBatchStatus() {
     sharedBatchStatus.value = status;
     if (
       status.active
-      && Boolean(props.currentUsername)
-      && status.owner_username?.toLowerCase() === props.currentUsername?.toLowerCase()
+      && canUpdateVisibleBrowserForBatch(
+        Boolean(props.canControlCollection),
+        props.currentUsername,
+        status,
+      )
     ) {
       withStockProbe.value = status.with_stock_probe;
       visibleBrowser.value = status.visible_browser;
@@ -1652,7 +1667,8 @@ async function addTarget() {
     if (result.personal_watchlist_member) {
       setPersonalWatchlistLocal(result.item.plid, true);
     }
-    await Promise.all([loadTargets(), loadSharedBatchStatus()]);
+    await loadTargets();
+    if (props.isAdmin) await loadSharedBatchStatus();
     targetManagerNotice.value = result.queued_to_active_batch
       ? `PLID${result.item.plid} 已保存并自动加入你的个人监控池，同时追加到当前运行批次队尾；断点中的原任务顺序保持不变。`
       : `PLID${result.item.plid} 已保存并自动加入你的个人监控池，将进入下一次采集清单。`;
@@ -1685,6 +1701,17 @@ function clearTargetManagerFeedback() {
   targetManagerError.value = "";
   targetManagerNotice.value = "";
   duplicateTarget.value = null;
+}
+
+async function togglePersonalWatchlistWorkspace() {
+  competitorSourceView.value = "competitor";
+  personalWatchlistFilter.value =
+    personalWatchlistFilter.value === "我的监控池" ? "全部" : "我的监控池";
+  await nextTick();
+  document.getElementById("true-competitor-panel")?.scrollIntoView({
+    behavior: "smooth",
+    block: "start",
+  });
 }
 
 function showDuplicateTarget(
@@ -2559,12 +2586,14 @@ function activeBatchBlockedMessage() {
 }
 
 async function updateVisibleBrowserSetting() {
-  persistCollectionCheckpoint();
   const status = sharedBatchStatus.value;
-  if (!status.active) return;
-  if (!sharedBatchBelongsToCurrentAccount.value || !status.batch_id) {
+  if (!status.active) {
+    persistCollectionCheckpoint();
+    return;
+  }
+  if (!canUpdateVisibleBrowser.value || !status.batch_id) {
     visibleBrowser.value = status.visible_browser;
-    showCollectionNotice("只能由当前批次所属账号修改显示浏览器设置。");
+    showCollectionNotice("当前账号无权修改运行批次的显示浏览器设置。");
     return;
   }
   try {
@@ -2572,6 +2601,7 @@ async function updateVisibleBrowserSetting() {
       status.batch_id,
       visibleBrowser.value,
     );
+    if (status.source !== "scheduled") persistCollectionCheckpoint();
     showCollectionActivityNotice(
       visibleBrowser.value
         ? "已同步到运行批次：从下一条链接开始显示库存探测浏览器。"
@@ -2579,6 +2609,7 @@ async function updateVisibleBrowserSetting() {
     );
   } catch (error) {
     visibleBrowser.value = status.visible_browser;
+    if (status.source !== "scheduled") persistCollectionCheckpoint();
     showCollectionNotice(
       error instanceof Error ? error.message : "更新显示浏览器设置失败",
     );
@@ -3335,21 +3366,51 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
       </div>
     </header>
 
-    <section class="collector panel">
-      <div class="section-heading">
-        <div>
-          <p class="section-kicker">持久化监控清单</p>
-          <h2>竞品链接管理</h2>
-        </div>
-        <p class="section-note">
-          新增链接会按新增顺序追加到当前运行批次队尾；需要提前检查时可另行点击插队
-        </p>
+    <section
+      class="panel personal-watchlist-summary-card personal-operator-workspace"
+      :class="{ 'operator-primary': !props.canControlCollection }"
+      aria-labelledby="personal-watchlist-workspace-title"
+    >
+      <div class="personal-watchlist-summary-copy">
+        <p class="section-kicker">当前账号专属工作区</p>
+        <strong id="personal-watchlist-workspace-title">
+          {{ props.currentUsername || "当前账号" }} 的个人监控池
+        </strong>
+        <span>
+          先处理你自己关注的真正竞品。粘贴新链接会自动加入当前账号的个人池，同时纳入共享每日采集；
+          其他账号看不到你的个人归类，加入或删除也不会影响全局历史和采集。
+        </span>
       </div>
-      <form class="target-add-row" @submit.prevent="addTarget">
+      <div class="personal-watchlist-summary-count" aria-label="当前账号个人监控池商品数量">
+        <strong>{{ personalWatchlistPlids.size }}</strong>
+        <span>个我的商品</span>
+      </div>
+      <button
+        type="button"
+        class="personal-watchlist-summary-action"
+        :class="{ active: personalWatchlistFilter === '我的监控池' }"
+        :aria-pressed="personalWatchlistFilter === '我的监控池'"
+        :disabled="
+          personalWatchlistPlids.size === 0
+          && personalWatchlistFilter !== '我的监控池'
+        "
+        @click="togglePersonalWatchlistWorkspace"
+      >
+        {{
+          personalWatchlistFilter === "我的监控池"
+            ? "返回全部真正竞品"
+            : personalWatchlistPlids.size
+              ? "查看我的个人监控池"
+              : "监控池暂无商品"
+        }}
+      </button>
+      <form class="target-add-row personal-watchlist-quick-add" @submit.prevent="addTarget">
+        <label for="personal-watchlist-link">加入我负责的竞品</label>
         <input
+          id="personal-watchlist-link"
           v-model="newTargetUrl"
           type="url"
-          aria-label="新增 Takealot 竞品链接"
+          aria-label="新增 Takealot 竞品链接并加入个人监控池"
           placeholder="粘贴 Takealot 商品链接，例如 https://www.takealot.com/.../PLID12345678"
           :disabled="targetManagerBusy === 'add' || !props.canOperate"
           @input="clearTargetManagerFeedback"
@@ -3359,7 +3420,7 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
           type="submit"
           :disabled="targetManagerBusy === 'add' || !props.canOperate"
         >
-          {{ targetManagerBusy === "add" ? "正在新增…" : "新增链接" }}
+          {{ targetManagerBusy === "add" ? "正在加入…" : "加入我的监控池" }}
         </button>
       </form>
       <p v-if="targetManagerError" class="target-manager-message error" role="alert">
@@ -3394,6 +3455,21 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
       <p v-if="targetManagerNotice" class="target-manager-message success" role="status">
         {{ targetManagerNotice }}
       </p>
+    </section>
+
+    <section
+      v-if="props.isAdmin"
+      class="collector panel shared-management-panel"
+    >
+      <div class="section-heading">
+        <div>
+          <p class="section-kicker">共享采集与管理</p>
+          <h2>全局链接与批次</h2>
+        </div>
+        <p class="section-note">
+          个人工作区之外的共享清单、插队、审计和管理员批次控制集中放在这里
+        </p>
+      </div>
       <template v-if="targets.length">
         <div class="target-list-panel">
           <button
@@ -3838,7 +3914,9 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
       </Teleport>
       <div class="collector-run-heading">
         <div>
-          <p class="section-kicker">建立与刷新观察样本</p>
+          <p class="section-kicker">
+            {{ props.canControlCollection ? "管理员批次控制" : "共享采集状态" }}
+          </p>
           <h3>批量采集真正竞品 + 自有链接</h3>
         </div>
         <span>
@@ -3910,11 +3988,7 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
             @change="updateVisibleBrowserSetting"
             :disabled="
               !withStockProbe
-              || !props.canControlCollection
-              || (
-                sharedBatchStatus.active
-                && !sharedBatchBelongsToCurrentAccount
-              )
+              || !canUpdateVisibleBrowser
             "
           />
           <span class="switch"></span>
@@ -4161,7 +4235,7 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
     </section>
 
     <section
-      v-if="linkHealth.length"
+      v-if="props.isAdmin && linkHealth.length"
       class="panel link-health-panel"
       :class="{ 'is-collapsed': !linkHealthOpen }"
     >
@@ -5455,7 +5529,10 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
                 </div>
               </section>
 
-              <section v-if="selected.来源 === 'competitor'" class="panel competitor-target-action-card">
+              <section
+                v-if="props.isAdmin && selected.来源 === 'competitor'"
+                class="panel competitor-target-action-card"
+              >
                 <div class="competitor-target-action-heading">
                   <div>
                     <p class="section-kicker">MONITORING LINK</p>
@@ -5573,7 +5650,10 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
                 </p>
               </section>
 
-              <section v-else class="panel competitor-target-action-card own-store-auto-target">
+              <section
+                v-else-if="props.isAdmin"
+                class="panel competitor-target-action-card own-store-auto-target"
+              >
                 <div class="competitor-target-action-heading">
                   <div>
                     <p class="section-kicker">AUTOMATIC FOLLOWER TARGET</p>

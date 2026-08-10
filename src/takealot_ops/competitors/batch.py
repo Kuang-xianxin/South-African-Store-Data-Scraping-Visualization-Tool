@@ -12,7 +12,7 @@ from datetime import UTC, datetime, timedelta
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from threading import RLock
-from typing import Generic, TypeVar
+from typing import Any, Generic, TypeVar
 
 
 T = TypeVar("T")
@@ -138,12 +138,20 @@ class CollectionBatchRegistry:
             self._expire_if_abandoned()
             if not self._state.active or self._state.batch_id != batch_id:
                 raise CollectionBatchBusyError("当前竞品批次已结束或批次编号不匹配")
-            if self._state.owner_username != username:
+            owner_matches = (
+                self._state.owner_username is not None
+                and self._state.owner_username.casefold() == username.casefold()
+            )
+            scheduled_controller = (
+                self._state.source == "scheduled" and username.casefold() == "kxx"
+            )
+            if not owner_matches and not scheduled_controller:
                 raise CollectionBatchBusyError(self._busy_message())
             if self._release_after_request:
                 raise CollectionBatchBusyError("当前商品正在完成停止清理，不能再修改批次设置")
             self._state.visible_browser = visible_browser
             self._state.updated_at = _utc_iso()
+            self._persist_journal()
             return asdict(self._state)
 
     def request_takeover(
@@ -383,6 +391,7 @@ class CollectionBatchRegistry:
                     self._release_after_request = False
                     self._owner_client_id = client_id
                     restored = self._journal_for_batch(batch_id)
+                    restored_visible_browser = restored.get("visible_browser")
                     self._state = CollectionBatchStatus(
                         active=True,
                         batch_id=batch_id,
@@ -392,7 +401,11 @@ class CollectionBatchRegistry:
                         event=event,
                         started_at=now,
                         with_stock_probe=with_stock_probe,
-                        visible_browser=visible_browser,
+                        visible_browser=(
+                            restored_visible_browser
+                            if isinstance(restored_visible_browser, bool)
+                            else visible_browser
+                        ),
                         queued_targets=restored["queued_targets"],
                         priority_targets=restored["priority_targets"],
                         prioritized_targets=restored["prioritized_targets"],
@@ -589,7 +602,7 @@ class CollectionBatchRegistry:
             return {}
         return payload if isinstance(payload, dict) else {}
 
-    def _journal_for_batch(self, batch_id: str) -> dict[str, list[dict[str, object]]]:
+    def _journal_for_batch(self, batch_id: str) -> dict[str, Any]:
         if self._journal.get("batch_id") != batch_id:
             self._journal = {}
             return {
@@ -598,8 +611,16 @@ class CollectionBatchRegistry:
                 "prioritized_targets": [],
                 "results": [],
                 "errors": [],
+                "visible_browser": None,
             }
-        result: dict[str, list[dict[str, object]]] = {}
+        restored_visible_browser = self._journal.get("visible_browser")
+        result: dict[str, Any] = {
+            "visible_browser": (
+                restored_visible_browser
+                if isinstance(restored_visible_browser, bool)
+                else None
+            )
+        }
         for key in (
             "queued_targets",
             "priority_targets",
@@ -625,6 +646,7 @@ class CollectionBatchRegistry:
             "prioritized_targets": self._state.prioritized_targets,
             "results": self._state.results,
             "errors": self._state.errors,
+            "visible_browser": self._state.visible_browser,
         }
         self._journal_path.parent.mkdir(parents=True, exist_ok=True)
         temporary_path = self._journal_path.with_suffix(

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import threading
 import time
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
@@ -429,7 +430,7 @@ def test_product_thumbnail_is_authenticated_and_rejects_untrusted_hosts(
         "TAKEALOT_DATABASE_URL",
         f"sqlite:///{database_path.as_posix()}",
     )
-    app = create_app(PROJECT_ROOT)
+    app = create_app(tmp_path)
 
     with TestClient(app, client=("127.0.0.1", 50000)) as client:
         unauthorized = client.get(
@@ -481,6 +482,78 @@ def test_product_thumbnail_is_authenticated_and_rejects_untrusted_hosts(
         assert requested_sizes == [640]
 
 
+def test_product_thumbnail_without_store_header_supports_limited_store_account(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    database_path = tmp_path / "erp-thumbnail-store-scope.db"
+    monkeypatch.setenv(
+        "TAKEALOT_DATABASE_URL",
+        f"sqlite:///{database_path.as_posix()}",
+    )
+    app = create_app(tmp_path)
+
+    with TestClient(app, client=("127.0.0.1", 50000)) as admin:
+        session = _bootstrap(admin)
+        csrf = str(session["csrf_token"])
+        created_store = admin.post(
+            "/api/auth/stores",
+            headers={"X-CSRF-Token": csrf},
+            json={"code": "store-03", "display_name": "Store 03"},
+        )
+        assert created_store.status_code == 200
+        store_id = int(created_store.json()["store"]["id"])
+        created_user = admin.post(
+            "/api/auth/users",
+            headers={"X-CSRF-Token": csrf},
+            json={
+                "username": "limited.images",
+                "display_name": "Limited Images",
+                "password": "operator-password-123",
+                "role": "operator",
+                "all_stores": False,
+                "store_ids": [store_id],
+            },
+        )
+        assert created_user.status_code == 200
+
+        thumbnail = tmp_path / "thumbnail.jpg"
+        thumbnail.write_bytes(b"\xff\xd8\xff\xd9")
+        requested_urls: list[str] = []
+
+        def fake_thumbnail_path(image_url: str, _size: int) -> Path:
+            requested_urls.append(image_url)
+            return thumbnail
+
+        monkeypatch.setattr(
+            app.state.product_thumbnail_cache,
+            "thumbnail_path",
+            fake_thumbnail_path,
+        )
+
+        with TestClient(app, client=("192.168.1.8", 50001)) as operator:
+            login = operator.post(
+                "/api/auth/login",
+                json={
+                    "username": "limited.images",
+                    "password": "operator-password-123",
+                },
+            )
+            assert login.status_code == 200
+            assert [
+                store["code"] for store in login.json()["user"]["accessible_stores"]
+            ] == ["store-03"]
+
+            response = operator.get(
+                "/api/erp/product-thumbnail",
+                params={"image_url": TRUSTED_PRODUCT_IMAGE_URL},
+            )
+
+        assert response.status_code == 200
+        assert response.headers["content-type"] == "image/jpeg"
+        assert requested_urls == [TRUSTED_PRODUCT_IMAGE_URL]
+
+
 def test_erp_requires_login_and_bootstraps_only_from_loopback(
     tmp_path: Path,
     monkeypatch,
@@ -490,7 +563,13 @@ def test_erp_requires_login_and_bootstraps_only_from_loopback(
         "TAKEALOT_DATABASE_URL",
         f"sqlite:///{database_path.as_posix()}",
     )
-    app = create_app(PROJECT_ROOT)
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    for config_name in ("anomaly_rules.yaml", "sale_status_rules.yaml"):
+        (config_dir / config_name).write_bytes(
+            (PROJECT_ROOT / "config" / config_name).read_bytes()
+        )
+    app = create_app(tmp_path)
 
     with TestClient(app, client=("192.168.1.8", 50000)) as remote:
         status = remote.get("/api/auth/status")
@@ -539,7 +618,7 @@ def test_store_assignments_scale_and_all_store_accounts_include_future_stores(
         "TAKEALOT_DATABASE_URL",
         f"sqlite:///{database_path.as_posix()}",
     )
-    app = create_app(PROJECT_ROOT)
+    app = create_app(tmp_path)
 
     with TestClient(app, client=("127.0.0.1", 50000)) as admin:
         session = _bootstrap(admin)
@@ -725,7 +804,7 @@ def test_store_summary_compares_only_accessible_connected_stores(
     database_path = tmp_path / "erp-store-summary.db"
     database_url = f"sqlite:///{database_path.as_posix()}"
     monkeypatch.setenv("TAKEALOT_DATABASE_URL", database_url)
-    app = create_app(PROJECT_ROOT)
+    app = create_app(tmp_path)
 
     with TestClient(app, client=("127.0.0.1", 50000)) as admin:
         session = _bootstrap(admin)
@@ -950,7 +1029,7 @@ def test_public_competitor_module_does_not_require_store_assignment(
         "TAKEALOT_DATABASE_URL",
         f"sqlite:///{database_path.as_posix()}",
     )
-    app = create_app(PROJECT_ROOT)
+    app = create_app(tmp_path)
 
     with TestClient(app, client=("127.0.0.1", 50000)) as admin:
         session = _bootstrap(admin)
@@ -1032,7 +1111,7 @@ def test_session_lasts_seven_days_and_slides_after_activity(
     database_path = tmp_path / "erp.db"
     database_url = f"sqlite:///{database_path.as_posix()}"
     monkeypatch.setenv("TAKEALOT_DATABASE_URL", database_url)
-    app = create_app(PROJECT_ROOT)
+    app = create_app(tmp_path)
 
     with TestClient(app, client=("127.0.0.1", 50000)) as client:
         issued = client.post(
@@ -1103,7 +1182,7 @@ def test_viewer_can_read_but_cannot_run_actions(
         "TAKEALOT_DATABASE_URL",
         f"sqlite:///{database_path.as_posix()}",
     )
-    app = create_app(PROJECT_ROOT)
+    app = create_app(tmp_path)
 
     with TestClient(app, client=("127.0.0.1", 50000)) as admin:
         session = _bootstrap(admin)
@@ -1182,7 +1261,7 @@ def test_keyword_traffic_routes_detect_title_change(
     database_path = tmp_path / "erp-keyword-traffic.db"
     database_url = f"sqlite:///{database_path.as_posix()}"
     monkeypatch.setenv("TAKEALOT_DATABASE_URL", database_url)
-    app = create_app(PROJECT_ROOT)
+    app = create_app(tmp_path)
 
     with TestClient(app, client=("127.0.0.1", 50000)) as client:
         _bootstrap(client)
@@ -1272,7 +1351,7 @@ def test_operator_can_confirm_and_revoke_logistics_links(
 
     monkeypatch.setattr(LogisticsOverviewService, "confirm_candidate", confirm_candidate)
     monkeypatch.setattr(LogisticsOverviewService, "revoke_link", revoke_link)
-    app = create_app(PROJECT_ROOT)
+    app = create_app(tmp_path)
 
     with TestClient(app, client=("127.0.0.1", 50000)) as admin:
         session = _bootstrap(admin)
@@ -1328,7 +1407,7 @@ def test_selection_template_and_account_permission_overrides(
         "TAKEALOT_DATABASE_URL",
         f"sqlite:///{database_path.as_posix()}",
     )
-    app = create_app(PROJECT_ROOT)
+    app = create_app(tmp_path)
 
     with TestClient(app, client=("127.0.0.1", 50000)) as admin:
         session = _bootstrap(admin)
@@ -1990,6 +2069,126 @@ def test_loopback_schedule_starts_visible_batch_and_kxx_can_stop_it(
         assert repeated.json()["state"] == "already_handled"
 
 
+def test_kxx_changes_scheduled_visible_browser_from_the_next_link(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    database_path = tmp_path / "scheduled-visible-options.db"
+    monkeypatch.setenv(
+        "TAKEALOT_DATABASE_URL",
+        f"sqlite:///{database_path.as_posix()}",
+    )
+    first_started = threading.Event()
+    release_first = threading.Event()
+    observed_visible_browser: list[bool] = []
+
+    class RecordingCollector:
+        def __init__(self, **_: object) -> None:
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_: object) -> None:
+            pass
+
+        async def collect(
+            self,
+            url: str,
+            *,
+            visible_browser: bool = False,
+            **_: object,
+        ) -> CompetitorCollectionResult:
+            import asyncio
+
+            call_index = len(observed_visible_browser)
+            observed_visible_browser.append(visible_browser)
+            if call_index == 0:
+                first_started.set()
+                await asyncio.to_thread(release_first.wait)
+            plid = url.rsplit("PLID", 1)[1]
+            return CompetitorCollectionResult(
+                plid=plid,
+                title=f"Product {plid}",
+                succeeded=True,
+                message="采集成功",
+            )
+
+    monkeypatch.setattr("takealot_ops.erp.web.CompetitorCollector", RecordingCollector)
+    monkeypatch.setattr(
+        "takealot_ops.erp.web._competitor_link_cooldown_seconds",
+        lambda *_: 0.0,
+    )
+    app = create_app(tmp_path)
+
+    with TestClient(app, client=("127.0.0.1", 50000)) as client:
+        session = _bootstrap(client)
+        csrf = str(session["csrf_token"])
+        headers = {"X-CSRF-Token": csrf}
+        created_admin = client.post(
+            "/api/auth/users",
+            headers=headers,
+            json={
+                "username": "admin.two",
+                "display_name": "Admin Two",
+                "password": "operator-password-123",
+                "role": "admin",
+            },
+        )
+        assert created_admin.status_code == 200
+        for plid in ("12345678", "87654321"):
+            created = client.post(
+                "/api/competitors/targets",
+                headers=headers,
+                json={"url": f"https://www.takealot.com/p/PLID{plid}"},
+            )
+            assert created.status_code == 200
+
+        try:
+            triggered = client.post("/api/internal/competitors/scheduled-trigger", json={})
+            assert triggered.status_code == 200
+            assert triggered.json()["accepted"] is True
+            assert first_started.wait(2)
+
+            status = client.get("/api/competitors/batch-status").json()
+            assert status["source"] == "scheduled"
+            assert status["current_plid"] == "12345678"
+            assert observed_visible_browser == [False]
+            options = client.post(
+                "/api/competitors/batch-options",
+                headers=headers,
+                json={"batch_id": status["batch_id"], "visible_browser": True},
+            )
+            assert options.status_code == 200
+            assert options.json()["status"]["visible_browser"] is True
+            assert observed_visible_browser == [False]
+
+            logged_out = client.post("/api/auth/logout", headers=headers)
+            assert logged_out.status_code == 200
+            login = client.post(
+                "/api/auth/login",
+                json={
+                    "username": "admin.two",
+                    "password": "operator-password-123",
+                },
+            )
+            assert login.status_code == 200
+            blocked = client.post(
+                "/api/competitors/batch-options",
+                headers={"X-CSRF-Token": str(login.json()["csrf_token"])},
+                json={"batch_id": status["batch_id"], "visible_browser": False},
+            )
+            assert blocked.status_code == 403
+
+            release_first.set()
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline and len(observed_visible_browser) < 2:
+                time.sleep(0.01)
+            assert observed_visible_browser == [False, True]
+        finally:
+            release_first.set()
+
+
 def test_schedule_trigger_rejects_non_loopback_client(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv(
         "TAKEALOT_DATABASE_URL",
@@ -2145,6 +2344,80 @@ def test_only_kxx_controls_batch_while_other_admin_can_add_and_prioritize(
         )
         assert completed.status_code == 200
         assert completed.json()["status"]["active"] is False
+
+
+def test_operator_only_adds_targets_and_manages_personal_watchlist(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    database_path = tmp_path / "operator-competitor-workspace.db"
+    monkeypatch.setenv(
+        "TAKEALOT_DATABASE_URL",
+        f"sqlite:///{database_path.as_posix()}",
+    )
+    app = create_app(tmp_path)
+
+    with TestClient(app, client=("127.0.0.1", 50000)) as admin:
+        session = _bootstrap(admin)
+        _create_operator(
+            admin,
+            str(session["csrf_token"]),
+            username="operator.competitors",
+        )
+
+    with TestClient(app, client=("192.168.1.8", 50001)) as operator:
+        login = operator.post(
+            "/api/auth/login",
+            json={
+                "username": "operator.competitors",
+                "password": "operator-password-123",
+            },
+        )
+        assert login.status_code == 200
+        headers = {"X-CSRF-Token": str(login.json()["csrf_token"])}
+
+        created = operator.post(
+            "/api/competitors/targets",
+            headers=headers,
+            json={"url": "https://www.takealot.com/example/PLID12345678"},
+        )
+        assert created.status_code == 200
+        assert created.json()["personal_watchlist_member"] is True
+        assert operator.get("/api/competitors/personal-watchlist").json()["count"] == 1
+        assert operator.get("/api/competitors/targets").status_code == 200
+
+        restricted_responses = [
+            operator.patch(
+                "/api/competitors/targets/12345678",
+                headers=headers,
+                json={
+                    "url": (
+                        "https://www.takealot.com/example/PLID12345678?variant=blue"
+                    )
+                },
+            ),
+            operator.delete(
+                "/api/competitors/targets/12345678",
+                headers=headers,
+            ),
+            operator.post(
+                "/api/competitors/targets/12345678/prioritize",
+                headers=headers,
+            ),
+            operator.get("/api/competitors/target-audits"),
+            operator.get("/api/competitors/link-health"),
+        ]
+        assert [response.status_code for response in restricted_responses] == [
+            403,
+            403,
+            403,
+            403,
+            403,
+        ]
+        assert all(
+            "仅限管理员" in response.json()["detail"]
+            for response in restricted_responses
+        )
 
 
 def test_collect_auto_adds_and_groups_new_offer_targets_once(
@@ -2709,7 +2982,7 @@ def test_csrf_and_last_admin_protection(
         "TAKEALOT_DATABASE_URL",
         f"sqlite:///{database_path.as_posix()}",
     )
-    app = create_app(PROJECT_ROOT)
+    app = create_app(tmp_path)
 
     with TestClient(app, client=("127.0.0.1", 50000)) as client:
         session = _bootstrap(client)
@@ -2744,7 +3017,7 @@ def test_erp_rejects_unsupported_quadrant_percentile_after_login(
         "TAKEALOT_DATABASE_URL",
         f"sqlite:///{(tmp_path / 'erp.db').as_posix()}",
     )
-    app = create_app(PROJECT_ROOT)
+    app = create_app(tmp_path)
     with TestClient(app, client=("127.0.0.1", 50000)) as client:
         _bootstrap(client)
         response = client.get("/api/erp/quadrants?as_of=2026-07-20&percentile=40")

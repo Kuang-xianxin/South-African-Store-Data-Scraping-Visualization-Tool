@@ -909,9 +909,17 @@ def create_app(project_root: Path | None = None) -> FastAPI:
         if user.username.casefold() != "kxx":
             raise HTTPException(
                 status_code=403,
+                detail="竞品批次的开始、继续和停止仅限 kxx 账号",
+            )
+
+    def require_competitor_admin(request: Request) -> None:
+        user = request.state.erp_user
+        if user.role != "admin":
+            raise HTTPException(
+                status_code=403,
                 detail=(
-                    "竞品批次的开始、继续和停止仅限 kxx 账号；"
-                    "当前账号仍可新增链接和插队"
+                    "全局竞品清单、插队、审计和失效复核仅限管理员；"
+                    "当前账号仍可新增链接并管理自己的个人监控池"
                 ),
             )
 
@@ -972,11 +980,10 @@ def create_app(project_root: Path | None = None) -> FastAPI:
                 session_token,
                 renewed=session.renewed,
             )
-        requested_store_code = (
-            request.headers.get(STORE_CODE_HEADER)
-            or request.query_params.get("store_code")
-            or "current"
-        ).strip().casefold()
+        requested_store_value = request.headers.get(
+            STORE_CODE_HEADER
+        ) or request.query_params.get("store_code")
+        requested_store_code = (requested_store_value or "current").strip().casefold()
         accessible_store = next(
             (
                 store
@@ -985,6 +992,16 @@ def create_app(project_root: Path | None = None) -> FastAPI:
             ),
             None,
         )
+        if (
+            accessible_store is None
+            and requested_store_value is None
+            and path == "/api/erp/product-thumbnail"
+        ):
+            # An <img> request cannot attach the API client's X-Store-Code header.
+            # Keep cached/older frontends working for accounts that are assigned only
+            # non-"current" stores; the endpoint is still permission-gated and can
+            # fetch only whitelisted public Takealot cover-image URLs.
+            accessible_store = next(iter(session.user.accessible_stores), None)
         requires_store = _requires_connected_store_access(path)
         if accessible_store is None and requires_store:
             response = JSONResponse(
@@ -2144,7 +2161,10 @@ def create_app(project_root: Path | None = None) -> FastAPI:
         }
 
     @app.get("/api/competitors/link-health")
-    def competitor_link_health() -> dict[str, list[dict[str, Any]]]:
+    def competitor_link_health(
+        request: Request,
+    ) -> dict[str, list[dict[str, Any]]]:
+        require_competitor_admin(request)
         settings = DashboardSettings.from_env(root)
         engine = create_read_only_erp_engine(settings.database_url)
         try:
@@ -2455,6 +2475,7 @@ def create_app(project_root: Path | None = None) -> FastAPI:
         payload: CompetitorTargetRequest,
         request: Request,
     ) -> dict[str, object]:
+        require_competitor_admin(request)
         normalized_plid, url = _validated_competitor_target_url(payload.url)
         if normalized_plid != plid:
             raise HTTPException(
@@ -2505,6 +2526,7 @@ def create_app(project_root: Path | None = None) -> FastAPI:
         plid: str,
         request: Request,
     ) -> dict[str, object]:
+        require_competitor_admin(request)
         user = request.state.erp_user
         settings = DashboardSettings.from_env(root)
         engine = create_engine_for_settings(settings)
@@ -2547,6 +2569,7 @@ def create_app(project_root: Path | None = None) -> FastAPI:
         request: Request,
         payload: CompetitorTargetPriorityRequest | None = None,
     ) -> dict[str, object]:
+        require_competitor_admin(request)
         user = request.state.erp_user
         source = payload.source if payload is not None else "manual"
         settings = DashboardSettings.from_env(root)
@@ -2681,11 +2704,13 @@ def create_app(project_root: Path | None = None) -> FastAPI:
 
     @app.get("/api/competitors/target-audits")
     def competitor_target_audits(
+        request: Request,
         start_date: date | None = Query(default=None),
         end_date: date | None = Query(default=None),
         page: int = Query(default=1, ge=1),
         page_size: int = Query(default=20, ge=1, le=100),
     ) -> dict[str, object]:
+        require_competitor_admin(request)
         if start_date is not None and end_date is not None and start_date > end_date:
             raise HTTPException(status_code=422, detail="开始日期不能晚于结束日期")
         settings = DashboardSettings.from_env(root)

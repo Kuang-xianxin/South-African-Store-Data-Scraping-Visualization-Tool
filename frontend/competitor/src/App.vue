@@ -327,6 +327,7 @@ const activePageProps = computed(() => {
       ...common,
       canOperate: canCollectCompetitors.value,
       canControlCollection: canControlCompetitorCollection.value,
+      isAdmin: session.value?.user.role === "admin",
       currentUsername: session.value?.user.username ?? "",
       currentStoreName: selectedStore.value?.display_name ?? "当前店铺",
       accessibleConnectedStoreCount: accessibleConnectedStoreCount.value,
