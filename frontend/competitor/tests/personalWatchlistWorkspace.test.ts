@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   buildPersonalWatchlistWorkspaceCards,
   personalWatchlistPageForPlid,
+  recountPersonalWatchlistLibraries,
 } from "../src/personalWatchlistWorkspace.ts";
 import type {
   CompetitorItem,
@@ -82,4 +83,43 @@ test("a located membership switches to the page containing its card", () => {
   assert.equal(personalWatchlistPageForPlid(cards, "7", 6), 2);
   assert.equal(personalWatchlistPageForPlid(cards, "14", 6), 3);
   assert.equal(personalWatchlistPageForPlid(cards, "99", 6), null);
+});
+
+test("library counts immediately follow local membership deletion", () => {
+  const libraries = [
+    {
+      id: 3,
+      name: "红光库",
+      created_at: "2026-08-10T01:00:00Z",
+      updated_at: "2026-08-10T01:00:00Z",
+      item_count: 1,
+    },
+    {
+      id: 7,
+      name: "空白库",
+      created_at: "2026-08-10T02:00:00Z",
+      updated_at: "2026-08-10T02:00:00Z",
+      item_count: 0,
+    },
+  ];
+  const membership = {
+    plid: "12345678",
+    added_at: "2026-08-10T03:00:00Z",
+    source: "competitor" as const,
+    library_ids: [3],
+  };
+
+  assert.deepEqual(
+    recountPersonalWatchlistLibraries(libraries, [membership]).map(
+      (library) => [library.name, library.item_count],
+    ),
+    [["红光库", 1], ["空白库", 0]],
+  );
+  assert.deepEqual(
+    recountPersonalWatchlistLibraries(libraries, []).map(
+      (library) => [library.name, library.item_count],
+    ),
+    [["红光库", 0], ["空白库", 0]],
+  );
+  assert.equal(libraries[0]?.item_count, 1);
 });

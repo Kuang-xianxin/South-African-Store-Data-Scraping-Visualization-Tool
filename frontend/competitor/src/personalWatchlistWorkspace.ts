@@ -2,6 +2,7 @@ import type {
   CompetitorItem,
   CompetitorPersonalWatchlistItem,
   CompetitorTargetItem,
+  PersonalWatchlistLibrary,
 } from "./types";
 
 export interface PersonalWatchlistWorkspaceCard {
@@ -38,4 +39,22 @@ export function personalWatchlistPageForPlid(
   if (pageSize <= 0) return null;
   const index = cards.findIndex((item) => item.plid === plid);
   return index < 0 ? null : Math.floor(index / pageSize) + 1;
+}
+
+export function recountPersonalWatchlistLibraries(
+  libraries: PersonalWatchlistLibrary[],
+  memberships: CompetitorPersonalWatchlistItem[],
+): PersonalWatchlistLibrary[] {
+  const counts = new Map(libraries.map((library) => [library.id, 0]));
+  memberships.forEach((membership) => {
+    new Set(membership.library_ids).forEach((libraryId) => {
+      if (counts.has(libraryId)) {
+        counts.set(libraryId, (counts.get(libraryId) ?? 0) + 1);
+      }
+    });
+  });
+  return libraries.map((library) => ({
+    ...library,
+    item_count: counts.get(library.id) ?? 0,
+  }));
 }

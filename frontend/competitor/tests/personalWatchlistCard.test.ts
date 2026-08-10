@@ -103,6 +103,7 @@ test("personal type libraries are account-local, multi-selectable and require a 
   assert.match(pageSource, /filteredPersonalWatchlistCards/);
   assert.match(pageSource, /personalWatchlistLibraryFilter === library\.id/);
   assert.match(pageSource, /unclassifiedPersonalWatchlistCount/);
+  assert.match(pageSource, /recountPersonalWatchlistLibraries\(/);
   assert.match(styleSource, /\.personal-watchlist-library-modal\s*\{/);
   assert.match(styleSource, /\.personal-watchlist-library-filter\s*\{/);
   assert.match(styleSource, /background:\s*#fff/);

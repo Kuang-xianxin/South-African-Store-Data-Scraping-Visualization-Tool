@@ -62,6 +62,7 @@ import { PRODUCT_IMAGE_SIZE, productThumbnailUrl } from "../productImages";
 import {
   buildPersonalWatchlistWorkspaceCards,
   personalWatchlistPageForPlid,
+  recountPersonalWatchlistLibraries,
   type PersonalWatchlistWorkspaceCard,
 } from "../personalWatchlistWorkspace";
 import {
@@ -1764,6 +1765,10 @@ function setPersonalWatchlistLocal(
     );
   }
   personalWatchlistPlids.value = next;
+  personalWatchlistLibraries.value = recountPersonalWatchlistLibraries(
+    personalWatchlistLibraries.value,
+    personalWatchlistItems.value,
+  );
 }
 
 async function persistPersonalWatchlistAddition(plid: string): Promise<boolean> {
