@@ -58,6 +58,7 @@ test("personal workspace keeps every membership even before first capture", () =
 
   assert.deepEqual(cards.map((item) => item.plid), ["11", "22", "33", "44"]);
   assert.equal(cards[0]?.competitor, competitor);
+  assert.equal(cards[0]?.personalMember, true);
   assert.equal(cards[0]?.target, null);
   assert.equal(cards[1]?.target, target);
   assert.deepEqual(cards[1]?.libraryIds, [3]);
@@ -69,11 +70,51 @@ test("personal workspace keeps every membership even before first capture", () =
   assert.equal(cards[3]?.competitor, ownStoreProduct);
 });
 
+test("shared library cards stay separate from personal membership", () => {
+  const sharedCompetitor = {
+    plid: "55",
+    来源: "competitor",
+    商品: "Shared captured product",
+  } as CompetitorItem;
+  const cards = buildPersonalWatchlistWorkspaceCards(
+    [
+      {
+        plid: "11",
+        added_at: "2026-08-11T01:00:00Z",
+        source: "competitor",
+        library_ids: [],
+      },
+    ],
+    [],
+    [sharedCompetitor],
+    [
+      {
+        plid: "55",
+        added_at: "2026-08-11T02:00:00Z",
+        library_ids: [8],
+      },
+      {
+        plid: "11",
+        added_at: "2026-08-11T03:00:00Z",
+        library_ids: [8],
+      },
+    ],
+  );
+
+  assert.deepEqual(cards.map((item) => item.plid), ["11", "55"]);
+  assert.equal(cards[0]?.personalMember, true);
+  assert.equal(cards[1]?.personalMember, false);
+  assert.equal(cards[1]?.source, "competitor");
+  assert.deepEqual(cards[1]?.libraryIds, [8]);
+  assert.equal(cards[1]?.competitor, sharedCompetitor);
+});
+
 test("a located membership switches to the page containing its card", () => {
   const cards = Array.from({ length: 14 }, (_, index) => ({
     plid: String(index + 1),
     addedAt: "",
     source: "competitor" as const,
+    personalMember: true,
     libraryIds: [],
     competitor: null,
     target: null,

@@ -9,12 +9,14 @@ import {
   createCompetitorTarget,
   createPersonalWatchlistLibrary,
   deleteCompetitorPersonalWatchlistItem,
+  deletePersonalWatchlistLibraryItem,
   deletePersonalWatchlistLibrary,
   deleteCompetitorTarget,
   fetchCompetitorBatchStatus,
   fetchCompetitorDetail,
   fetchCompetitorLinkHealth,
   fetchCompetitorPersonalWatchlist,
+  fetchPersonalWatchlistShareUsers,
   fetchCompetitorTargetAudits,
   fetchCompetitorTargets,
   fetchCompetitorStoreTargets,
@@ -27,6 +29,7 @@ import {
   updateCompetitorTarget,
   updateCompetitorBatchOptions,
   updatePersonalWatchlistItemLibraries,
+  updatePersonalWatchlistLibraryShares,
   updatePersonalWatchlistSettings,
   type CompetitorBatchStatus,
 } from "../api";
@@ -96,6 +99,9 @@ import type {
   OwnFollowerHistoryItem,
   OwnStoreScope,
   PersonalWatchlistLibrary,
+  PersonalWatchlistLibrarySharePermission,
+  PersonalWatchlistSharedItem,
+  PersonalWatchlistShareUser,
 } from "../types";
 import { formatChinaDateTime } from "../time";
 
@@ -190,6 +196,7 @@ let collectionClientChannel: BroadcastChannel | null = null;
 const rawUrls = ref("");
 const targets = ref<CompetitorTargetItem[]>([]);
 const personalWatchlistItems = ref<CompetitorPersonalWatchlistItem[]>([]);
+const personalWatchlistSharedItems = ref<PersonalWatchlistSharedItem[]>([]);
 const personalWatchlistPlids = ref<Set<string>>(new Set());
 const personalWatchlistBusyPlid = ref("");
 const personalWatchlistError = ref("");
@@ -211,6 +218,15 @@ const personalWatchlistEditingLibraryName = ref("");
 const personalWatchlistLibraryBusy = ref(false);
 const personalWatchlistLibraryError = ref("");
 const personalWatchlistLibraryNotice = ref("");
+const personalWatchlistShareUsers = ref<PersonalWatchlistShareUser[]>([]);
+const personalWatchlistShareUsersLoaded = ref(false);
+const personalWatchlistShareUsersLoading = ref(false);
+const personalWatchlistShareUserQuery = ref("");
+const personalWatchlistSharingLibraryId = ref<number | null>(null);
+const personalWatchlistShareDraft = ref<Array<{
+  user_id: number;
+  permission: PersonalWatchlistLibrarySharePermission;
+}>>([]);
 const pendingTargetAfterLibrarySetup = ref("");
 const pendingPersonalWatchlistPlidAfterLibrarySetup = ref("");
 const storeTargets = ref<CompetitorStoreTargetItem[]>([]);
@@ -528,23 +544,56 @@ const offerTrendXAxisTicks = computed(() => {
 const competitorsByPlid = computed(
   () => new Map(allCompetitorItems.value.map((item) => [item.plid, item])),
 );
+const ownedPersonalWatchlistLibraries = computed(() =>
+  personalWatchlistLibraries.value.filter((library) => library.access === "owner"),
+);
+const sharedPersonalWatchlistLibraries = computed(() =>
+  personalWatchlistLibraries.value.filter((library) => library.access !== "owner"),
+);
+const activePersonalWatchlistLibrary = computed(() => {
+  const filter = personalWatchlistLibraryFilter.value;
+  if (typeof filter !== "number") return null;
+  return personalWatchlistLibraries.value.find((library) => library.id === filter) ?? null;
+});
+const sharingPersonalWatchlistLibrary = computed(() => {
+  const libraryId = personalWatchlistSharingLibraryId.value;
+  if (libraryId === null) return null;
+  return ownedPersonalWatchlistLibraries.value.find(
+    (library) => library.id === libraryId,
+  ) ?? null;
+});
+const filteredPersonalWatchlistShareUsers = computed(() => {
+  const query = personalWatchlistShareUserQuery.value.trim().toLocaleLowerCase();
+  if (!query) return personalWatchlistShareUsers.value;
+  return personalWatchlistShareUsers.value.filter((user) =>
+    [user.display_name, user.username]
+      .some((value) => value.toLocaleLowerCase().includes(query)),
+  );
+});
 const personalWatchlistCards = computed(() =>
   buildPersonalWatchlistWorkspaceCards(
     personalWatchlistItems.value,
     targets.value,
     allCompetitorItems.value,
+    personalWatchlistSharedItems.value,
   ),
 );
 const filteredPersonalWatchlistCards = computed(() => {
   const filter = personalWatchlistLibraryFilter.value;
-  if (filter === "all") return personalWatchlistCards.value;
+  if (filter === "all") {
+    return personalWatchlistCards.value.filter((card) => card.personalMember);
+  }
   if (filter === "unclassified") {
-    return personalWatchlistCards.value.filter((card) => !card.libraryIds.length);
+    return personalWatchlistCards.value.filter(
+      (card) => card.personalMember && !card.libraryIds.length,
+    );
   }
   return personalWatchlistCards.value.filter((card) => card.libraryIds.includes(filter));
 });
 const unclassifiedPersonalWatchlistCount = computed(
-  () => personalWatchlistCards.value.filter((card) => !card.libraryIds.length).length,
+  () => personalWatchlistCards.value.filter(
+    (card) => card.personalMember && !card.libraryIds.length,
+  ).length,
 );
 const personalWatchlistPageCount = computed(() =>
   Math.max(
@@ -1719,6 +1768,7 @@ function applyPersonalWatchlistPayload(
   payload: CompetitorPersonalWatchlistPayload,
 ): void {
   personalWatchlistItems.value = payload.items;
+  personalWatchlistSharedItems.value = payload.shared_items ?? [];
   personalWatchlistPlids.value = new Set(payload.items.map((item) => item.plid));
   personalWatchlistLibraries.value = payload.libraries;
   personalWatchlistDefaultConfigured.value = payload.default_library_configured;
@@ -1746,6 +1796,9 @@ function setPersonalWatchlistLocal(
   const next = new Set(personalWatchlistPlids.value);
   if (included) {
     next.add(plid);
+    personalWatchlistSharedItems.value = personalWatchlistSharedItems.value.filter(
+      (item) => item.plid !== plid,
+    );
     const existing = personalWatchlistItems.value.find((item) => item.plid === plid);
     const nextMembership = membership ?? existing ?? {
       plid,
@@ -1768,12 +1821,14 @@ function setPersonalWatchlistLocal(
   personalWatchlistLibraries.value = recountPersonalWatchlistLibraries(
     personalWatchlistLibraries.value,
     personalWatchlistItems.value,
+    personalWatchlistSharedItems.value,
   );
 }
 
 async function persistPersonalWatchlistAddition(plid: string): Promise<boolean> {
   const result = await addCompetitorPersonalWatchlistItem(plid);
   setPersonalWatchlistLocal(plid, true, result.item);
+  await loadPersonalWatchlist();
   return result.created;
 }
 
@@ -1783,7 +1838,27 @@ function personalWatchlistLibraryNames(
   const selectedIds = new Set(card.libraryIds);
   return personalWatchlistLibraries.value
     .filter((library) => selectedIds.has(library.id))
-    .map((library) => library.name);
+    .map((library) => library.access === "owner"
+      ? library.name
+      : `${library.name} · ${library.owner_display_name}共享`);
+}
+
+async function loadPersonalWatchlistShareUsers(force = false): Promise<void> {
+  if (
+    personalWatchlistShareUsersLoading.value
+    || (personalWatchlistShareUsersLoaded.value && !force)
+  ) return;
+  personalWatchlistShareUsersLoading.value = true;
+  try {
+    personalWatchlistShareUsers.value = await fetchPersonalWatchlistShareUsers();
+    personalWatchlistShareUsersLoaded.value = true;
+  } catch (error) {
+    personalWatchlistLibraryError.value = error instanceof Error
+      ? error.message
+      : "系统用户列表读取失败";
+  } finally {
+    personalWatchlistShareUsersLoading.value = false;
+  }
 }
 
 function openPersonalWatchlistLibrarySettings(): void {
@@ -1794,6 +1869,7 @@ function openPersonalWatchlistLibrarySettings(): void {
   personalWatchlistLibraryNotice.value = "";
   personalWatchlistLibraryModalOpen.value = true;
   document.body.style.overflow = "hidden";
+  void loadPersonalWatchlistShareUsers();
 }
 
 function openPersonalWatchlistCardLibraries(
@@ -1806,6 +1882,7 @@ function openPersonalWatchlistCardLibraries(
   personalWatchlistLibraryNotice.value = "";
   personalWatchlistLibraryModalOpen.value = true;
   document.body.style.overflow = "hidden";
+  void loadPersonalWatchlistShareUsers();
 }
 
 function promptForPersonalWatchlistDefault(url: string): void {
@@ -1830,6 +1907,9 @@ function closePersonalWatchlistLibraryModal(): void {
   personalWatchlistLibrarySelection.value = [];
   personalWatchlistEditingLibraryId.value = null;
   personalWatchlistEditingLibraryName.value = "";
+  personalWatchlistSharingLibraryId.value = null;
+  personalWatchlistShareDraft.value = [];
+  personalWatchlistShareUserQuery.value = "";
   pendingTargetAfterLibrarySetup.value = "";
   pendingPersonalWatchlistPlidAfterLibrarySetup.value = "";
   document.body.style.overflow = "";
@@ -1887,6 +1967,83 @@ async function savePersonalWatchlistLibraryRename(): Promise<void> {
   }
 }
 
+function openPersonalWatchlistLibrarySharing(library: PersonalWatchlistLibrary): void {
+  if (library.access !== "owner") return;
+  personalWatchlistSharingLibraryId.value = library.id;
+  personalWatchlistShareDraft.value = library.shares.map((share) => ({
+    user_id: share.user_id,
+    permission: share.permission,
+  }));
+  personalWatchlistShareUserQuery.value = "";
+  personalWatchlistLibraryError.value = "";
+  personalWatchlistLibraryNotice.value = "";
+  void loadPersonalWatchlistShareUsers();
+}
+
+function personalWatchlistSharePermissionFor(
+  userId: number,
+): PersonalWatchlistLibrarySharePermission | null {
+  return personalWatchlistShareDraft.value.find(
+    (share) => share.user_id === userId,
+  )?.permission ?? null;
+}
+
+function setPersonalWatchlistShareEnabled(userId: number, event: Event): void {
+  const enabled = (event.target as HTMLInputElement).checked;
+  const existing = personalWatchlistSharePermissionFor(userId);
+  if (enabled && existing === null) {
+    const nextShare: {
+      user_id: number;
+      permission: PersonalWatchlistLibrarySharePermission;
+    } = { user_id: userId, permission: "read" };
+    personalWatchlistShareDraft.value = [
+      ...personalWatchlistShareDraft.value,
+      nextShare,
+    ].sort((left, right) => left.user_id - right.user_id);
+  } else if (!enabled) {
+    personalWatchlistShareDraft.value = personalWatchlistShareDraft.value.filter(
+      (share) => share.user_id !== userId,
+    );
+  }
+}
+
+function setPersonalWatchlistSharePermission(userId: number, event: Event): void {
+  const permission = (event.target as HTMLSelectElement).value;
+  if (permission !== "read" && permission !== "edit") return;
+  personalWatchlistShareDraft.value = personalWatchlistShareDraft.value.map(
+    (share) => share.user_id === userId ? { ...share, permission } : share,
+  );
+}
+
+async function savePersonalWatchlistLibraryShares(): Promise<void> {
+  const library = sharingPersonalWatchlistLibrary.value;
+  if (!library || personalWatchlistLibraryBusy.value) return;
+  personalWatchlistLibraryBusy.value = true;
+  personalWatchlistLibraryError.value = "";
+  try {
+    const result = await updatePersonalWatchlistLibraryShares(
+      library.id,
+      personalWatchlistShareDraft.value,
+    );
+    personalWatchlistLibraries.value = personalWatchlistLibraries.value.map(
+      (item) => item.id === library.id ? result.library : item,
+    );
+    personalWatchlistShareDraft.value = result.library.shares.map((share) => ({
+      user_id: share.user_id,
+      permission: share.permission,
+    }));
+    personalWatchlistLibraryNotice.value = result.library.share_count
+      ? `类型库“${result.library.name}”已分享给 ${result.library.share_count} 个用户。`
+      : `类型库“${result.library.name}”已取消全部分享。`;
+  } catch (error) {
+    personalWatchlistLibraryError.value = error instanceof Error
+      ? error.message
+      : "保存类型库分享权限失败";
+  } finally {
+    personalWatchlistLibraryBusy.value = false;
+  }
+}
+
 async function removePersonalWatchlistLibrary(
   library: PersonalWatchlistLibrary,
 ): Promise<void> {
@@ -1899,6 +2056,10 @@ async function removePersonalWatchlistLibrary(
     personalWatchlistLibrarySelection.value = personalWatchlistLibrarySelection.value.filter(
       (libraryId) => libraryId !== library.id,
     );
+    if (personalWatchlistSharingLibraryId.value === library.id) {
+      personalWatchlistSharingLibraryId.value = null;
+      personalWatchlistShareDraft.value = [];
+    }
     await loadPersonalWatchlist();
     personalWatchlistLibraryNotice.value = (
       `类型库“${library.name}”已删除，监控池商品和采集历史未改变。`
@@ -1935,6 +2096,39 @@ async function savePersonalWatchlistCardLibraries(): Promise<void> {
       error instanceof Error ? error.message : "保存商品类型库失败";
   } finally {
     personalWatchlistLibraryBusy.value = false;
+  }
+}
+
+function canEditPersonalWatchlistLibrary(
+  library: PersonalWatchlistLibrary | null,
+): boolean {
+  return library?.access === "owner" || library?.access === "edit";
+}
+
+async function removeCardFromActivePersonalWatchlistLibrary(
+  card: PersonalWatchlistWorkspaceCard,
+): Promise<void> {
+  const library = activePersonalWatchlistLibrary.value;
+  if (
+    !library
+    || !canEditPersonalWatchlistLibrary(library)
+    || personalWatchlistBusyPlid.value
+  ) return;
+  personalWatchlistBusyPlid.value = card.plid;
+  personalWatchlistLibraryError.value = "";
+  try {
+    await deletePersonalWatchlistLibraryItem(library.id, card.plid);
+    await loadPersonalWatchlist();
+    personalWatchlistNotice.value = (
+      `PLID${card.plid} 已从类型库“${library.name}”移除；`
+      + "个人监控关系、全局采集和历史记录均未改变。"
+    );
+  } catch (error) {
+    personalWatchlistError.value = error instanceof Error
+      ? error.message
+      : "从类型库移除商品失败";
+  } finally {
+    personalWatchlistBusyPlid.value = "";
   }
 }
 
@@ -2022,7 +2216,12 @@ function openPersonalWatchlistCard(card: PersonalWatchlistWorkspaceCard): void {
     return;
   }
   clearTargetManagerFeedback();
-  if (card.source === "own_store") {
+  if (!card.personalMember) {
+    const library = activePersonalWatchlistLibrary.value;
+    targetManagerNotice.value = library
+      ? `PLID${card.plid} 来自 ${library.owner_display_name} 分享的类型库“${library.name}”；商品详情仍按你的账号数据权限显示。`
+      : `PLID${card.plid} 来自共享类型库；商品详情仍按你的账号数据权限显示。`;
+  } else if (card.source === "own_store") {
     targetManagerNotice.value = (
       `PLID${card.plid} 是自有店铺商品，已在个人监控池并持续参加每日跟卖巡检；`
       + "公开快照完成后会在此补齐详情。"
@@ -2034,6 +2233,31 @@ function openPersonalWatchlistCard(card: PersonalWatchlistWorkspaceCard): void {
   }
 }
 
+async function addSharedCardToPersonalWatchlist(
+  card: PersonalWatchlistWorkspaceCard,
+): Promise<void> {
+  if (card.personalMember || personalWatchlistBusyPlid.value) return;
+  if (!personalWatchlistDefaultConfigured.value) {
+    promptForPersonalWatchlistDefaultBeforeMembership(card.plid);
+    return;
+  }
+  personalWatchlistBusyPlid.value = card.plid;
+  clearPersonalWatchlistFeedback();
+  try {
+    await persistPersonalWatchlistAddition(card.plid);
+    personalWatchlistNotice.value = (
+      `PLID${card.plid} 已加入你的个人监控池；共享类型库归属保持不变。`
+    );
+    await focusPersonalWatchlistCard(card.plid);
+  } catch (error) {
+    personalWatchlistError.value = error instanceof Error
+      ? error.message
+      : "加入个人监控池失败";
+  } finally {
+    personalWatchlistBusyPlid.value = "";
+  }
+}
+
 async function removeFromPersonalWatchlist(plid: string): Promise<void> {
   if (personalWatchlistBusyPlid.value) return;
   clearPersonalWatchlistFeedback();
@@ -2041,6 +2265,7 @@ async function removeFromPersonalWatchlist(plid: string): Promise<void> {
   try {
     await deleteCompetitorPersonalWatchlistItem(plid);
     setPersonalWatchlistLocal(plid, false);
+    await loadPersonalWatchlist();
     personalWatchlistNotice.value = (
       `PLID${plid} 已从你的个人监控池删除；全局监控队列、每日采集和历史记录不受影响。`
     );
@@ -3822,7 +4047,7 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
         </strong>
         <span>
           这里直接展示你关注的真正竞品和自有店铺商品。粘贴链接会自动识别来源并加入当前账号个人池；
-          真正竞品进入监控队列，自有商品沿用每日全量跟卖巡检，其他账号看不到你的个人归类和类型库。
+          真正竞品进入监控队列，自有商品沿用每日全量跟卖巡检；个人归类默认私有，只有主动分享的类型库对指定用户开放。
         </span>
       </div>
       <div class="personal-watchlist-summary-count" aria-label="当前账号个人监控池商品数量">
@@ -3906,10 +4131,16 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
             <p class="section-kicker">MY PERSONAL WATCHLIST</p>
             <h3 id="personal-watchlist-board-title">个人监控池商品</h3>
           </div>
-          <span v-if="personalWatchlistCards.length">
+          <span v-if="personalWatchlistItems.length || activePersonalWatchlistLibrary">
             第 {{ personalWatchlistPage }}/{{ personalWatchlistPageCount }} 页 ·
-            显示 {{ filteredPersonalWatchlistCards.length }} / 共
-            {{ personalWatchlistCards.length }} 个
+            <template v-if="activePersonalWatchlistLibrary">
+              {{ activePersonalWatchlistLibrary.name }} 共
+              {{ activePersonalWatchlistLibrary.item_count }} 个
+            </template>
+            <template v-else>
+              显示 {{ filteredPersonalWatchlistCards.length }} / 我的
+              {{ personalWatchlistItems.length }} 个
+            </template>
           </span>
         </div>
 
@@ -3918,29 +4149,55 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
           class="personal-watchlist-library-filter"
           aria-label="按个人类型库筛选监控池商品"
         >
-          <button
-            type="button"
-            :class="{ selected: personalWatchlistLibraryFilter === 'all' }"
-            @click="personalWatchlistLibraryFilter = 'all'"
+          <div class="personal-watchlist-library-filter-group personal-filter-core">
+            <span>我的监控池</span>
+            <button
+              type="button"
+              :class="{ selected: personalWatchlistLibraryFilter === 'all' }"
+              @click="personalWatchlistLibraryFilter = 'all'"
+            >
+              全部 <small>{{ personalWatchlistItems.length }}</small>
+            </button>
+            <button
+              type="button"
+              :class="{ selected: personalWatchlistLibraryFilter === 'unclassified' }"
+              @click="personalWatchlistLibraryFilter = 'unclassified'"
+            >
+              未分类 <small>{{ unclassifiedPersonalWatchlistCount }}</small>
+            </button>
+          </div>
+          <div
+            v-if="ownedPersonalWatchlistLibraries.length"
+            class="personal-watchlist-library-filter-group"
           >
-            全部 <small>{{ personalWatchlistCards.length }}</small>
-          </button>
-          <button
-            type="button"
-            :class="{ selected: personalWatchlistLibraryFilter === 'unclassified' }"
-            @click="personalWatchlistLibraryFilter = 'unclassified'"
+            <span>我的类型库</span>
+            <button
+              v-for="library in ownedPersonalWatchlistLibraries"
+              :key="`filter-${library.id}`"
+              type="button"
+              :class="{ selected: personalWatchlistLibraryFilter === library.id }"
+              @click="personalWatchlistLibraryFilter = library.id"
+            >
+              {{ library.name }} <small>{{ library.item_count }}</small>
+            </button>
+          </div>
+          <div
+            v-if="sharedPersonalWatchlistLibraries.length"
+            class="personal-watchlist-library-filter-group shared-library-filter-group"
           >
-            未分类 <small>{{ unclassifiedPersonalWatchlistCount }}</small>
-          </button>
-          <button
-            v-for="library in personalWatchlistLibraries"
-            :key="`filter-${library.id}`"
-            type="button"
-            :class="{ selected: personalWatchlistLibraryFilter === library.id }"
-            @click="personalWatchlistLibraryFilter = library.id"
-          >
-            {{ library.name }} <small>{{ library.item_count }}</small>
-          </button>
+            <span>共享给我</span>
+            <button
+              v-for="library in sharedPersonalWatchlistLibraries"
+              :key="`filter-${library.id}`"
+              type="button"
+              :class="{ selected: personalWatchlistLibraryFilter === library.id }"
+              @click="personalWatchlistLibraryFilter = library.id"
+            >
+              {{ library.name }}
+              <em>{{ library.access === "edit" ? "可编辑" : "只读" }}</em>
+              <small>{{ library.item_count }}</small>
+            </button>
+          </div>
         </nav>
 
         <div
@@ -3954,6 +4211,7 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
             class="personal-watchlist-product-card"
             :class="{
               'has-detail': Boolean(card.competitor),
+              'is-shared-card': !card.personalMember,
               'is-highlighted': personalWatchlistHighlightPlid === card.plid,
             }"
             tabindex="-1"
@@ -3982,7 +4240,9 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
                 >已定位到此商品</strong>
                 <small :class="{ inactive: card.source !== 'own_store' && !card.target }">
                   {{
-                    card.source === "own_store"
+                    !card.personalMember
+                      ? "共享类型库"
+                      : card.source === "own_store"
                       ? "自有店铺 · 每日巡检"
                       : card.target
                         ? "真正竞品 · 监控队列"
@@ -4008,6 +4268,9 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
                     : card.competitor.跟卖报价.length
                 }} 个变体 / 报价
               </p>
+              <p v-else-if="!card.personalMember">
+                共享库仅传递库内 PLID；当前账号无权读取的店铺私有详情不会显示。
+              </p>
               <p v-else-if="card.target">
                 已加入两个清单，首次采集完成后会在这里补齐商品、价格和库存。
               </p>
@@ -4029,7 +4292,10 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
                 </span>
               </div>
               <div class="personal-watchlist-product-actions">
-                <span>加入时间 {{ formatChinaDateTime(card.addedAt) }}</span>
+                <span>
+                  {{ card.personalMember ? "加入个人池" : "加入共享库" }}时间
+                  {{ formatChinaDateTime(card.addedAt) }}
+                </span>
                 <button
                   v-if="card.competitor"
                   type="button"
@@ -4039,12 +4305,33 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
                   查看商品详情
                 </button>
                 <button
+                  v-if="card.personalMember"
                   type="button"
                   class="secondary-button"
                   @click.stop="openPersonalWatchlistCardLibraries(card)"
                 >
                   设置类型库
                 </button>
+                <button
+                  v-if="
+                    !card.personalMember
+                    && (card.competitor || card.target)
+                  "
+                  type="button"
+                  class="secondary-button"
+                  :disabled="Boolean(personalWatchlistBusyPlid)"
+                  @click.stop="addSharedCardToPersonalWatchlist(card)"
+                >加入我的监控池</button>
+                <button
+                  v-if="
+                    activePersonalWatchlistLibrary
+                    && canEditPersonalWatchlistLibrary(activePersonalWatchlistLibrary)
+                  "
+                  type="button"
+                  class="secondary-button danger-soft"
+                  :disabled="Boolean(personalWatchlistBusyPlid)"
+                  @click.stop="removeCardFromActivePersonalWatchlistLibrary(card)"
+                >从此类型库移除</button>
                 <button
                   v-if="props.isAdmin && card.target"
                   type="button"
@@ -4054,6 +4341,7 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
                   监控队列操作
                 </button>
                 <button
+                  v-if="card.personalMember"
                   type="button"
                   class="secondary-button danger"
                   :disabled="Boolean(personalWatchlistBusyPlid)"
@@ -4071,10 +4359,14 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
         </div>
         <div v-else class="personal-watchlist-empty-state">
           <strong>
-            {{ personalWatchlistCards.length ? "当前类型库暂无商品" : "个人监控池暂无商品" }}
+            {{ activePersonalWatchlistLibrary
+              ? "当前类型库暂无商品"
+              : "个人监控池暂无商品" }}
           </strong>
-          <span v-if="personalWatchlistCards.length">
-            可切换“全部”，或点击卡片上的“设置类型库”调整归类。
+          <span v-if="activePersonalWatchlistLibrary">
+            {{ canEditPersonalWatchlistLibrary(activePersonalWatchlistLibrary)
+              ? "可从自己的监控池卡片中把商品加入这个类型库。"
+              : "该共享库为只读；内容由创建者或可编辑成员维护。" }}
           </span>
           <span v-else>
             在上方粘贴 Takealot 链接，系统会识别真正竞品或自有商品并加入你的个人监控池。
@@ -4994,7 +5286,7 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
             <div>
               <p class="section-kicker">PERSONAL TYPE LIBRARIES</p>
               <h2 id="personal-watchlist-library-modal-title">个人监控池类型库</h2>
-              <span>类型库、默认设置和商品归类仅当前账号可见。</span>
+              <span>我的库由我管理；共享库按创建者授予的只读或可编辑权限协作。</span>
             </div>
             <button
               type="button"
@@ -5034,14 +5326,24 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
                 <label
                   v-for="library in personalWatchlistLibraries"
                   :key="`assignment-${library.id}`"
+                  :class="{ 'is-read-only': library.access === 'read' }"
                 >
                   <input
                     type="checkbox"
                     :checked="personalWatchlistLibrarySelection.includes(library.id)"
+                    :disabled="library.access === 'read'"
                     @change="togglePersonalWatchlistLibrarySelection(library.id)"
                   />
-                  <span>{{ library.name }}</span>
-                  <small>{{ library.item_count }} 个商品</small>
+                  <span>
+                    {{ library.name }}
+                    <em v-if="library.access !== 'owner'">
+                      {{ library.owner_display_name }}共享
+                    </em>
+                  </span>
+                  <small>
+                    {{ library.access === "read" ? "只读" : "可编辑" }} ·
+                    {{ library.item_count }} 个
+                  </small>
                 </label>
               </div>
               <div v-else class="personal-watchlist-library-empty">
@@ -5075,7 +5377,7 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
                   <small>商品仍会加入个人监控池</small>
                 </label>
                 <label
-                  v-for="library in personalWatchlistLibraries"
+                  v-for="library in ownedPersonalWatchlistLibraries"
                   :key="`default-${library.id}`"
                 >
                   <input
@@ -5106,7 +5408,7 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
                   <p class="section-kicker">CUSTOM LIBRARIES</p>
                   <h3>创建和管理类型库</h3>
                 </div>
-                <span>纯白自定义库，由当前账号自行命名</span>
+                <span>只有创建者能重命名、删除和设置分享权限</span>
               </div>
               <form
                 class="personal-watchlist-library-create"
@@ -5126,11 +5428,11 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
                 >创建类型库</button>
               </form>
               <div
-                v-if="personalWatchlistLibraries.length"
+                v-if="ownedPersonalWatchlistLibraries.length"
                 class="personal-watchlist-library-list"
               >
                 <article
-                  v-for="library in personalWatchlistLibraries"
+                  v-for="library in ownedPersonalWatchlistLibraries"
                   :key="library.id"
                 >
                   <template v-if="personalWatchlistEditingLibraryId === library.id">
@@ -5155,8 +5457,16 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
                   <template v-else>
                     <div>
                       <strong>{{ library.name }}</strong>
-                      <span>{{ library.item_count }} 个商品</span>
+                      <span>
+                        {{ library.item_count }} 个商品 ·
+                        {{ library.share_count ? `已分享 ${library.share_count} 人` : "仅自己" }}
+                      </span>
                     </div>
+                    <button
+                      type="button"
+                      class="secondary-button share-library-button"
+                      @click="openPersonalWatchlistLibrarySharing(library)"
+                    >分享设置</button>
                     <button
                       type="button"
                       class="secondary-button"
@@ -5173,6 +5483,130 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
               </div>
               <div v-else class="personal-watchlist-library-empty">
                 当前账号还没有类型库。
+              </div>
+            </section>
+
+            <section
+              v-if="sharingPersonalWatchlistLibrary"
+              class="personal-watchlist-library-section personal-watchlist-sharing-section"
+            >
+              <div class="personal-watchlist-library-section-heading">
+                <div>
+                  <p class="section-kicker">SHARE PERMISSIONS</p>
+                  <h3>分享“{{ sharingPersonalWatchlistLibrary.name }}”</h3>
+                </div>
+                <button
+                  type="button"
+                  class="secondary-button"
+                  @click="personalWatchlistSharingLibraryId = null"
+                >收起</button>
+              </div>
+              <div class="personal-watchlist-permission-guide">
+                <span>
+                  <strong>只读</strong>
+                  可查看库和库内卡片，不能增删内容。
+                </span>
+                <span>
+                  <strong>可编辑</strong>
+                  可加入自己的监控池卡片，也可从库中移除卡片；不能改库名、删除库或管理分享。
+                </span>
+              </div>
+              <label class="personal-watchlist-share-search">
+                <span>查找系统用户</span>
+                <input
+                  v-model="personalWatchlistShareUserQuery"
+                  type="search"
+                  placeholder="输入姓名或账号"
+                />
+              </label>
+              <div
+                v-if="personalWatchlistShareUsersLoading"
+                class="personal-watchlist-library-empty"
+              >正在读取系统用户…</div>
+              <div
+                v-else-if="filteredPersonalWatchlistShareUsers.length"
+                class="personal-watchlist-share-user-list"
+              >
+                <article
+                  v-for="shareUser in filteredPersonalWatchlistShareUsers"
+                  :key="shareUser.id"
+                  :class="{
+                    selected: personalWatchlistSharePermissionFor(shareUser.id),
+                    inactive: !shareUser.active,
+                  }"
+                >
+                  <label>
+                    <input
+                      type="checkbox"
+                      :checked="Boolean(personalWatchlistSharePermissionFor(shareUser.id))"
+                      @change="setPersonalWatchlistShareEnabled(shareUser.id, $event)"
+                    />
+                    <span>
+                      <strong>{{ shareUser.display_name }}</strong>
+                      <small>@{{ shareUser.username }}</small>
+                    </span>
+                  </label>
+                  <em v-if="!shareUser.active">账号已停用</em>
+                  <select
+                    :value="personalWatchlistSharePermissionFor(shareUser.id) || 'read'"
+                    :disabled="!personalWatchlistSharePermissionFor(shareUser.id)"
+                    :aria-label="`${shareUser.display_name} 的类型库权限`"
+                    @change="setPersonalWatchlistSharePermission(shareUser.id, $event)"
+                  >
+                    <option value="read">只读</option>
+                    <option value="edit">可编辑</option>
+                  </select>
+                </article>
+              </div>
+              <div v-else class="personal-watchlist-library-empty">
+                {{ personalWatchlistShareUserQuery.trim()
+                  ? "没有匹配的系统用户。"
+                  : "系统中暂无其他用户。" }}
+              </div>
+              <div class="personal-watchlist-share-actions">
+                <span>已选择 {{ personalWatchlistShareDraft.length }} 人</span>
+                <button
+                  type="button"
+                  class="primary-button"
+                  :disabled="personalWatchlistLibraryBusy"
+                  @click="savePersonalWatchlistLibraryShares"
+                >保存分享权限</button>
+              </div>
+            </section>
+
+            <section
+              v-if="sharedPersonalWatchlistLibraries.length"
+              class="personal-watchlist-library-section shared-with-me-section"
+            >
+              <div class="personal-watchlist-library-section-heading">
+                <div>
+                  <p class="section-kicker">SHARED WITH ME</p>
+                  <h3>共享给我的类型库</h3>
+                </div>
+                <span>共享不会自动加入我的个人监控池</span>
+              </div>
+              <div class="shared-with-me-library-grid">
+                <article
+                  v-for="library in sharedPersonalWatchlistLibraries"
+                  :key="`shared-summary-${library.id}`"
+                >
+                  <div>
+                    <strong>{{ library.name }}</strong>
+                    <span>创建者 {{ library.owner_display_name }} · @{{ library.owner_username }}</span>
+                  </div>
+                  <em :class="library.access">
+                    {{ library.access === "edit" ? "可编辑" : "只读" }}
+                  </em>
+                  <small>{{ library.item_count }} 个商品</small>
+                  <button
+                    type="button"
+                    class="secondary-button"
+                    @click="
+                      personalWatchlistLibraryFilter = library.id;
+                      closePersonalWatchlistLibraryModal()
+                    "
+                  >查看此库</button>
+                </article>
               </div>
             </section>
           </div>

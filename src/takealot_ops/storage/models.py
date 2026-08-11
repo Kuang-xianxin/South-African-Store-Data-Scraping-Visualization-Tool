@@ -9,6 +9,7 @@ from typing import Any
 from sqlalchemy import (
     JSON,
     Boolean,
+    CheckConstraint,
     Date,
     DateTime,
     ForeignKey,
@@ -618,8 +619,39 @@ class PersonalWatchlistLibrary(Base):
     )
 
 
+class PersonalWatchlistLibraryShare(Base):
+    """Grant one system user read or edit access to an account-owned library."""
+
+    __tablename__ = "personal_watchlist_library_shares"
+    __table_args__ = (
+        CheckConstraint(
+            "permission IN ('read', 'edit')",
+            name="ck_watchlist_library_share_permission",
+        ),
+    )
+
+    library_id: Mapped[int] = mapped_column(
+        ForeignKey("personal_watchlist_libraries.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("erp_users.id", ondelete="CASCADE"),
+        primary_key=True,
+        index=True,
+    )
+    permission: Mapped[str] = mapped_column(String(10), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+    )
+
+
 class PersonalWatchlistLibraryItem(Base):
-    """Assign one personal watchlist PLID to one account-owned type library."""
+    """Assign one PLID to a library independently of each viewer's personal pool."""
 
     __tablename__ = "personal_watchlist_library_items"
 

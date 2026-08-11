@@ -177,6 +177,7 @@ from takealot_ops.storage.models import (
     OwnStorePersonalWatchlist,
     PersonalWatchlistLibrary,
     PersonalWatchlistLibraryItem,
+    PersonalWatchlistLibraryShare,
     PersonalWatchlistPreference,
 )
 from takealot_ops.storage.store_context import (
@@ -314,6 +315,22 @@ class PersonalWatchlistLibraryAssignmentsRequest(BaseModel):
     """Replace one personal watchlist card's current-account library membership."""
 
     library_ids: list[int] = Field(default_factory=list, max_length=100)
+
+
+class PersonalWatchlistLibraryShareInput(BaseModel):
+    """One recipient and their library-content permission."""
+
+    user_id: int = Field(ge=1)
+    permission: Literal["read", "edit"]
+
+
+class PersonalWatchlistLibrarySharesRequest(BaseModel):
+    """Replace all recipients for one library owned by the current account."""
+
+    shares: list[PersonalWatchlistLibraryShareInput] = Field(
+        default_factory=list,
+        max_length=500,
+    )
 
 
 class CompetitorTargetPriorityRequest(BaseModel):
@@ -2340,7 +2357,7 @@ def create_app(project_root: Path | None = None) -> FastAPI:
     def competitor_personal_watchlist(
         request: Request,
     ) -> dict[str, object]:
-        """Return the current account's saved competitors, own products and libraries."""
+        """Return personal memberships plus owned and explicitly shared libraries."""
         user = request.state.erp_user
         settings = DashboardSettings.from_env(root)
         engine = create_read_only_erp_engine(settings.database_url)
@@ -2349,6 +2366,40 @@ def create_app(project_root: Path | None = None) -> FastAPI:
                 return _personal_watchlist_payload(session, user_id=user.id)
         finally:
             engine.dispose()
+
+    @app.get("/api/competitors/personal-watchlist/share-users")
+    def personal_watchlist_share_users(
+        request: Request,
+    ) -> dict[str, object]:
+        """Return the minimal account directory needed to choose share recipients."""
+        user = request.state.erp_user
+        settings = DashboardSettings.from_env(root)
+        engine = create_read_only_erp_engine(settings.database_url)
+        try:
+            with Session(engine) as session:
+                accounts = session.scalars(
+                    select(ErpUser)
+                    .where(ErpUser.id != user.id)
+                    .order_by(
+                        ErpUser.active.desc(),
+                        ErpUser.display_name.asc(),
+                        ErpUser.username.asc(),
+                        ErpUser.id.asc(),
+                    )
+                ).all()
+        finally:
+            engine.dispose()
+        return {
+            "items": [
+                {
+                    "id": account.id,
+                    "username": account.username,
+                    "display_name": account.display_name,
+                    "active": account.active,
+                }
+                for account in accounts
+            ]
+        }
 
     @app.post("/api/competitors/personal-watchlist/libraries")
     def create_personal_watchlist_library(
@@ -2378,13 +2429,11 @@ def create_app(project_root: Path | None = None) -> FastAPI:
                 )
                 session.add(library)
                 session.flush()
-                result = {
-                    "id": library.id,
-                    "name": library.name,
-                    "created_at": library.created_at.isoformat(),
-                    "updated_at": library.updated_at.isoformat(),
-                    "item_count": 0,
-                }
+                result = _single_personal_watchlist_library_payload(
+                    session,
+                    library=library,
+                    viewer_user_id=user.id,
+                )
                 session.commit()
         finally:
             engine.dispose()
@@ -2421,20 +2470,12 @@ def create_app(project_root: Path | None = None) -> FastAPI:
                     raise HTTPException(status_code=409, detail=f"类型库“{name}”已存在")
                 library.name = name
                 library.updated_at = datetime.now(UTC)
-                item_count = len(
-                    session.scalars(
-                        select(PersonalWatchlistLibraryItem).where(
-                            PersonalWatchlistLibraryItem.library_id == library.id
-                        )
-                    ).all()
+                session.flush()
+                result = _single_personal_watchlist_library_payload(
+                    session,
+                    library=library,
+                    viewer_user_id=user.id,
                 )
-                result = {
-                    "id": library.id,
-                    "name": library.name,
-                    "created_at": library.created_at.isoformat(),
-                    "updated_at": library.updated_at.isoformat(),
-                    "item_count": item_count,
-                }
                 session.commit()
         finally:
             engine.dispose()
@@ -2444,6 +2485,141 @@ def create_app(project_root: Path | None = None) -> FastAPI:
             user.username,
         )
         return {"library": result}
+
+    @app.put("/api/competitors/personal-watchlist/libraries/{library_id}/shares")
+    def update_personal_watchlist_library_shares(
+        library_id: int,
+        payload: PersonalWatchlistLibrarySharesRequest,
+        request: Request,
+    ) -> dict[str, object]:
+        """Replace per-user share grants; only the library creator may do this."""
+        user = request.state.erp_user
+        recipient_ids = [share.user_id for share in payload.shares]
+        if len(recipient_ids) != len(set(recipient_ids)):
+            raise HTTPException(status_code=422, detail="同一系统用户不能重复指定分享权限")
+        if user.id in recipient_ids:
+            raise HTTPException(status_code=422, detail="创建者无需把类型库分享给自己")
+        settings = DashboardSettings.from_env(root)
+        engine = create_engine_for_settings(settings)
+        try:
+            create_schema(engine)
+            with Session(engine) as session:
+                library = session.get(PersonalWatchlistLibrary, library_id)
+                if library is None or library.user_id != user.id:
+                    raise HTTPException(status_code=404, detail="未找到当前账号创建的类型库")
+                recipients = (
+                    session.scalars(
+                        select(ErpUser).where(ErpUser.id.in_(recipient_ids))
+                    ).all()
+                    if recipient_ids
+                    else []
+                )
+                found_recipient_ids = {recipient.id for recipient in recipients}
+                missing_recipient_ids = sorted(set(recipient_ids) - found_recipient_ids)
+                if missing_recipient_ids:
+                    missing = "、".join(str(item) for item in missing_recipient_ids)
+                    raise HTTPException(
+                        status_code=404,
+                        detail=f"系统用户不存在：{missing}",
+                    )
+                existing_rows = session.scalars(
+                    select(PersonalWatchlistLibraryShare).where(
+                        PersonalWatchlistLibraryShare.library_id == library.id
+                    )
+                ).all()
+                existing_by_user_id = {row.user_id: row for row in existing_rows}
+                selected_by_user_id = {share.user_id: share for share in payload.shares}
+                for recipient_id, existing_row in existing_by_user_id.items():
+                    if recipient_id not in selected_by_user_id:
+                        session.delete(existing_row)
+                now = datetime.now(UTC)
+                for recipient_id, requested_share in selected_by_user_id.items():
+                    share_row = existing_by_user_id.get(recipient_id)
+                    if share_row is None:
+                        session.add(
+                            PersonalWatchlistLibraryShare(
+                                library_id=library.id,
+                                user_id=recipient_id,
+                                permission=requested_share.permission,
+                                created_at=now,
+                                updated_at=now,
+                            )
+                        )
+                    else:
+                        share_row.permission = requested_share.permission
+                        share_row.updated_at = now
+                library.updated_at = now
+                session.flush()
+                result = _single_personal_watchlist_library_payload(
+                    session,
+                    library=library,
+                    viewer_user_id=user.id,
+                )
+                session.commit()
+        finally:
+            engine.dispose()
+        competitor_logger.info(
+            "personal_watchlist_library action=share id=%s user=%s recipients=%s",
+            library_id,
+            user.username,
+            len(recipient_ids),
+        )
+        return {"library": result}
+
+    @app.delete(
+        "/api/competitors/personal-watchlist/libraries/{library_id}/items/{plid}"
+    )
+    def delete_personal_watchlist_library_item(
+        library_id: int,
+        plid: str,
+        request: Request,
+    ) -> dict[str, object]:
+        """Remove one card from a library for its owner or an edit recipient."""
+        normalized_plid = _validated_competitor_plid(plid)
+        user = request.state.erp_user
+        settings = DashboardSettings.from_env(root)
+        engine = create_engine_for_settings(settings)
+        removed = False
+        try:
+            create_schema(engine)
+            with Session(engine) as session:
+                library = session.get(PersonalWatchlistLibrary, library_id)
+                if library is None:
+                    raise HTTPException(status_code=404, detail="类型库不存在")
+                access = _personal_watchlist_library_access(
+                    session,
+                    library=library,
+                    user_id=user.id,
+                )
+                if access is None:
+                    raise HTTPException(status_code=404, detail="当前账号无权访问该类型库")
+                if access == "read":
+                    raise HTTPException(status_code=403, detail="该类型库为只读分享，不能移除商品")
+                assignment = session.get(
+                    PersonalWatchlistLibraryItem,
+                    (library.id, normalized_plid),
+                )
+                if assignment is not None:
+                    session.delete(assignment)
+                    library.updated_at = datetime.now(UTC)
+                    removed = True
+                    session.flush()
+                result = _single_personal_watchlist_library_payload(
+                    session,
+                    library=library,
+                    viewer_user_id=user.id,
+                )
+                session.commit()
+        finally:
+            engine.dispose()
+        competitor_logger.info(
+            "personal_watchlist_library action=remove_item id=%s plid=%s user=%s removed=%s",
+            library_id,
+            normalized_plid,
+            user.username,
+            removed,
+        )
+        return {"ok": True, "removed": removed, "library": result}
 
     @app.delete("/api/competitors/personal-watchlist/libraries/{library_id}")
     def delete_personal_watchlist_library(
@@ -2558,24 +2734,59 @@ def create_app(project_root: Path | None = None) -> FastAPI:
                     plid=normalized_plid,
                 ):
                     raise HTTPException(status_code=404, detail="该商品不在你的个人监控池")
-                selected_libraries = (
+                owned_library_ids = set(
                     session.scalars(
-                        select(PersonalWatchlistLibrary).where(
-                            PersonalWatchlistLibrary.user_id == user.id,
-                            PersonalWatchlistLibrary.id.in_(selected_library_ids),
+                        select(PersonalWatchlistLibrary.id).where(
+                            PersonalWatchlistLibrary.user_id == user.id
                         )
                     ).all()
-                    if selected_library_ids
+                )
+                share_rows = session.scalars(
+                    select(PersonalWatchlistLibraryShare).where(
+                        PersonalWatchlistLibraryShare.user_id == user.id
+                    )
+                ).all()
+                access_by_library_id: dict[
+                    int,
+                    Literal["owner", "read", "edit"],
+                ] = {library_id: "owner" for library_id in owned_library_ids}
+                access_by_library_id.update(
+                    {
+                        share.library_id: (
+                            "edit" if share.permission == "edit" else "read"
+                        )
+                        for share in share_rows
+                        if share.library_id not in owned_library_ids
+                    }
+                )
+                selected_ids = set(selected_library_ids)
+                if not selected_ids.issubset(access_by_library_id):
+                    raise HTTPException(status_code=404, detail="包含当前账号无权访问的类型库")
+                accessible_ids = set(access_by_library_id)
+                current_ids = set(
+                    session.scalars(
+                        select(PersonalWatchlistLibraryItem.library_id).where(
+                            PersonalWatchlistLibraryItem.plid == normalized_plid,
+                            PersonalWatchlistLibraryItem.library_id.in_(accessible_ids),
+                        )
+                    ).all()
+                    if accessible_ids
                     else []
                 )
-                if len(selected_libraries) != len(selected_library_ids):
-                    raise HTTPException(status_code=404, detail="包含不属于当前账号的类型库")
-                current_ids = _personal_watchlist_library_ids_for_plid(
-                    session,
-                    user_id=user.id,
-                    plid=normalized_plid,
-                )
-                for library_id in set(current_ids) - set(selected_library_ids):
+                read_only_ids = {
+                    library_id
+                    for library_id, access in access_by_library_id.items()
+                    if access == "read"
+                }
+                if (selected_ids & read_only_ids) - current_ids:
+                    raise HTTPException(status_code=403, detail="只读类型库不能加入商品")
+                modifiable_ids = {
+                    library_id
+                    for library_id, access in access_by_library_id.items()
+                    if access in {"owner", "edit"}
+                }
+                selected_modifiable_ids = selected_ids & modifiable_ids
+                for library_id in (current_ids & modifiable_ids) - selected_modifiable_ids:
                     assignment = session.get(
                         PersonalWatchlistLibraryItem,
                         (library_id, normalized_plid),
@@ -2583,7 +2794,7 @@ def create_app(project_root: Path | None = None) -> FastAPI:
                     if assignment is not None:
                         session.delete(assignment)
                 now = datetime.now(UTC)
-                for library_id in set(selected_library_ids) - set(current_ids):
+                for library_id in selected_modifiable_ids - current_ids:
                     session.add(
                         PersonalWatchlistLibraryItem(
                             library_id=library_id,
@@ -2591,6 +2802,9 @@ def create_app(project_root: Path | None = None) -> FastAPI:
                             added_at=now,
                         )
                     )
+                effective_library_ids = sorted(
+                    selected_modifiable_ids | (current_ids & read_only_ids)
+                )
                 session.commit()
         finally:
             engine.dispose()
@@ -2598,9 +2812,9 @@ def create_app(project_root: Path | None = None) -> FastAPI:
             "personal_watchlist_library action=assign plid=%s user=%s library_ids=%s",
             normalized_plid,
             user.username,
-            selected_library_ids,
+            effective_library_ids,
         )
-        return {"plid": normalized_plid, "library_ids": selected_library_ids}
+        return {"plid": normalized_plid, "library_ids": effective_library_ids}
 
     @app.put("/api/competitors/personal-watchlist/{plid}")
     def add_competitor_personal_watchlist_item(
@@ -3844,15 +4058,28 @@ def _personal_watchlist_library_ids_for_plid(
     user_id: int,
     plid: str,
 ) -> list[int]:
+    owned_ids = set(
+        session.scalars(
+            select(PersonalWatchlistLibrary.id).where(
+                PersonalWatchlistLibrary.user_id == user_id
+            )
+        ).all()
+    )
+    shared_ids = set(
+        session.scalars(
+            select(PersonalWatchlistLibraryShare.library_id).where(
+                PersonalWatchlistLibraryShare.user_id == user_id
+            )
+        ).all()
+    )
+    accessible_ids = owned_ids | shared_ids
+    if not accessible_ids:
+        return []
     return sorted(
         session.scalars(
             select(PersonalWatchlistLibraryItem.library_id)
-            .join(
-                PersonalWatchlistLibrary,
-                PersonalWatchlistLibrary.id == PersonalWatchlistLibraryItem.library_id,
-            )
             .where(
-                PersonalWatchlistLibrary.user_id == user_id,
+                PersonalWatchlistLibraryItem.library_id.in_(accessible_ids),
                 PersonalWatchlistLibraryItem.plid == plid,
             )
         ).all()
@@ -3884,7 +4111,7 @@ def _personal_watchlist_payload(
     own_store_items = session.scalars(
         select(OwnStorePersonalWatchlist).where(OwnStorePersonalWatchlist.user_id == user_id)
     ).all()
-    libraries = session.scalars(
+    owned_libraries = session.scalars(
         select(PersonalWatchlistLibrary)
         .where(PersonalWatchlistLibrary.user_id == user_id)
         .order_by(
@@ -3892,7 +4119,41 @@ def _personal_watchlist_payload(
             PersonalWatchlistLibrary.id.asc(),
         )
     ).all()
+    recipient_shares = session.scalars(
+        select(PersonalWatchlistLibraryShare).where(
+            PersonalWatchlistLibraryShare.user_id == user_id
+        )
+    ).all()
+    owned_library_ids = {library.id for library in owned_libraries}
+    shared_library_ids = {
+        share.library_id
+        for share in recipient_shares
+        if share.library_id not in owned_library_ids
+    }
+    shared_libraries = (
+        session.scalars(
+            select(PersonalWatchlistLibrary)
+            .where(PersonalWatchlistLibrary.id.in_(shared_library_ids))
+            .order_by(
+                PersonalWatchlistLibrary.created_at.asc(),
+                PersonalWatchlistLibrary.id.asc(),
+            )
+        ).all()
+        if shared_library_ids
+        else []
+    )
+    libraries = [*owned_libraries, *shared_libraries]
     library_ids = [library.id for library in libraries]
+    access_by_library_id: dict[int, Literal["owner", "read", "edit"]] = {
+        library.id: "owner" for library in owned_libraries
+    }
+    access_by_library_id.update(
+        {
+            share.library_id: "edit" if share.permission == "edit" else "read"
+            for share in recipient_shares
+            if share.library_id in shared_library_ids
+        }
+    )
     assignments = (
         session.scalars(
             select(PersonalWatchlistLibraryItem).where(
@@ -3903,10 +4164,41 @@ def _personal_watchlist_payload(
         else []
     )
     assignments_by_plid: dict[str, list[int]] = defaultdict(list)
+    assignment_added_at_by_plid: dict[str, datetime] = {}
     item_counts: dict[int, int] = defaultdict(int)
     for assignment in assignments:
         assignments_by_plid[assignment.plid].append(assignment.library_id)
         item_counts[assignment.library_id] += 1
+        previous_added_at = assignment_added_at_by_plid.get(assignment.plid)
+        if previous_added_at is None or assignment.added_at > previous_added_at:
+            assignment_added_at_by_plid[assignment.plid] = assignment.added_at
+
+    all_shares = (
+        session.scalars(
+            select(PersonalWatchlistLibraryShare).where(
+                PersonalWatchlistLibraryShare.library_id.in_(library_ids)
+            )
+        ).all()
+        if library_ids
+        else []
+    )
+    shares_by_library_id: dict[int, list[PersonalWatchlistLibraryShare]] = defaultdict(list)
+    for share in all_shares:
+        shares_by_library_id[share.library_id].append(share)
+    referenced_user_ids = {
+        *(library.user_id for library in libraries),
+        *(share.user_id for share in all_shares),
+    }
+    users_by_id = {
+        account.id: account
+        for account in (
+            session.scalars(
+                select(ErpUser).where(ErpUser.id.in_(referenced_user_ids))
+            ).all()
+            if referenced_user_ids
+            else []
+        )
+    }
 
     membership_rows: dict[
         str,
@@ -3924,8 +4216,21 @@ def _personal_watchlist_payload(
     preference = session.get(PersonalWatchlistPreference, user_id)
     default_library_id = (
         preference.default_library_id
-        if preference is not None and preference.default_library_id in library_ids
+        if preference is not None and preference.default_library_id in owned_library_ids
         else None
+    )
+    shared_items = [
+        {
+            "plid": plid,
+            "added_at": assignment_added_at_by_plid[plid].isoformat(),
+            "library_ids": sorted(set(assigned_library_ids)),
+        }
+        for plid, assigned_library_ids in assignments_by_plid.items()
+        if plid not in membership_rows
+    ]
+    shared_items.sort(
+        key=lambda item: (str(item["added_at"]), str(item["plid"])),
+        reverse=True,
     )
     return {
         "items": [
@@ -3937,14 +4242,16 @@ def _personal_watchlist_payload(
             for item, source in ordered_memberships
         ],
         "count": len(ordered_memberships),
+        "shared_items": shared_items,
         "libraries": [
-            {
-                "id": library.id,
-                "name": library.name,
-                "created_at": library.created_at.isoformat(),
-                "updated_at": library.updated_at.isoformat(),
-                "item_count": item_counts[library.id],
-            }
+            _personal_watchlist_library_payload(
+                library,
+                owner=users_by_id[library.user_id],
+                access=access_by_library_id[library.id],
+                item_count=item_counts[library.id],
+                share_rows=shares_by_library_id[library.id],
+                users_by_id=users_by_id,
+            )
             for library in libraries
         ],
         "default_library_configured": bool(
@@ -4154,6 +4461,109 @@ def _competitor_target_audit_payload(
         "actor_display_name": audit.actor_display_name,
         "changed_at": audit.changed_at.isoformat(),
     }
+
+
+def _personal_watchlist_library_payload(
+    library: PersonalWatchlistLibrary,
+    *,
+    owner: ErpUser,
+    access: Literal["owner", "read", "edit"],
+    item_count: int,
+    share_rows: Sequence[PersonalWatchlistLibraryShare] = (),
+    users_by_id: Mapping[int, ErpUser] | None = None,
+) -> dict[str, object]:
+    accounts = users_by_id or {}
+    visible_shares = []
+    if access == "owner":
+        for share in sorted(share_rows, key=lambda item: item.user_id):
+            recipient = accounts.get(share.user_id)
+            if recipient is None:
+                continue
+            visible_shares.append(
+                {
+                    "user_id": recipient.id,
+                    "username": recipient.username,
+                    "display_name": recipient.display_name,
+                    "active": recipient.active,
+                    "permission": "edit" if share.permission == "edit" else "read",
+                }
+            )
+    return {
+        "id": library.id,
+        "name": library.name,
+        "created_at": library.created_at.isoformat(),
+        "updated_at": library.updated_at.isoformat(),
+        "item_count": item_count,
+        "owner_user_id": owner.id,
+        "owner_username": owner.username,
+        "owner_display_name": owner.display_name,
+        "access": access,
+        "is_owner": access == "owner",
+        "share_count": len(share_rows),
+        "shares": visible_shares,
+    }
+
+
+def _single_personal_watchlist_library_payload(
+    session: Session,
+    *,
+    library: PersonalWatchlistLibrary,
+    viewer_user_id: int,
+) -> dict[str, object]:
+    access = _personal_watchlist_library_access(
+        session,
+        library=library,
+        user_id=viewer_user_id,
+    )
+    if access is None:
+        raise HTTPException(status_code=404, detail="未找到当前账号可访问的类型库")
+    owner = session.get(ErpUser, library.user_id)
+    if owner is None:
+        raise HTTPException(status_code=404, detail="类型库创建者账号不存在")
+    share_rows = session.scalars(
+        select(PersonalWatchlistLibraryShare).where(
+            PersonalWatchlistLibraryShare.library_id == library.id
+        )
+    ).all()
+    share_user_ids = {share.user_id for share in share_rows}
+    users_by_id = {
+        account.id: account
+        for account in (
+            session.scalars(select(ErpUser).where(ErpUser.id.in_(share_user_ids))).all()
+            if share_user_ids
+            else []
+        )
+    }
+    item_count = int(
+        session.scalar(
+            select(func.count())
+            .select_from(PersonalWatchlistLibraryItem)
+            .where(PersonalWatchlistLibraryItem.library_id == library.id)
+        )
+        or 0
+    )
+    return _personal_watchlist_library_payload(
+        library,
+        owner=owner,
+        access=access,
+        item_count=item_count,
+        share_rows=share_rows,
+        users_by_id=users_by_id,
+    )
+
+
+def _personal_watchlist_library_access(
+    session: Session,
+    *,
+    library: PersonalWatchlistLibrary,
+    user_id: int,
+) -> Literal["owner", "read", "edit"] | None:
+    if library.user_id == user_id:
+        return "owner"
+    share = session.get(PersonalWatchlistLibraryShare, (library.id, user_id))
+    if share is None:
+        return None
+    return "edit" if share.permission == "edit" else "read"
 
 
 def _beijing_day_start_utc(value: date) -> datetime:

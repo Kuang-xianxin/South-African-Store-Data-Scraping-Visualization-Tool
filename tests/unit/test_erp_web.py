@@ -2853,6 +2853,7 @@ def test_competitor_personal_watchlist_is_account_scoped_and_viewer_editable(
                 }
             ],
             "count": 1,
+            "shared_items": [],
             "libraries": [],
             "default_library_configured": False,
             "default_library_id": None,
@@ -3152,6 +3153,241 @@ def test_personal_watchlist_type_libraries_are_account_scoped_and_multi_selectab
         assert [item["plid"] for item in admin.get("/api/competitors/targets").json()["items"]] == [
             "12345678"
         ]
+
+
+def test_personal_watchlist_library_shares_enforce_read_and_edit_permissions(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    database_path = tmp_path / "erp-personal-watchlist-library-shares.db"
+    monkeypatch.setenv(
+        "TAKEALOT_DATABASE_URL",
+        f"sqlite:///{database_path.as_posix()}",
+    )
+    app = create_app(tmp_path)
+
+    with TestClient(app, client=("127.0.0.1", 50100)) as admin:
+        session = _bootstrap(admin)
+        headers = {"X-CSRF-Token": str(session["csrf_token"])}
+        created_users: dict[str, dict[str, object]] = {}
+        for username, display_name in (
+            ("library.reader", "Library Reader"),
+            ("library.editor", "Library Editor"),
+            ("library.inactive", "Inactive Recipient"),
+        ):
+            response = admin.post(
+                "/api/auth/users",
+                headers=headers,
+                json={
+                    "username": username,
+                    "display_name": display_name,
+                    "password": "watchlist-password-123",
+                    "role": "viewer",
+                },
+            )
+            assert response.status_code == 200
+            created_users[username] = response.json()["user"]
+        inactive_id = int(created_users["library.inactive"]["id"])
+        deactivated = admin.patch(
+            f"/api/auth/users/{inactive_id}",
+            headers=headers,
+            json={"active": False},
+        )
+        assert deactivated.status_code == 200
+
+        library_response = admin.post(
+            "/api/competitors/personal-watchlist/libraries",
+            headers=headers,
+            json={"name": "Shared Focus"},
+        )
+        assert library_response.status_code == 200
+        library = library_response.json()["library"]
+        assert library["access"] == "owner"
+        assert library["shares"] == []
+        library_id = int(library["id"])
+
+        for plid in ("12345678", "87654321"):
+            created = admin.post(
+                "/api/competitors/targets",
+                headers=headers,
+                json={"url": f"https://www.takealot.com/example/PLID{plid}"},
+            )
+            assert created.status_code == 200
+        assigned = admin.put(
+            "/api/competitors/personal-watchlist/12345678/libraries",
+            headers=headers,
+            json={"library_ids": [library_id]},
+        )
+        assert assigned.status_code == 200
+        removed_second_personal_item = admin.delete(
+            "/api/competitors/personal-watchlist/87654321",
+            headers=headers,
+        )
+        assert removed_second_personal_item.json()["removed"] is True
+
+        reader_id = int(created_users["library.reader"]["id"])
+        editor_id = int(created_users["library.editor"]["id"])
+        share_response = admin.put(
+            f"/api/competitors/personal-watchlist/libraries/{library_id}/shares",
+            headers=headers,
+            json={
+                "shares": [
+                    {"user_id": reader_id, "permission": "read"},
+                    {"user_id": editor_id, "permission": "edit"},
+                    {"user_id": inactive_id, "permission": "read"},
+                ]
+            },
+        )
+        assert share_response.status_code == 200
+        shared_library = share_response.json()["library"]
+        assert shared_library["share_count"] == 3
+        assert {
+            (share["username"], share["permission"], share["active"])
+            for share in shared_library["shares"]
+        } == {
+            ("library.reader", "read", True),
+            ("library.editor", "edit", True),
+            ("library.inactive", "read", False),
+        }
+        assert (
+            admin.put(
+                f"/api/competitors/personal-watchlist/libraries/{library_id}/shares",
+                headers=headers,
+                json={
+                    "shares": [
+                        {"user_id": reader_id, "permission": "read"},
+                        {"user_id": reader_id, "permission": "edit"},
+                    ]
+                },
+            ).status_code
+            == 422
+        )
+
+    with TestClient(app, client=("192.168.1.8", 50101)) as reader:
+        login = reader.post(
+            "/api/auth/login",
+            json={
+                "username": "library.reader",
+                "password": "watchlist-password-123",
+            },
+        )
+        assert login.status_code == 200
+        reader_headers = {"X-CSRF-Token": str(login.json()["csrf_token"])}
+        candidate_users = reader.get(
+            "/api/competitors/personal-watchlist/share-users"
+        )
+        assert candidate_users.status_code == 200
+        assert {item["username"] for item in candidate_users.json()["items"]} >= {
+            "kxx",
+            "library.editor",
+            "library.inactive",
+        }
+        reader_payload = reader.get("/api/competitors/personal-watchlist").json()
+        assert reader_payload["count"] == 0
+        assert [item["plid"] for item in reader_payload["shared_items"]] == ["12345678"]
+        reader_library = reader_payload["libraries"][0]
+        assert reader_library["access"] == "read"
+        assert reader_library["owner_username"] == "kxx"
+        assert reader_library["shares"] == []
+        assert (
+            reader.delete(
+                f"/api/competitors/personal-watchlist/libraries/{library_id}/items/12345678",
+                headers=reader_headers,
+            ).status_code
+            == 403
+        )
+        reader_add = reader.put(
+            "/api/competitors/personal-watchlist/87654321",
+            headers=reader_headers,
+        )
+        assert reader_add.status_code == 200
+        assert (
+            reader.put(
+                "/api/competitors/personal-watchlist/87654321/libraries",
+                headers=reader_headers,
+                json={"library_ids": [library_id]},
+            ).status_code
+            == 403
+        )
+
+    with TestClient(app, client=("192.168.1.9", 50102)) as editor:
+        login = editor.post(
+            "/api/auth/login",
+            json={
+                "username": "library.editor",
+                "password": "watchlist-password-123",
+            },
+        )
+        assert login.status_code == 200
+        editor_headers = {"X-CSRF-Token": str(login.json()["csrf_token"])}
+        editor_payload = editor.get("/api/competitors/personal-watchlist").json()
+        assert editor_payload["libraries"][0]["access"] == "edit"
+        editor_add = editor.put(
+            "/api/competitors/personal-watchlist/87654321",
+            headers=editor_headers,
+        )
+        assert editor_add.status_code == 200
+        editor_assign = editor.put(
+            "/api/competitors/personal-watchlist/87654321/libraries",
+            headers=editor_headers,
+            json={"library_ids": [library_id]},
+        )
+        assert editor_assign.status_code == 200
+        assert editor_assign.json()["library_ids"] == [library_id]
+        removed_from_shared_library = editor.delete(
+            f"/api/competitors/personal-watchlist/libraries/{library_id}/items/12345678",
+            headers=editor_headers,
+        )
+        assert removed_from_shared_library.status_code == 200
+        assert removed_from_shared_library.json()["removed"] is True
+        assert removed_from_shared_library.json()["library"]["item_count"] == 1
+        assert (
+            editor.patch(
+                f"/api/competitors/personal-watchlist/libraries/{library_id}",
+                headers=editor_headers,
+                json={"name": "Editor Renamed"},
+            ).status_code
+            == 404
+        )
+        assert (
+            editor.put(
+                f"/api/competitors/personal-watchlist/libraries/{library_id}/shares",
+                headers=editor_headers,
+                json={"shares": []},
+            ).status_code
+            == 404
+        )
+
+    with TestClient(app, client=("127.0.0.1", 50103)) as admin:
+        login = admin.post(
+            "/api/auth/login",
+            json={"username": "kxx", "password": "pass-123"},
+        )
+        assert login.status_code == 200
+        headers = {"X-CSRF-Token": str(login.json()["csrf_token"])}
+        owner_payload = admin.get("/api/competitors/personal-watchlist").json()
+        assert [item["plid"] for item in owner_payload["shared_items"]] == ["87654321"]
+        revoked_reader = admin.put(
+            f"/api/competitors/personal-watchlist/libraries/{library_id}/shares",
+            headers=headers,
+            json={"shares": [{"user_id": editor_id, "permission": "edit"}]},
+        )
+        assert revoked_reader.status_code == 200
+        assert revoked_reader.json()["library"]["share_count"] == 1
+
+    with TestClient(app, client=("192.168.1.8", 50104)) as reader:
+        login = reader.post(
+            "/api/auth/login",
+            json={
+                "username": "library.reader",
+                "password": "watchlist-password-123",
+            },
+        )
+        assert login.status_code == 200
+        revoked_payload = reader.get("/api/competitors/personal-watchlist").json()
+        assert revoked_payload["libraries"] == []
+        assert revoked_payload["shared_items"] == []
+        assert revoked_payload["count"] == 1
 
 
 def test_competitor_manual_retry_priority_is_audited_once(

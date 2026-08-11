@@ -91,7 +91,7 @@ test("the personal pool is a standalone top workspace with direct card location"
   );
 });
 
-test("personal type libraries are account-local, multi-selectable and require a first default choice", () => {
+test("personal type libraries separate owner controls from read and edit sharing", () => {
   assert.match(pageSource, /openPersonalWatchlistLibrarySettings/);
   assert.match(pageSource, /openPersonalWatchlistCardLibraries\(card\)/);
   assert.match(pageSource, /togglePersonalWatchlistLibrarySelection\(library\.id\)/);
@@ -104,8 +104,18 @@ test("personal type libraries are account-local, multi-selectable and require a 
   assert.match(pageSource, /personalWatchlistLibraryFilter === library\.id/);
   assert.match(pageSource, /unclassifiedPersonalWatchlistCount/);
   assert.match(pageSource, /recountPersonalWatchlistLibraries\(/);
+  assert.match(pageSource, /updatePersonalWatchlistLibraryShares/);
+  assert.match(pageSource, /personalWatchlistSharePermissionFor/);
+  assert.match(pageSource, /SHARED WITH ME/);
+  assert.match(pageSource, /只读/);
+  assert.match(pageSource, /可编辑/);
+  assert.match(pageSource, /library\.access === "owner"/);
+  assert.match(pageSource, /deletePersonalWatchlistLibraryItem/);
+  assert.match(pageSource, /共享库仅传递库内 PLID/);
   assert.match(styleSource, /\.personal-watchlist-library-modal\s*\{/);
   assert.match(styleSource, /\.personal-watchlist-library-filter\s*\{/);
+  assert.match(styleSource, /\.personal-watchlist-share-user-list\s*\{/);
+  assert.match(styleSource, /\.shared-with-me-library-grid\s*\{/);
   assert.match(styleSource, /background:\s*#fff/);
 });
 

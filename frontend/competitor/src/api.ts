@@ -6,6 +6,8 @@ import type {
   CompetitorPersonalWatchlistItem,
   CompetitorPersonalWatchlistPayload,
   PersonalWatchlistLibrary,
+  PersonalWatchlistLibrarySharePermission,
+  PersonalWatchlistShareUser,
   CompetitorStoreTargetPayload,
   CompetitorTargetAuditPayload,
   CompetitorTargetItem,
@@ -296,6 +298,13 @@ export function fetchCompetitorPersonalWatchlist(): Promise<CompetitorPersonalWa
   );
 }
 
+export async function fetchPersonalWatchlistShareUsers(): Promise<PersonalWatchlistShareUser[]> {
+  const result = await request<{ items: PersonalWatchlistShareUser[] }>(
+    "/api/competitors/personal-watchlist/share-users",
+  );
+  return result.items;
+}
+
 export function addCompetitorPersonalWatchlistItem(
   plid: string,
 ): Promise<{ item: CompetitorPersonalWatchlistItem; created: boolean }> {
@@ -345,6 +354,34 @@ export function deletePersonalWatchlistLibrary(
 }> {
   return request(
     `/api/competitors/personal-watchlist/libraries/${encodeURIComponent(libraryId)}`,
+    { method: "DELETE" },
+  );
+}
+
+export function updatePersonalWatchlistLibraryShares(
+  libraryId: number,
+  shares: Array<{
+    user_id: number;
+    permission: PersonalWatchlistLibrarySharePermission;
+  }>,
+): Promise<{ library: PersonalWatchlistLibrary }> {
+  return request(
+    `/api/competitors/personal-watchlist/libraries/${encodeURIComponent(libraryId)}/shares`,
+    {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ shares }),
+    },
+  );
+}
+
+export function deletePersonalWatchlistLibraryItem(
+  libraryId: number,
+  plid: string,
+): Promise<{ ok: boolean; removed: boolean; library: PersonalWatchlistLibrary }> {
+  return request(
+    `/api/competitors/personal-watchlist/libraries/${encodeURIComponent(libraryId)}`
+      + `/items/${encodeURIComponent(plid)}`,
     { method: "DELETE" },
   );
 }

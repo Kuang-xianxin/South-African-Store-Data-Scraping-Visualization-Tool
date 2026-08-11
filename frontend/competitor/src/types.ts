@@ -181,17 +181,49 @@ export interface CompetitorPersonalWatchlistItem {
   library_ids: number[];
 }
 
+export interface PersonalWatchlistSharedItem {
+  plid: string;
+  added_at: string;
+  library_ids: number[];
+}
+
+export type PersonalWatchlistLibraryAccess = "owner" | "read" | "edit";
+export type PersonalWatchlistLibrarySharePermission = "read" | "edit";
+
+export interface PersonalWatchlistLibraryShare {
+  user_id: number;
+  username: string;
+  display_name: string;
+  active: boolean;
+  permission: PersonalWatchlistLibrarySharePermission;
+}
+
+export interface PersonalWatchlistShareUser {
+  id: number;
+  username: string;
+  display_name: string;
+  active: boolean;
+}
+
 export interface PersonalWatchlistLibrary {
   id: number;
   name: string;
   created_at: string;
   updated_at: string;
   item_count: number;
+  owner_user_id: number;
+  owner_username: string;
+  owner_display_name: string;
+  access: PersonalWatchlistLibraryAccess;
+  is_owner: boolean;
+  share_count: number;
+  shares: PersonalWatchlistLibraryShare[];
 }
 
 export interface CompetitorPersonalWatchlistPayload {
   items: CompetitorPersonalWatchlistItem[];
   count: number;
+  shared_items: PersonalWatchlistSharedItem[];
   libraries: PersonalWatchlistLibrary[];
   default_library_configured: boolean;
   default_library_id: number | null;
