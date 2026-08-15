@@ -4,6 +4,7 @@ import hashlib
 import threading
 import time
 from datetime import UTC, date, datetime, timedelta
+from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -24,17 +25,22 @@ from takealot_ops.competitors.service import (
     CompetitorDiscoveredTarget,
 )
 from takealot_ops.erp.daily_report import capture_daily_report
-from takealot_ops.erp.web import create_app
+from takealot_ops.erp.web import _aggregate_store_revenue_series, create_app
 from takealot_ops.logistics.service import LogisticsOverviewService
 from takealot_ops.storage.migrations import create_schema
 from takealot_ops.storage.models import (
     CompetitorTarget,
     CompetitorSnapshot,
+    DailyReportRun,
+    DailySalesMetricState,
     ErpStore,
     ErpSession,
+    ErpUserStore,
     LogisticsProviderSnapshot,
     OfferCurrent,
     OfferSnapshot,
+    OwnStorePersonalWatchlist,
+    SalesRevenueRevision,
     StoreOfferBaseline,
 )
 from takealot_ops.storage.store_context import current_store_code, store_scope
@@ -44,6 +50,83 @@ PROJECT_ROOT = Path(__file__).parents[2]
 TRUSTED_PRODUCT_IMAGE_URL = (
     "https://takealot.s3.amazonaws.com/covers_images/37b5fc661b694ed5969280cc0cea2ce4/s.file"
 )
+
+
+def test_store_revenue_series_excludes_the_open_sast_day() -> None:
+    series = {
+        "current": [
+            {"metric_date": "2026-08-10", "ordered_revenue": 100},
+            {"metric_date": "2026-08-11", "ordered_revenue": 10},
+        ],
+        "store-02": [
+            {"metric_date": "2026-08-10", "ordered_revenue": 200},
+            {"metric_date": "2026-08-11", "ordered_revenue": 20},
+        ],
+    }
+
+    points = _aggregate_store_revenue_series(
+        series,
+        completed_through=date(2026, 8, 10),
+    )
+
+    assert [point["metric_date"] for point in points] == ["2026-08-10"]
+    assert points[0]["total_ordered_revenue"] == 300
+
+
+def test_store_revenue_series_keeps_every_date_in_an_explicit_viewport() -> None:
+    first_date = date(2026, 7, 1)
+    series = {
+        store_code: [
+            {
+                "metric_date": (first_date + timedelta(days=index)).isoformat(),
+                "ordered_revenue": (index + 1) * multiplier,
+            }
+            for index in range(40)
+        ]
+        for store_code, multiplier in (("current", 10), ("store-02", 20))
+    }
+
+    points = _aggregate_store_revenue_series(
+        series,
+        start_date=first_date,
+        completed_through=date(2026, 8, 9),
+        limit=None,
+    )
+
+    assert len(points) == 40
+    assert points[0]["metric_date"] == "2026-07-01"
+    assert points[-1]["metric_date"] == "2026-08-09"
+    assert points[-1]["total_ordered_revenue"] == 1200
+
+
+def test_store_revenue_series_returns_available_sum_for_partial_coverage() -> None:
+    points = _aggregate_store_revenue_series(
+        {
+            "current": [
+                {"metric_date": "2026-07-29", "ordered_revenue": 88722},
+            ],
+            "store-06": [],
+        },
+        completed_through=date(2026, 7, 29),
+    )
+
+    assert points == [
+        {
+            "metric_date": "2026-07-29",
+            "total_ordered_revenue": 88722.0,
+            "covered_store_count": 1,
+            "store_count": 2,
+            "missing_store_count": 1,
+            "data_status": "pending",
+            "source_verified_store_count": 0,
+            "pending_reconciliation_store_count": 0,
+            "unverified_source_store_count": 2,
+            "revised_store_count": 0,
+            "revision_count": 0,
+            "latest_sales_verified_at": None,
+            "latest_revision_at": None,
+        }
+    ]
 
 
 def _bootstrap(client: TestClient) -> dict[str, object]:
@@ -83,6 +166,8 @@ def test_competitor_detail_requests_only_the_selected_plid(
     monkeypatch,
 ) -> None:
     calls: list[dict[str, object]] = []
+    sales_calls: list[dict[str, object]] = []
+    traffic_calls: list[dict[str, object]] = []
     database_path = tmp_path / "detail-route.db"
     monkeypatch.setenv(
         "TAKEALOT_DATABASE_URL",
@@ -95,7 +180,7 @@ def test_competitor_detail_requests_only_the_selected_plid(
             history=pd.DataFrame(),
             reviews=pd.DataFrame(),
             variants=pd.DataFrame(),
-            store_current=pd.DataFrame(),
+            store_current=pd.DataFrame([{"plid": "101163999"}]),
             store_history=pd.DataFrame(),
         )
 
@@ -103,20 +188,160 @@ def test_competitor_detail_requests_only_the_selected_plid(
         "takealot_ops.erp.web._load_competitor_dataset",
         load_detail_dataset,
     )
+
+    def load_sales(_root: Path, **kwargs):
+        sales_calls.append(kwargs)
+        return []
+
+    monkeypatch.setattr(
+        "takealot_ops.erp.web._load_own_store_sales",
+        load_sales,
+    )
+
+    def load_traffic(_root: Path, **kwargs):
+        traffic_calls.append(kwargs)
+        return []
+
+    monkeypatch.setattr(
+        "takealot_ops.erp.web._load_own_store_traffic",
+        load_traffic,
+    )
     app = create_app(tmp_path)
 
     with TestClient(app, client=("127.0.0.1", 50000)) as client:
         _bootstrap(client)
-        response = client.get("/api/competitors/101163999")
+        response = client.get(
+            "/api/competitors/101163999?start_date=2026-08-01&end_date=2026-08-14"
+        )
 
     assert response.status_code == 200
-    assert response.json() == {"history": [], "reviews": [], "variants": []}
+    assert response.json() == {
+        "history": [],
+        "reviews": [],
+        "variants": [],
+        "own_store_sales": [],
+        "own_store_traffic": [],
+    }
     assert calls == [
         {
-            "start_date": None,
-            "end_date": None,
+            "start_date": date(2026, 8, 1),
+            "end_date": date(2026, 8, 14),
             "own_store_codes": {"current"},
             "plids": {"101163999"},
+        }
+    ]
+    assert len(sales_calls) == 1
+    assert sales_calls[0]["plid"] == "101163999"
+    assert sales_calls[0]["own_store_codes"] == {"current"}
+    assert isinstance(sales_calls[0]["through"], date)
+    assert traffic_calls == [
+        {
+            "plid": "101163999",
+            "own_store_codes": {"current"},
+            "start_date": date(2026, 8, 1),
+            "end_date": date(2026, 8, 14),
+        }
+    ]
+
+
+def test_personal_watchlist_overview_projects_only_visible_membership_plids(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    calls: list[dict[str, object]] = []
+    database_path = tmp_path / "personal-watchlist-overview.db"
+    monkeypatch.setenv(
+        "TAKEALOT_DATABASE_URL",
+        f"sqlite:///{database_path.as_posix()}",
+    )
+    monkeypatch.setenv(
+        "TAKEALOT_STORES",
+        "current|Alpha Store|STORE_KEY_ALPHA;store-02|Beta Store|STORE_KEY_BETA",
+    )
+    monkeypatch.setenv("STORE_KEY_ALPHA", "alpha-key")
+    monkeypatch.setenv("STORE_KEY_BETA", "beta-key")
+
+    def load_personal_dataset(_root: Path, **kwargs):
+        calls.append(kwargs)
+        return SimpleNamespace(
+            current=(
+                pd.DataFrame(
+                    [{"plid": "12345678", "商品": "Hydrated competitor"}]
+                )
+                if kwargs["plids"]
+                else pd.DataFrame()
+            ),
+            store_current=pd.DataFrame(),
+            own_follower_events=[],
+            date_range_payload=lambda: {
+                "available_start": "2026-08-01",
+                "available_end": "2026-08-10",
+                "selected_start": "2026-08-02",
+                "selected_end": "2026-08-09",
+            },
+        )
+
+    monkeypatch.setattr(
+        "takealot_ops.erp.web._load_competitor_dataset",
+        load_personal_dataset,
+    )
+    app = create_app(tmp_path)
+
+    with TestClient(app, client=("127.0.0.1", 50000)) as client:
+        engine = create_engine(f"sqlite:///{database_path.as_posix()}")
+        create_schema(engine)
+        now = datetime(2026, 8, 11, 5, tzinfo=UTC)
+        with Session(engine) as session, session.begin():
+            current_store = session.scalar(
+                select(ErpStore).where(ErpStore.code == "current")
+            )
+            assert current_store is not None
+            current_store.display_name = "Alpha Store"
+            current_store.active = True
+            current_store.data_connected = True
+            session.add(
+                ErpStore(
+                        code="store-02",
+                        display_name="Beta Store",
+                        active=True,
+                        data_connected=True,
+                        created_at=now,
+                        updated_at=now,
+                )
+            )
+        engine.dispose()
+        session = _bootstrap(client)
+        empty_response = client.get(
+            "/api/competitors/personal-watchlist/overview"
+        )
+        assert empty_response.status_code == 200
+        assert empty_response.json()["items"] == []
+        assert calls[-1]["plids"] == set()
+        created = client.post(
+            "/api/competitors/targets",
+            headers={"X-CSRF-Token": str(session["csrf_token"])},
+            json={"url": "https://www.takealot.com/example/PLID12345678"},
+        )
+        assert created.status_code == 200
+        calls.clear()
+
+        response = client.get(
+            "/api/competitors/personal-watchlist/overview"
+            "?start_date=2026-08-02&end_date=2026-08-09&own_store_scope=current"
+        )
+
+    assert response.status_code == 200
+    assert response.json()["items"] == [
+        {"plid": "12345678", "商品": "Hydrated competitor"}
+    ]
+    assert response.json()["own_follower_events"] == []
+    assert calls == [
+        {
+            "start_date": date(2026, 8, 2),
+            "end_date": date(2026, 8, 9),
+            "own_store_codes": {"current", "store-02"},
+            "plids": {"12345678"},
+            "include_detail_frames": False,
         }
     ]
 
@@ -148,6 +373,12 @@ def test_competitor_radar_returns_automatic_store_targets_and_separate_items(
             current_store.display_name = "Alpha Store"
             current_store.active = True
             current_store.data_connected = True
+            session.add(
+                ErpUserStore(
+                    user_id=int(issued["user"]["id"]),
+                    store_id=current_store.id,
+                )
+            )
             session.add(
                 ErpStore(
                     code="store-02",
@@ -251,6 +482,9 @@ def test_competitor_radar_returns_automatic_store_targets_and_separate_items(
         all_store_targets = client.get(
             "/api/competitors/store-targets?own_store_scope=all"
         )
+        operating_store_targets = client.get(
+            "/api/competitors/store-targets?own_store_scope=operating"
+        )
         beta_targets = client.get(
             "/api/competitors/store-targets",
             headers={"X-Store-Code": "store-02"},
@@ -258,6 +492,16 @@ def test_competitor_radar_returns_automatic_store_targets_and_separate_items(
         competitor_targets = client.get("/api/competitors/targets")
         overview = client.get("/api/competitors")
         all_store_overview = client.get("/api/competitors?own_store_scope=all")
+        operating_store_overview = client.get(
+            "/api/competitors?own_store_scope=operating"
+        )
+        own_store_overview = client.get("/api/competitors/own-store")
+        all_store_own_store_overview = client.get(
+            "/api/competitors/own-store?own_store_scope=all"
+        )
+        operating_own_store_overview = client.get(
+            "/api/competitors/own-store?own_store_scope=operating"
+        )
         own_default_library_response = client.post(
             "/api/competitors/personal-watchlist/libraries",
             headers={"X-CSRF-Token": str(issued["csrf_token"])},
@@ -337,6 +581,11 @@ def test_competitor_radar_returns_automatic_store_targets_and_separate_items(
         "all_store_unique_count": 2,
         "all_store_membership_count": 3,
     }
+    assert operating_store_targets.status_code == 200
+    assert operating_store_targets.json() == {
+        **automatic_targets.json(),
+        "scope": "operating",
+    }
     assert beta_targets.status_code == 200
     assert {item["plid"] for item in beta_targets.json()["items"]} == {
         "12345678",
@@ -357,6 +606,27 @@ def test_competitor_radar_returns_automatic_store_targets_and_separate_items(
         "87654321",
     }
     assert all_store_overview.json()["own_follower_events"] == []
+    assert operating_store_overview.status_code == 200
+    assert {
+        item["plid"]
+        for item in operating_store_overview.json()["store_items"]
+    } == {"12345678"}
+    assert own_store_overview.status_code == 200
+    assert {item["plid"] for item in own_store_overview.json()["store_items"]} == {
+        "12345678"
+    }
+    assert all_store_own_store_overview.status_code == 200
+    assert {
+        item["plid"]
+        for item in all_store_own_store_overview.json()["store_items"]
+    } == {"12345678", "87654321"}
+    assert operating_own_store_overview.status_code == 200
+    assert {
+        item["plid"]
+        for item in operating_own_store_overview.json()["store_items"]
+    } == {"12345678"}
+    assert "items" not in own_store_overview.json()
+    assert "own_follower_events" not in own_store_overview.json()
     assert all(item["来源"] == "own_store" for item in overview.json()["store_items"])
     assert private_add.status_code == 200
     private_payload = private_add.json()
@@ -382,6 +652,177 @@ def test_competitor_radar_returns_automatic_store_targets_and_separate_items(
     assert competitor_add.status_code == 200
     assert competitor_add.json()["item"]["plid"] == "77777777"
     assert competitor_add.json()["automatic_store_target"] is False
+
+
+def test_personal_watchlist_blocks_own_store_plids_outside_user_store_scope(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    database_path = tmp_path / "personal-watchlist-store-scope.db"
+    database_url = f"sqlite:///{database_path.as_posix()}"
+    monkeypatch.setenv("TAKEALOT_DATABASE_URL", database_url)
+    app = create_app(tmp_path)
+
+    with TestClient(app, client=("127.0.0.1", 50000)) as admin:
+        engine = create_engine(database_url)
+        create_schema(engine)
+        now = datetime(2026, 8, 11, 5, tzinfo=UTC)
+        with Session(engine) as session, session.begin():
+            current_store = session.scalar(
+                select(ErpStore).where(ErpStore.code == "current")
+            )
+            assert current_store is not None
+            current_store.display_name = "Alpha Store"
+            current_store.active = True
+            current_store.data_connected = True
+            current_store_id = current_store.id
+            session.add(
+                ErpStore(
+                        code="store-02",
+                        display_name="Beta Store",
+                        active=True,
+                        data_connected=True,
+                        created_at=now,
+                        updated_at=now,
+                )
+            )
+        with store_scope("current"), Session(engine) as session, session.begin():
+            session.add(
+                OfferCurrent(
+                    offer_id="shared-alpha-offer",
+                    productline_id="22222222",
+                    sku="ALPHA-SHARED",
+                    title="Shared Authorized Product",
+                    selling_price=100,
+                    total_stock=3,
+                    captured_at=now,
+                )
+            )
+        with store_scope("store-02"), Session(engine) as session, session.begin():
+            session.add_all(
+                [
+                    OfferCurrent(
+                        offer_id="beta-private-offer",
+                        productline_id="11111111",
+                        sku="BETA-PRIVATE",
+                        title="Unauthorized Own Product",
+                        selling_price=200,
+                        total_stock=4,
+                        captured_at=now,
+                    ),
+                    OfferCurrent(
+                        offer_id="shared-beta-offer",
+                        productline_id="22222222",
+                        sku="BETA-SHARED",
+                        title="Shared Unauthorized Store Copy",
+                        selling_price=101,
+                        total_stock=2,
+                        captured_at=now,
+                    ),
+                ]
+            )
+        engine.dispose()
+        issued = _bootstrap(admin)
+        admin_csrf = str(issued["csrf_token"])
+
+        created_user = admin.post(
+            "/api/auth/users",
+            headers={"X-CSRF-Token": admin_csrf},
+            json={
+                "username": "alpha.operator",
+                "display_name": "Alpha Operator",
+                "password": "operator-password-123",
+                "role": "operator",
+                "permissions": ["competitors.view", "competitors.collect"],
+                "all_stores": False,
+                "store_ids": [current_store_id],
+            },
+        )
+        assert created_user.status_code == 200
+        operator_user_id = int(created_user.json()["user"]["id"])
+        private_membership = admin.put(
+            "/api/competitors/personal-watchlist/11111111",
+            headers={"X-CSRF-Token": admin_csrf},
+        )
+        assert private_membership.status_code == 200
+        private_library_response = admin.post(
+            "/api/competitors/personal-watchlist/libraries",
+            headers={"X-CSRF-Token": admin_csrf},
+            json={"name": "Private Shared Library"},
+        )
+        assert private_library_response.status_code == 200
+        private_library_id = int(private_library_response.json()["library"]["id"])
+        assigned_private = admin.put(
+            "/api/competitors/personal-watchlist/11111111/libraries",
+            headers={"X-CSRF-Token": admin_csrf},
+            json={"library_ids": [private_library_id]},
+        )
+        assert assigned_private.status_code == 200
+        shared_private = admin.put(
+            f"/api/competitors/personal-watchlist/libraries/{private_library_id}/shares",
+            headers={"X-CSRF-Token": admin_csrf},
+            json={"shares": [{"user_id": operator_user_id, "permission": "read"}]},
+        )
+        assert shared_private.status_code == 200
+
+        with TestClient(app, client=("192.168.1.8", 50001)) as operator:
+            login = operator.post(
+                "/api/auth/login",
+                json={
+                    "username": "alpha.operator",
+                    "password": "operator-password-123",
+                },
+            )
+            assert login.status_code == 200
+            assert [
+                store["code"] for store in login.json()["user"]["accessible_stores"]
+            ] == ["current"]
+            headers = {"X-CSRF-Token": str(login.json()["csrf_token"])}
+
+            denied_personal = operator.put(
+                "/api/competitors/personal-watchlist/11111111",
+                headers=headers,
+            )
+            denied_target = operator.post(
+                "/api/competitors/targets",
+                headers=headers,
+                json={"url": "https://www.takealot.com/private/PLID11111111"},
+            )
+            allowed_shared = operator.post(
+                "/api/competitors/targets",
+                headers=headers,
+                json={"url": "https://www.takealot.com/shared/PLID22222222"},
+            )
+            personal = operator.get("/api/competitors/personal-watchlist")
+
+        for denied in (denied_personal, denied_target):
+            assert denied.status_code == 403
+            assert "无权查看店铺的自有商品" in denied.json()["detail"]
+            assert "不能加入个人监控池" in denied.json()["detail"]
+            assert "Beta Store" not in denied.json()["detail"]
+        assert allowed_shared.status_code == 200
+        assert allowed_shared.json()["automatic_store_target"] is True
+        assert allowed_shared.json()["store_names"] == ["Alpha Store"]
+        assert personal.status_code == 200
+        assert [item["plid"] for item in personal.json()["items"]] == ["22222222"]
+        assert personal.json()["shared_items"] == [
+            {
+                "plid": "11111111",
+                "added_at": personal.json()["shared_items"][0]["added_at"],
+                "library_ids": [private_library_id],
+                "source": "own_store",
+                "detail_access": "store_access_denied",
+            }
+        ]
+
+        engine = create_engine(database_url)
+        with Session(engine) as session:
+            assert session.get(
+                OwnStorePersonalWatchlist,
+                (operator_user_id, "11111111"),
+            ) is None
+            assert session.get(CompetitorTarget, "11111111") is None
+        engine.dispose()
 
 
 def test_collect_routes_own_store_plid_to_follower_only_collection(
@@ -773,11 +1214,12 @@ def test_store_assignments_scale_and_all_store_accounts_include_future_stores(
                 "password": "owner-password-123",
                 "role": "viewer",
                 "all_stores": True,
-                "store_ids": [],
+                "store_ids": planned_ids[:2],
             },
         )
         assert owner.status_code == 200
         assert len(owner.json()["user"]["accessible_stores"]) == 6
+        assert owner.json()["user"]["assigned_store_ids"] == planned_ids[:2]
 
         unknown_store = admin.post(
             "/api/auth/users",
@@ -937,6 +1379,112 @@ def test_store_summary_compares_only_accessible_connected_stores(
                             },
                         },
                     ),
+                    DailyReportRun(
+                        store_code="current",
+                        run_id="summary-current-pre-close-failed",
+                        business_date=date(2026, 8, 6),
+                        slot="pre_close",
+                        captured_at=datetime(2026, 8, 7, 1),
+                        status="failed",
+                        counts={"final_reason": "current period-end transport failure"},
+                        created_at=datetime(2026, 8, 7, 1),
+                    ),
+                    DailyReportRun(
+                        store_code="store-02",
+                        run_id="summary-store-02-pre-close-failed",
+                        business_date=date(2026, 8, 6),
+                        slot="pre_close",
+                        captured_at=datetime(2026, 8, 7, 1),
+                        status="failed",
+                        counts={"final_reason": "store-02 period-end transport failure"},
+                        created_at=datetime(2026, 8, 7, 1),
+                    ),
+                    DailySalesMetricState(
+                        store_code="current",
+                        metric_date=date(2026, 8, 5),
+                        ordered_units=5,
+                        ordered_revenue=Decimal("500.00"),
+                        source_kind="takealot_sales_api",
+                        source_run_id="current-recovery-run",
+                        source_details={
+                            "kind": "takealot_sales_api",
+                            "label": "Takealot Seller Sales API /sales 成功批次",
+                            "run_id": "current-recovery-run",
+                            "requested_start": "2026-07-08",
+                            "requested_end": "2026-08-06",
+                            "collected_at": "2026-08-07T02:00:00+00:00",
+                        },
+                        verified_at=datetime(2026, 8, 7, 2, tzinfo=UTC),
+                        first_published_at=captured_at,
+                        updated_at=datetime(2026, 8, 7, 2, tzinfo=UTC),
+                        revision_count=1,
+                    ),
+                    DailySalesMetricState(
+                        store_code="current",
+                        metric_date=date(2026, 8, 6),
+                        ordered_units=10,
+                        ordered_revenue=Decimal("1000.00"),
+                        source_kind="takealot_sales_api",
+                        source_run_id="current-recovery-run",
+                        source_details={
+                            "kind": "takealot_sales_api",
+                            "label": "Takealot Seller Sales API /sales 成功批次",
+                            "run_id": "current-recovery-run",
+                            "requested_start": "2026-07-08",
+                            "requested_end": "2026-08-06",
+                            "collected_at": "2026-08-07T02:00:00+00:00",
+                        },
+                        verified_at=datetime(2026, 8, 7, 2, tzinfo=UTC),
+                        first_published_at=captured_at,
+                        updated_at=datetime(2026, 8, 7, 2, tzinfo=UTC),
+                        revision_count=0,
+                    ),
+                    DailySalesMetricState(
+                        store_code="store-02",
+                        metric_date=date(2026, 8, 5),
+                        ordered_units=10,
+                        ordered_revenue=Decimal("1000.00"),
+                        source_kind="takealot_sales_api",
+                        source_run_id="store-02-before-failure",
+                        source_details={
+                            "kind": "takealot_sales_api",
+                            "label": "Takealot Seller Sales API /sales 成功批次",
+                            "run_id": "store-02-before-failure",
+                            "requested_start": "2026-07-08",
+                            "requested_end": "2026-08-06",
+                            "collected_at": "2026-08-07T00:30:00+00:00",
+                        },
+                        verified_at=datetime(2026, 8, 7, 0, 30, tzinfo=UTC),
+                        first_published_at=captured_at,
+                        updated_at=datetime(2026, 8, 7, 0, 30, tzinfo=UTC),
+                        revision_count=0,
+                    ),
+                    SalesRevenueRevision(
+                        store_code="current",
+                        metric_date=date(2026, 8, 5),
+                        change_type="corrected",
+                        before_ordered_units=4,
+                        after_ordered_units=5,
+                        before_ordered_revenue=Decimal("400.00"),
+                        after_ordered_revenue=Decimal("500.00"),
+                        revenue_delta=Decimal("100.00"),
+                        units_delta=1,
+                        before_source={
+                            "kind": "takealot_sales_api",
+                            "label": "Earlier Sales API batch",
+                            "run_id": "current-before-run",
+                        },
+                        after_source={
+                            "kind": "takealot_sales_api",
+                            "label": "Takealot Seller Sales API /sales 成功批次",
+                            "run_id": "current-recovery-run",
+                            "requested_start": "2026-07-08",
+                            "requested_end": "2026-08-06",
+                            "collected_at": "2026-08-07T02:00:00+00:00",
+                        },
+                        source_run_id="current-recovery-run",
+                        detected_at=datetime(2026, 8, 7, 2, tzinfo=UTC),
+                    ),
                 ]
             )
 
@@ -965,10 +1513,13 @@ def test_store_summary_compares_only_accessible_connected_stores(
             loaded_store_codes.append(store_code)
             return store_code
 
-        def fake_summary_payload(store_code, as_of):
+        def fake_summary_payload(store_code, as_of, *, start_date=None):
+            assert start_date == date(2026, 8, 1)
             multiplier = 1 if store_code == "current" else 2
             return {
                 "as_of": as_of.isoformat(),
+                "range_start": start_date.isoformat(),
+                "range_end": as_of.isoformat(),
                 "latest_metric_date": "2026-08-06",
                 "kpis": {
                     "latest_ordered_units": 10 * multiplier,
@@ -1002,7 +1553,8 @@ def test_store_summary_compares_only_accessible_connected_stores(
                 ],
             }
 
-        def fake_traffic_series(_engine, *, as_of):
+        def fake_traffic_series(_engine, *, as_of, days=30):
+            assert days == 6
             multiplier = 1 if current_store_code() == "current" else 2
             return [
                 {
@@ -1038,17 +1590,40 @@ def test_store_summary_compares_only_accessible_connected_stores(
             )
             assert login.status_code == 200
             response = operator_client.get(
-                "/api/erp/summary/stores?as_of=2026-08-06",
+                "/api/erp/summary/stores?as_of=2026-08-06&start_date=2026-08-01",
+                headers={"X-Store-Code": "current"},
+            )
+            operating_response = operator_client.get(
+                "/api/erp/summary/stores"
+                "?as_of=2026-08-06&start_date=2026-08-01"
+                "&store_scope=operating",
                 headers={"X-Store-Code": "current"},
             )
             single_store_response = operator_client.get(
-                "/api/erp/summary?as_of=2026-08-06",
+                "/api/erp/summary?as_of=2026-08-06&start_date=2026-08-01",
+                headers={"X-Store-Code": "current"},
+            )
+            invalid_range_response = operator_client.get(
+                "/api/erp/summary/stores?as_of=2026-08-06&start_date=2026-08-07",
+                headers={"X-Store-Code": "current"},
+            )
+            audit_response = operator_client.get(
+                "/api/erp/summary/stores/sales-revisions",
+                params={"start_date": "2026-08-05", "end_date": "2026-08-06"},
                 headers={"X-Store-Code": "current"},
             )
 
         assert response.status_code == 200
         payload = response.json()
+        assert operating_response.status_code == 200
+        assert {
+            item["store_code"]
+            for item in operating_response.json()["stores"]
+        } == {"current", "store-02"}
+        assert payload["range_start"] == "2026-08-01"
+        assert payload["range_end"] == "2026-08-06"
         assert payload["store_count"] == 2
+        assert payload["sales_revenue_completed_through"] == "2026-08-06"
         stores_by_code = {
             item["store_code"]: item
             for item in payload["stores"]
@@ -1085,6 +1660,16 @@ def test_store_summary_compares_only_accessible_connected_stores(
         assert stores_by_code["current"]["health"]["business_reasons"] == [
             "缺货商品 1 个"
         ]
+        assert stores_by_code["current"]["sales_reconciliation"]["status"] == (
+            "recovered"
+        )
+        assert stores_by_code["store-02"]["sales_reconciliation"]["status"] == (
+            "pending"
+        )
+        assert (
+            "周期末失败后销售额尚待新的 Sales API 成功批次核验"
+            in stores_by_code["store-02"]["health"]["data_reasons"]
+        )
         assert payload["stores"][0]["store_code"] == "store-02"
         assert payload["health_summary"] == {
             "attention": 2,
@@ -1098,15 +1683,43 @@ def test_store_summary_compares_only_accessible_connected_stores(
                 "covered_store_count": 2,
                 "store_count": 2,
                 "missing_store_count": 0,
+                "data_status": "pending",
+                "source_verified_store_count": 2,
+                "pending_reconciliation_store_count": 1,
+                "unverified_source_store_count": 0,
+                "revised_store_count": 1,
+                "revision_count": 1,
+                "latest_sales_verified_at": "2026-08-07T02:00:00",
+                "latest_revision_at": "2026-08-07T02:00:00",
             },
             {
                 "metric_date": "2026-08-06",
-                "total_ordered_revenue": None,
+                "total_ordered_revenue": 1000.0,
                 "covered_store_count": 1,
                 "store_count": 2,
                 "missing_store_count": 1,
+                "data_status": "pending",
+                "source_verified_store_count": 1,
+                "pending_reconciliation_store_count": 1,
+                "unverified_source_store_count": 1,
+                "revised_store_count": 0,
+                "revision_count": 0,
+                "latest_sales_verified_at": "2026-08-07T02:00:00",
+                "latest_revision_at": None,
             },
         ]
+        assert payload["sales_reconciliation"] == {
+            "period_end_business_date": "2026-08-06",
+            "failed_store_count": 2,
+            "pending_store_count": 1,
+            "recovered_store_count": 1,
+            "verified_store_count": 0,
+            "unverified_store_count": 0,
+            "revision_count": 1,
+            "latest_sales_verified_at": "2026-08-07T02:00:00",
+            "latest_revision_at": "2026-08-07T02:00:00",
+            "stores": payload["sales_reconciliation"]["stores"],
+        }
         assert payload["logistics"]["overseas_warehouse"]["stock_total"] == 100
         assert payload["logistics"]["platform_warehouse"] == {
             "captured_at": "2026-08-07T01:00:00",
@@ -1121,10 +1734,20 @@ def test_store_summary_compares_only_accessible_connected_stores(
             "platform_stock_in_receiving_coverage": 2,
         }
         assert single_store_response.status_code == 200
+        assert single_store_response.json()["range_start"] == "2026-08-01"
         assert single_store_response.json()["operators"][0]["display_name"] == (
             "Summary Operator"
         )
         assert set(loaded_store_codes) == {"current", "store-02"}
+        assert audit_response.status_code == 200
+        assert invalid_range_response.status_code == 422
+        audit = audit_response.json()
+        assert audit["total"] == 1
+        assert audit["items"][0]["store_code"] == "current"
+        assert audit["items"][0]["before_ordered_revenue"] == 400.0
+        assert audit["items"][0]["after_ordered_revenue"] == 500.0
+        assert audit["items"][0]["before_source"]["run_id"] == "current-before-run"
+        assert audit["items"][0]["after_source"]["run_id"] == "current-recovery-run"
 
 
 def test_public_competitor_module_does_not_require_store_assignment(
@@ -1379,15 +2002,16 @@ def test_keyword_traffic_routes_detect_title_change(
                     offer_id="offer-keyword",
                     sku="SKU-KEYWORD",
                     title="Memory Foam Queen Mattress",
+                    created_at=datetime(2026, 1, 15, 10, 34, tzinfo=UTC),
                     captured_at=datetime(2026, 8, 3, 1, tzinfo=UTC),
                     page_views_30_days=160,
                 )
             )
-            for snapshot_date, page_views, title in (
-                (date(2026, 7, 31), 100, "Memory Foam Mattress"),
-                (date(2026, 8, 1), 110, "Memory Foam Queen Mattress"),
-                (date(2026, 8, 2), 135, "Memory Foam Queen Mattress"),
-                (date(2026, 8, 3), 160, "Memory Foam Queen Mattress"),
+            for snapshot_date, page_views, title, total_stock in (
+                (date(2026, 7, 31), 100, "Memory Foam Mattress", 5),
+                (date(2026, 8, 1), 110, "Memory Foam Queen Mattress", 8),
+                (date(2026, 8, 2), 135, "Memory Foam Queen Mattress", 7),
+                (date(2026, 8, 3), 160, "Memory Foam Queen Mattress", 9),
             ):
                 session.add(
                     OfferSnapshot(
@@ -1401,6 +2025,7 @@ def test_keyword_traffic_routes_detect_title_change(
                             tzinfo=UTC,
                         ),
                         page_views_30_days=page_views,
+                        total_stock=total_stock,
                     )
                 )
         engine.dispose()
@@ -1415,6 +2040,10 @@ def test_keyword_traffic_routes_detect_title_change(
     assert listing.json()["summary"]["archived_product_count"] == 1
     assert listing.json()["items"][0]["latest_page_views_30_days"] == 160
     assert detail.status_code == 200
+    assert detail.json()["product"]["first_listed_at"] == "2026-01-15 12:34"
+    assert detail.json()["product"]["first_listed_source"] == "platform"
+    assert detail.json()["product"]["latest_restock_date"] == "2026-08-03 08:00"
+    assert detail.json()["product"]["latest_restock_increase"] == 2
     assert detail.json()["product"]["current_keywords"] == [
         "Memory",
         "Foam",
@@ -2158,6 +2787,9 @@ def test_loopback_schedule_starts_visible_batch_and_kxx_can_stop_it(
         assert stopped_status["event"] == "manual_stop"
         assert stopped_status["reason"] == "scheduled stop test"
         assert app.state.scheduled_competitor_runner.status()["run_status"] == "stopped"
+        resumable_status = client.get("/api/competitors/batch-status").json()
+        assert resumable_status["scheduled_resume_available"] is True
+        assert resumable_status["scheduled_resume_pending"] == 1
 
         repeated_stop = client.post(
             "/api/competitors/batch-stop",
@@ -2174,6 +2806,37 @@ def test_loopback_schedule_starts_visible_batch_and_kxx_can_stop_it(
         assert repeated.status_code == 200
         assert repeated.json()["accepted"] is False
         assert repeated.json()["state"] == "already_handled"
+
+        resumed = client.post(
+            "/api/competitors/batch-resume",
+            headers=headers,
+            json={"batch_id": status["batch_id"]},
+        )
+        assert resumed.status_code == 200
+        resumed_status = resumed.json()["status"]
+        assert resumed_status["active"] is True
+        assert resumed_status["batch_id"] == status["batch_id"]
+        assert resumed_status["event"] == "resume"
+        assert resumed_status["scheduled_resume_available"] is False
+
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline:
+            resumed_status = client.get("/api/competitors/batch-status").json()
+            if resumed_status.get("current_request_id"):
+                break
+            time.sleep(0.01)
+        assert resumed_status["current_plid"] == "12345678"
+
+        stopped_again = client.post(
+            "/api/competitors/batch-stop",
+            headers=headers,
+            json={
+                "batch_id": status["batch_id"],
+                "reason": "cleanup resumed scheduled test",
+            },
+        )
+        assert stopped_again.status_code == 200
+        assert stopped_again.json()["status"]["active"] is False
 
 
 def test_kxx_changes_scheduled_visible_browser_from_the_next_link(
@@ -2402,6 +3065,13 @@ def test_only_kxx_controls_batch_while_other_admin_can_add_and_prioritize(
             json={"url": "https://www.takealot.com/example/PLID12345678"},
         )
         assert collect_blocked.status_code == 403
+        resume_blocked = other_admin.post(
+            "/api/competitors/batch-resume",
+            headers={"X-CSRF-Token": operator_csrf},
+            json={"batch_id": "batch-admin"},
+        )
+        assert resume_blocked.status_code == 403
+        assert "仅限 kxx 账号" in resume_blocked.json()["detail"]
         created_target = other_admin.post(
             "/api/competitors/targets",
             headers={"X-CSRF-Token": operator_csrf},
@@ -2512,9 +3182,13 @@ def test_operator_only_adds_targets_and_manages_personal_watchlist(
                 headers=headers,
             ),
             operator.get("/api/competitors/target-audits"),
+            operator.get("/api/competitors/listing-operations"),
+            operator.get("/api/competitors/listing-operations/1/items"),
             operator.get("/api/competitors/link-health"),
         ]
         assert [response.status_code for response in restricted_responses] == [
+            403,
+            403,
             403,
             403,
             403,
@@ -3273,6 +3947,13 @@ def test_personal_watchlist_library_shares_enforce_read_and_edit_permissions(
         )
         assert login.status_code == 200
         reader_headers = {"X-CSRF-Token": str(login.json()["csrf_token"])}
+        read_only_default = reader.put(
+            "/api/competitors/personal-watchlist/settings",
+            headers=reader_headers,
+            json={"default_library_id": library_id},
+        )
+        assert read_only_default.status_code == 403
+        assert "只读共享类型库" in read_only_default.json()["detail"]
         candidate_users = reader.get(
             "/api/competitors/personal-watchlist/share-users"
         )
@@ -3285,6 +3966,8 @@ def test_personal_watchlist_library_shares_enforce_read_and_edit_permissions(
         reader_payload = reader.get("/api/competitors/personal-watchlist").json()
         assert reader_payload["count"] == 0
         assert [item["plid"] for item in reader_payload["shared_items"]] == ["12345678"]
+        assert reader_payload["shared_items"][0]["source"] == "competitor"
+        assert reader_payload["shared_items"][0]["detail_access"] == "public"
         reader_library = reader_payload["libraries"][0]
         assert reader_library["access"] == "read"
         assert reader_library["owner_username"] == "kxx"
@@ -3320,13 +4003,23 @@ def test_personal_watchlist_library_shares_enforce_read_and_edit_permissions(
         )
         assert login.status_code == 200
         editor_headers = {"X-CSRF-Token": str(login.json()["csrf_token"])}
+        editor_default = editor.put(
+            "/api/competitors/personal-watchlist/settings",
+            headers=editor_headers,
+            json={"default_library_id": library_id},
+        )
+        assert editor_default.status_code == 200
+        assert editor_default.json()["default_library_id"] == library_id
         editor_payload = editor.get("/api/competitors/personal-watchlist").json()
         assert editor_payload["libraries"][0]["access"] == "edit"
+        assert editor_payload["default_library_configured"] is True
+        assert editor_payload["default_library_id"] == library_id
         editor_add = editor.put(
             "/api/competitors/personal-watchlist/87654321",
             headers=editor_headers,
         )
         assert editor_add.status_code == 200
+        assert editor_add.json()["item"]["library_ids"] == [library_id]
         editor_assign = editor.put(
             "/api/competitors/personal-watchlist/87654321/libraries",
             headers=editor_headers,
@@ -3374,6 +4067,12 @@ def test_personal_watchlist_library_shares_enforce_read_and_edit_permissions(
         )
         assert revoked_reader.status_code == 200
         assert revoked_reader.json()["library"]["share_count"] == 1
+        downgraded_editor = admin.put(
+            f"/api/competitors/personal-watchlist/libraries/{library_id}/shares",
+            headers=headers,
+            json={"shares": [{"user_id": editor_id, "permission": "read"}]},
+        )
+        assert downgraded_editor.status_code == 200
 
     with TestClient(app, client=("192.168.1.8", 50104)) as reader:
         login = reader.post(
@@ -3388,6 +4087,20 @@ def test_personal_watchlist_library_shares_enforce_read_and_edit_permissions(
         assert revoked_payload["libraries"] == []
         assert revoked_payload["shared_items"] == []
         assert revoked_payload["count"] == 1
+
+    with TestClient(app, client=("192.168.1.9", 50105)) as editor:
+        login = editor.post(
+            "/api/auth/login",
+            json={
+                "username": "library.editor",
+                "password": "watchlist-password-123",
+            },
+        )
+        assert login.status_code == 200
+        downgraded_payload = editor.get("/api/competitors/personal-watchlist").json()
+        assert downgraded_payload["libraries"][0]["access"] == "read"
+        assert downgraded_payload["default_library_configured"] is False
+        assert downgraded_payload["default_library_id"] is None
 
 
 def test_competitor_manual_retry_priority_is_audited_once(

@@ -7,6 +7,7 @@ export const COMPETITOR_OPERATING_SIGNAL_OPTIONS = [
   "补货",
   "库存减少",
   "库存数量不变",
+  "库存变化大",
   "评论增加",
   "好评增加",
   "差评增加",
@@ -47,24 +48,48 @@ export function competitorOperatingSignals(item: CompetitorItem) {
       signals.add(priceSignal as "降价" | "涨价" | "价格不变");
     }
   }
-  if (
+  const periodSalesUnits = item.周期销售件数;
+  const periodReplenishmentUnits = item.周期补货量;
+  const hasPeriodSalesUnits = typeof periodSalesUnits === "number";
+  const hasPeriodReplenishmentUnits = typeof periodReplenishmentUnits === "number";
+  const legacyReplenished = (
     item.趋势判断 === "检测到补货"
     || item.跟卖报价.some((offer) => REPLENISHMENT_SIGNALS.has(offer.库存信号))
-  ) {
-    signals.add("补货");
-  }
-  const stockDecreased = (
-    (item.库存净流出 !== null && item.库存净流出 > 0)
-    || item.跟卖报价.some(
-      (offer) => offer.库存信号 === "库存减少" || offer.库存信号 === "转为没货",
-    )
   );
+  const replenished = hasPeriodReplenishmentUnits
+    ? periodReplenishmentUnits > 0
+    : legacyReplenished;
+  if (replenished) signals.add("补货");
+  const stockDecreased = hasPeriodSalesUnits
+    ? periodSalesUnits > 0
+    : (
+      (item.库存净流出 !== null && item.库存净流出 > 0)
+      || item.跟卖报价.some(
+        (offer) => offer.库存信号 === "库存减少" || offer.库存信号 === "转为没货",
+      )
+    );
   if (stockDecreased) signals.add("库存减少");
-  if (
+  const endpointOrOfferUnchanged = (
     (item.库存可比 === true && item.库存净变化 === 0)
     || item.跟卖报价.some((offer) => offer.库存信号 === "库存数量不变")
-  ) {
-    signals.add("库存数量不变");
+  );
+  const hasCompletePeriodMovement = hasPeriodSalesUnits && hasPeriodReplenishmentUnits;
+  const hasAnyPeriodMovement = hasPeriodSalesUnits || hasPeriodReplenishmentUnits;
+  const stockUnchanged = hasCompletePeriodMovement
+    ? (
+      item.库存可比 === true
+      && periodSalesUnits === 0
+      && periodReplenishmentUnits === 0
+    )
+    : (
+      !hasAnyPeriodMovement
+      && !stockDecreased
+      && !replenished
+      && endpointOrOfferUnchanged
+    );
+  if (stockUnchanged) signals.add("库存数量不变");
+  if (item.周期库存周转金额 !== null && item.周期库存周转金额 > 0) {
+    signals.add("库存变化大");
   }
   const reviewsIncreased = item.新增评论 !== null && item.新增评论 > 0;
   if (reviewsIncreased) signals.add("评论增加");

@@ -2,15 +2,24 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  alignOwnStoreTrafficTrendToOfferTrend,
   buildCompetitorOfferHistory,
   buildCompetitorOfferTrend,
+  buildOwnStoreTrafficTrend,
   comparableOfferNetOutflow,
   followerOffers,
   groupCompetitorOffersBySeller,
   findSnapshotOffer,
+  nearestObservedOwnStoreTrafficPoint,
+  offerIntervalReplenishmentUnits,
+  offerIntervalSalesUnits,
   sortCompetitorOffers,
 } from "../src/competitorOfferHistory.ts";
-import type { CompetitorItem, CompetitorOfferItem } from "../src/types.ts";
+import type {
+  CompetitorItem,
+  CompetitorOfferItem,
+  OwnStoreTrafficSeries,
+} from "../src/types.ts";
 
 function offer(overrides: Partial<CompetitorOfferItem>): CompetitorOfferItem {
   return {
@@ -200,6 +209,239 @@ test("offer trend sorts chronologically and only plots exact stock quantities", 
   assert.deepEqual(trend.map((point) => point.price), [100, 95]);
   assert.deepEqual(trend.map((point) => point.exactStock), [10, null]);
   assert.deepEqual(trend.map((point) => point.reviews), [12, 14]);
+});
+
+test("own-store traffic trend preserves gaps and title-change nodes", () => {
+  const series: OwnStoreTrafficSeries = {
+    store_code: "store-01",
+    store_name: "Own store",
+    plid: "123",
+    offer_id: "offer-1",
+    sku: "SKU-1",
+    range_start: "2026-08-02",
+    range_end: "2026-08-04",
+    observed_count: 2,
+    traffic_count: 2,
+    missing_count: 1,
+    metric_notice: "rolling traffic",
+    points: [
+      {
+        date: "2026-08-02",
+        captured_at: "2026-08-02T02:00:00Z",
+        page_views_30_days: 100,
+        title: "Old title",
+        title_changed: false,
+        previous_title: null,
+        data_status: "observed",
+      },
+      {
+        date: "2026-08-03",
+        captured_at: null,
+        page_views_30_days: null,
+        title: null,
+        title_changed: false,
+        previous_title: null,
+        data_status: "missing",
+      },
+      {
+        date: "2026-08-04",
+        captured_at: "2026-08-04T02:00:00Z",
+        page_views_30_days: 140,
+        title: "New title",
+        title_changed: true,
+        previous_title: "Old title",
+        data_status: "observed",
+      },
+    ],
+  };
+
+  const trend = buildOwnStoreTrafficTrend(series);
+
+  assert.deepEqual(trend.map((point) => point.page_views_30_days), [100, null, 140]);
+  assert.equal(trend[2]?.title_changed, true);
+  assert.equal(
+    nearestObservedOwnStoreTrafficPoint(trend, Date.parse("2026-08-04T01:00:00Z"))
+      ?.page_views_30_days,
+    140,
+  );
+  assert.equal(
+    nearestObservedOwnStoreTrafficPoint(trend, Date.parse("2026-08-03T00:00:00Z"))
+      ?.data_status,
+    "observed",
+  );
+});
+
+test("traffic nodes align to the nearest offer observation without rewriting capture time", () => {
+  const selected = offer({ 报价键: "offer:selected" });
+  const firstOffer = snapshot(1, [selected]);
+  firstOffer.采集时间 = "2026-08-02T01:00:00Z";
+  const secondOffer = snapshot(2, [selected]);
+  secondOffer.采集时间 = "2026-08-03T01:00:00Z";
+  const offerTrend = buildCompetitorOfferTrend([firstOffer, secondOffer], selected);
+  const trafficTrend = buildOwnStoreTrafficTrend({
+    store_code: "store-01",
+    store_name: "Own store",
+    plid: "123",
+    offer_id: "offer-1",
+    sku: "SKU-1",
+    range_start: "2026-08-02",
+    range_end: "2026-08-03",
+    observed_count: 2,
+    traffic_count: 2,
+    missing_count: 0,
+    metric_notice: "rolling traffic",
+    points: [
+      {
+        date: "2026-08-02",
+        captured_at: "2026-08-02T08:00:00Z",
+        page_views_30_days: 100,
+        title: "Old title",
+        title_changed: false,
+        previous_title: null,
+        data_status: "observed",
+      },
+      {
+        date: "2026-08-03",
+        captured_at: "2026-08-03T08:00:00Z",
+        page_views_30_days: 120,
+        title: "New title",
+        title_changed: true,
+        previous_title: "Old title",
+        data_status: "observed",
+      },
+    ],
+  });
+
+  const aligned = alignOwnStoreTrafficTrendToOfferTrend(trafficTrend, offerTrend);
+
+  assert.deepEqual(aligned.map((point) => point.alignedOfferIndex), [0, 1]);
+  assert.deepEqual(
+    aligned.map((point) => point.alignedCapturedAtMs),
+    offerTrend.map((point) => point.capturedAtMs),
+  );
+  assert.deepEqual(
+    aligned.map((point) => point.capturedAtMs),
+    trafficTrend.map((point) => point.capturedAtMs),
+  );
+});
+
+test("offer interval units accumulate exact decreases and replenishment separately", () => {
+  const selected = offer({ 报价键: "offer:selected", 报价来源: "public_offer" });
+  const stocks = [10, 6, 12, 9];
+  const history = stocks.map((stock, index) => snapshot(index + 1, [
+    offer({
+      报价键: "offer:selected",
+      报价来源: "public_offer",
+      库存数量: stock,
+      库存精确: true,
+    }),
+  ]));
+
+  assert.equal(offerIntervalSalesUnits(history, selected), 7);
+  assert.equal(offerIntervalReplenishmentUnits(history, selected), 6);
+});
+
+test("offer interval sales units ignore interleaved points from another source", () => {
+  const selected = offer({ 报价键: "offer:selected", 报价来源: "public_offer" });
+  const publicStart = offer({
+    报价键: "offer:selected",
+    报价来源: "public_offer",
+    库存数量: 10,
+  });
+  const sellerApiPoint = offer({
+    报价键: "seller-api:store-01:offer-1",
+    报价来源: "seller_api",
+    offer_id: "offer-1",
+    卖家ID: "store-01",
+    卖家: "Own store",
+    库存数量: 99,
+  });
+  const publicEnd = offer({
+    报价键: "offer:selected",
+    报价来源: "public_offer",
+    库存数量: 8,
+  });
+
+  assert.equal(
+    offerIntervalSalesUnits(
+      [snapshot(1, [publicStart]), snapshot(2, [sellerApiPoint]), snapshot(3, [publicEnd])],
+      selected,
+    ),
+    2,
+  );
+  assert.equal(
+    offerIntervalReplenishmentUnits(
+      [snapshot(1, [publicStart]), snapshot(2, [sellerApiPoint]), snapshot(3, [publicEnd])],
+      selected,
+    ),
+    0,
+  );
+});
+
+test("offer interval units skip missing, inexact, and isolated scope observations", () => {
+  const selected = offer({ 报价键: "offer:selected", 报价来源: "public_offer" });
+  const exactStart = offer({
+    报价键: "offer:selected",
+    报价来源: "public_offer",
+    库存数量: 10,
+    库存精确: true,
+  });
+  const exactEnd = offer({
+    报价键: "offer:selected",
+    报价来源: "public_offer",
+    库存数量: 7,
+    库存精确: true,
+  });
+  const otherPublicOffer = offer({
+    报价键: "offer:other",
+    报价来源: "public_offer",
+    offer_id: "other",
+    卖家ID: "other-seller",
+    卖家: "Other seller",
+  });
+  const inexactPoint = { ...exactStart, 库存数量: 500, 库存精确: false };
+  const changedScopeStart = { ...exactStart, SKU: "changed-sku", 库存数量: 20 };
+  const changedScopeEnd = { ...exactStart, SKU: "changed-sku", 库存数量: 17 };
+  const isolatedScope = { ...exactStart, SKU: "isolated-sku", 库存数量: 99 };
+  const usableHistory = [
+    snapshot(1, [exactStart]),
+    snapshot(2, [otherPublicOffer]),
+    snapshot(3, [inexactPoint]),
+    snapshot(4, [changedScopeStart]),
+    snapshot(5, [isolatedScope]),
+    snapshot(6, [changedScopeEnd]),
+    snapshot(7, [exactEnd]),
+  ];
+
+  assert.equal(
+    offerIntervalSalesUnits(usableHistory, selected),
+    6,
+  );
+  assert.equal(
+    offerIntervalReplenishmentUnits(usableHistory, selected),
+    0,
+  );
+  assert.equal(
+    offerIntervalSalesUnits(
+      [snapshot(1, [exactStart]), snapshot(2, [inexactPoint])],
+      selected,
+    ),
+    null,
+  );
+  assert.equal(
+    offerIntervalSalesUnits(
+      [snapshot(1, [exactStart]), snapshot(2, [changedScopeStart])],
+      selected,
+    ),
+    null,
+  );
+  assert.equal(
+    offerIntervalReplenishmentUnits(
+      [snapshot(1, [exactStart]), snapshot(2, [changedScopeStart])],
+      selected,
+    ),
+    null,
+  );
 });
 
 test("seller sorting prioritizes comparable interval net outflow and leaves unknowns last", () => {

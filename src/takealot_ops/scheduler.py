@@ -107,7 +107,9 @@ def run_daily(
     """Run the complete daily workflow in the approved publication order."""
     captured_at = clock.now()
     end_date = sast_date(captured_at)
-    start_date = end_date - timedelta(days=6)
+    # Re-pull the complete 30-day window shown by the cross-store revenue chart.
+    # Takealot can add or amend historical order lines after an earlier capture.
+    start_date = end_date - timedelta(days=29)
     export_date = report_date or end_date
     engine = create_engine_for_settings(settings)
     client: TakealotClient | None = None
@@ -121,15 +123,9 @@ def run_daily(
         with Session(engine) as session:
             repository = Repository(session)
             offer_result = collect_offers(client, repository, captured_at)
-            if not offer_result.succeeded:
-                return DailyRunResult(
-                    "collection_failed",
-                    start_date,
-                    end_date,
-                    offer_result=offer_result,
-                    error=offer_result.error,
-                )
-
+            # Sales history is independently authoritative for revenue. Even when
+            # the Offer capture fails (and the formal daily-report run must remain
+            # failed), still try the Sales endpoint and publish auditable corrections.
             sales_result = collect_sales(client, repository, start_date, end_date)
             if not sales_result.succeeded:
                 return DailyRunResult(
@@ -140,6 +136,7 @@ def run_daily(
                     sales_result=sales_result,
                     error=sales_result.error,
                 )
+            sales_verified_at = clock.now()
 
             service = MetricService(
                 repository,
@@ -150,7 +147,42 @@ def run_daily(
                 now=lambda: captured_at,
             )
             try:
-                metric_rows = service.rebuild(start_date, end_date)
+                metric_rows = service.rebuild(
+                    start_date,
+                    end_date,
+                    sales_source={
+                        "kind": "takealot_sales_api",
+                        "label": "Takealot Seller Sales API /sales 成功批次",
+                        "endpoint": "/sales",
+                        "run_id": sales_result.run_id,
+                        "requested_start": start_date,
+                        "requested_end": end_date,
+                        "record_count": int(sales_result.counts.get("records", 0)),
+                        "collected_at": sales_verified_at,
+                    },
+                )
+            except Exception as exc:
+                return DailyRunResult(
+                    "processing_failed",
+                    start_date,
+                    end_date,
+                    offer_result=offer_result,
+                    sales_result=sales_result,
+                    error=_safe_error("processing", exc),
+                )
+
+            if not offer_result.succeeded:
+                return DailyRunResult(
+                    "collection_failed",
+                    start_date,
+                    end_date,
+                    offer_result=offer_result,
+                    sales_result=sales_result,
+                    metric_rows=metric_rows,
+                    error=offer_result.error,
+                )
+
+            try:
                 quality = verify_quality(repository, end_date, start_date=start_date)
                 dataset = service.dashboard_dataset(export_date)
             except Exception as exc:
@@ -160,6 +192,7 @@ def run_daily(
                     end_date,
                     offer_result=offer_result,
                     sales_result=sales_result,
+                    metric_rows=metric_rows,
                     error=_safe_error("processing", exc),
                 )
 

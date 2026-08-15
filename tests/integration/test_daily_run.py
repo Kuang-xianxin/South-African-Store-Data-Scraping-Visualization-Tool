@@ -6,7 +6,7 @@ from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
 from takealot_ops.quality import verify_quality
@@ -14,7 +14,7 @@ from takealot_ops.reporting import ReportPaths
 from takealot_ops.scheduler import run_daily
 from takealot_ops.settings import Settings
 from takealot_ops.storage.migrations import create_schema
-from takealot_ops.storage.models import DataQualityEvent
+from takealot_ops.storage.models import DailySalesMetricState, DataQualityEvent
 from takealot_ops.storage.repository import Repository
 
 
@@ -54,6 +54,19 @@ class FixtureSaleClient(RecordingClient):
         self.calls.append((path, dict(params)))
         fixture = "offers_page_1.json" if path == "/offers" else "sales_page.json"
         payload = json.loads((FIXTURES / fixture).read_text(encoding="utf-8"))
+        yield dict(payload["items"][0])
+
+
+class SalesAfterOfferFailureClient(RecordingClient):
+    def iter_items(
+        self, path: str, params: Mapping[str, Any]
+    ) -> Iterator[dict[str, Any]]:
+        self.calls.append((path, dict(params)))
+        if path == "/offers":
+            payload = json.loads((FIXTURES / "offers_page_1.json").read_text(encoding="utf-8"))
+            yield dict(payload["items"][0])
+            raise RuntimeError("simulated offer pagination failure")
+        payload = json.loads((FIXTURES / "sales_page.json").read_text(encoding="utf-8"))
         yield dict(payload["items"][0])
 
 
@@ -99,7 +112,7 @@ def _fake_reports(tmp_path: Path, report_date: date) -> ReportPaths:
     return ReportPaths(html=html, excel=excel, png=png)
 
 
-def test_daily_run_refreshes_seven_sast_days(tmp_path: Path, monkeypatch) -> None:
+def test_daily_run_reconciles_thirty_sast_days(tmp_path: Path, monkeypatch) -> None:
     client = RecordingClient()
     monkeypatch.setattr("takealot_ops.scheduler.TakealotClient", lambda _: client)
     monkeypatch.setattr(
@@ -111,12 +124,12 @@ def test_daily_run_refreshes_seven_sast_days(tmp_path: Path, monkeypatch) -> Non
         _settings(tmp_path), FixedClock(datetime(2026, 7, 20, 22, 30, tzinfo=UTC))
     )
 
-    assert result.start_date == date(2026, 7, 15)
+    assert result.start_date == date(2026, 6, 22)
     assert result.end_date == date(2026, 7, 21)
     assert client.calls[1] == (
         "/sales",
         {
-            "order_date__gte": "2026-07-15",
+            "order_date__gte": "2026-06-22",
             "order_date__lte": "2026-07-21",
             "limit": 100,
         },
@@ -168,6 +181,35 @@ def test_daily_run_does_not_publish_reports_after_incomplete_pagination(
     assert result.status == "collection_failed"
     assert result.report_paths is None
     assert published == []
+
+
+def test_offer_failure_still_reconciles_sales_without_marking_capture_success(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    client = SalesAfterOfferFailureClient()
+    settings = _settings(tmp_path)
+    monkeypatch.setattr("takealot_ops.scheduler.TakealotClient", lambda _: client)
+
+    result = run_daily(
+        settings,
+        FixedClock(datetime(2026, 7, 20, 8, tzinfo=UTC)),
+    )
+
+    assert result.status == "collection_failed"
+    assert result.offer_result is not None and not result.offer_result.succeeded
+    assert result.sales_result is not None and result.sales_result.succeeded
+    assert result.metric_rows > 0
+    assert [path for path, _ in client.calls] == ["/offers", "/sales"]
+    engine = create_engine(settings.database_url)
+    with Session(engine) as session:
+        state = session.scalar(select(DailySalesMetricState))
+    engine.dispose()
+    assert state is not None
+    assert state.source_kind == "takealot_sales_api"
+    assert state.source_run_id == result.sales_result.run_id
+    assert state.source_details["requested_start"] == "2026-06-21"
+    assert state.source_details["requested_end"] == "2026-07-20"
 
 
 def test_daily_run_checks_quality_across_the_full_refresh_window(

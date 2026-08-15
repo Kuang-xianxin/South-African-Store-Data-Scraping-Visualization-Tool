@@ -24,6 +24,8 @@ BEIJING = ZoneInfo("Asia/Shanghai")
 SCHEDULED_OWNER_USERNAME = "scheduled-task"
 SCHEDULED_OWNER_DISPLAY_NAME = "每日 09:00 自动任务"
 SCHEDULED_CLIENT_ID = "scheduled-runner"
+PENDING_RETRY_DELAY_SECONDS = 600.0
+PENDING_RETRY_ROUND_LIMIT = 3
 
 
 @dataclass(frozen=True)
@@ -105,6 +107,8 @@ class ScheduledCompetitorBatchRunner:
         busy_poll_seconds: float = 5.0,
         inter_target_seconds: float = 1.0,
         network_pause_seconds: float = 600.0,
+        pending_retry_delay_seconds: float = PENDING_RETRY_DELAY_SECONDS,
+        pending_retry_round_limit: int = PENDING_RETRY_ROUND_LIMIT,
     ) -> None:
         self._registry = registry
         self._journal_path = journal_path
@@ -117,6 +121,8 @@ class ScheduledCompetitorBatchRunner:
         self._busy_poll_seconds = busy_poll_seconds
         self._inter_target_seconds = inter_target_seconds
         self._network_pause_seconds = network_pause_seconds
+        self._pending_retry_delay_seconds = max(0.0, pending_retry_delay_seconds)
+        self._pending_retry_round_limit = max(0, pending_retry_round_limit)
         self._lock = asyncio.Lock()
         self._task: asyncio.Task[None] | None = None
         self._closing = False
@@ -125,6 +131,7 @@ class ScheduledCompetitorBatchRunner:
     def start(self) -> None:
         """Resume a durable pending or interrupted scheduled run on ERP startup."""
         self._import_trigger_files()
+        self._restore_completed_pending_wait()
         if self._needs_driver():
             self._ensure_driver()
 
@@ -158,21 +165,38 @@ class ScheduledCompetitorBatchRunner:
                 self._persist_journal()
                 return self._trigger_payload("already_started", accepted=False)
             if self._state.get("pending"):
-                return self._trigger_payload("already_pending", accepted=False)
+                active_status = self._active_batch_status()
+                if not active_status.get("active"):
+                    return self._trigger_payload("already_pending", accepted=False)
+                pending_for = self._optional_text(self._state.get("pending_for"))
+                self._skip_pending_due_to_busy(active_status)
+                if pending_for == trigger_date:
+                    return self._trigger_payload("skipped_busy", accepted=False)
             self._state["pending"] = True
             self._state["pending_for"] = trigger_date
             self._state["requested_at"] = self._utc_iso()
             self._state["last_error"] = ""
+            active_status = self._active_batch_status()
+            if active_status.get("active"):
+                self._skip_pending_due_to_busy(active_status)
+                return self._trigger_payload("skipped_busy", accepted=False)
             self._persist_journal()
         self._logger.info("scheduled_trigger date=%s state=accepted", trigger_date)
         self._ensure_driver()
         return self._trigger_payload("accepted", accepted=True)
 
-    async def mark_stopped(self, batch_id: str, *, stopped_by: str) -> bool:
+    async def mark_stopped(
+        self,
+        batch_id: str,
+        *,
+        stopped_by: str,
+        reason: str = "",
+    ) -> bool:
         """Persist that kxx stopped this scheduled batch; never restart it today."""
         async with self._lock:
             if (
-                self._state.get("run_status") not in {"running", "paused"}
+                self._state.get("run_status")
+                not in {"running", "paused", "retry_wait"}
                 or self._state.get("batch_id") != batch_id
             ):
                 return False
@@ -181,8 +205,10 @@ class ScheduledCompetitorBatchRunner:
             self._state["active_item"] = None
             self._state["resume_after"] = None
             self._state["network_failures"] = []
+            self._state["run_revision"] = self._run_revision() + 1
             self._state["stopped_at"] = self._utc_iso()
             self._state["stopped_by"] = stopped_by
+            self._state["stop_reason"] = self._single_line(reason)
             self._persist_journal()
         self._logger.info(
             "scheduled_batch batch=%s event=manual_stop user=%s",
@@ -191,23 +217,194 @@ class ScheduledCompetitorBatchRunner:
         )
         return True
 
+    async def resume_stopped(
+        self,
+        batch_id: str,
+        *,
+        resumed_by: str,
+    ) -> dict[str, object]:
+        """Explicitly resume a stopped or exhausted scheduled batch checkpoint."""
+        async with self._lock:
+            previous_run_status = str(self._state.get("run_status") or "idle")
+            if previous_run_status not in {"stopped", "completed_with_pending"} or (
+                self._state.get("batch_id") != batch_id
+            ):
+                raise ValueError("当前没有与该编号匹配的可继续 09:00 自动批次断点")
+
+            shared_status = self._registry.status()
+            if shared_status.get("active"):
+                raise CollectionBatchBusyError("当前已有竞品批次运行，不能同时恢复自动批次")
+
+            metrics = self._metrics()
+            resume_queue = self._resume_queue(
+                deferred_failures=True,
+                retry_round=1,
+            )
+            if metrics["pending"] <= 0 or not resume_queue:
+                raise ValueError("该 09:00 自动批次已经没有待重试或未完成链接")
+
+            previous_state = dict(self._state)
+            self._state.update(
+                {
+                    "run_status": "running",
+                    "pending": False,
+                    "queue": resume_queue,
+                    "active_item": None,
+                    "resume_after": None,
+                    "network_failures": [],
+                    "pending_retry_round": (
+                        0
+                        if previous_run_status == "completed_with_pending"
+                        else self._pending_retry_round()
+                    ),
+                    "run_revision": self._run_revision() + 1,
+                    "last_resumed_at": self._utc_iso(),
+                    "last_resumed_by": resumed_by,
+                    "explicit_resume_count": (
+                        self._optional_int(self._state.get("explicit_resume_count")) or 0
+                    )
+                    + 1,
+                }
+            )
+            try:
+                self._persist_journal()
+                status = self._registry.event(
+                    batch_id=batch_id,
+                    client_id=SCHEDULED_CLIENT_ID,
+                    event="resume",
+                    username=SCHEDULED_OWNER_USERNAME,
+                    display_name=SCHEDULED_OWNER_DISPLAY_NAME,
+                    completed=metrics["completed"],
+                    total=metrics["total"],
+                    pending=metrics["pending"],
+                    succeeded=metrics["succeeded"],
+                    failed=metrics["failed"],
+                    terminal=metrics["terminal"],
+                    reason=(
+                        f"{resumed_by} 已从服务端断点继续今日 09:00 自动批次，"
+                        f"保留原批次顺序并续爬 {metrics['pending']} 条"
+                    ),
+                    with_stock_probe=True,
+                    visible_browser=False,
+                    source="scheduled",
+                    results=self._result_rows(),
+                    errors=self._error_rows(),
+                )
+            except Exception:
+                self._state = previous_state
+                self._persist_journal()
+                raise
+
+        self._logger.info(
+            "scheduled_batch batch=%s event=manual_resume user=%s pending=%s",
+            batch_id,
+            resumed_by,
+            metrics["pending"],
+        )
+        self._ensure_driver()
+        return status
+
     def status(self) -> dict[str, object]:
         """Return a small copy suitable for the loopback trigger response."""
+        run_status = str(self._state.get("run_status") or "idle")
+        resumable_pending = (
+            self._metrics()["pending"]
+            if run_status in {"stopped", "completed_with_pending"}
+            else 0
+        )
+        wait_kind = (
+            "network"
+            if run_status == "paused"
+            else "pending_retry"
+            if run_status == "retry_wait"
+            else None
+        )
         return {
             "pending": bool(self._state.get("pending")),
             "pending_for": self._state.get("pending_for"),
-            "run_status": self._state.get("run_status", "idle"),
+            "run_status": run_status,
             "batch_id": self._state.get("batch_id"),
             "last_started_on": self._state.get("last_started_on"),
             "last_started_at": self._state.get("last_started_at"),
             "last_completed_at": self._state.get("last_completed_at"),
             "last_error": self._state.get("last_error", ""),
+            "last_skipped_on": self._state.get("last_skipped_on"),
+            "last_skipped_at": self._state.get("last_skipped_at"),
+            "last_skip_reason": self._state.get("last_skip_reason", ""),
+            "resume_available": resumable_pending > 0,
+            "resumable_pending": resumable_pending,
+            "wait_kind": wait_kind,
+            "resume_after": self._state.get("resume_after"),
+            "pending_retry_round": self._pending_retry_round(),
+            "pending_retry_round_limit": self._pending_retry_round_limit,
+        }
+
+    def stopped_checkpoint_status(self) -> dict[str, object] | None:
+        """Project any durable, explicitly resumable scheduled checkpoint."""
+        run_status = str(self._state.get("run_status") or "idle")
+        batch_id = self._optional_text(self._state.get("batch_id"))
+        if run_status not in {"stopped", "completed_with_pending"} or batch_id is None:
+            return None
+        metrics = self._metrics()
+        if metrics["pending"] <= 0:
+            return None
+        stopped = run_status == "stopped"
+        stopped_by = self._optional_text(self._state.get("stopped_by")) or "kxx"
+        if stopped:
+            reason = self._optional_text(self._state.get("stop_reason")) or (
+                "已手动中断今日 09:00 自动批次；服务端断点已保留，可由 kxx "
+                "显式继续；今天不会自动再次启动，明天 09:00 照常。"
+            )
+        else:
+            reason = self._optional_text(self._state.get("completion_reason")) or (
+                f"延时自动重试后仍有 {metrics['pending']} 条未解决；"
+                "可由 kxx 继续同一服务端断点"
+            )
+        return {
+            "active": False,
+            "batch_id": batch_id,
+            "owner_username": SCHEDULED_OWNER_USERNAME,
+            "owner_display_name": SCHEDULED_OWNER_DISPLAY_NAME,
+            "source": "scheduled",
+            "event": "manual_stop" if stopped else "completed",
+            "completed": metrics["completed"],
+            "total": metrics["total"],
+            "pending": metrics["pending"],
+            "succeeded": metrics["succeeded"],
+            "failed": metrics["failed"],
+            "terminal": metrics["terminal"],
+            "current_index": None,
+            "current_plid": None,
+            "current_request_id": None,
+            "current_stage": None,
+            "current_retry_kind": None,
+            "current_retry_attempt": None,
+            "with_stock_probe": True,
+            "visible_browser": False,
+            "takeover_pending": False,
+            "reason": reason,
+            "started_at": self._state.get("last_started_at"),
+            "updated_at": (
+                self._state.get("stopped_at")
+                if stopped
+                else self._state.get("last_completed_at")
+            ),
+            "queued_targets": [],
+            "priority_targets": [],
+            "prioritized_targets": [],
+            "results": self._result_rows(),
+            "errors": self._error_rows(),
+            "stopped_by": stopped_by if stopped else None,
         }
 
     async def _drive(self) -> None:
         try:
             while not self._closing:
                 self._import_trigger_files()
+                if self._state.get("pending"):
+                    active_status = self._active_batch_status()
+                    if active_status.get("active"):
+                        self._skip_pending_due_to_busy(active_status)
                 run_status = str(self._state.get("run_status") or "idle")
                 if run_status == "running":
                     await self._resume_current_run()
@@ -215,10 +412,14 @@ class ScheduledCompetitorBatchRunner:
                 if run_status == "paused":
                     await self._wait_for_network_resume()
                     continue
+                if run_status == "retry_wait":
+                    await self._wait_for_pending_retry()
+                    continue
                 if not self._state.get("pending"):
                     return
-                if self._registry.status().get("active"):
-                    await self._sleep(self._busy_poll_seconds)
+                active_status = self._active_batch_status()
+                if active_status.get("active"):
+                    self._skip_pending_due_to_busy(active_status)
                     continue
                 try:
                     targets = await self._load_targets()
@@ -235,13 +436,88 @@ class ScheduledCompetitorBatchRunner:
                     self._persist_journal()
                     await self._sleep(self._busy_poll_seconds)
                     continue
-                if not await self._begin_run(targets):
+                try:
+                    started = await self._begin_run(targets)
+                except CollectionBatchBusyError:
+                    self._skip_pending_due_to_busy(self._registry.status())
+                    continue
+                if not started:
                     await self._sleep(self._busy_poll_seconds)
                     continue
                 await self._run_current_queue()
         finally:
             if self._task is asyncio.current_task():
                 self._task = None
+
+    def _active_batch_status(self) -> dict[str, object]:
+        """Include a durable scheduled run before it reacquires the registry."""
+        active_status = self._registry.status()
+        if active_status.get("active"):
+            return active_status
+        run_status = str(self._state.get("run_status") or "idle")
+        batch_id = self._optional_text(self._state.get("batch_id"))
+        if run_status not in {"running", "paused", "retry_wait"} or batch_id is None:
+            return active_status
+        return {
+            **active_status,
+            "active": True,
+            "batch_id": batch_id,
+            "source": "scheduled",
+            "owner_username": SCHEDULED_OWNER_USERNAME,
+            "owner_display_name": SCHEDULED_OWNER_DISPLAY_NAME,
+        }
+
+    def _skip_pending_due_to_busy(
+        self,
+        active_status: dict[str, object],
+    ) -> None:
+        """Consume one scheduled trigger when another shared batch owns the slot."""
+        trigger_date = self._optional_text(self._state.get("pending_for")) or (
+            self._beijing_date()
+        )
+        active_source = self._optional_text(active_status.get("source")) or "manual"
+        active_batch_id = self._optional_text(active_status.get("batch_id"))
+        active_owner = self._optional_text(
+            active_status.get("owner_display_name")
+        ) or self._optional_text(active_status.get("owner_username"))
+        active_label = (
+            "另一场09:00自动批次"
+            if active_source == "scheduled"
+            else "手动批次"
+        )
+        details = ""
+        if active_batch_id:
+            details = f"（批次 {active_batch_id}"
+            if active_owner:
+                details += f"，{active_owner}"
+            details += "）"
+        reason = (
+            f"{trigger_date} 09:00 自动批次未启动：触发或取得采集权时已有"
+            f"{active_label}运行{details}；本次按冲突跳过，当天不排队、"
+            "不在现有批次结束后补跑，次日09:00再按计划尝试。"
+        )[:500]
+        handled = self._handled_trigger_dates()
+        handled.add(trigger_date)
+        self._state.update(
+            {
+                "pending": False,
+                "pending_for": None,
+                "last_error": "",
+                "last_skipped_on": trigger_date,
+                "last_skipped_at": self._utc_iso(),
+                "last_skip_reason": reason,
+                "handled_trigger_dates": sorted(handled),
+            }
+        )
+        self._persist_journal()
+        self._logger.info(
+            "scheduled_trigger date=%s state=skipped_busy active_batch=%s "
+            "active_source=%s active_owner=%s",
+            trigger_date,
+            active_batch_id or "-",
+            active_source,
+            active_owner or "-",
+        )
 
     async def _begin_run(self, targets: list[ScheduledCollectionTarget]) -> bool:
         deduplicated: list[ScheduledCollectionTarget] = []
@@ -261,26 +537,23 @@ class ScheduledCompetitorBatchRunner:
             {"index": index, "url": target.url}
             for index, target in enumerate(deduplicated)
         ]
-        try:
-            self._registry.event(
-                batch_id=batch_id,
-                client_id=SCHEDULED_CLIENT_ID,
-                event="start",
-                username=SCHEDULED_OWNER_USERNAME,
-                display_name=SCHEDULED_OWNER_DISPLAY_NAME,
-                completed=0,
-                total=len(queue),
-                pending=len(queue),
-                succeeded=0,
-                failed=0,
-                terminal=0,
-                reason="Windows 计划任务已在 09:00 自动开始同一共享采集批次",
-                with_stock_probe=True,
-                visible_browser=False,
-                source="scheduled",
-            )
-        except CollectionBatchBusyError:
-            return False
+        self._registry.event(
+            batch_id=batch_id,
+            client_id=SCHEDULED_CLIENT_ID,
+            event="start",
+            username=SCHEDULED_OWNER_USERNAME,
+            display_name=SCHEDULED_OWNER_DISPLAY_NAME,
+            completed=0,
+            total=len(queue),
+            pending=len(queue),
+            succeeded=0,
+            failed=0,
+            terminal=0,
+            reason="Windows 计划任务已在 09:00 自动开始同一共享采集批次",
+            with_stock_probe=True,
+            visible_browser=False,
+            source="scheduled",
+        )
 
         async with self._lock:
             handled = self._handled_trigger_dates()
@@ -315,7 +588,10 @@ class ScheduledCompetitorBatchRunner:
                     "last_target_refresh_completed": 0,
                     "resume_after": None,
                     "network_failures": [],
+                    "pending_retry_round": 0,
+                    "completion_reason": "",
                     "active_item": None,
+                    "run_revision": self._run_revision() + 1,
                 }
             )
             self._persist_journal()
@@ -379,9 +655,12 @@ class ScheduledCompetitorBatchRunner:
             if not queue:
                 if self._state.get("run_status") != "running":
                     return
+                if await self._pause_for_pending_retry(batch_id):
+                    return
                 await self._complete_run(batch_id)
                 return
 
+            run_revision = self._run_revision()
             item = queue.pop(0)
             self._state["queue"] = queue
             self._state["active_item"] = item
@@ -403,7 +682,10 @@ class ScheduledCompetitorBatchRunner:
                     retry_attempt,
                 )
             except asyncio.CancelledError:
-                if self._state.get("run_status") == "stopped":
+                if (
+                    self._state.get("run_status") != "running"
+                    or self._run_revision() != run_revision
+                ):
                     return
                 self._prepend_active_item(item)
                 raise
@@ -417,7 +699,10 @@ class ScheduledCompetitorBatchRunner:
                     retryable=True,
                 )
 
-            if self._state.get("run_status") == "stopped":
+            if (
+                self._state.get("run_status") != "running"
+                or self._run_revision() != run_revision
+            ):
                 return
             self._state["active_item"] = None
             self._apply_attempt(index, url, item, attempt, priority=priority)
@@ -507,6 +792,70 @@ class ScheduledCompetitorBatchRunner:
             json.dumps(failures, ensure_ascii=False),
         )
 
+    async def _pause_for_pending_retry(self, batch_id: str) -> bool:
+        """Wait before a bounded retry wave instead of stranding tail failures."""
+        metrics = self._metrics()
+        current_round = self._pending_retry_round()
+        if (
+            metrics["pending"] <= 0
+            or current_round >= self._pending_retry_round_limit
+        ):
+            return False
+        retry_round = current_round + 1
+        retry_queue = self._resume_queue(
+            deferred_failures=True,
+            retry_round=retry_round,
+        )
+        if not retry_queue:
+            return False
+        resume_after = self._clock_utc() + timedelta(
+            seconds=self._pending_retry_delay_seconds
+        )
+        reason = self._pending_retry_wait_reason(
+            metrics["pending"],
+            retry_round,
+            self._pending_retry_delay_seconds,
+        )
+        self._state.update(
+            {
+                "run_status": "retry_wait",
+                "queue": retry_queue,
+                "resume_after": resume_after.isoformat(),
+                "pending_retry_round": retry_round,
+                "network_failures": [],
+            }
+        )
+        self._persist_journal()
+        self._registry.event(
+            batch_id=batch_id,
+            client_id=SCHEDULED_CLIENT_ID,
+            event="scheduled_pause",
+            username=SCHEDULED_OWNER_USERNAME,
+            display_name=SCHEDULED_OWNER_DISPLAY_NAME,
+            completed=metrics["completed"],
+            total=metrics["total"],
+            pending=metrics["pending"],
+            succeeded=metrics["succeeded"],
+            failed=metrics["failed"],
+            terminal=metrics["terminal"],
+            reason=reason,
+            with_stock_probe=True,
+            visible_browser=False,
+            source="scheduled",
+            results=self._result_rows(),
+            errors=self._error_rows(),
+        )
+        self._logger.info(
+            "scheduled_batch batch=%s event=pending_retry_wait round=%s/%s "
+            "pending=%s resume_after=%s",
+            batch_id,
+            retry_round,
+            self._pending_retry_round_limit,
+            metrics["pending"],
+            resume_after.isoformat(),
+        )
+        return True
+
     async def _wait_for_network_resume(self) -> None:
         batch_id = str(self._state.get("batch_id") or "")
         if not batch_id:
@@ -515,7 +864,7 @@ class ScheduledCompetitorBatchRunner:
             self._persist_journal()
             return
         while not self._closing and self._state.get("run_status") == "paused":
-            remaining = self._network_pause_remaining()
+            remaining = self._pause_remaining()
             event = "scheduled_pause" if remaining > 0 else "auto_resume"
             reason = (
                 self._network_pause_reason(
@@ -557,6 +906,61 @@ class ScheduledCompetitorBatchRunner:
                 self._logger.info(
                     "scheduled_batch batch=%s event=network_auto_resume",
                     batch_id,
+                )
+                return
+            await self._sleep(min(self._busy_poll_seconds, remaining))
+
+    async def _wait_for_pending_retry(self) -> None:
+        batch_id = str(self._state.get("batch_id") or "")
+        if not batch_id:
+            self._state["run_status"] = "failed"
+            self._state["last_error"] = "延时重试断点缺少批次编号"
+            self._persist_journal()
+            return
+        while not self._closing and self._state.get("run_status") == "retry_wait":
+            remaining = self._pause_remaining()
+            retry_round = self._pending_retry_round()
+            metrics = self._metrics()
+            event = "scheduled_pause" if remaining > 0 else "auto_resume"
+            reason = self._pending_retry_wait_reason(
+                metrics["pending"],
+                retry_round,
+                remaining,
+            )
+            try:
+                self._registry.event(
+                    batch_id=batch_id,
+                    client_id=SCHEDULED_CLIENT_ID,
+                    event=event,
+                    username=SCHEDULED_OWNER_USERNAME,
+                    display_name=SCHEDULED_OWNER_DISPLAY_NAME,
+                    completed=metrics["completed"],
+                    total=metrics["total"],
+                    pending=metrics["pending"],
+                    succeeded=metrics["succeeded"],
+                    failed=metrics["failed"],
+                    terminal=metrics["terminal"],
+                    reason=reason,
+                    with_stock_probe=True,
+                    visible_browser=False,
+                    source="scheduled",
+                    results=self._result_rows(),
+                    errors=self._error_rows(),
+                )
+            except CollectionBatchBusyError:
+                await self._sleep(self._busy_poll_seconds)
+                continue
+            if remaining <= 0:
+                self._state["run_status"] = "running"
+                self._state["resume_after"] = None
+                self._persist_journal()
+                self._logger.info(
+                    "scheduled_batch batch=%s event=pending_retry_auto_resume "
+                    "round=%s/%s pending=%s",
+                    batch_id,
+                    retry_round,
+                    self._pending_retry_round_limit,
+                    metrics["pending"],
                 )
                 return
             await self._sleep(min(self._busy_poll_seconds, remaining))
@@ -606,8 +1010,10 @@ class ScheduledCompetitorBatchRunner:
         if self._state.get("run_status") != "running":
             return
         metrics = self._metrics()
+        retry_round = self._pending_retry_round()
         reason = (
-            f"09:00 自动批次结束，仍有 {metrics['pending']} 个待重试或未完成链接"
+            f"09:00 自动批次已完成 {retry_round} 轮延时自动重试，仍有 "
+            f"{metrics['pending']} 个待重试或未完成链接；可继续同一服务端断点"
             if metrics["pending"]
             else "09:00 自动批次全部链接已检查"
         )
@@ -637,6 +1043,7 @@ class ScheduledCompetitorBatchRunner:
         self._state["active_item"] = None
         self._state["resume_after"] = None
         self._state["network_failures"] = []
+        self._state["completion_reason"] = reason
         self._persist_journal()
         self._logger.info(
             "scheduled_batch batch=%s event=completed completed=%s total=%s "
@@ -773,6 +1180,8 @@ class ScheduledCompetitorBatchRunner:
         item: dict[str, object],
         attempt: ScheduledCollectionAttempt,
     ) -> None:
+        if bool(item.get("deferred_retry")):
+            return
         queue = self._queue()
         retry_kind: str | None = None
         limit = 0
@@ -835,6 +1244,42 @@ class ScheduledCompetitorBatchRunner:
             "terminal": len(terminal),
         }
 
+    def _resume_queue(
+        self,
+        *,
+        deferred_failures: bool = False,
+        retry_round: int = 1,
+    ) -> list[dict[str, object]]:
+        """Rebuild failed and unattempted work in the frozen target order."""
+        attempted = self._index_set("attempted_indexes")
+        failed = self._index_set("failed_indexes")
+        terminal = self._index_set("terminal_indexes")
+        successful_plids = {
+            str(row.get("plid") or "") for row in self._result_rows()
+        }
+        queue: list[dict[str, object]] = []
+        for target in sorted(
+            self._targets(),
+            key=lambda item: self._required_int(item.get("index")),
+        ):
+            index = self._required_int(target.get("index"))
+            url = str(target["url"])
+            plid = self._plid_from_url(url)
+            if index in terminal:
+                continue
+            if index in failed or index not in attempted or plid not in successful_plids:
+                item: dict[str, object] = {"index": index, "url": url}
+                if deferred_failures and index in failed:
+                    item.update(
+                        {
+                            "retry_kind": "automatic",
+                            "retry_attempt": max(1, min(retry_round, 10)),
+                            "deferred_retry": True,
+                        }
+                    )
+                queue.append(item)
+        return queue
+
     def _prepend_active_item(self, item: dict[str, object]) -> None:
         self._state["active_item"] = None
         self._state["queue"] = [item, *self._queue()]
@@ -843,7 +1288,8 @@ class ScheduledCompetitorBatchRunner:
     def _needs_driver(self) -> bool:
         return bool(
             self._state.get("pending")
-            or self._state.get("run_status") in {"running", "paused"}
+            or self._state.get("run_status")
+            in {"running", "paused", "retry_wait"}
         )
 
     def _update_network_failure_streak(
@@ -887,7 +1333,7 @@ class ScheduledCompetitorBatchRunner:
             if isinstance(item, dict)
         ]
 
-    def _network_pause_remaining(self) -> float:
+    def _pause_remaining(self) -> float:
         raw = self._optional_text(self._state.get("resume_after"))
         if raw is None:
             return 0.0
@@ -912,6 +1358,75 @@ class ScheduledCompetitorBatchRunner:
             f"连续2条网络连接失败，自动暂停 {wait_seconds} 秒后续爬"
             + (f"；{failure_text}" if failure_text else "")
         )[:500]
+
+    def _pending_retry_wait_reason(
+        self,
+        pending: int,
+        retry_round: int,
+        remaining_seconds: float,
+    ) -> str:
+        wait_seconds = max(0, int(round(remaining_seconds)))
+        if wait_seconds > 0:
+            return (
+                f"仍有 {pending} 条待重试，自动等待 {wait_seconds} 秒后开始第 "
+                f"{retry_round}/{self._pending_retry_round_limit} 轮延时重试；"
+                "疑似失效链接按至少10分钟间隔复核"
+            )[:500]
+        return (
+            f"等待间隔已结束，开始第 {retry_round}/{self._pending_retry_round_limit} "
+            f"轮延时重试，共 {pending} 条"
+        )[:500]
+
+    def _restore_completed_pending_wait(self) -> None:
+        """Upgrade an older completed-with-pending journal into a retry wait."""
+        if self._state.get("run_status") != "completed_with_pending":
+            return
+        metrics = self._metrics()
+        current_round = self._pending_retry_round()
+        if (
+            metrics["pending"] <= 0
+            or current_round >= self._pending_retry_round_limit
+        ):
+            return
+        retry_round = current_round + 1
+        retry_queue = self._resume_queue(
+            deferred_failures=True,
+            retry_round=retry_round,
+        )
+        if not retry_queue:
+            return
+        completed_at = self._clock_utc()
+        completed_raw = self._optional_text(self._state.get("last_completed_at"))
+        if completed_raw is not None:
+            try:
+                completed_at = datetime.fromisoformat(completed_raw)
+            except ValueError:
+                pass
+            if completed_at.tzinfo is None:
+                completed_at = completed_at.replace(tzinfo=UTC)
+            completed_at = completed_at.astimezone(UTC)
+        resume_after = completed_at + timedelta(
+            seconds=self._pending_retry_delay_seconds
+        )
+        self._state.update(
+            {
+                "run_status": "retry_wait",
+                "queue": retry_queue,
+                "resume_after": resume_after.isoformat(),
+                "pending_retry_round": retry_round,
+                "network_failures": [],
+            }
+        )
+        self._persist_journal()
+        self._logger.info(
+            "scheduled_batch batch=%s event=restore_completed_pending "
+            "round=%s/%s pending=%s resume_after=%s",
+            self._state.get("batch_id") or "-",
+            retry_round,
+            self._pending_retry_round_limit,
+            metrics["pending"],
+            resume_after.isoformat(),
+        )
 
     def _import_trigger_files(self) -> None:
         if self._trigger_dir is None or not self._trigger_dir.is_dir():
@@ -993,6 +1508,9 @@ class ScheduledCompetitorBatchRunner:
             "last_started_at": None,
             "last_completed_at": None,
             "last_error": "",
+            "last_skipped_on": None,
+            "last_skipped_at": None,
+            "last_skip_reason": "",
             "targets": [],
             "queue": [],
             "attempted_indexes": [],
@@ -1005,8 +1523,12 @@ class ScheduledCompetitorBatchRunner:
             "last_target_refresh_completed": 0,
             "resume_after": None,
             "network_failures": [],
+            "pending_retry_round": 0,
+            "completion_reason": "",
             "handled_trigger_dates": [],
             "active_item": None,
+            "run_revision": 0,
+            "explicit_resume_count": 0,
         }
 
     def _targets(self) -> list[dict[str, object]]:
@@ -1042,6 +1564,12 @@ class ScheduledCompetitorBatchRunner:
         if not isinstance(raw, list):
             return set()
         return {str(value) for value in raw}
+
+    def _run_revision(self) -> int:
+        return self._optional_int(self._state.get("run_revision")) or 0
+
+    def _pending_retry_round(self) -> int:
+        return self._optional_int(self._state.get("pending_retry_round")) or 0
 
     def _beijing_date(self) -> str:
         now = self._clock()

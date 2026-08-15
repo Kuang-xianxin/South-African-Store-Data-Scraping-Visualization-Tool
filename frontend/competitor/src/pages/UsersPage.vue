@@ -42,9 +42,9 @@ const storeCode = ref("");
 const storeDisplayName = ref("");
 
 const roleDescriptions: Record<UserRole, string> = {
-  viewer: "查看店铺、竞品、运营日报和已有报表，不执行采集、刷新或人工处理。",
-  operator: "承担日常运营工作，可采集、刷新、处理日报待办并生成报表。",
-  selection: "可查看和采集竞品雷达，也可查看运营日报，但不能处理任何日报待办。",
+  viewer: "查看店铺、竞品和已有报表，不执行采集、刷新或人工处理。",
+  operator: "承担日常运营工作，可采集、刷新并使用已开放的经营模块。",
+  selection: "可查看和采集竞品雷达，不执行店铺数据刷新。",
   admin: "拥有全部业务能力，并可创建账号、套用模板和调整每个账号的独立权限。",
 };
 
@@ -181,16 +181,15 @@ async function saveStore(
 }
 
 function storeAssignmentSummary(store: ManagedStore) {
+  const operatingAccounts = users.value.filter(
+    (user) =>
+      user.active
+      && user.assigned_store_ids.includes(store.id),
+  ).length;
   const allStoreAccounts = users.value.filter(
     (user) => user.active && user.all_stores,
   ).length;
-  const assignedAccounts = users.value.filter(
-    (user) =>
-      user.active
-      && !user.all_stores
-      && user.assigned_store_ids.includes(store.id),
-  ).length;
-  return `${allStoreAccounts} 个全店账号自动可见 · ${assignedAccounts} 个限定账号已分配`;
+  return `${operatingAccounts} 个账号负责运营 · ${allStoreAccounts} 个全店账号可查看`;
 }
 
 async function applyTemplate(user: ManagedUser, nextRole: UserRole) {
@@ -212,8 +211,8 @@ async function changeAllStores(user: ManagedUser, enabled: boolean) {
       store_ids: [...user.assigned_store_ids],
     },
     enabled
-      ? `已为 ${user.display_name} 开启全部店铺；未来新增店铺也会自动可见。`
-      : `已把 ${user.display_name} 改为仅访问勾选店铺。`,
+      ? `已为 ${user.display_name} 开启全部店铺；运营店铺勾选保持不变。`
+      : `已把 ${user.display_name} 改为仅查看并运营勾选店铺。`,
   );
 }
 
@@ -227,8 +226,8 @@ async function changeUserStore(
     : user.assigned_store_ids.filter((id) => id !== storeId);
   await saveUser(
     user,
-    { all_stores: false, store_ids: next },
-    `已更新 ${user.display_name} 的店铺范围；该账号需重新登录后生效。`,
+    { all_stores: user.all_stores, store_ids: next },
+    `已更新 ${user.display_name} 的运营店铺；该账号需重新登录后生效。`,
   );
 }
 
@@ -463,15 +462,24 @@ function formatDate(value: string | null) {
           {{ saving ? "正在创建…" : "创建账号" }}
         </button>
         <fieldset class="create-store-scope">
-          <legend>店铺范围</legend>
+          <legend>店铺查看与运营范围</legend>
           <label class="store-all-option">
             <input v-model="createAllStores" type="checkbox" />
             <span>
               <strong>全部店铺（含未来新增）</strong>
-              <small>适用于管理员、老板等跨店账号</small>
+              <small>只控制可查看范围；下方仍单独勾选该账号负责运营的店铺</small>
             </span>
           </label>
-          <div v-if="!createAllStores" class="store-checkbox-grid">
+          <div class="permission-heading create-operating-heading">
+            <div>
+              <strong>运营店铺授权（可多选）</strong>
+              <span>
+                用于顶部“我的运营店铺”合并查看；未开启全部店铺时，勾选项同时也是该账号可查看的范围
+              </span>
+            </div>
+            <small>已选 {{ createStoreIds.length }} 个</small>
+          </div>
+          <div class="store-checkbox-grid">
             <label
               v-for="store in activeStores"
               :key="store.id"
@@ -581,16 +589,16 @@ function formatDate(value: string | null) {
           <div class="account-store-access">
             <div class="permission-heading">
               <div>
-                <strong>账号店铺范围</strong>
+                <strong>账号店铺查看范围</strong>
                 <span>
-                  全部店铺会自动包含以后新增店铺；限定账号只访问下方勾选店铺
+                  全部店铺会自动包含以后新增店铺；关闭后仅能查看下方勾选的运营店铺
                 </span>
               </div>
               <small>
                 {{
                   user.all_stores
-                    ? `全部 ${user.accessible_stores.length} 个启用店铺`
-                    : `已分配 ${user.assigned_store_ids.length} 个店铺`
+                    ? `可查看全部 ${user.accessible_stores.length} 个启用店铺`
+                    : `可查看 ${user.assigned_store_ids.length} 个运营店铺`
                 }}
               </small>
             </div>
@@ -608,10 +616,19 @@ function formatDate(value: string | null) {
               />
               <span>
                 <strong>全部店铺（含未来新增）</strong>
-                <small>管理员和老板账号建议保持开启</small>
+                <small>只扩大查看范围，不会把全部店铺自动算作该账号负责运营</small>
               </span>
             </label>
-            <div v-if="!user.all_stores" class="store-checkbox-grid">
+            <div class="permission-heading operating-store-heading">
+              <div>
+                <strong>运营店铺授权（可多选）</strong>
+                <span>
+                  决定顶部“我的运营店铺”合并范围；开启全部查看后，未勾选店铺仍可单店查看但不进入该合并项
+                </span>
+              </div>
+              <small>负责 {{ user.assigned_store_ids.length }} 个店铺</small>
+            </div>
+            <div class="store-checkbox-grid">
               <label
                 v-for="store in stores"
                 :key="store.id"
@@ -647,7 +664,7 @@ function formatDate(value: string | null) {
                   </small>
                 </span>
               </label>
-              <p v-if="!stores.length">尚无店铺；该账号暂时不能访问店铺数据。</p>
+              <p v-if="!stores.length">尚无店铺；该账号暂时不能分配运营店铺。</p>
             </div>
           </div>
 
@@ -1111,6 +1128,12 @@ button:disabled {
 .permission-heading small {
   color: #7e8d85;
   font-size: 10px;
+}
+.create-operating-heading,
+.operating-store-heading {
+  margin-top: 16px;
+  padding-top: 14px;
+  border-top: 1px solid #e2e8e4;
 }
 .permission-group-grid {
   display: grid;

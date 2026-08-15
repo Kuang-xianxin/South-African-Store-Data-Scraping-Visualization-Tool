@@ -74,8 +74,13 @@ def load_erp_dataset(
         engine.dispose()
 
 
-def build_summary_payload(dataset: DashboardDataset, as_of: date) -> dict[str, Any]:
-    """Build store KPIs, 30-day trend, and leading products."""
+def build_summary_payload(
+    dataset: DashboardDataset,
+    as_of: date,
+    *,
+    start_date: date | None = None,
+) -> dict[str, Any]:
+    """Build store KPIs, a requested sales viewport, and leading products."""
     latest = latest_rows(dataset.product_daily, as_of)
     latest_date = latest_metric_date(latest)
     recent_start = as_of - timedelta(days=6)
@@ -102,8 +107,23 @@ def build_summary_payload(dataset: DashboardDataset, as_of: date) -> dict[str, A
     products = _enrich_products(latest, dataset.offer_current)
     if "ordered_units" in products.columns:
         products = products.sort_values("ordered_units", ascending=False).head(12)
+    sales_store = store
+    if start_date is not None and "metric_date" in sales_store.columns:
+        sales_dates = pd.to_datetime(
+            sales_store["metric_date"],
+            errors="coerce",
+        ).dt.date
+        sales_store = sales_store.loc[sales_dates >= start_date]
+    elif start_date is None:
+        sales_store = sales_store.tail(30)
     return {
         "as_of": as_of.isoformat(),
+        "range_start": (
+            start_date.isoformat()
+            if start_date is not None
+            else (as_of - timedelta(days=29)).isoformat()
+        ),
+        "range_end": as_of.isoformat(),
         "latest_metric_date": latest_date,
         "kpis": {
             "latest_ordered_units": numeric_sum(latest, "ordered_units", integer=True),
@@ -119,7 +139,7 @@ def build_summary_payload(dataset: DashboardDataset, as_of: date) -> dict[str, A
             "selling_products": unique_count(sold, "offer_id"),
             "stockout_products": int((stock == 0).sum()),
         },
-        "sales_series": frame_records(store.tail(30)),
+        "sales_series": frame_records(sales_store),
         "top_products": frame_records(products),
     }
 

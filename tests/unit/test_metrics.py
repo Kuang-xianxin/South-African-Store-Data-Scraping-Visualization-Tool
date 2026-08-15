@@ -7,7 +7,7 @@ from zoneinfo import ZoneInfo
 
 import pandas as pd
 import pytest
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
 from takealot_ops.domain import OfferRecord, SaleRecord
@@ -21,7 +21,12 @@ from takealot_ops.metrics.service import (
     latest_metric_anomalies,
 )
 from takealot_ops.storage.migrations import create_schema
-from takealot_ops.storage.models import AnomalyEvent, DataQualityEvent
+from takealot_ops.storage.models import (
+    AnomalyEvent,
+    DailySalesMetricState,
+    DataQualityEvent,
+    SalesRevenueRevision,
+)
 from takealot_ops.storage.repository import Repository
 
 
@@ -299,6 +304,94 @@ def test_ordered_revenue_uses_api_line_value_without_multiplying_quantity(
 
     assert row["ordered_units"] == 2
     assert row["ordered_revenue"] == Decimal("704.00")
+
+
+def test_rebuild_updates_historical_sales_and_keeps_source_audit(tmp_path: Path) -> None:
+    metric_date = date(2026, 7, 20)
+    first_collected_at = datetime(2026, 7, 21, 2, tzinfo=UTC)
+    second_collected_at = datetime(2026, 7, 22, 2, tzinfo=UTC)
+    engine = create_engine("sqlite://")
+    create_schema(engine)
+    with Session(engine) as session:
+        _seed(
+            session,
+            sales=[
+                _sale(
+                    "late-changing-line",
+                    datetime(2026, 7, 20, 8, tzinfo=UTC),
+                    quantity=1,
+                    price="100.00",
+                )
+            ],
+        )
+        repository = Repository(session)
+        service = _service(
+            session,
+            tmp_path,
+            included=("included",),
+            now=first_collected_at,
+        )
+        service.rebuild(
+            metric_date,
+            metric_date,
+            sales_source={
+                "kind": "takealot_sales_api",
+                "label": "Takealot Seller Sales API /sales 成功批次",
+                "run_id": "sales-run-before",
+                "requested_start": metric_date,
+                "requested_end": metric_date,
+                "record_count": 1,
+                "collected_at": first_collected_at,
+            },
+        )
+
+        with repository.transaction():
+            repository.upsert_sale(
+                _sale(
+                    "late-changing-line",
+                    datetime(2026, 7, 20, 8, tzinfo=UTC),
+                    quantity=2,
+                    price="150.00",
+                ),
+                {"order_item_id": "late-changing-line", "selling_price": 150},
+            )
+        service = _service(
+            session,
+            tmp_path,
+            included=("included",),
+            now=second_collected_at,
+        )
+        service.rebuild(
+            metric_date,
+            metric_date,
+            sales_source={
+                "kind": "takealot_sales_api",
+                "label": "Takealot Seller Sales API /sales 成功批次",
+                "run_id": "sales-run-after",
+                "requested_start": metric_date - timedelta(days=29),
+                "requested_end": metric_date,
+                "record_count": 1,
+                "collected_at": second_collected_at,
+            },
+        )
+        state = session.scalar(select(DailySalesMetricState))
+        revisions = list(session.scalars(select(SalesRevenueRevision)))
+
+    assert state is not None
+    assert state.ordered_revenue == Decimal("150.00")
+    assert state.ordered_units == 2
+    assert state.source_run_id == "sales-run-after"
+    assert state.revision_count == 1
+    assert len(revisions) == 1
+    revision = revisions[0]
+    assert revision.before_ordered_revenue == Decimal("100.00")
+    assert revision.after_ordered_revenue == Decimal("150.00")
+    assert revision.revenue_delta == Decimal("50.00")
+    assert revision.before_ordered_units == 1
+    assert revision.after_ordered_units == 2
+    assert revision.before_source["run_id"] == "sales-run-before"
+    assert revision.after_source["run_id"] == "sales-run-after"
+    assert revision.after_source["requested_start"] == "2026-06-21"
 
 
 def test_unknown_status_is_excluded_from_effective_units_and_flagged(tmp_path: Path) -> None:

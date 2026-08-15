@@ -10,7 +10,7 @@ import time
 from collections import defaultdict
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from contextlib import asynccontextmanager
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from threading import Lock
@@ -47,6 +47,22 @@ from takealot_ops.competitors.batch import (
     CollectionRequestCoordinator,
     configure_collection_logger,
 )
+from takealot_ops.competitors.listings import (
+    BALANCED_LISTING_SELECTION_RULE,
+    MAX_LISTING_PRODUCTS,
+    CompetitorListingInputError,
+    CompetitorListingPreviewExpiredError,
+    CompetitorListingPreviewRegistry,
+    CompetitorListingProviderError,
+    build_competitor_listing_url,
+    finalize_competitor_listing_preview,
+    parse_competitor_listing_source,
+    preview_competitor_listing,
+)
+from takealot_ops.competitors.own_store_sales import build_own_store_sales_series
+from takealot_ops.competitors.own_store_traffic import (
+    build_own_store_traffic_series,
+)
 from takealot_ops.competitors.service import (
     CompetitorCollectionResult,
     CompetitorCollector,
@@ -64,6 +80,7 @@ from takealot_ops.competitors.scheduled import (
     ScheduledCompetitorBatchRunner,
 )
 from takealot_ops.dashboard.refresh import run_dashboard_refresh
+from takealot_ops.domain import sast_date
 from takealot_ops.erp.auth import (
     SESSION_COOKIE,
     SESSION_LIFETIME,
@@ -157,6 +174,15 @@ from takealot_ops.nft102_portal import (
 from takealot_ops.reporting import generate_daily_reports
 from takealot_ops.scheduler import verify_database_integrity
 from takealot_ops.search_ranking import (
+    DecisionParameterChoice,
+    DecisionParameterConfirmation,
+    ProductFactConfirmation,
+    ProductFactInput,
+    ProductFactRevocation,
+    SearchRankingBatchConflictError,
+    SearchRankingBatchController,
+    SearchRankingBatchInputError,
+    SearchRankingBatchPermissionError,
     SearchRankingConfigurationError,
     SearchRankingInputError,
     SearchRankingProviderError,
@@ -166,11 +192,15 @@ from takealot_ops.settings import DashboardSettings
 from takealot_ops.storage.migrations import create_engine_for_settings, create_schema
 from takealot_ops.storage.models import (
     CollectionRun,
+    CompetitorListingOperation,
+    CompetitorListingOperationItem,
     CompetitorPersonalWatchlist,
     CompetitorSnapshot,
     CompetitorTarget,
     CompetitorTargetAudit,
     DailyProductMetric,
+    DailyReportRun,
+    DailySalesMetricState,
     ErpUser,
     ErpUserStore,
     OfferCurrent,
@@ -179,6 +209,7 @@ from takealot_ops.storage.models import (
     PersonalWatchlistLibraryItem,
     PersonalWatchlistLibraryShare,
     PersonalWatchlistPreference,
+    SalesRevenueRevision,
 )
 from takealot_ops.storage.store_context import (
     STORE_CODE_HEADER,
@@ -269,6 +300,16 @@ class CompetitorBatchStopRequest(BaseModel):
     reason: str = Field(default="已由 kxx 手动停止采集", max_length=500)
 
 
+class CompetitorBatchResumeRequest(BaseModel):
+    """Resume one manually stopped server-owned scheduled batch checkpoint."""
+
+    batch_id: str = Field(
+        min_length=1,
+        max_length=80,
+        pattern=r"^[A-Za-z0-9_-]+$",
+    )
+
+
 class ScheduledCompetitorTriggerRequest(BaseModel):
     """Optional date written by the local Windows trigger command."""
 
@@ -297,6 +338,33 @@ class CompetitorTargetRequest(BaseModel):
     """One persisted Takealot competitor product URL."""
 
     url: str = Field(min_length=1, max_length=2000)
+
+
+class CompetitorListingPreviewRequest(BaseModel):
+    """One human-reviewed seller/category filter and selection request."""
+
+    source_type: Literal["seller", "category"]
+    url: str = Field(min_length=1, max_length=2000)
+    price_min: int | None = Field(default=None, ge=0, le=10_000_000)
+    price_max: int | None = Field(default=None, ge=0, le=10_000_000)
+    sorts: list[str] = Field(default_factory=list, max_length=5)
+    product_limit: int | None = Field(
+        default=None,
+        ge=1,
+        le=MAX_LISTING_PRODUCTS,
+    )
+
+
+class CompetitorListingCommitRequest(BaseModel):
+    """Commit one server-frozen listing preview after human confirmation."""
+
+    preview_token: str = Field(min_length=20, max_length=200)
+    library_id: int = Field(ge=1)
+    product_limit: int | None = Field(
+        default=None,
+        ge=1,
+        le=MAX_LISTING_PRODUCTS,
+    )
 
 
 class PersonalWatchlistLibraryRequest(BaseModel):
@@ -425,6 +493,55 @@ class DailyReportNoteRequest(BaseModel):
 
 class DailyReportDeleteNoteRequest(BaseModel):
     note: str = Field(default="", max_length=2000)
+
+
+class ProductFactItemRequest(BaseModel):
+    fact_type: Literal[
+        "product_type",
+        "construction",
+        "material",
+        "function",
+        "packaging",
+        "usage",
+    ]
+    fact_term: str = Field(
+        min_length=2,
+        max_length=100,
+        pattern=r"^[A-Za-z0-9]+(?: [A-Za-z0-9]+){0,5}$",
+    )
+    statement: str = Field(default="", max_length=500)
+
+
+class ProductFactConfirmRequest(BaseModel):
+    source_analysis_id: int = Field(gt=0)
+    reason_code: str = Field(min_length=2, max_length=240)
+    facts: list[ProductFactItemRequest] = Field(min_length=1, max_length=6)
+    confirmed: Literal[True]
+    acknowledged_fact_accuracy: Literal[True]
+    acknowledged_ranking_revalidation: Literal[True]
+
+
+class ProductFactRevokeRequest(BaseModel):
+    reason: str = Field(min_length=2, max_length=500)
+
+
+class DecisionParameterChoiceRequest(BaseModel):
+    parameter_key: str = Field(min_length=1, max_length=100)
+    is_decision_parameter: bool
+
+
+class DecisionParameterConfirmRequest(BaseModel):
+    choices: list[DecisionParameterChoiceRequest] = Field(max_length=12)
+    confirmed_current_title: Literal[True]
+    acknowledged_search_validation: Literal[True]
+    acknowledged_no_ranking_guarantee: Literal[True]
+
+
+class SearchRankingBatchStartRequest(BaseModel):
+    snapshot_id: str = Field(min_length=64, max_length=64, pattern=r"^[a-f0-9]{64}$")
+    confirmed_paid_model_calls: Literal[True]
+    confirmed_public_takealot_requests: Literal[True]
+    confirmed_strict_serial_no_retry: Literal[True]
 
 
 class LoginRequest(BaseModel):
@@ -589,6 +706,15 @@ def _optional_int(value: Any) -> int | None:
         return None
 
 
+def _optional_float(value: Any) -> float | None:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def _empty_store_inventory() -> dict[str, Any]:
     return {
         "captured_at": None,
@@ -654,7 +780,7 @@ def _responsible_users_by_store(
     engine: Engine,
     stores: Sequence[StoreIdentity],
 ) -> dict[str, list[dict[str, Any]]]:
-    """Return active non-admin users who can view each requested store."""
+    """Return active users explicitly assigned to operate each requested store."""
     result: dict[str, list[dict[str, Any]]] = {
         store.code: [] for store in stores
     }
@@ -664,10 +790,7 @@ def _responsible_users_by_store(
     with Session(engine) as session:
         users = session.scalars(
             select(ErpUser)
-            .where(
-                ErpUser.active.is_(True),
-                ErpUser.role != "admin",
-            )
+            .where(ErpUser.active.is_(True))
             .order_by(ErpUser.display_name, ErpUser.id)
         ).all()
         assignments = session.execute(
@@ -688,11 +811,7 @@ def _responsible_users_by_store(
             continue
         if STORE_VIEW not in permissions:
             continue
-        user_store_ids = (
-            set(store_by_id)
-            if user.store_access_all
-            else assigned_by_user.get(user.id, set())
-        )
+        user_store_ids = assigned_by_user.get(user.id, set())
         for store_id in user_store_ids:
             store_code = store_by_id.get(store_id)
             if store_code is None:
@@ -704,7 +823,7 @@ def _responsible_users_by_store(
                     "role": user.role,
                 }
             )
-    role_priority = {"operator": 0, "viewer": 1, "selection": 2}
+    role_priority = {"operator": 0, "admin": 1, "viewer": 2, "selection": 3}
     for users_for_store in result.values():
         users_for_store.sort(
             key=lambda item: (
@@ -813,12 +932,234 @@ def _aggregate_platform_inventory(
     return result
 
 
+def _store_sales_metric_states(
+    engine: Engine,
+    *,
+    as_of: date,
+    start_date: date | None = None,
+    limit: int = 120,
+) -> dict[str, dict[str, Any]]:
+    """Return store-day totals and provenance for the requested viewport."""
+    with Session(engine) as session:
+        state_statement = (
+            select(DailySalesMetricState)
+            .where(DailySalesMetricState.metric_date <= as_of)
+            .order_by(DailySalesMetricState.metric_date.desc())
+        )
+        if start_date is not None:
+            state_statement = state_statement.where(
+                DailySalesMetricState.metric_date >= start_date
+            )
+        else:
+            state_statement = state_statement.limit(limit)
+        states = session.scalars(state_statement).all()
+        revision_statement = (
+            select(
+                SalesRevenueRevision.metric_date,
+                func.count(SalesRevenueRevision.id),
+                func.max(SalesRevenueRevision.detected_at),
+            )
+            .where(SalesRevenueRevision.metric_date <= as_of)
+            .group_by(SalesRevenueRevision.metric_date)
+        )
+        if start_date is not None:
+            revision_statement = revision_statement.where(
+                SalesRevenueRevision.metric_date >= start_date
+            )
+        revision_rows = session.execute(revision_statement).all()
+    revisions = {
+        metric_date: {
+            "count": int(count or 0),
+            "latest_at": latest_at.isoformat() if latest_at is not None else None,
+        }
+        for metric_date, count, latest_at in revision_rows
+    }
+    return {
+        state.metric_date.isoformat(): {
+            "source_kind": state.source_kind,
+            "source_run_id": state.source_run_id,
+            "source": dict(state.source_details or {}),
+            "verified_at": (
+                state.verified_at.isoformat() if state.verified_at is not None else None
+            ),
+            "revision_count": revisions.get(state.metric_date, {}).get(
+                "count",
+                int(state.revision_count or 0),
+            ),
+            "latest_revision_at": revisions.get(state.metric_date, {}).get(
+                "latest_at"
+            ),
+        }
+        for state in states
+    }
+
+
+def _store_sales_reconciliation(
+    engine: Engine,
+    *,
+    store: StoreIdentity,
+    as_of: date,
+) -> dict[str, Any]:
+    """Classify whether a later Sales API rebuild recovered the latest period-end run."""
+    range_start = as_of - timedelta(days=29)
+    with Session(engine) as session:
+        period_end = session.scalars(
+            select(DailyReportRun)
+            .where(
+                DailyReportRun.slot == "pre_close",
+                DailyReportRun.business_date <= as_of,
+            )
+            .order_by(
+                DailyReportRun.captured_at.desc(),
+                DailyReportRun.created_at.desc(),
+            )
+            .limit(1)
+        ).first()
+        latest_verified_at = session.scalar(
+            select(func.max(DailySalesMetricState.verified_at)).where(
+                DailySalesMetricState.metric_date >= range_start,
+                DailySalesMetricState.metric_date <= as_of,
+                DailySalesMetricState.source_kind == "takealot_sales_api",
+            )
+        )
+        metric_date_count = int(
+            session.scalar(
+                select(func.count(func.distinct(DailyProductMetric.metric_date))).where(
+                    DailyProductMetric.metric_date >= range_start,
+                    DailyProductMetric.metric_date <= as_of,
+                )
+            )
+            or 0
+        )
+        tracked_metric_date_count = int(
+            session.scalar(
+                select(
+                    func.count(func.distinct(DailySalesMetricState.metric_date))
+                ).where(
+                    DailySalesMetricState.metric_date >= range_start,
+                    DailySalesMetricState.metric_date <= as_of,
+                )
+            )
+            or 0
+        )
+        metric_date_count = max(metric_date_count, tracked_metric_date_count)
+        verified_after_failure_count = 0
+        if period_end is not None and period_end.status == "failed":
+            verified_after_failure_count = int(
+                session.scalar(
+                    select(
+                        func.count(func.distinct(DailySalesMetricState.metric_date))
+                    ).where(
+                        DailySalesMetricState.metric_date >= range_start,
+                        DailySalesMetricState.metric_date <= as_of,
+                        DailySalesMetricState.source_kind == "takealot_sales_api",
+                        DailySalesMetricState.verified_at > period_end.captured_at,
+                    )
+                )
+                or 0
+            )
+        revision_total = int(
+            session.scalar(
+                select(func.count(SalesRevenueRevision.id)).where(
+                    SalesRevenueRevision.metric_date <= as_of
+                )
+            )
+            or 0
+        )
+        latest_revision_at = session.scalar(
+            select(func.max(SalesRevenueRevision.detected_at)).where(
+                SalesRevenueRevision.metric_date <= as_of
+            )
+        )
+
+    period_end_captured_at = period_end.captured_at if period_end is not None else None
+    if period_end is None:
+        status = "unverified"
+    elif period_end.status != "failed":
+        status = "verified"
+    elif metric_date_count > 0 and verified_after_failure_count == metric_date_count:
+        status = "recovered"
+    else:
+        status = "pending"
+    counts = period_end.counts if period_end is not None else None
+    reason = None
+    if isinstance(counts, Mapping):
+        reason = str(
+            counts.get("final_reason") or counts.get("missing_reason") or ""
+        ).strip() or None
+    return {
+        "store_code": store.code,
+        "store_name": store.display_name,
+        "status": status,
+        "period_end_business_date": (
+            period_end.business_date.isoformat() if period_end is not None else None
+        ),
+        "period_end_status": period_end.status if period_end is not None else None,
+        "period_end_captured_at": (
+            period_end_captured_at.isoformat()
+            if period_end_captured_at is not None
+            else None
+        ),
+        "period_end_failure_reason": reason if period_end is not None and period_end.status == "failed" else None,
+        "latest_sales_verified_at": (
+            latest_verified_at.isoformat() if latest_verified_at is not None else None
+        ),
+        "metric_date_count": metric_date_count,
+        "verified_after_failure_count": verified_after_failure_count,
+        "revision_count": revision_total,
+        "latest_revision_at": (
+            latest_revision_at.isoformat() if latest_revision_at is not None else None
+        ),
+    }
+
+
+def _sales_reconciliation_summary(
+    items: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    failed = [item for item in items if item.get("period_end_status") == "failed"]
+    pending = [item for item in items if item.get("status") == "pending"]
+    recovered = [item for item in items if item.get("status") == "recovered"]
+    verified = [item for item in items if item.get("status") == "verified"]
+    unverified = [item for item in items if item.get("status") == "unverified"]
+    business_dates = [
+        str(item["period_end_business_date"])
+        for item in items
+        if item.get("period_end_business_date")
+    ]
+    verified_times = [
+        str(item["latest_sales_verified_at"])
+        for item in items
+        if item.get("latest_sales_verified_at")
+    ]
+    revision_times = [
+        str(item["latest_revision_at"])
+        for item in items
+        if item.get("latest_revision_at")
+    ]
+    return {
+        "period_end_business_date": max(business_dates) if business_dates else None,
+        "failed_store_count": len(failed),
+        "pending_store_count": len(pending),
+        "recovered_store_count": len(recovered),
+        "verified_store_count": len(verified),
+        "unverified_store_count": len(unverified),
+        "revision_count": sum(int(item.get("revision_count") or 0) for item in items),
+        "latest_sales_verified_at": max(verified_times) if verified_times else None,
+        "latest_revision_at": max(revision_times) if revision_times else None,
+        "stores": [dict(item) for item in items],
+    }
+
+
 def _aggregate_store_revenue_series(
     store_series: Mapping[str, Sequence[Mapping[str, Any]]],
     *,
-    limit: int = 30,
+    store_states: Mapping[str, Mapping[str, Mapping[str, Any]]] | None = None,
+    reconciliation_by_store: Mapping[str, Mapping[str, Any]] | None = None,
+    start_date: date | None = None,
+    completed_through: date | None = None,
+    limit: int | None = 30,
 ) -> list[dict[str, Any]]:
-    """Combine store revenue by SAST metric date without filling missing stores."""
+    """Combine completed SAST days from available stores without zero-filling gaps."""
     store_count = len(store_series)
     values_by_store: dict[str, dict[str, float | None]] = {}
     metric_dates: set[str] = set()
@@ -837,29 +1178,131 @@ def _aggregate_store_revenue_series(
             metric_dates.add(metric_date)
         values_by_store[store_code] = values
 
-    selected_dates = sorted(metric_dates)[-limit:]
+    completed_through_text = completed_through.isoformat() if completed_through else None
+    start_date_text = start_date.isoformat() if start_date else None
+    selected_dates = sorted(
+        metric_date
+        for metric_date in metric_dates
+        if (start_date_text is None or metric_date >= start_date_text)
+        and (completed_through_text is None or metric_date <= completed_through_text)
+    )
+    if limit is not None:
+        selected_dates = selected_dates[-limit:]
     result: list[dict[str, Any]] = []
     for metric_date in selected_dates:
         revenues: list[float] = []
-        for values in values_by_store.values():
+        source_verified_store_count = 0
+        pending_reconciliation_store_count = 0
+        unverified_source_store_count = 0
+        revised_store_count = 0
+        revision_count = 0
+        latest_revision_values: list[str] = []
+        latest_verified_values: list[str] = []
+        for store_code, values in values_by_store.items():
             revenue = values.get(metric_date)
             if revenue is not None:
                 revenues.append(revenue)
+            state = (store_states or {}).get(store_code, {}).get(metric_date)
+            if not isinstance(state, Mapping):
+                unverified_source_store_count += 1
+            else:
+                if state.get("source_kind") == "takealot_sales_api" and state.get(
+                    "verified_at"
+                ):
+                    source_verified_store_count += 1
+                    latest_verified_values.append(str(state["verified_at"]))
+                state_revision_count = int(state.get("revision_count") or 0)
+                if state_revision_count:
+                    revised_store_count += 1
+                    revision_count += state_revision_count
+                if state.get("latest_revision_at"):
+                    latest_revision_values.append(str(state["latest_revision_at"]))
+            reconciliation = (reconciliation_by_store or {}).get(store_code)
+            if isinstance(reconciliation, Mapping) and reconciliation.get("status") == "pending":
+                pending_reconciliation_store_count += 1
         covered_store_count = len(revenues)
+        if pending_reconciliation_store_count or unverified_source_store_count:
+            data_status = "pending"
+        elif revision_count:
+            data_status = "revised"
+        else:
+            data_status = "verified"
         result.append(
             {
                 "metric_date": metric_date,
                 "total_ordered_revenue": (
                     round(sum(revenues), 2)
-                    if store_count > 0 and covered_store_count == store_count
+                    if covered_store_count > 0
                     else None
                 ),
                 "covered_store_count": covered_store_count,
                 "store_count": store_count,
                 "missing_store_count": store_count - covered_store_count,
+                "data_status": data_status,
+                "source_verified_store_count": source_verified_store_count,
+                "pending_reconciliation_store_count": pending_reconciliation_store_count,
+                "unverified_source_store_count": unverified_source_store_count,
+                "revised_store_count": revised_store_count,
+                "revision_count": revision_count,
+                "latest_sales_verified_at": (
+                    max(latest_verified_values) if latest_verified_values else None
+                ),
+                "latest_revision_at": (
+                    max(latest_revision_values) if latest_revision_values else None
+                ),
             }
         )
     return result
+
+
+def _sales_revenue_revision_rows(
+    engine: Engine,
+    *,
+    stores: Sequence[StoreIdentity],
+    start_date: date | None,
+    end_date: date | None,
+) -> list[dict[str, Any]]:
+    """Return auditable revisions for the caller's visible connected stores."""
+    output: list[dict[str, Any]] = []
+    for store in stores:
+        with store_scope(store.code), Session(engine) as session:
+            statement = select(SalesRevenueRevision)
+            if start_date is not None:
+                statement = statement.where(
+                    SalesRevenueRevision.metric_date >= start_date
+                )
+            if end_date is not None:
+                statement = statement.where(SalesRevenueRevision.metric_date <= end_date)
+            rows = session.scalars(
+                statement.order_by(
+                    SalesRevenueRevision.detected_at.desc(),
+                    SalesRevenueRevision.id.desc(),
+                )
+            ).all()
+        output.extend(
+            {
+                "id": row.id,
+                "store_code": store.code,
+                "store_name": store.display_name,
+                "metric_date": row.metric_date.isoformat(),
+                "change_type": row.change_type,
+                "before_ordered_units": row.before_ordered_units,
+                "after_ordered_units": row.after_ordered_units,
+                "before_ordered_revenue": _optional_float(
+                    row.before_ordered_revenue
+                ),
+                "after_ordered_revenue": _optional_float(row.after_ordered_revenue),
+                "revenue_delta": _optional_float(row.revenue_delta),
+                "units_delta": row.units_delta,
+                "before_source": dict(row.before_source or {}),
+                "after_source": dict(row.after_source or {}),
+                "source_run_id": row.source_run_id,
+                "detected_at": row.detected_at.isoformat(),
+            }
+            for row in rows
+        )
+    output.sort(key=lambda item: (str(item["detected_at"]), int(item["id"])), reverse=True)
+    return output
 
 
 def _store_health(item: Mapping[str, Any]) -> dict[str, Any]:
@@ -894,6 +1337,13 @@ def _store_health(item: Mapping[str, Any]) -> dict[str, Any]:
             missing_products = _optional_int(traffic.get("missing_product_count")) or 0
         if missing_products:
             data_reasons.append(f"周期末浏览量缺失 {missing_products} 个商品")
+
+    sales_reconciliation = item.get("sales_reconciliation")
+    if (
+        isinstance(sales_reconciliation, Mapping)
+        and sales_reconciliation.get("status") == "pending"
+    ):
+        data_reasons.append("周期末失败后销售额尚待新的 Sales API 成功批次核验")
 
     inventory = item.get("inventory")
     if not isinstance(inventory, Mapping):
@@ -958,12 +1408,18 @@ def create_app(project_root: Path | None = None) -> FastAPI:
         if database_url.startswith("sqlite")
         else root / "logs" / "competitor-batch-queue.json"
     )
+    listing_preview_registry = CompetitorListingPreviewRegistry()
     refresh_coordinator = RefreshCoordinator(root)
     product_thumbnails = ProductThumbnailCache(root)
     logistics_overview = LogisticsOverviewService(root)
     platform_warehouse = PlatformWarehouseService(root)
     search_ranking = SearchRankingService(root)
     search_ranking_lock = asyncio.Lock()
+    search_ranking_batch = SearchRankingBatchController(
+        root,
+        service=search_ranking,
+        analysis_lock=search_ranking_lock,
+    )
     scheduled_competitor_runner: ScheduledCompetitorBatchRunner | None = None
 
     @asynccontextmanager
@@ -973,6 +1429,7 @@ def create_app(project_root: Path | None = None) -> FastAPI:
         try:
             yield
         finally:
+            await search_ranking_batch.close()
             if scheduled_competitor_runner is not None:
                 await scheduled_competitor_runner.close()
             await competitor_public_client.close()
@@ -991,6 +1448,32 @@ def create_app(project_root: Path | None = None) -> FastAPI:
     app.state.auth_manager = auth
     app.state.product_thumbnail_cache = product_thumbnails
     app.state.search_ranking_service = search_ranking
+    app.state.search_ranking_batch_controller = search_ranking_batch
+
+    def _control_search_ranking_batch(
+        request: Request,
+        action: Literal["pause", "resume", "stop"],
+    ) -> dict[str, Any]:
+        controller: SearchRankingBatchController = (
+            request.app.state.search_ranking_batch_controller
+        )
+        user = request.state.erp_user
+        try:
+            getattr(controller, action)(
+                actor_username=user.username,
+                actor_is_admin=user.role == "admin",
+            )
+        except SearchRankingBatchPermissionError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        except SearchRankingBatchConflictError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return {
+            "batch": controller.status_payload(
+                user.accessible_stores,
+                actor_username=user.username,
+                actor_is_admin=user.role == "admin",
+            )
+        }
 
     def require_competitor_batch_controller(request: Request) -> None:
         user = request.state.erp_user
@@ -1320,16 +1803,29 @@ def create_app(project_root: Path | None = None) -> FastAPI:
     def summary(
         request: Request,
         as_of: date = Query(default_factory=date.today),
+        start_date: date | None = Query(default=None),
     ) -> dict[str, Any]:
+        if start_date is not None and start_date > as_of:
+            raise HTTPException(status_code=422, detail="开始日期不能晚于截止日期")
         settings = DashboardSettings.from_env(root)
-        payload = build_summary_payload(load_erp_dataset(settings, as_of), as_of)
+        dataset = load_erp_dataset(settings, as_of)
+        payload = (
+            build_summary_payload(dataset, as_of, start_date=start_date)
+            if start_date is not None
+            else build_summary_payload(dataset, as_of)
+        )
         engine = create_read_only_erp_engine(settings.database_url)
         try:
             store = request.state.erp_store
             try:
-                payload["traffic_series"] = period_end_traffic_series(
-                    engine,
-                    as_of=as_of,
+                payload["traffic_series"] = (
+                    period_end_traffic_series(
+                        engine,
+                        as_of=as_of,
+                        days=(as_of - start_date).days + 1,
+                    )
+                    if start_date is not None
+                    else period_end_traffic_series(engine, as_of=as_of)
                 )
             except SQLAlchemyError:
                 payload["traffic_series"] = []
@@ -1348,16 +1844,25 @@ def create_app(project_root: Path | None = None) -> FastAPI:
     def store_summaries(
         request: Request,
         as_of: date = Query(default_factory=date.today),
+        start_date: date | None = Query(default=None),
+        selected_store_scope: Literal["all", "operating"] = Query(
+            default="all",
+            alias="store_scope",
+        ),
     ) -> dict[str, Any]:
-        """Return a compact comparison for every connected store visible to the user."""
+        """Return a compact comparison for the authorized multi-store scope."""
+        if start_date is not None and start_date > as_of:
+            raise HTTPException(status_code=422, detail="开始日期不能晚于截止日期")
         settings = DashboardSettings.from_env(root)
-        stores = tuple(
-            store
-            for store in request.state.erp_user.accessible_stores
-            if store.active and store.data_connected
+        completed_sales_through = min(
+            as_of,
+            sast_date(datetime.now(UTC)) - timedelta(days=1),
         )
+        stores = _multi_store_identities_for_request(request, selected_store_scope)
         items: list[dict[str, Any]] = []
         revenue_series_by_store: dict[str, Sequence[Mapping[str, Any]]] = {}
+        revenue_states_by_store: dict[str, Mapping[str, Mapping[str, Any]]] = {}
+        sales_reconciliation_by_store: dict[str, Mapping[str, Any]] = {}
         engine = create_read_only_erp_engine(settings.database_url)
         try:
             try:
@@ -1366,14 +1871,25 @@ def create_app(project_root: Path | None = None) -> FastAPI:
                 operators_by_store = {store.code: [] for store in stores}
             for store in stores:
                 with store_scope(store.code):
-                    payload = build_summary_payload(
-                        load_erp_dataset(settings, as_of),
-                        as_of,
+                    dataset = load_erp_dataset(settings, as_of)
+                    payload = (
+                        build_summary_payload(
+                            dataset,
+                            as_of,
+                            start_date=start_date,
+                        )
+                        if start_date is not None
+                        else build_summary_payload(dataset, as_of)
                     )
                     try:
-                        traffic_series = period_end_traffic_series(
-                            engine,
-                            as_of=as_of,
+                        traffic_series = (
+                            period_end_traffic_series(
+                                engine,
+                                as_of=as_of,
+                                days=(as_of - start_date).days + 1,
+                            )
+                            if start_date is not None
+                            else period_end_traffic_series(engine, as_of=as_of)
                         )
                     except SQLAlchemyError:
                         traffic_series = []
@@ -1381,7 +1897,36 @@ def create_app(project_root: Path | None = None) -> FastAPI:
                         inventory = _store_inventory_snapshot(engine)
                     except SQLAlchemyError:
                         inventory = _empty_store_inventory()
+                    try:
+                        revenue_states = _store_sales_metric_states(
+                            engine,
+                            as_of=as_of,
+                            start_date=start_date,
+                        )
+                    except SQLAlchemyError:
+                        revenue_states = {}
+                    try:
+                        sales_reconciliation = _store_sales_reconciliation(
+                            engine,
+                            store=store,
+                            as_of=as_of,
+                        )
+                    except SQLAlchemyError:
+                        sales_reconciliation = {
+                            "store_code": store.code,
+                            "store_name": store.display_name,
+                            "status": "unverified",
+                            "period_end_business_date": None,
+                            "period_end_status": None,
+                            "period_end_captured_at": None,
+                            "period_end_failure_reason": None,
+                            "latest_sales_verified_at": None,
+                            "revision_count": 0,
+                            "latest_revision_at": None,
+                        }
                 revenue_series_by_store[store.code] = payload.get("sales_series", [])
+                revenue_states_by_store[store.code] = revenue_states
+                sales_reconciliation_by_store[store.code] = sales_reconciliation
                 item = {
                     "store_code": store.code,
                     "store_name": store.display_name,
@@ -1392,6 +1937,7 @@ def create_app(project_root: Path | None = None) -> FastAPI:
                     ),
                     "operators": operators_by_store.get(store.code, []),
                     "inventory": inventory,
+                    "sales_reconciliation": sales_reconciliation,
                 }
                 item["health"] = _store_health(item)
                 items.append(item)
@@ -1410,16 +1956,73 @@ def create_app(project_root: Path | None = None) -> FastAPI:
             engine.dispose()
         return {
             "as_of": as_of.isoformat(),
+            "range_start": (
+                start_date.isoformat()
+                if start_date is not None
+                else (as_of - timedelta(days=29)).isoformat()
+            ),
+            "range_end": as_of.isoformat(),
             "store_count": len(items),
             "health_summary": _health_rollup(items),
             "sales_revenue_series": _aggregate_store_revenue_series(
-                revenue_series_by_store
+                revenue_series_by_store,
+                store_states=revenue_states_by_store,
+                reconciliation_by_store=sales_reconciliation_by_store,
+                start_date=start_date,
+                completed_through=completed_sales_through,
+                limit=None if start_date is not None else 30,
+            ),
+            "sales_revenue_completed_through": completed_sales_through.isoformat(),
+            "sales_reconciliation": _sales_reconciliation_summary(
+                tuple(sales_reconciliation_by_store.values())
             ),
             "logistics": {
                 "overseas_warehouse": overseas_inventory,
                 "platform_warehouse": _aggregate_platform_inventory(items),
             },
             "stores": items,
+        }
+
+    @app.get("/api/erp/summary/stores/sales-revisions")
+    def store_sales_revisions(
+        request: Request,
+        start_date: date | None = Query(default=None),
+        end_date: date | None = Query(default=None),
+        page: int = Query(default=1, ge=1),
+        page_size: int = Query(default=20, ge=1, le=100),
+        selected_store_scope: Literal["all", "operating"] = Query(
+            default="all",
+            alias="store_scope",
+        ),
+    ) -> dict[str, Any]:
+        """Return immutable before/after revenue revisions for the chosen scope."""
+        if start_date is not None and end_date is not None and start_date > end_date:
+            raise HTTPException(status_code=422, detail="开始日期不能晚于结束日期")
+        stores = _multi_store_identities_for_request(request, selected_store_scope)
+        settings = DashboardSettings.from_env(root)
+        engine = create_read_only_erp_engine(settings.database_url)
+        try:
+            rows = _sales_revenue_revision_rows(
+                engine,
+                stores=stores,
+                start_date=start_date,
+                end_date=end_date,
+            )
+        finally:
+            engine.dispose()
+        offset = (page - 1) * page_size
+        return {
+            "items": rows[offset : offset + page_size],
+            "total": len(rows),
+            "page": page,
+            "page_size": page_size,
+            "start_date": start_date.isoformat() if start_date is not None else None,
+            "end_date": end_date.isoformat() if end_date is not None else None,
+            "source_policy": {
+                "before": "上一次已发布店铺日指标及其保存的来源",
+                "after": "触发本次修订的成功 Sales API 批次或明确标注的本地重建",
+                "immutable": True,
+            },
         }
 
     @app.get("/api/erp/products")
@@ -1480,6 +2083,111 @@ def create_app(project_root: Path | None = None) -> FastAPI:
         service: SearchRankingService = request.app.state.search_ranking_service
         return service.list_payload()
 
+    @app.get("/api/erp/search-ranking/root-expansion-library")
+    def search_ranking_root_expansion_library(
+        request: Request,
+        search: str = Query(default="", max_length=100),
+        limit: int = Query(default=100, ge=1, le=200),
+    ) -> dict[str, Any]:
+        service: SearchRankingService = request.app.state.search_ranking_service
+        return service.root_expansion_library_payload(search=search, limit=limit)
+
+    @app.get("/api/erp/search-ranking/autocomplete-library")
+    def search_ranking_autocomplete_library_compatibility(
+        request: Request,
+        search: str = Query(default="", max_length=100),
+        limit: int = Query(default=100, ge=1, le=200),
+    ) -> dict[str, Any]:
+        service: SearchRankingService = request.app.state.search_ranking_service
+        return service.root_expansion_library_payload(search=search, limit=limit)
+
+    @app.get("/api/erp/search-ranking/batch")
+    def search_ranking_batch_preview(request: Request) -> dict[str, Any]:
+        controller: SearchRankingBatchController = (
+            request.app.state.search_ranking_batch_controller
+        )
+        user = request.state.erp_user
+        try:
+            return controller.preview_payload(
+                user.accessible_stores,
+                actor_username=user.username,
+                actor_is_admin=user.role == "admin",
+            )
+        except SearchRankingBatchInputError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @app.get("/api/erp/search-ranking/batch/status")
+    def search_ranking_batch_status(request: Request) -> dict[str, Any]:
+        controller: SearchRankingBatchController = (
+            request.app.state.search_ranking_batch_controller
+        )
+        user = request.state.erp_user
+        return {
+            "batch": controller.status_payload(
+                user.accessible_stores,
+                actor_username=user.username,
+                actor_is_admin=user.role == "admin",
+            )
+        }
+
+    @app.post("/api/erp/search-ranking/batch/start")
+    async def start_search_ranking_batch(
+        payload: SearchRankingBatchStartRequest,
+        request: Request,
+    ) -> dict[str, Any]:
+        controller: SearchRankingBatchController = (
+            request.app.state.search_ranking_batch_controller
+        )
+        user = request.state.erp_user
+        try:
+            batch = controller.start(
+                user.accessible_stores,
+                actor_username=user.username,
+                actor_display_name=user.display_name or user.username,
+                actor_is_admin=user.role == "admin",
+                snapshot_id=payload.snapshot_id,
+            )
+        except SearchRankingBatchInputError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except SearchRankingBatchConflictError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return {"batch": batch}
+
+    @app.post("/api/erp/search-ranking/batch/pause")
+    async def pause_search_ranking_batch(request: Request) -> dict[str, Any]:
+        return _control_search_ranking_batch(request, "pause")
+
+    @app.post("/api/erp/search-ranking/batch/resume")
+    async def resume_search_ranking_batch(request: Request) -> dict[str, Any]:
+        return _control_search_ranking_batch(request, "resume")
+
+    @app.post("/api/erp/search-ranking/batch/stop")
+    async def stop_search_ranking_batch(request: Request) -> dict[str, Any]:
+        return _control_search_ranking_batch(request, "stop")
+
+    @app.post("/api/erp/search-ranking/batch/restart")
+    async def restart_search_ranking_batch(
+        payload: SearchRankingBatchStartRequest,
+        request: Request,
+    ) -> dict[str, Any]:
+        controller: SearchRankingBatchController = (
+            request.app.state.search_ranking_batch_controller
+        )
+        user = request.state.erp_user
+        try:
+            batch = controller.restart(
+                user.accessible_stores,
+                actor_username=user.username,
+                actor_display_name=user.display_name or user.username,
+                actor_is_admin=user.role == "admin",
+                snapshot_id=payload.snapshot_id,
+            )
+        except SearchRankingBatchPermissionError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        except (SearchRankingBatchInputError, SearchRankingBatchConflictError) as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return {"batch": batch}
+
     @app.get("/api/erp/search-ranking/{offer_id}")
     def search_ranking_product_detail(
         offer_id: str,
@@ -1511,6 +2219,100 @@ def create_app(project_root: Path | None = None) -> FastAPI:
             raise HTTPException(status_code=503, detail=str(exc)) from exc
         except (SearchRankingProviderError, CompetitorNetworkError) as exc:
             raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    @app.post("/api/erp/search-ranking/{offer_id}/product-facts/confirm")
+    async def confirm_search_ranking_product_facts(
+        offer_id: str,
+        payload: ProductFactConfirmRequest,
+        request: Request,
+    ) -> dict[str, Any]:
+        if search_ranking_lock.locked():
+            raise HTTPException(
+                status_code=409,
+                detail="另一个搜索定位任务正在运行；商品事实尚未写入，请稍后重试",
+            )
+        service: SearchRankingService = request.app.state.search_ranking_service
+        user = request.state.erp_user
+        confirmation = ProductFactConfirmation(
+            source_analysis_id=payload.source_analysis_id,
+            reason_code=payload.reason_code,
+            actor_username=user.username,
+            actor_display_name=user.display_name or user.username,
+            facts=tuple(
+                ProductFactInput(
+                    fact_type=item.fact_type,
+                    fact_term=item.fact_term,
+                    statement=item.statement,
+                )
+                for item in payload.facts
+            ),
+        )
+        try:
+            async with search_ranking_lock:
+                return await service.confirm_product_facts(
+                    offer_id,
+                    confirmation,
+                )
+        except SearchRankingInputError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except SearchRankingConfigurationError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        except (SearchRankingProviderError, CompetitorNetworkError) as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    @app.post("/api/erp/search-ranking/{offer_id}/decision-parameters/confirm")
+    async def confirm_search_ranking_decision_parameters(
+        offer_id: str,
+        payload: DecisionParameterConfirmRequest,
+        request: Request,
+    ) -> dict[str, Any]:
+        if search_ranking_lock.locked():
+            raise HTTPException(
+                status_code=409,
+                detail="搜索定位任务正在运行；决策参数尚未写入，请稍后再确认",
+            )
+        service: SearchRankingService = request.app.state.search_ranking_service
+        user = request.state.erp_user
+        try:
+            async with search_ranking_lock:
+                return service.confirm_decision_parameters(
+                    offer_id,
+                    DecisionParameterConfirmation(
+                        actor_username=user.username,
+                        actor_display_name=user.display_name or user.username,
+                        choices=tuple(
+                            DecisionParameterChoice(
+                                parameter_key=item.parameter_key,
+                                is_decision_parameter=item.is_decision_parameter,
+                            )
+                            for item in payload.choices
+                        ),
+                    ),
+                )
+        except SearchRankingInputError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @app.post("/api/erp/search-ranking/{offer_id}/product-facts/{fact_id}/revoke")
+    def revoke_search_ranking_product_fact(
+        offer_id: str,
+        fact_id: int,
+        payload: ProductFactRevokeRequest,
+        request: Request,
+    ) -> dict[str, Any]:
+        service: SearchRankingService = request.app.state.search_ranking_service
+        user = request.state.erp_user
+        try:
+            return service.revoke_product_fact(
+                offer_id,
+                fact_id,
+                ProductFactRevocation(
+                    actor_username=user.username,
+                    actor_display_name=user.display_name or user.username,
+                    reason=payload.reason,
+                ),
+            )
+        except SearchRankingInputError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     @app.get("/api/erp/quadrants")
     def quadrants(
@@ -2238,18 +3040,42 @@ def create_app(project_root: Path | None = None) -> FastAPI:
         request: Request,
         start_date: date | None = Query(default=None),
         end_date: date | None = Query(default=None),
-        own_store_scope: Literal["current", "all"] = Query(default="current"),
+        own_store_scope: Literal["current", "all", "operating"] = Query(default="current"),
     ) -> dict[str, object]:
         dataset = _load_competitor_dataset(
             root,
             start_date=start_date,
             end_date=end_date,
             own_store_codes=_own_store_codes_for_request(request, own_store_scope),
+            include_detail_frames=False,
         )
         return {
             "items": frame_records(dataset.current),
             "store_items": frame_records(dataset.store_current),
             "own_follower_events": dataset.own_follower_events,
+            "date_range": dataset.date_range_payload(),
+        }
+
+    @app.get("/api/competitors/own-store")
+    def own_store_competitors(
+        request: Request,
+        start_date: date | None = Query(default=None),
+        end_date: date | None = Query(default=None),
+        own_store_scope: Literal["current", "all", "operating"] = Query(
+            default="current"
+        ),
+    ) -> dict[str, object]:
+        """Return only the scope-dependent private-store radar partition."""
+        dataset = _load_competitor_dataset(
+            root,
+            start_date=start_date,
+            end_date=end_date,
+            own_store_codes=_own_store_codes_for_request(request, own_store_scope),
+            include_detail_frames=False,
+            own_store_only=True,
+        )
+        return {
+            "store_items": frame_records(dataset.store_current),
             "date_range": dataset.date_range_payload(),
         }
 
@@ -2267,7 +3093,52 @@ def create_app(project_root: Path | None = None) -> FastAPI:
 
     @app.get("/api/competitors/batch-status")
     def competitor_batch_status() -> dict[str, object]:
-        return collection_registry.status()
+        status = collection_registry.status()
+        runner_status = (
+            scheduled_competitor_runner.status()
+            if scheduled_competitor_runner is not None
+            else {}
+        )
+        stopped_checkpoint = (
+            scheduled_competitor_runner.stopped_checkpoint_status()
+            if scheduled_competitor_runner is not None
+            else None
+        )
+        if not status.get("active") and stopped_checkpoint is not None:
+            status.update(stopped_checkpoint)
+        resume_available = bool(
+            not status.get("active")
+            and status.get("source") == "scheduled"
+            and status.get("event") in {"manual_stop", "completed"}
+            and status.get("batch_id") == runner_status.get("batch_id")
+            and runner_status.get("resume_available")
+        )
+        resumable_pending = runner_status.get("resumable_pending")
+        status["scheduled_resume_available"] = resume_available
+        status["scheduled_resume_pending"] = (
+            resumable_pending
+            if resume_available and isinstance(resumable_pending, int)
+            else 0
+        )
+        status["scheduled_wait_kind"] = (
+            runner_status.get("wait_kind")
+            if status.get("active") and status.get("source") == "scheduled"
+            else None
+        )
+        status["scheduled_auto_resume_at"] = (
+            runner_status.get("resume_after")
+            if status.get("active") and status.get("source") == "scheduled"
+            else None
+        )
+        status["scheduled_retry_round"] = runner_status.get(
+            "pending_retry_round",
+            0,
+        )
+        status["scheduled_retry_round_limit"] = runner_status.get(
+            "pending_retry_round_limit",
+            0,
+        )
+        return status
 
     @app.post("/api/competitors/batch-options")
     def update_competitor_batch_options(
@@ -2363,9 +3234,51 @@ def create_app(project_root: Path | None = None) -> FastAPI:
         engine = create_read_only_erp_engine(settings.database_url)
         try:
             with Session(engine) as session:
-                return _personal_watchlist_payload(session, user_id=user.id)
+                return _personal_watchlist_payload(
+                    session,
+                    user_id=user.id,
+                    accessible_store_codes={
+                        store.code
+                        for store in user.accessible_stores
+                        if store.active and store.data_connected
+                    },
+                )
         finally:
             engine.dispose()
+
+    @app.get("/api/competitors/personal-watchlist/overview")
+    def competitor_personal_watchlist_overview(
+        request: Request,
+        start_date: date | None = Query(default=None),
+        end_date: date | None = Query(default=None),
+    ) -> dict[str, object]:
+        """Hydrate personal-pool cards across every store authorized to the account."""
+
+        user = request.state.erp_user
+        settings = DashboardSettings.from_env(root)
+        engine = create_read_only_erp_engine(settings.database_url)
+        try:
+            with Session(engine) as session:
+                plids = _personal_watchlist_projection_plids(
+                    session,
+                    user_id=user.id,
+                )
+        finally:
+            engine.dispose()
+        dataset = _load_competitor_dataset(
+            root,
+            start_date=start_date,
+            end_date=end_date,
+            own_store_codes=_own_store_codes_for_request(request, "all"),
+            plids=plids,
+            include_detail_frames=False,
+        )
+        return {
+            "items": frame_records(dataset.current),
+            "store_items": frame_records(dataset.store_current),
+            "own_follower_events": [],
+            "date_range": dataset.date_range_payload(),
+        }
 
     @app.get("/api/competitors/personal-watchlist/share-users")
     def personal_watchlist_share_users(
@@ -2529,6 +3442,15 @@ def create_app(project_root: Path | None = None) -> FastAPI:
                 ).all()
                 existing_by_user_id = {row.user_id: row for row in existing_rows}
                 selected_by_user_id = {share.user_id: share for share in payload.shares}
+                lost_default_editor_ids = {
+                    recipient_id
+                    for recipient_id, existing_row in existing_by_user_id.items()
+                    if existing_row.permission == "edit"
+                    and (
+                        recipient_id not in selected_by_user_id
+                        or selected_by_user_id[recipient_id].permission != "edit"
+                    )
+                }
                 for recipient_id, existing_row in existing_by_user_id.items():
                     if recipient_id not in selected_by_user_id:
                         session.delete(existing_row)
@@ -2548,6 +3470,19 @@ def create_app(project_root: Path | None = None) -> FastAPI:
                     else:
                         share_row.permission = requested_share.permission
                         share_row.updated_at = now
+                if lost_default_editor_ids:
+                    invalid_preferences = session.scalars(
+                        select(PersonalWatchlistPreference).where(
+                            PersonalWatchlistPreference.user_id.in_(
+                                lost_default_editor_ids
+                            ),
+                            PersonalWatchlistPreference.default_library_id == library.id,
+                        )
+                    ).all()
+                    for preference in invalid_preferences:
+                        preference.default_library_id = None
+                        preference.default_configured = False
+                        preference.updated_at = now
                 library.updated_at = now
                 session.flush()
                 result = _single_personal_watchlist_library_payload(
@@ -2635,9 +3570,17 @@ def create_app(project_root: Path | None = None) -> FastAPI:
                 library = session.get(PersonalWatchlistLibrary, library_id)
                 if library is None or library.user_id != user.id:
                     raise HTTPException(status_code=404, detail="未找到当前账号的类型库")
-                preference = session.get(PersonalWatchlistPreference, user.id)
-                default_was_deleted = bool(
-                    preference is not None and preference.default_library_id == library_id
+                affected_preferences = session.scalars(
+                    select(PersonalWatchlistPreference).where(
+                        PersonalWatchlistPreference.default_library_id == library_id
+                    )
+                ).all()
+                owner_default_was_deleted = any(
+                    item.user_id == user.id for item in affected_preferences
+                )
+                preference = next(
+                    (item for item in affected_preferences if item.user_id == user.id),
+                    session.get(PersonalWatchlistPreference, user.id),
                 )
                 default_library_configured = bool(
                     preference is not None and preference.default_configured
@@ -2645,10 +3588,13 @@ def create_app(project_root: Path | None = None) -> FastAPI:
                 default_library_id = (
                     preference.default_library_id if preference is not None else None
                 )
-                if default_was_deleted and preference is not None:
-                    preference.default_library_id = None
-                    preference.default_configured = False
-                    preference.updated_at = datetime.now(UTC)
+                if affected_preferences:
+                    now = datetime.now(UTC)
+                    for affected_preference in affected_preferences:
+                        affected_preference.default_library_id = None
+                        affected_preference.default_configured = False
+                        affected_preference.updated_at = now
+                if owner_default_was_deleted:
                     default_library_configured = False
                     default_library_id = None
                 session.delete(library)
@@ -2682,10 +3628,25 @@ def create_app(project_root: Path | None = None) -> FastAPI:
                         PersonalWatchlistLibrary,
                         payload.default_library_id,
                     )
-                    if library is None or library.user_id != user.id:
+                    if library is None:
                         raise HTTPException(
                             status_code=404,
-                            detail="未找到当前账号选择的默认类型库",
+                            detail="未找到当前账号可使用的默认类型库",
+                        )
+                    access = _personal_watchlist_library_access(
+                        session,
+                        library=library,
+                        user_id=user.id,
+                    )
+                    if access is None:
+                        raise HTTPException(
+                            status_code=404,
+                            detail="未找到当前账号可使用的默认类型库",
+                        )
+                    if access == "read":
+                        raise HTTPException(
+                            status_code=403,
+                            detail="只读共享类型库不能设为新增链接默认归类",
                         )
                 preference = session.get(PersonalWatchlistPreference, user.id)
                 now = datetime.now(UTC)
@@ -2830,9 +3791,12 @@ def create_app(project_root: Path | None = None) -> FastAPI:
             create_schema(engine)
             with Session(engine) as session:
                 target = session.get(CompetitorTarget, normalized_plid)
-                private_store_rows = load_connected_store_offers(
-                    session,
-                    plids={normalized_plid},
+                private_store_rows = _authorized_own_store_rows_for_personal_watchlist(
+                    load_connected_store_offers(
+                        session,
+                        plids={normalized_plid},
+                    ),
+                    user=user,
                 )
                 now = datetime.now(UTC)
                 item: CompetitorPersonalWatchlist | OwnStorePersonalWatchlist
@@ -2929,6 +3893,140 @@ def create_app(project_root: Path | None = None) -> FastAPI:
         )
         return {"ok": True, "removed": removed}
 
+    @app.post("/api/competitors/listing-preview")
+    async def preview_competitor_listing_source(
+        payload: CompetitorListingPreviewRequest,
+        request: Request,
+    ) -> dict[str, object]:
+        user = request.state.erp_user
+        try:
+            source = parse_competitor_listing_source(
+                payload.url,
+                expected_type=payload.source_type,
+            )
+            selected_sorts = payload.sorts or [source.default_sort]
+            for sort in selected_sorts:
+                build_competitor_listing_url(
+                    source,
+                    sort=sort,
+                    price_min=payload.price_min,
+                    price_max=payload.price_max,
+                )
+        except CompetitorListingInputError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+        try:
+            async with competitor_public_client.lease() as public_client_lease:
+                await public_client_lease.client.start()
+                try:
+                    result = await preview_competitor_listing(
+                        public_client_lease.client,
+                        source_url=payload.url,
+                        source_type=payload.source_type,
+                        price_min=payload.price_min,
+                        price_max=payload.price_max,
+                        sorts=selected_sorts,
+                        product_limit=payload.product_limit,
+                    )
+                except (CompetitorNetworkError, CompetitorListingProviderError):
+                    public_client_lease.invalidate()
+                    raise
+        except CompetitorListingInputError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except CompetitorNetworkError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        except CompetitorListingProviderError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+        preview_token = None
+        if result["candidate_queue_frozen"]:
+            preview_token = listing_preview_registry.issue(
+                user_id=user.id,
+                payload=result,
+            )
+        result_sorts = result.get("sorts")
+        sort_count = len(result_sorts) if isinstance(result_sorts, list) else 0
+        competitor_logger.info(
+            "listing_preview source=%s total=%s selected=%s sorts=%s user=%s committable=%s",
+            result["source_type"],
+            result["source_total"],
+            result["selected_count"],
+            sort_count,
+            user.username,
+            result["can_commit"],
+        )
+        return {**result, "preview_token": preview_token}
+
+    @app.post("/api/competitors/listing-targets")
+    def create_competitor_listing_targets(
+        payload: CompetitorListingCommitRequest,
+        request: Request,
+    ) -> dict[str, object]:
+        user = request.state.erp_user
+        try:
+            preview = listing_preview_registry.resolve(
+                token=payload.preview_token,
+                user_id=user.id,
+            )
+            preview = finalize_competitor_listing_preview(
+                preview,
+                product_limit=payload.product_limit,
+            )
+        except CompetitorListingPreviewExpiredError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except CompetitorListingInputError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        raw_products = preview.get("products")
+        if not isinstance(raw_products, list) or not raw_products:
+            raise HTTPException(status_code=409, detail="筛选预览没有可加入的商品")
+
+        settings = DashboardSettings.from_env(root)
+        engine = create_engine_for_settings(settings)
+        try:
+            create_schema(engine)
+            result = _persist_competitor_listing_targets(
+                engine,
+                preview=preview,
+                user=user,
+                personal_library_id=payload.library_id,
+            )
+        except CompetitorListingInputError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        finally:
+            engine.dispose()
+
+        queued_count = sum(
+            collection_registry.enqueue_target(plid=plid, url=url)
+            for plid, url in result.new_targets
+        )
+        listing_preview_registry.discard(payload.preview_token)
+        competitor_logger.info(
+            "listing_commit source=%s selected=%s added=%s existing=%s own_store=%s "
+            "library_id=%s queued=%s user=%s",
+            preview.get("source_type"),
+            result.selected_count,
+            result.added_target_count,
+            result.existing_target_count,
+            result.own_store_count,
+            result.personal_library_id,
+            queued_count,
+            user.username,
+        )
+        return {
+            "source_type": preview.get("source_type"),
+            "source_url": preview.get("source_url"),
+            "operation_id": result.operation_id,
+            "personal_library_id": result.personal_library_id,
+            "personal_library_name": result.personal_library_name,
+            "selected_count": result.selected_count,
+            "added_target_count": result.added_target_count,
+            "reactivated_target_count": result.reactivated_target_count,
+            "existing_target_count": result.existing_target_count,
+            "own_store_count": result.own_store_count,
+            "personal_watchlist_added_count": result.personal_watchlist_added_count,
+            "queued_to_active_batch_count": queued_count,
+        }
+
     @app.post("/api/competitors/targets")
     def create_competitor_target(
         payload: CompetitorTargetRequest,
@@ -2943,9 +4041,12 @@ def create_app(project_root: Path | None = None) -> FastAPI:
             now = datetime.now(UTC)
             with Session(engine) as session:
                 personal_item: CompetitorPersonalWatchlist | OwnStorePersonalWatchlist
-                private_store_rows = load_connected_store_offers(
-                    session,
-                    plids={plid},
+                private_store_rows = _authorized_own_store_rows_for_personal_watchlist(
+                    load_connected_store_offers(
+                        session,
+                        plids={plid},
+                    ),
+                    user=user,
                 )
                 if private_store_rows:
                     personal_item, personal_created = _ensure_own_store_personal_watchlist_item(
@@ -3260,7 +4361,7 @@ def create_app(project_root: Path | None = None) -> FastAPI:
     @app.get("/api/competitors/store-targets")
     def competitor_store_targets(
         request: Request,
-        own_store_scope: Literal["current", "all"] = Query(default="current"),
+        own_store_scope: Literal["current", "all", "operating"] = Query(default="current"),
     ) -> dict[str, object]:
         """Return private PLIDs for the selected store or authorized all-store view."""
         settings = DashboardSettings.from_env(root)
@@ -3379,19 +4480,107 @@ def create_app(project_root: Path | None = None) -> FastAPI:
             },
         }
 
+    @app.get("/api/competitors/listing-operations")
+    def competitor_listing_operations(
+        request: Request,
+        source_type: Literal["seller", "category"] | None = Query(default=None),
+        page: int = Query(default=1, ge=1),
+        page_size: int = Query(default=10, ge=1, le=50),
+    ) -> dict[str, object]:
+        require_competitor_admin(request)
+        settings = DashboardSettings.from_env(root)
+        engine = create_read_only_erp_engine(settings.database_url)
+        try:
+            with Session(engine) as session:
+                statement = select(CompetitorListingOperation)
+                count_statement = select(func.count()).select_from(
+                    CompetitorListingOperation
+                )
+                if source_type is not None:
+                    condition = CompetitorListingOperation.source_type == source_type
+                    statement = statement.where(condition)
+                    count_statement = count_statement.where(condition)
+                total = int(session.scalar(count_statement) or 0)
+                operations = session.scalars(
+                    statement.order_by(
+                        CompetitorListingOperation.committed_at.desc(),
+                        CompetitorListingOperation.id.desc(),
+                    )
+                    .offset((page - 1) * page_size)
+                    .limit(page_size)
+                ).all()
+        finally:
+            engine.dispose()
+        return {
+            "items": [
+                _competitor_listing_operation_payload(operation)
+                for operation in operations
+            ],
+            "total": total,
+            "page": page,
+            "page_size": page_size,
+            "source_type": source_type,
+        }
+
+    @app.get("/api/competitors/listing-operations/{operation_id}/items")
+    def competitor_listing_operation_items(
+        operation_id: int,
+        request: Request,
+        page: int = Query(default=1, ge=1),
+        page_size: int = Query(default=20, ge=1, le=100),
+    ) -> dict[str, object]:
+        require_competitor_admin(request)
+        settings = DashboardSettings.from_env(root)
+        engine = create_read_only_erp_engine(settings.database_url)
+        try:
+            with Session(engine) as session:
+                if session.get(CompetitorListingOperation, operation_id) is None:
+                    raise HTTPException(status_code=404, detail="店铺/类目操作记录不存在")
+                condition = (
+                    CompetitorListingOperationItem.operation_id == operation_id
+                )
+                total = int(
+                    session.scalar(
+                        select(func.count())
+                        .select_from(CompetitorListingOperationItem)
+                        .where(condition)
+                    )
+                    or 0
+                )
+                items = session.scalars(
+                    select(CompetitorListingOperationItem)
+                    .where(condition)
+                    .order_by(CompetitorListingOperationItem.position.asc())
+                    .offset((page - 1) * page_size)
+                    .limit(page_size)
+                ).all()
+        finally:
+            engine.dispose()
+        return {
+            "items": [
+                _competitor_listing_operation_item_payload(item)
+                for item in items
+            ],
+            "total": total,
+            "page": page,
+            "page_size": page_size,
+            "operation_id": operation_id,
+        }
+
     @app.get("/api/competitors/{plid}")
     def competitor_detail(
         plid: str,
         request: Request,
         start_date: date | None = Query(default=None),
         end_date: date | None = Query(default=None),
-        own_store_scope: Literal["current", "all"] = Query(default="current"),
+        own_store_scope: Literal["current", "all", "operating"] = Query(default="current"),
     ) -> dict[str, list[dict[str, Any]]]:
+        own_store_codes = _own_store_codes_for_request(request, own_store_scope)
         dataset = _load_competitor_dataset(
             root,
             start_date=start_date,
             end_date=end_date,
-            own_store_codes=_own_store_codes_for_request(request, own_store_scope),
+            own_store_codes=own_store_codes,
             plids={plid},
         )
         history = dataset.history
@@ -3414,10 +4603,33 @@ def create_app(project_root: Path | None = None) -> FastAPI:
             history = dataset.store_history
             if not history.empty:
                 history = history.loc[history["plid"].astype(str) == plid]
+        own_store_sales = (
+            _load_own_store_sales(
+                root,
+                plid=plid,
+                own_store_codes=own_store_codes,
+                through=datetime.now(ZoneInfo("Asia/Shanghai")).date(),
+            )
+            if store_item is not None
+            else []
+        )
+        own_store_traffic = (
+            _load_own_store_traffic(
+                root,
+                plid=plid,
+                own_store_codes=own_store_codes,
+                start_date=start_date,
+                end_date=end_date,
+            )
+            if store_item is not None
+            else []
+        )
         return {
             "history": frame_records(history),
             "reviews": frame_records(reviews),
             "variants": frame_records(variants),
+            "own_store_sales": own_store_sales,
+            "own_store_traffic": own_store_traffic,
         }
 
     async def run_competitor_collection(
@@ -3772,6 +4984,21 @@ def create_app(project_root: Path | None = None) -> FastAPI:
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
 
+    @app.post("/api/competitors/batch-resume")
+    async def resume_stopped_scheduled_competitor_batch(
+        payload: CompetitorBatchResumeRequest,
+        request: Request,
+    ) -> dict[str, object]:
+        require_competitor_batch_controller(request)
+        try:
+            await scheduled_competitor_runner.resume_stopped(
+                payload.batch_id,
+                resumed_by=request.state.erp_user.username,
+            )
+        except (CollectionBatchBusyError, ValueError) as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return {"ok": True, "status": competitor_batch_status()}
+
     @app.post("/api/competitors/collect")
     async def collect_competitor(
         payload: CollectCompetitorRequest,
@@ -3823,6 +5050,7 @@ def create_app(project_root: Path | None = None) -> FastAPI:
                 await scheduled_competitor_runner.mark_stopped(
                     batch_id,
                     stopped_by=stopped_by,
+                    reason=reason,
                 )
             finally:
                 try:
@@ -3850,12 +5078,12 @@ def create_app(project_root: Path | None = None) -> FastAPI:
         request: Request,
     ) -> dict[str, object]:
         require_competitor_batch_controller(request)
-        status = await stop_competitor_batch(
+        await stop_competitor_batch(
             batch_id=payload.batch_id,
             reason=payload.reason,
             stopped_by=request.state.erp_user.username,
         )
-        return {"ok": True, "status": status}
+        return {"ok": True, "status": competitor_batch_status()}
 
     @app.post("/api/competitors/batch-events")
     async def competitor_batch_event(
@@ -3865,12 +5093,12 @@ def create_app(project_root: Path | None = None) -> FastAPI:
         require_competitor_batch_controller(request)
         user = request.state.erp_user
         if payload.event == "manual_stop":
-            status = await stop_competitor_batch(
+            await stop_competitor_batch(
                 batch_id=payload.batch_id,
                 reason=payload.reason,
                 stopped_by=user.username,
             )
-            return {"ok": True, "status": status}
+            return {"ok": True, "status": competitor_batch_status()}
         try:
             status = collection_registry.event(
                 batch_id=payload.batch_id,
@@ -3937,6 +5165,310 @@ def create_app(project_root: Path | None = None) -> FastAPI:
             )
 
     return app
+
+
+@dataclass(frozen=True)
+class _PersistedListingTargets:
+    operation_id: int
+    personal_library_id: int
+    personal_library_name: str
+    selected_count: int
+    added_target_count: int
+    reactivated_target_count: int
+    existing_target_count: int
+    own_store_count: int
+    personal_watchlist_added_count: int
+    new_targets: tuple[tuple[str, str], ...]
+
+
+@dataclass(frozen=True)
+class _NormalizedListingProduct:
+    plid: str
+    url: str
+    title: str
+    sort_ranks: dict[str, int]
+
+
+def _persist_competitor_listing_targets(
+    engine: Engine,
+    *,
+    preview: Mapping[str, object],
+    user: UserIdentity,
+    personal_library_id: int,
+) -> _PersistedListingTargets:
+    """Persist one frozen listing preview with the single-link ownership semantics."""
+
+    raw_products = preview.get("products")
+    if not isinstance(raw_products, list):
+        raise CompetitorListingInputError("筛选预览中的商品格式无效")
+    raw_source_type = str(preview.get("source_type") or "").strip()
+    if raw_source_type not in {"seller", "category"}:
+        raise CompetitorListingInputError("筛选预览中的来源类型无效")
+    source_type: Literal["seller", "category"] = (
+        "seller" if raw_source_type == "seller" else "category"
+    )
+    source = parse_competitor_listing_source(
+        str(preview.get("source_url") or ""),
+        expected_type=source_type,
+    )
+    price_min = _listing_preview_optional_int(preview.get("price_min"), "最低价格")
+    price_max = _listing_preview_optional_int(preview.get("price_max"), "最高价格")
+    product_limit = _listing_preview_optional_int(
+        preview.get("product_limit"),
+        "最终加入数量",
+    )
+    if product_limit is not None and not 1 <= product_limit <= MAX_LISTING_PRODUCTS:
+        raise CompetitorListingInputError("筛选预览中的最终加入数量无效")
+    raw_sorts = preview.get("sorts")
+    if not isinstance(raw_sorts, list) or not raw_sorts:
+        raise CompetitorListingInputError("筛选预览中的排序方式无效")
+    selected_sorts: list[str] = []
+    for raw_sort in raw_sorts:
+        sort = " ".join(str(raw_sort).split())
+        build_competitor_listing_url(
+            source,
+            sort=sort,
+            price_min=price_min,
+            price_max=price_max,
+        )
+        if sort not in selected_sorts:
+            selected_sorts.append(sort)
+    selection_rule = str(preview.get("selection_rule") or "").strip()
+    if selection_rule != BALANCED_LISTING_SELECTION_RULE:
+        raise CompetitorListingInputError("筛选预览中的合并排序规则已失效")
+
+    normalized_products: list[_NormalizedListingProduct] = []
+    seen: set[str] = set()
+    for raw in raw_products:
+        if not isinstance(raw, Mapping):
+            raise CompetitorListingInputError("筛选预览中的商品格式无效")
+        submitted_plid = str(raw.get("plid") or "").strip()
+        submitted_url = str(raw.get("url") or "").strip()
+        try:
+            plid, url = _validated_competitor_target_url(submitted_url)
+        except HTTPException as exc:
+            raise CompetitorListingInputError(str(exc.detail)) from exc
+        if submitted_plid != plid:
+            raise CompetitorListingInputError("筛选预览中的商品 PLID 与链接不一致")
+        if plid in seen:
+            continue
+        title = " ".join(str(raw.get("title") or "").split())[:1000]
+        seen.add(plid)
+        normalized_products.append(
+            _NormalizedListingProduct(
+                plid=plid,
+                url=url,
+                title=title or f"PLID{plid}",
+                sort_ranks=_listing_preview_sort_ranks(
+                    raw.get("sort_ranks"),
+                    selected_sorts,
+                ),
+            )
+        )
+    if not normalized_products:
+        raise CompetitorListingInputError("筛选预览没有可加入的商品")
+    if len(normalized_products) > MAX_LISTING_PRODUCTS:
+        raise CompetitorListingInputError(
+            f"单次最多加入 {MAX_LISTING_PRODUCTS} 个去重商品"
+        )
+
+    added_target_count = 0
+    reactivated_target_count = 0
+    existing_target_count = 0
+    own_store_count = 0
+    personal_watchlist_added_count = 0
+    new_targets: list[tuple[str, str]] = []
+    now = datetime.now(UTC)
+    with Session(engine) as session, session.begin():
+        personal_library = session.get(
+            PersonalWatchlistLibrary,
+            personal_library_id,
+        )
+        if personal_library is None or personal_library.user_id != user.id:
+            raise CompetitorListingInputError(
+                "请选择当前账号拥有的个人监控池类型库"
+            )
+        personal_library_name = personal_library.name
+        own_rows = _authorized_own_store_rows_for_personal_watchlist(
+            load_connected_store_offers(
+                session,
+                plids={product.plid for product in normalized_products},
+            ),
+            user=user,
+        )
+        own_plids = {
+            str(row.offer.productline_id or "").strip()
+            for row in own_rows
+            if str(row.offer.productline_id or "").strip()
+        }
+        operation = CompetitorListingOperation(
+            source_type=source.source_type,
+            source_url=source.source_url,
+            source_label=source.source_label[:255],
+            personal_library_id=personal_library.id,
+            personal_library_name=personal_library.name,
+            price_min=price_min,
+            price_max=price_max,
+            sorts=list(selected_sorts),
+            selection_rule=selection_rule,
+            product_limit=product_limit,
+            selected_count=len(normalized_products),
+            added_target_count=0,
+            reactivated_target_count=0,
+            existing_target_count=0,
+            own_store_count=0,
+            personal_watchlist_added_count=0,
+            actor_user_id=user.id,
+            actor_username=user.username,
+            actor_display_name=user.display_name,
+            committed_at=now,
+        )
+        session.add(operation)
+        session.flush()
+        operation_id = operation.id
+
+        for position, product in enumerate(normalized_products, start=1):
+            plid = product.plid
+            url = product.url
+            title = product.title
+            personal_created = False
+            if plid in own_plids:
+                _, personal_created = _ensure_own_store_personal_watchlist_item(
+                    session,
+                    user_id=user.id,
+                    plid=plid,
+                    added_at=now,
+                )
+                _assign_personal_watchlist_library(
+                    session,
+                    library_id=personal_library.id,
+                    plid=plid,
+                    added_at=now,
+                )
+                own_store_count += 1
+                personal_watchlist_added_count += int(personal_created)
+                item_result = "own_store"
+            else:
+                target = session.get(CompetitorTarget, plid)
+                if target is not None and target.active:
+                    existing_target_count += 1
+                    _, personal_created = _ensure_competitor_personal_watchlist_item(
+                        session,
+                        user_id=user.id,
+                        plid=plid,
+                        added_at=now,
+                    )
+                    _assign_personal_watchlist_library(
+                        session,
+                        library_id=personal_library.id,
+                        plid=plid,
+                        added_at=now,
+                    )
+                    personal_watchlist_added_count += int(personal_created)
+                    item_result = "existing_target"
+                else:
+                    old_url = target.url if target is not None else None
+                    item_result = "reactivated_target" if target is not None else "added_target"
+                    if target is None:
+                        target = CompetitorTarget(
+                            plid=plid,
+                            offer_group_plid=plid,
+                            url=url,
+                            title=title,
+                            active=True,
+                            created_at=now,
+                            updated_at=now,
+                        )
+                        session.add(target)
+                    else:
+                        if not target.offer_group_plid:
+                            target.offer_group_plid = plid
+                        target.url = url
+                        target.title = target.title or title
+                        target.active = True
+                        target.updated_at = now
+                        reactivated_target_count += 1
+                    session.add(
+                        _competitor_target_audit(
+                            plid=plid,
+                            action="add",
+                            old_url=old_url,
+                            new_url=url,
+                            user=user,
+                            changed_at=now,
+                        )
+                    )
+                    _, personal_created = _ensure_competitor_personal_watchlist_item(
+                        session,
+                        user_id=user.id,
+                        plid=plid,
+                        added_at=now,
+                    )
+                    _assign_personal_watchlist_library(
+                        session,
+                        library_id=personal_library.id,
+                        plid=plid,
+                        added_at=now,
+                    )
+                    personal_watchlist_added_count += int(personal_created)
+                    added_target_count += 1
+                    new_targets.append((plid, url))
+            session.add(
+                CompetitorListingOperationItem(
+                    operation_id=operation_id,
+                    position=position,
+                    plid=plid,
+                    title=title,
+                    url=url,
+                    result=item_result,
+                    personal_watchlist_added=personal_created,
+                    sort_ranks=product.sort_ranks,
+                )
+            )
+        operation.added_target_count = added_target_count
+        operation.reactivated_target_count = reactivated_target_count
+        operation.existing_target_count = existing_target_count
+        operation.own_store_count = own_store_count
+        operation.personal_watchlist_added_count = personal_watchlist_added_count
+
+    return _PersistedListingTargets(
+        operation_id=operation_id,
+        personal_library_id=personal_library_id,
+        personal_library_name=personal_library_name,
+        selected_count=len(normalized_products),
+        added_target_count=added_target_count,
+        reactivated_target_count=reactivated_target_count,
+        existing_target_count=existing_target_count,
+        own_store_count=own_store_count,
+        personal_watchlist_added_count=personal_watchlist_added_count,
+        new_targets=tuple(new_targets),
+    )
+
+
+def _listing_preview_optional_int(value: object, label: str) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise CompetitorListingInputError(f"筛选预览中的{label}无效")
+    return value
+
+
+def _listing_preview_sort_ranks(
+    value: object,
+    selected_sorts: Sequence[str],
+) -> dict[str, int]:
+    if not isinstance(value, Mapping):
+        return {}
+    output: dict[str, int] = {}
+    for sort in selected_sorts:
+        rank = value.get(sort)
+        if (
+            isinstance(rank, int)
+            and not isinstance(rank, bool)
+            and 1 <= rank <= MAX_LISTING_PRODUCTS
+        ):
+            output[sort] = rank
+    return output
 
 
 def _validated_competitor_target_url(value: str) -> tuple[str, str]:
@@ -4036,16 +5568,38 @@ def _assign_default_personal_watchlist_library(
     ):
         return
     library = session.get(PersonalWatchlistLibrary, preference.default_library_id)
-    if library is None or library.user_id != user_id:
+    if library is None:
         return
+    access = _personal_watchlist_library_access(
+        session,
+        library=library,
+        user_id=user_id,
+    )
+    if access not in {"owner", "edit"}:
+        return
+    _assign_personal_watchlist_library(
+        session,
+        library_id=library.id,
+        plid=plid,
+        added_at=added_at,
+    )
+
+
+def _assign_personal_watchlist_library(
+    session: Session,
+    *,
+    library_id: int,
+    plid: str,
+    added_at: datetime,
+) -> None:
     assignment = session.get(
         PersonalWatchlistLibraryItem,
-        (library.id, plid),
+        (library_id, plid),
     )
     if assignment is None:
         session.add(
             PersonalWatchlistLibraryItem(
-                library_id=library.id,
+                library_id=library_id,
                 plid=plid,
                 added_at=added_at,
             )
@@ -4100,10 +5654,56 @@ def _personal_watchlist_item_payload(
     }
 
 
+def _personal_watchlist_projection_plids(
+    session: Session,
+    *,
+    user_id: int,
+) -> set[str]:
+    """Return only PLIDs the account can currently see in its watchlist workspace."""
+
+    plids = {
+        *session.scalars(
+            select(CompetitorPersonalWatchlist.plid).where(
+                CompetitorPersonalWatchlist.user_id == user_id
+            )
+        ).all(),
+        *session.scalars(
+            select(OwnStorePersonalWatchlist.plid).where(
+                OwnStorePersonalWatchlist.user_id == user_id
+            )
+        ).all(),
+    }
+    owned_library_ids = set(
+        session.scalars(
+            select(PersonalWatchlistLibrary.id).where(
+                PersonalWatchlistLibrary.user_id == user_id
+            )
+        ).all()
+    )
+    shared_library_ids = set(
+        session.scalars(
+            select(PersonalWatchlistLibraryShare.library_id).where(
+                PersonalWatchlistLibraryShare.user_id == user_id
+            )
+        ).all()
+    )
+    accessible_library_ids = owned_library_ids | shared_library_ids
+    if accessible_library_ids:
+        plids.update(
+            session.scalars(
+                select(PersonalWatchlistLibraryItem.plid).where(
+                    PersonalWatchlistLibraryItem.library_id.in_(accessible_library_ids)
+                )
+            ).all()
+        )
+    return {str(plid).strip() for plid in plids if str(plid).strip()}
+
+
 def _personal_watchlist_payload(
     session: Session,
     *,
     user_id: int,
+    accessible_store_codes: set[str],
 ) -> dict[str, object]:
     competitor_items = session.scalars(
         select(CompetitorPersonalWatchlist).where(CompetitorPersonalWatchlist.user_id == user_id)
@@ -4208,15 +5808,34 @@ def _personal_watchlist_payload(
         ],
     ] = {item.plid: (item, "competitor") for item in competitor_items}
     membership_rows.update({item.plid: (item, "own_store") for item in own_store_items})
+    shared_plids = set(assignments_by_plid) - set(membership_rows)
+    shared_item_context = _personal_watchlist_shared_item_context(
+        session,
+        plids=shared_plids,
+        accessible_store_codes=accessible_store_codes,
+    )
     ordered_memberships = sorted(
         membership_rows.values(),
         key=lambda row: (row[0].added_at, row[0].plid),
         reverse=True,
     )
     preference = session.get(PersonalWatchlistPreference, user_id)
+    default_eligible_library_ids = owned_library_ids | {
+        library_id
+        for library_id, access in access_by_library_id.items()
+        if access == "edit"
+    }
+    default_preference_valid = bool(
+        preference is not None
+        and preference.default_configured
+        and (
+            preference.default_library_id is None
+            or preference.default_library_id in default_eligible_library_ids
+        )
+    )
     default_library_id = (
         preference.default_library_id
-        if preference is not None and preference.default_library_id in owned_library_ids
+        if preference is not None and default_preference_valid
         else None
     )
     shared_items = [
@@ -4224,6 +5843,8 @@ def _personal_watchlist_payload(
             "plid": plid,
             "added_at": assignment_added_at_by_plid[plid].isoformat(),
             "library_ids": sorted(set(assigned_library_ids)),
+            "source": shared_item_context[plid][0],
+            "detail_access": shared_item_context[plid][1],
         }
         for plid, assigned_library_ids in assignments_by_plid.items()
         if plid not in membership_rows
@@ -4255,7 +5876,7 @@ def _personal_watchlist_payload(
             for library in libraries
         ],
         "default_library_configured": bool(
-            preference is not None and preference.default_configured
+            default_preference_valid
         ),
         "default_library_id": default_library_id,
     }
@@ -4268,6 +5889,121 @@ def _validated_personal_watchlist_library_name(value: str) -> str:
     if len(name) > 40:
         raise HTTPException(status_code=422, detail="类型库名称不能超过40个字符")
     return name
+
+
+def _authorized_own_store_rows_for_personal_watchlist(
+    rows: Sequence[ConnectedStoreOffer],
+    *,
+    user: UserIdentity,
+) -> tuple[ConnectedStoreOffer, ...]:
+    """Reject own-store memberships unless the account can see an owning store."""
+
+    if not rows:
+        return ()
+    accessible_store_codes = {
+        store.code
+        for store in user.accessible_stores
+        if store.active and store.data_connected
+    }
+    owner_codes_by_plid: dict[str, set[str]] = defaultdict(set)
+    for row in rows:
+        plid = str(row.offer.productline_id or "").strip()
+        if plid:
+            owner_codes_by_plid[plid].add(row.store_code)
+    blocked_plids = sorted(
+        plid
+        for plid, owner_codes in owner_codes_by_plid.items()
+        if owner_codes.isdisjoint(accessible_store_codes)
+    )
+    if blocked_plids:
+        shown = "、".join(f"PLID{plid}" for plid in blocked_plids[:5])
+        if len(blocked_plids) > 5:
+            shown += f" 等{len(blocked_plids)}个商品"
+        logging.getLogger(__name__).warning(
+            "personal_watchlist denied_unauthorized_own_store plids=%s user=%s",
+            ",".join(blocked_plids),
+            user.username,
+        )
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "所选商品中包含当前账号无权查看店铺的自有商品"
+                f"（{shown}），不能加入个人监控池；"
+                "请调整选择，或联系管理员分配对应店铺权限"
+            ),
+        )
+    return tuple(row for row in rows if row.store_code in accessible_store_codes)
+
+
+def _personal_watchlist_shared_item_context(
+    session: Session,
+    *,
+    plids: set[str],
+    accessible_store_codes: set[str],
+) -> dict[
+    str,
+    tuple[
+        Literal["competitor", "own_store", "unknown"],
+        Literal["public", "authorized", "store_access_denied", "unknown"],
+    ],
+]:
+    """Classify shared PLIDs without exposing private store identities or details."""
+
+    if not plids:
+        return {}
+    own_store_membership_plids = set(
+        session.scalars(
+            select(OwnStorePersonalWatchlist.plid).where(
+                OwnStorePersonalWatchlist.plid.in_(plids)
+            )
+        ).all()
+    )
+    competitor_membership_plids = set(
+        session.scalars(
+            select(CompetitorPersonalWatchlist.plid).where(
+                CompetitorPersonalWatchlist.plid.in_(plids)
+            )
+        ).all()
+    )
+    competitor_target_plids = set(
+        session.scalars(
+            select(CompetitorTarget.plid).where(CompetitorTarget.plid.in_(plids))
+        ).all()
+    )
+    owner_codes_by_plid: dict[str, set[str]] = defaultdict(set)
+    for row in load_connected_store_offers(session, plids=plids):
+        plid = str(row.offer.productline_id or "").strip()
+        if plid:
+            owner_codes_by_plid[plid].add(row.store_code)
+
+    result: dict[
+        str,
+        tuple[
+            Literal["competitor", "own_store", "unknown"],
+            Literal["public", "authorized", "store_access_denied", "unknown"],
+        ],
+    ] = {}
+    for plid in plids:
+        owner_codes = owner_codes_by_plid[plid]
+        if plid in own_store_membership_plids or owner_codes:
+            detail_access: Literal[
+                "public",
+                "authorized",
+                "store_access_denied",
+                "unknown",
+            ]
+            if not owner_codes:
+                detail_access = "unknown"
+            elif owner_codes.isdisjoint(accessible_store_codes):
+                detail_access = "store_access_denied"
+            else:
+                detail_access = "authorized"
+            result[plid] = ("own_store", detail_access)
+        elif plid in competitor_membership_plids or plid in competitor_target_plids:
+            result[plid] = ("competitor", "public")
+        else:
+            result[plid] = ("unknown", "unknown")
+    return result
 
 
 def _personal_watchlist_membership_exists(
@@ -4566,6 +6302,49 @@ def _personal_watchlist_library_access(
     return "edit" if share.permission == "edit" else "read"
 
 
+def _competitor_listing_operation_payload(
+    operation: CompetitorListingOperation,
+) -> dict[str, object]:
+    return {
+        "id": operation.id,
+        "source_type": operation.source_type,
+        "source_url": operation.source_url,
+        "source_label": operation.source_label,
+        "personal_library_id": operation.personal_library_id,
+        "personal_library_name": operation.personal_library_name,
+        "price_min": operation.price_min,
+        "price_max": operation.price_max,
+        "sorts": list(operation.sorts),
+        "selection_rule": operation.selection_rule,
+        "product_limit": operation.product_limit,
+        "selected_count": operation.selected_count,
+        "added_target_count": operation.added_target_count,
+        "reactivated_target_count": operation.reactivated_target_count,
+        "existing_target_count": operation.existing_target_count,
+        "own_store_count": operation.own_store_count,
+        "personal_watchlist_added_count": operation.personal_watchlist_added_count,
+        "actor_username": operation.actor_username,
+        "actor_display_name": operation.actor_display_name,
+        "committed_at": operation.committed_at.isoformat(),
+    }
+
+
+def _competitor_listing_operation_item_payload(
+    item: CompetitorListingOperationItem,
+) -> dict[str, object]:
+    return {
+        "id": item.id,
+        "operation_id": item.operation_id,
+        "position": item.position,
+        "plid": item.plid,
+        "title": item.title,
+        "url": item.url,
+        "result": item.result,
+        "personal_watchlist_added": item.personal_watchlist_added,
+        "sort_ranks": dict(item.sort_ranks),
+    }
+
+
 def _beijing_day_start_utc(value: date) -> datetime:
     return datetime.combine(
         value,
@@ -4677,7 +6456,7 @@ def _permission_denied_message(permission: str | tuple[str, ...]) -> str:
     if permission == LOGISTICS_MANAGE:
         return "当前账号可以查看物流数据，但不能确认或撤销物流关联"
     if permission == SEARCH_RANKING_RUN:
-        return "当前账号可以查看搜索定位，但不能调用模型或采集搜索排名"
+        return "当前账号可以查看搜索定位，但不能运行定位或保存人工确认"
     if permission in {REPORTS_GENERATE, NFT102_MANAGE}:
         return "当前账号不能执行报表生成或续写"
     return "当前账号没有访问此模块的权限"
@@ -4722,6 +6501,8 @@ def _load_competitor_dataset(
     end_date: date | None = None,
     own_store_codes: set[str] | None = None,
     plids: set[str] | None = None,
+    include_detail_frames: bool = True,
+    own_store_only: bool = False,
 ) -> CompetitorDataset:
     if start_date is not None and end_date is not None and start_date > end_date:
         raise HTTPException(status_code=422, detail="开始日期不能晚于结束日期")
@@ -4745,6 +6526,8 @@ def _load_competitor_dataset(
                 end_date=end_date,
                 own_store_codes=own_store_codes,
                 plids=plids,
+                include_detail_frames=include_detail_frames,
+                own_store_only=own_store_only,
             )
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -4752,9 +6535,63 @@ def _load_competitor_dataset(
         engine.dispose()
 
 
+def _load_own_store_sales(
+    project_root: Path,
+    *,
+    plid: str,
+    own_store_codes: set[str],
+    through: date,
+) -> list[dict[str, Any]]:
+    if not own_store_codes:
+        return []
+    settings = DashboardSettings.from_env(project_root)
+    path = sqlite_database_path(settings.database_url)
+    if path is not None and not path.exists():
+        return []
+    engine = create_read_only_erp_engine(settings.database_url)
+    try:
+        with Session(engine) as session:
+            return build_own_store_sales_series(
+                session,
+                plid=plid,
+                store_codes=own_store_codes,
+                through=through,
+            )
+    finally:
+        engine.dispose()
+
+
+def _load_own_store_traffic(
+    project_root: Path,
+    *,
+    plid: str,
+    own_store_codes: set[str],
+    start_date: date | None,
+    end_date: date | None,
+) -> list[dict[str, Any]]:
+    if not own_store_codes:
+        return []
+    settings = DashboardSettings.from_env(project_root)
+    path = sqlite_database_path(settings.database_url)
+    if path is not None and not path.exists():
+        return []
+    engine = create_read_only_erp_engine(settings.database_url)
+    try:
+        with Session(engine) as session:
+            return build_own_store_traffic_series(
+                session,
+                plid=plid,
+                store_codes=own_store_codes,
+                start_date=start_date,
+                end_date=end_date,
+            )
+    finally:
+        engine.dispose()
+
+
 def _own_store_codes_for_request(
     request: Request,
-    own_store_scope: Literal["current", "all"],
+    own_store_scope: Literal["current", "all", "operating"],
 ) -> set[str]:
     """Resolve connected own-store visibility without exposing unauthorized stores."""
     accessible_codes = {
@@ -4764,10 +6601,41 @@ def _own_store_codes_for_request(
     }
     if own_store_scope == "all":
         return accessible_codes
+    if own_store_scope == "operating":
+        operating_store_ids = set(request.state.erp_user.assigned_store_ids)
+        return {
+            store.code
+            for store in request.state.erp_user.accessible_stores
+            if (
+                store.id in operating_store_ids
+                and store.active
+                and store.data_connected
+            )
+        }
     selected_store = getattr(request.state, "erp_store", None)
     if selected_store is None or selected_store.code not in accessible_codes:
         return set()
     return {selected_store.code}
+
+
+def _multi_store_identities_for_request(
+    request: Request,
+    store_scope_value: Literal["all", "operating"],
+) -> tuple[StoreIdentity, ...]:
+    """Resolve an authorized multi-store identity set without widening access."""
+    operating_store_ids = set(request.state.erp_user.assigned_store_ids)
+    return tuple(
+        store
+        for store in request.state.erp_user.accessible_stores
+        if (
+            store.active
+            and store.data_connected
+            and (
+                store_scope_value == "all"
+                or store.id in operating_store_ids
+            )
+        )
+    )
 
 
 def _write_daily_report(

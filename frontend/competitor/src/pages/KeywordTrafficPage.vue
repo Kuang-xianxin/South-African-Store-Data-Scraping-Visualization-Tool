@@ -6,6 +6,12 @@ import {
   fetchKeywordTrafficDetail,
   fetchKeywordTrafficProducts,
 } from "../api";
+import {
+  floatingChartTooltipClasses,
+  floatingChartTooltipFromEvent,
+  floatingChartTooltipStyle,
+  type FloatingChartTooltipPosition,
+} from "../floatingChartTooltip";
 import { PRODUCT_IMAGE_SIZE, productThumbnailUrl } from "../productImages";
 import type {
   KeywordTrafficDetailPayload,
@@ -13,7 +19,6 @@ import type {
   KeywordTrafficHistoryPoint,
   KeywordTrafficListPayload,
   KeywordTrafficProductSummary,
-  KeywordTrafficWindow,
 } from "../types";
 
 const props = defineProps<{
@@ -33,6 +38,7 @@ const loadingDetail = ref(false);
 const loadError = ref("");
 const failedImageUrls = ref(new Set<string>());
 const activePointIndex = ref<number | null>(null);
+const chartTooltipPosition = ref<FloatingChartTooltipPosition | null>(null);
 
 const products = computed(() => listPayload.value?.items ?? []);
 const filteredProducts = computed(() => {
@@ -97,6 +103,28 @@ const chartSegments = computed(() => {
   }
   if (current.length) segments.push(current.join(" "));
   return segments;
+});
+const chartBridgeSegments = computed(() => {
+  const bridges: string[] = [];
+  let previousKnownIndex: number | null = null;
+  let crossedMissingPoint = false;
+  chartPointPositions.value.forEach((point, index) => {
+    if (point.y === null) {
+      if (previousKnownIndex !== null) crossedMissingPoint = true;
+      return;
+    }
+    if (crossedMissingPoint && previousKnownIndex !== null) {
+      const previous = chartPointPositions.value[previousKnownIndex];
+      if (previous?.y !== null && previous?.y !== undefined) {
+        bridges.push(
+          `M ${previous.x.toFixed(2)} ${previous.y.toFixed(2)} L ${point.x.toFixed(2)} ${point.y.toFixed(2)}`,
+        );
+      }
+    }
+    previousKnownIndex = index;
+    crossedMissingPoint = false;
+  });
+  return bridges;
 });
 const chartGrid = computed(() =>
   Array.from({ length: 5 }, (_, index) => {
@@ -192,6 +220,7 @@ async function loadProducts(preferredOfferId = "") {
 async function selectProduct(offerId: string) {
   selectedOfferId.value = offerId;
   activePointIndex.value = null;
+  chartTooltipPosition.value = null;
   await loadDetail(offerId);
 }
 
@@ -231,14 +260,49 @@ function chartY(value: number) {
   return chartTop + (1 - ratio) * chartInnerHeight;
 }
 
-function setActivePoint(index: number) {
-  activePointIndex.value = index;
+function handleChartPointer(event: PointerEvent) {
+  if (!chartPointPositions.value.length) return;
+  const svg = event.currentTarget as SVGSVGElement;
+  const bounds = svg.getBoundingClientRect();
+  if (!bounds.width) return;
+  const viewX = ((event.clientX - bounds.left) / bounds.width) * chartWidth;
+  activePointIndex.value = chartPointPositions.value.reduce(
+    (nearestIndex, point, index) =>
+      Math.abs(point.x - viewX)
+        < Math.abs(chartPointPositions.value[nearestIndex].x - viewX)
+        ? index
+        : nearestIndex,
+    0,
+  );
+  chartTooltipPosition.value = floatingChartTooltipFromEvent(event);
 }
 
-function setSelectedEvent(event: KeywordTrafficEvent) {
+function clearChartPointer() {
+  activePointIndex.value = null;
+  chartTooltipPosition.value = null;
+}
+
+function setActivePoint(index: number, event: Event) {
+  activePointIndex.value = index;
+  chartTooltipPosition.value = floatingChartTooltipFromEvent(event);
+}
+
+function stepActivePoint(index: number, direction: -1 | 1, event: KeyboardEvent) {
+  const current = activePointIndex.value ?? index;
+  activePointIndex.value = Math.min(
+    chartPointPositions.value.length - 1,
+    Math.max(0, current + direction),
+  );
+  chartTooltipPosition.value = floatingChartTooltipFromEvent(event);
+}
+
+function setSelectedEvent(event: KeywordTrafficEvent, interactionEvent?: Event) {
   selectedEventId.value = event.id;
   const pointIndex = detail.value?.history.findIndex((point) => point.date === event.effective_date) ?? -1;
   if (pointIndex >= 0) activePointIndex.value = pointIndex;
+  chartTooltipPosition.value = interactionEvent
+    ? floatingChartTooltipFromEvent(interactionEvent)
+    : null;
 }
 
 function productImageUrl(item: KeywordTrafficProductSummary | KeywordTrafficDetailPayload["product"] | null) {
@@ -281,40 +345,22 @@ function directionLabel(direction: KeywordTrafficEvent["comparison"]["traffic_di
   }[direction];
 }
 
-function trendDirectionLabel(direction: KeywordTrafficWindow["trend_direction"]) {
-  return {
-    up: "上升趋势",
-    down: "下降趋势",
-    flat: "平稳趋势",
-    unavailable: "趋势不足",
-  }[direction];
-}
-
-function trendChangeLabel(event: KeywordTrafficEvent | null) {
-  if (!event) return "尚未选择变更节点";
-  return {
-    reversal_up: "趋势由弱转强",
-    reversal_down: "趋势由强转弱",
-    improving: "上升速度增强",
-    weakening: "上升速度减弱",
-    stable: "趋势变化不明显",
-    insufficient: "趋势数据不足",
-  }[event.comparison.trend_change];
-}
-
-function comparisonStatusLabel(event: KeywordTrafficEvent | null) {
-  if (!event) return "等待每日完整 Offer 快照建立标题关键词档案。";
-  const comparison = event.comparison;
-  if (comparison.status === "waiting") return "变更后尚无可观察日期。";
-  if (comparison.status === "collecting") {
-    return `变更后已观察 ${comparison.observed_after_days}/${comparison.comparison_days} 天，结论仍在积累。`;
-  }
-  if (comparison.status === "data_missing") return "对比窗口已结束，但存在缺失流量，结论保持缺失。";
-  return `变更前后各 ${comparison.comparison_days} 天的观察窗口已完整结束。`;
-}
-
 function changeSummary(event: KeywordTrafficEvent) {
   return event.change_label.replace(/^自动(?=基线|变化)/, "");
+}
+
+function firstListingTitle(item: KeywordTrafficDetailPayload["product"]) {
+  if (!item.first_listed_at) return "首次上架时间";
+  return item.first_listed_source === "platform"
+    ? "首次上架时间 · 南非时间"
+    : "首次上架时间 · 本库最早记录";
+}
+
+function firstListingNotice(item: KeywordTrafficDetailPayload["product"]) {
+  if (!item.first_listed_at) return "当前没有可用的首次上架或本库历史记录";
+  return item.first_listed_source === "platform"
+    ? "取自 Takealot Offers 首次上架字段"
+    : "旧记录缺少平台时间，仅显示本库最早日期";
 }
 
 function errorMessage(error: unknown, fallback: string) {
@@ -470,6 +516,22 @@ function errorMessage(error: unknown, fallback: string) {
             </div>
           </header>
 
+          <section class="product-lifecycle" aria-label="商品上架与补货时间">
+            <article>
+              <span>{{ firstListingTitle(detail.product) }}</span>
+              <strong>{{ detail.product.first_listed_at || "暂无记录" }}</strong>
+              <small>{{ firstListingNotice(detail.product) }}</small>
+            </article>
+            <article>
+              <span>最近补货时间 · 北京时间</span>
+              <strong>{{ detail.product.latest_restock_date || "暂无记录" }}</strong>
+              <small v-if="detail.product.latest_restock_increase !== null">
+                平台库存较前一条有效快照 +{{ formatNumber(detail.product.latest_restock_increase) }} 件
+              </small>
+              <small v-else>尚未观察到平台库存增加</small>
+            </article>
+          </section>
+
           <section class="current-keywords">
             <div>
               <p>当前官方标题关键词</p>
@@ -479,68 +541,6 @@ function errorMessage(error: unknown, fallback: string) {
             <div class="keyword-chips">
               <span v-for="keyword in currentKeywords" :key="keyword">{{ keyword }}</span>
               <em v-if="!currentKeywords.length">无需人工操作；下次完整采集会建立首份标题关键词档案。</em>
-            </div>
-          </section>
-
-          <section v-if="selectedEvent" class="impact-section">
-            <header>
-              <div>
-                <p>{{ selectedEvent.event_kind === "change" ? "已选变化节点" : "已选基线节点" }}</p>
-                <h3>{{ selectedEvent.effective_date }} · {{ changeSummary(selectedEvent) }}</h3>
-              </div>
-              <span class="observation-status" :class="selectedEvent.comparison.status">
-                {{ comparisonStatusLabel(selectedEvent) }}
-              </span>
-            </header>
-            <div class="impact-grid">
-              <article class="impact-card traffic" :class="selectedEvent.comparison.traffic_direction">
-                <div class="impact-label">
-                  <span>01</span>
-                  <p>30天浏览量上升 / 下降</p>
-                </div>
-                <strong>{{ directionLabel(selectedEvent.comparison.traffic_direction) }}</strong>
-                <div class="value-flow">
-                  <span>
-                    <small>变更前最后有效值</small>
-                    <b>{{ formatNumber(selectedEvent.comparison.before.last_value) }}</b>
-                  </span>
-                  <i>→</i>
-                  <span>
-                    <small>变更后最新有效值</small>
-                    <b>{{ formatNumber(selectedEvent.comparison.after.last_value) }}</b>
-                  </span>
-                </div>
-                <p class="impact-result">
-                  净变化 {{ formatSigned(selectedEvent.comparison.traffic_delta) }}
-                  <em v-if="selectedEvent.comparison.traffic_delta_percent !== null">
-                    （{{ formatSigned(selectedEvent.comparison.traffic_delta_percent, '%') }}）
-                  </em>
-                </p>
-              </article>
-
-              <article class="impact-card trend" :class="selectedEvent.comparison.trend_change">
-                <div class="impact-label">
-                  <span>02</span>
-                  <p>上升 / 下降趋势变化</p>
-                </div>
-                <strong>{{ trendChangeLabel(selectedEvent) }}</strong>
-                <div class="value-flow">
-                  <span>
-                    <small>变更前趋势</small>
-                    <b>{{ trendDirectionLabel(selectedEvent.comparison.before.trend_direction) }}</b>
-                    <em>{{ formatSigned(selectedEvent.comparison.before.slope_per_day, "/天") }}</em>
-                  </span>
-                  <i>→</i>
-                  <span>
-                    <small>变更后趋势</small>
-                    <b>{{ trendDirectionLabel(selectedEvent.comparison.after.trend_direction) }}</b>
-                    <em>{{ formatSigned(selectedEvent.comparison.after.slope_per_day, "/天") }}</em>
-                  </span>
-                </div>
-                <p class="impact-result">
-                  趋势速度变化 {{ formatSigned(selectedEvent.comparison.slope_change, "/天") }}
-                </p>
-              </article>
             </div>
           </section>
 
@@ -555,6 +555,7 @@ function errorMessage(error: unknown, fallback: string) {
                 <span><i class="before"></i>变更前窗口</span>
                 <span><i class="after"></i>变更后窗口</span>
                 <span><i class="marker"></i>标题变化</span>
+                <span><i class="missing-bridge"></i>缺失区间桥接（非补值）</span>
               </div>
             </header>
             <div class="chart-wrap">
@@ -562,6 +563,8 @@ function errorMessage(error: unknown, fallback: string) {
                 :viewBox="`0 0 ${chartWidth} ${chartHeight}`"
                 role="img"
                 aria-label="近30天浏览量与标题关键词变化节点趋势图"
+                @pointermove="handleChartPointer"
+                @pointerleave="clearChartPointer"
               >
                 <rect class="chart-background" :x="chartLeft" :y="chartTop" :width="chartInnerWidth" :height="chartInnerHeight" rx="14" />
                 <rect
@@ -584,6 +587,20 @@ function errorMessage(error: unknown, fallback: string) {
                 </g>
                 <path v-for="(segment, index) in chartSegments" :key="index" class="traffic-line halo" :d="segment" />
                 <path v-for="(segment, index) in chartSegments" :key="`line-${index}`" class="traffic-line" :d="segment" />
+                <path
+                  v-for="(segment, index) in chartBridgeSegments"
+                  :key="`missing-bridge-${index}`"
+                  class="traffic-line missing-bridge"
+                  :d="segment"
+                />
+                <line
+                  v-if="activePoint"
+                  class="point-cursor"
+                  :x1="activePoint.x"
+                  :x2="activePoint.x"
+                  :y1="chartTop"
+                  :y2="chartTop + chartInnerHeight"
+                />
                 <g
                   v-for="marker in chartEventMarkers"
                   :key="marker.event.id"
@@ -595,9 +612,9 @@ function errorMessage(error: unknown, fallback: string) {
                   tabindex="0"
                   role="button"
                   :aria-label="`${marker.event.effective_date} ${changeSummary(marker.event)}`"
-                  @click="setSelectedEvent(marker.event)"
-                  @keydown.enter.prevent="setSelectedEvent(marker.event)"
-                  @keydown.space.prevent="setSelectedEvent(marker.event)"
+                  @click="setSelectedEvent(marker.event, $event)"
+                  @keydown.enter.prevent="setSelectedEvent(marker.event, $event)"
+                  @keydown.space.prevent="setSelectedEvent(marker.event, $event)"
                 >
                   <line :x1="marker.x" :x2="marker.x" :y1="chartTop - 8" :y2="chartTop + chartInnerHeight" />
                   <rect :x="marker.x - 34" :y="14" width="68" height="26" rx="13" />
@@ -614,18 +631,46 @@ function errorMessage(error: unknown, fallback: string) {
                   tabindex="0"
                   role="button"
                   :aria-label="`${point.date}，近30天浏览量 ${formatNumber(point.page_views_30_days)}`"
-                  @mouseenter="setActivePoint(point.index)"
-                  @focus="setActivePoint(point.index)"
-                  @click="setActivePoint(point.index)"
+                  @pointerenter="setActivePoint(point.index, $event)"
+                  @focus="setActivePoint(point.index, $event)"
+                  @click="setActivePoint(point.index, $event)"
+                  @keydown.left.prevent="stepActivePoint(point.index, -1, $event)"
+                  @keydown.right.prevent="stepActivePoint(point.index, 1, $event)"
                 >
-                  <circle v-if="point.y !== null" class="point-hit" :cx="point.x" :cy="point.y" r="10" />
+                  <circle class="point-hit" :cx="point.x" :cy="point.y ?? chartTop + chartInnerHeight" r="15" />
+                  <circle
+                    v-if="point.y !== null && point.index === activePointIndex"
+                    class="point-halo"
+                    :cx="point.x"
+                    :cy="point.y"
+                    r="10"
+                  />
                   <circle v-if="point.y !== null" class="point-dot" :cx="point.x" :cy="point.y" r="3.2" />
+                  <path
+                    v-else
+                    class="point-missing"
+                    :d="`M ${point.x - 5} ${chartTop + chartInnerHeight - 5} L ${point.x + 5} ${chartTop + chartInnerHeight + 5} M ${point.x + 5} ${chartTop + chartInnerHeight - 5} L ${point.x - 5} ${chartTop + chartInnerHeight + 5}`"
+                  />
                 </g>
               </svg>
-              <div v-if="activePoint" class="point-readout">
-                <span>{{ activePoint.date }}</span>
-                <strong>近30天浏览量 {{ formatNumber(activePoint.page_views_30_days) }}</strong>
-                <small v-if="activePoint.page_views_30_days === null">平台该日流量字段缺失，未补零。</small>
+              <div
+                v-if="activePoint && chartTooltipPosition"
+                class="point-readout"
+                :class="floatingChartTooltipClasses(chartTooltipPosition)"
+                :style="floatingChartTooltipStyle(chartTooltipPosition, 330)"
+                role="status"
+                aria-live="polite"
+              >
+                <div>
+                  <span>数据日期</span>
+                  <strong>{{ activePoint.date }}</strong>
+                </div>
+                <div>
+                  <span>滚动指标</span>
+                  <strong>近30天浏览量 {{ formatNumber(activePoint.page_views_30_days) }}</strong>
+                </div>
+                <small v-if="activePoint.page_views_30_days === null">平台该日流量字段缺失，折线保留断点且未补零。</small>
+                <small v-else>这是该日看到的滚动30天值，不是单日浏览量。</small>
               </div>
             </div>
             <p class="metric-notice">{{ detail.metric_notice }}</p>
@@ -779,7 +824,7 @@ function errorMessage(error: unknown, fallback: string) {
 .monitor-workspace { min-width: 0; padding: 20px; }
 .product-focus { align-items: center; display: grid; gap: 15px; grid-template-columns: 80px minmax(0, 1fr) auto; }
 .focus-thumb { height: 80px; width: 80px; }
-.focus-copy p, .current-keywords p, .impact-section header p, .traffic-chart-card header p, .event-timeline header p { color: var(--muted); font-size: 0.7rem; letter-spacing: 0.08em; margin: 0 0 4px; text-transform: uppercase; }
+.focus-copy p, .current-keywords p, .traffic-chart-card header p, .event-timeline header p { color: var(--muted); font-size: 0.7rem; letter-spacing: 0.08em; margin: 0 0 4px; text-transform: uppercase; }
 .focus-copy h3 { font-size: 1.2rem; line-height: 1.35; margin: 0 0 6px; }
 .focus-copy span { color: var(--muted); font-size: 0.75rem; overflow-wrap: anywhere; }
 .focus-actions { align-items: end; display: flex; flex-wrap: wrap; gap: 8px; justify-content: flex-end; }
@@ -787,39 +832,18 @@ function errorMessage(error: unknown, fallback: string) {
 .focus-actions label span { color: var(--muted); font-size: 0.65rem; }
 .focus-actions select { font-size: 0.75rem; padding: 8px 9px; }
 
+.product-lifecycle { display: grid; gap: 10px; grid-template-columns: repeat(2, minmax(0, 1fr)); margin-top: 16px; }
+.product-lifecycle article { background: #f7f9fb; border: 1px solid #dbe2eb; border-left: 4px solid #315e95; border-radius: 13px; display: grid; gap: 4px; min-width: 0; padding: 13px 15px; }
+.product-lifecycle article:last-child { border-left-color: var(--green); }
+.product-lifecycle span { color: var(--muted); font-size: 0.68rem; letter-spacing: 0.04em; }
+.product-lifecycle strong { font-size: 0.96rem; overflow-wrap: anywhere; }
+.product-lifecycle small { color: var(--muted); font-size: 0.68rem; line-height: 1.5; }
+
 .current-keywords { align-items: start; background: #f7f9fb; border: 1px solid #e1e5eb; border-radius: 14px; display: grid; gap: 16px; grid-template-columns: 145px minmax(0, 1fr); margin-top: 18px; padding: 14px 16px; }
 .current-keywords > div:first-child span { color: var(--muted); font-size: 0.72rem; }
 .keyword-chips { display: flex; flex-wrap: wrap; gap: 7px; }
 .keyword-chips span { background: #203652; border-radius: 999px; color: #fff; font-size: 0.72rem; padding: 6px 10px; }
 .keyword-chips em { color: var(--muted); font-size: 0.78rem; font-style: normal; line-height: 1.6; }
-
-.impact-section { background: #f7f9fb; border: 1px solid #dbe2eb; border-radius: 18px; margin-top: 18px; padding: 17px; }
-.impact-section > header { align-items: center; display: flex; gap: 18px; justify-content: space-between; }
-.impact-section h3, .traffic-chart-card h3, .event-timeline h3 { font-size: 1rem; margin: 0; }
-.observation-status { background: #e9f3ee; border-radius: 999px; color: #247257; font-size: 0.7rem; max-width: 420px; padding: 7px 11px; text-align: right; }
-.observation-status.collecting, .observation-status.waiting { background: #fff2dc; color: #99601d; }
-.observation-status.data_missing { background: #f0f1f3; color: #6f7681; }
-.impact-grid { display: grid; gap: 12px; grid-template-columns: repeat(2, minmax(0, 1fr)); margin-top: 14px; }
-.impact-card { background: #fff; border: 1px solid #dce2ea; border-radius: 15px; min-width: 0; padding: 16px; position: relative; }
-.impact-card::before { border-radius: 15px 0 0 15px; bottom: 0; content: ""; left: 0; position: absolute; top: 0; width: 5px; }
-.impact-card.up::before, .impact-card.reversal_up::before, .impact-card.improving::before { background: var(--green); }
-.impact-card.down::before, .impact-card.reversal_down::before, .impact-card.weakening::before { background: var(--red); }
-.impact-card.flat::before, .impact-card.stable::before { background: var(--blue); }
-.impact-card.unavailable::before, .impact-card.insufficient::before { background: #9aa2ae; }
-.impact-label { align-items: center; display: flex; gap: 8px; }
-.impact-label span { align-items: center; background: #243852; border-radius: 7px; color: #fff; display: flex; font-size: 0.62rem; height: 24px; justify-content: center; width: 28px; }
-.impact-label p { color: var(--muted); font-size: 0.73rem; margin: 0; }
-.impact-card > strong { display: block; font-size: clamp(1.25rem, 2vw, 1.8rem); letter-spacing: -0.04em; margin: 12px 0; }
-.impact-card.up > strong, .impact-card.reversal_up > strong, .impact-card.improving > strong { color: var(--green); }
-.impact-card.down > strong, .impact-card.reversal_down > strong, .impact-card.weakening > strong { color: var(--red); }
-.value-flow { align-items: stretch; display: grid; gap: 8px; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); }
-.value-flow > span { background: #f5f7fa; border-radius: 10px; display: grid; gap: 3px; padding: 10px; }
-.value-flow small { color: var(--muted); font-size: 0.65rem; }
-.value-flow b { font-size: 1rem; }
-.value-flow em { color: var(--muted); font-size: 0.66rem; font-style: normal; }
-.value-flow > i { align-self: center; color: #8994a4; font-style: normal; }
-.impact-result { border-top: 1px dashed #d9dfe7; font-size: 0.75rem; margin: 12px 0 0; padding-top: 10px; }
-.impact-result em { font-style: normal; }
 
 .traffic-chart-card, .event-timeline { border: 1px solid #dbe1e9; border-radius: 18px; margin-top: 18px; overflow: hidden; }
 .traffic-chart-card > header, .event-timeline > header { align-items: center; display: flex; gap: 16px; justify-content: space-between; padding: 16px 18px 8px; }
@@ -830,18 +854,20 @@ function errorMessage(error: unknown, fallback: string) {
 .chart-legend .before { background: rgba(61, 105, 165, 0.14); }
 .chart-legend .after { background: rgba(31, 139, 99, 0.14); }
 .chart-legend .marker { border-left: 3px solid #c8443b; width: 2px; }
-.chart-wrap { overflow-x: auto; padding: 4px 10px 0; position: relative; }
-.chart-wrap svg { display: block; min-width: 760px; width: 100%; }
-.chart-background { fill: #fbfcfd; stroke: #e4e8ee; }
+.chart-legend .missing-bridge { border-top: 3px dashed #8a6a48; height: 0; }
+.chart-wrap { background: linear-gradient(180deg, #fff 0%, #f8fafc 100%); overflow: hidden; padding: 4px 10px 0; position: relative; }
+.chart-wrap svg { display: block; width: 100%; }
+.chart-background { fill: #fbfcfe; stroke: #cfd7e2; stroke-width: 1.5; }
 .window-band.before { fill: rgba(58, 101, 161, 0.1); }
 .window-band.after { fill: rgba(28, 132, 94, 0.1); }
-.grid-line { stroke: #e4e8ee; stroke-dasharray: 3 6; }
-.axis-label { fill: #748096; font-size: 12px; }
+.grid-line { stroke: #d8dfe8; stroke-dasharray: 4 5; }
+.axis-label { fill: #536176; font-size: 12px; font-weight: 700; }
 .axis-label.y { text-anchor: end; }
 .axis-label.x { text-anchor: middle; }
 .axis-title { fill: #66738a; font-size: 12px; font-weight: 700; text-anchor: middle; }
-.traffic-line { fill: none; stroke: #db4c42; stroke-linecap: round; stroke-linejoin: round; stroke-width: 3.5; }
-.traffic-line.halo { stroke: rgba(219, 76, 66, 0.12); stroke-width: 11; }
+.traffic-line { fill: none; stroke: #d43f36; stroke-linecap: round; stroke-linejoin: round; stroke-width: 4.5; }
+.traffic-line.halo { stroke: rgba(212, 63, 54, 0.14); stroke-width: 13; }
+.traffic-line.missing-bridge { filter: none; stroke: #8a6a48; stroke-dasharray: 7 7; stroke-width: 3; }
 .event-marker { cursor: pointer; outline: none; }
 .event-marker line { stroke: #c8443b; stroke-dasharray: 5 4; stroke-width: 2; }
 .event-marker rect { fill: #c8443b; }
@@ -853,13 +879,19 @@ function errorMessage(error: unknown, fallback: string) {
 .event-marker.selected line { stroke-width: 3.5; }
 .event-marker.selected rect { filter: drop-shadow(0 4px 7px rgba(93, 36, 32, 0.28)); }
 .event-marker:focus rect { stroke: #18243a; stroke-width: 2; }
-.point-hit { fill: transparent; }
-.point-dot { fill: #fff; pointer-events: none; stroke: #d84b41; stroke-width: 2; }
+.point-hit { fill: transparent; stroke: transparent; }
+.point-dot { fill: #fff; pointer-events: none; stroke: #d43f36; stroke-width: 2.5; }
+.point-halo { fill: rgba(255, 255, 255, 0.94); pointer-events: none; stroke: rgba(212, 63, 54, 0.28); stroke-width: 6; }
+.point-cursor { pointer-events: none; stroke: #253a56; stroke-dasharray: 5 5; stroke-width: 1.5; }
+.point-missing { fill: none; pointer-events: none; stroke: #9b6521; stroke-linecap: round; stroke-width: 2.5; }
 .data-point { cursor: crosshair; outline: none; }
 .data-point.active .point-dot, .data-point:focus .point-dot { fill: #d84b41; r: 5; }
-.point-readout { align-items: center; background: #1c2a40; border-radius: 10px; bottom: 18px; color: #fff; display: flex; flex-wrap: wrap; gap: 10px; left: 92px; padding: 8px 12px; pointer-events: none; position: absolute; }
-.point-readout span, .point-readout small { color: rgba(255, 255, 255, 0.7); font-size: 0.68rem; }
-.point-readout strong { font-size: 0.75rem; }
+.point-readout { background: rgba(24, 38, 58, 0.96); border: 1px solid rgba(255, 255, 255, 0.12); border-radius: 12px; box-shadow: 0 14px 30px rgba(24, 38, 58, 0.24); color: #fff; display: grid; gap: 8px; left: 0; max-width: min(330px, calc(100vw - 24px)); padding: 12px 14px; pointer-events: none; position: fixed; top: 0; transform: translateY(14px); width: max-content; z-index: 1300; }
+.point-readout.tooltip-align-above { transform: translateY(calc(-100% - 14px)); }
+.point-readout > div { align-items: baseline; display: flex; gap: 12px; justify-content: space-between; }
+.point-readout span, .point-readout small { color: rgba(255, 255, 255, 0.7); font-size: 0.68rem; line-height: 1.5; }
+.point-readout strong { font-size: 0.76rem; text-align: right; }
+.point-readout small { border-top: 1px solid rgba(255, 255, 255, 0.13); padding-top: 7px; }
 .metric-notice { background: #f5f7fa; border-top: 1px solid #e2e6ec; color: var(--muted); font-size: 0.7rem; line-height: 1.65; margin: 0; padding: 10px 16px; }
 
 .event-timeline > header > span { color: var(--muted); font-size: 0.72rem; }
@@ -895,7 +927,6 @@ function errorMessage(error: unknown, fallback: string) {
   .product-thumb { height: 48px; width: 48px; }
   .product-traffic { grid-column: 2; text-align: left; }
   .product-traffic small, .product-traffic strong { display: inline; }
-  .impact-grid { grid-template-columns: 1fr; }
   .product-focus { grid-template-columns: 72px minmax(0, 1fr); }
   .focus-thumb { height: 72px; width: 72px; }
   .focus-actions { grid-column: 1 / -1; justify-content: flex-start; }
@@ -907,9 +938,9 @@ function errorMessage(error: unknown, fallback: string) {
   .monitor-layout { grid-template-columns: 1fr; }
   .product-browser { max-height: none; position: static; }
   .product-list { max-height: 430px; }
+  .product-lifecycle { grid-template-columns: 1fr; }
   .current-keywords { grid-template-columns: 1fr; }
-  .traffic-chart-card > header, .event-timeline > header, .impact-section > header { align-items: flex-start; flex-direction: column; }
-  .observation-status { max-width: none; text-align: left; }
+  .traffic-chart-card > header, .event-timeline > header { align-items: flex-start; flex-direction: column; }
 }
 
 @media (max-width: 560px) {
@@ -919,10 +950,8 @@ function errorMessage(error: unknown, fallback: string) {
   .product-focus { grid-template-columns: 58px minmax(0, 1fr); }
   .focus-thumb { height: 58px; width: 58px; }
   .focus-actions { align-items: stretch; display: grid; grid-template-columns: 1fr 1fr; }
-  .value-flow { grid-template-columns: 1fr; }
-  .value-flow > i { display: none; }
   .event-card { align-items: start; grid-template-columns: 30px minmax(0, 1fr); }
   .event-outcome { grid-column: 2; justify-items: start; }
-  .point-readout { bottom: 12px; left: 30px; right: 30px; }
+  .point-readout { left: 30px; max-width: none; right: 30px; top: 12px; }
 }
 </style>

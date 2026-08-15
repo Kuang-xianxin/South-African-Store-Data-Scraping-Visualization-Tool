@@ -87,6 +87,7 @@ def load_connected_store_offer_points(
     session: Session,
     *,
     plids: set[str] | None = None,
+    store_codes: set[str] | None = None,
 ) -> list[StoreOfferBaseline | StoreOfferObservation]:
     """Load every Seller API refresh point, retaining legacy baselines as fallback."""
     normalized_plids = (
@@ -97,10 +98,19 @@ def load_connected_store_offer_points(
     if normalized_plids is not None and not normalized_plids:
         return []
     result: list[StoreOfferBaseline | StoreOfferObservation] = []
-    for store_code, _ in _connected_store_catalog(session):
+    for store_code, _ in _connected_store_catalog(session, store_codes=store_codes):
         with store_scope(store_code):
             observation_statement = select(StoreOfferObservation)
-            baseline_statement = select(StoreOfferBaseline)
+            observation_exists = (
+                select(StoreOfferObservation.id)
+                .where(
+                    StoreOfferObservation.store_code == StoreOfferBaseline.store_code,
+                    StoreOfferObservation.offer_id == StoreOfferBaseline.offer_id,
+                    StoreOfferObservation.captured_at == StoreOfferBaseline.captured_at,
+                )
+                .exists()
+            )
+            baseline_statement = select(StoreOfferBaseline).where(~observation_exists)
             if normalized_plids is not None:
                 observation_statement = observation_statement.where(
                     StoreOfferObservation.productline_id.in_(normalized_plids)
@@ -116,10 +126,6 @@ def load_connected_store_offer_points(
                     )
                 )
             )
-            observed_keys = {
-                (row.offer_id, row.captured_at)
-                for row in observations
-            }
             baselines = session.scalars(
                 baseline_statement.order_by(
                     StoreOfferBaseline.captured_at.desc(),
@@ -127,11 +133,7 @@ def load_connected_store_offer_points(
                 )
             )
             result.extend(observations)
-            result.extend(
-                row
-                for row in baselines
-                if (row.offer_id, row.captured_at) not in observed_keys
-            )
+            result.extend(baselines)
     return result
 
 
@@ -176,15 +178,30 @@ def _normalized_offer_identity(value: object) -> str:
     return " ".join(str(value or "").casefold().split())
 
 
-def _connected_store_catalog(session: Session) -> list[tuple[str, str]]:
-    stores = list(
-        session.scalars(
-            select(ErpStore)
-            .where(ErpStore.active.is_(True), ErpStore.data_connected.is_(True))
-            .order_by(ErpStore.code)
-        )
+def _connected_store_catalog(
+    session: Session,
+    *,
+    store_codes: set[str] | None = None,
+) -> list[tuple[str, str]]:
+    normalized_store_codes = (
+        {str(code).strip() for code in store_codes if str(code).strip()}
+        if store_codes is not None
+        else None
     )
+    if normalized_store_codes is not None and not normalized_store_codes:
+        return []
+    statement = select(ErpStore).where(
+        ErpStore.active.is_(True),
+        ErpStore.data_connected.is_(True),
+    )
+    if normalized_store_codes is not None:
+        statement = statement.where(ErpStore.code.in_(normalized_store_codes))
+    stores = list(session.scalars(statement.order_by(ErpStore.code)))
     if stores:
         return [(store.code, store.display_name) for store in stores]
     code = current_store_code()
-    return [(code, code)]
+    return (
+        [(code, code)]
+        if normalized_store_codes is None or code in normalized_store_codes
+        else []
+    )

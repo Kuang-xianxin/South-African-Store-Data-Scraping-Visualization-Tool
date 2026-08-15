@@ -12,6 +12,10 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from takealot_ops.erp.service import (
+    _format_observation_time,
+    _format_platform_listing_time,
+)
 from takealot_ops.storage.models import OfferCurrent, OfferSnapshot
 
 
@@ -163,6 +167,7 @@ def build_keyword_product_detail(
     current_keywords = (
         list(title_states[-1]["keywords"]) if title_states else extract_title_keywords(offer.title)
     )
+    lifecycle = _product_lifecycle_payload(offer, all_rows)
     return {
         "as_of": as_of.isoformat(),
         "history_days": history_days,
@@ -173,6 +178,7 @@ def build_keyword_product_detail(
             "title": offer.title,
             "image_url": offer.image_url,
             "current_keywords": current_keywords,
+            **lifecycle,
         },
         "history": history,
         "events": events,
@@ -181,6 +187,39 @@ def build_keyword_product_detail(
             " Offer 快照中的官方商品标题词。曲线是近30天浏览量滚动窗口，不是精确"
             "当天流量或独立访客数；节点附近变化只表示观察关联，不证明因果。"
         ),
+    }
+
+
+def _product_lifecycle_payload(
+    offer: OfferCurrent,
+    rows: Sequence[OfferSnapshot],
+) -> dict[str, str | int | None]:
+    """Return the same listing/restock evidence used by the operating coordinates."""
+    platform_listed_at = _format_platform_listing_time(offer.created_at)
+    first_observed_at = rows[0].snapshot_date.isoformat() if rows else None
+
+    previous_stock: int | None = None
+    latest_restock_date: str | None = None
+    latest_restock_increase: int | None = None
+    for snapshot in rows:
+        if snapshot.total_stock is None:
+            continue
+        current_stock = int(snapshot.total_stock)
+        if previous_stock is not None and current_stock > previous_stock:
+            latest_restock_date = (
+                _format_observation_time(snapshot.captured_at)
+                or snapshot.snapshot_date.isoformat()
+            )
+            latest_restock_increase = current_stock - previous_stock
+        previous_stock = current_stock
+
+    return {
+        "first_listed_at": platform_listed_at or first_observed_at,
+        "first_listed_source": (
+            "platform" if platform_listed_at is not None else "first_observed"
+        ),
+        "latest_restock_date": latest_restock_date,
+        "latest_restock_increase": latest_restock_increase,
     }
 
 

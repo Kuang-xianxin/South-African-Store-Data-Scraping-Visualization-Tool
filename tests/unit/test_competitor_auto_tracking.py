@@ -48,16 +48,36 @@ def test_automatic_targets_cover_connected_stores_dedupe_and_rotate() -> None:
         with Session(engine) as session, session.begin():
             session.add_all(
                 [
-                    OfferCurrent(offer_id="a-1", productline_id="100", captured_at=now),
-                    OfferCurrent(offer_id="a-2", productline_id="200", captured_at=now),
+                    OfferCurrent(
+                        offer_id="a-1",
+                        productline_id="100",
+                        status="disabled_by_seller",
+                        captured_at=now,
+                    ),
+                    OfferCurrent(
+                        offer_id="a-2",
+                        productline_id="200",
+                        status="buyable",
+                        captured_at=now,
+                    ),
                 ]
             )
     with store_scope("beta"):
         with Session(engine) as session, session.begin():
             session.add_all(
                 [
-                    OfferCurrent(offer_id="b-1", productline_id="200", captured_at=now),
-                    OfferCurrent(offer_id="b-2", productline_id="300", captured_at=now),
+                    OfferCurrent(
+                        offer_id="b-1",
+                        productline_id="200",
+                        status="disabled_by_takealot",
+                        captured_at=now,
+                    ),
+                    OfferCurrent(
+                        offer_id="b-2",
+                        productline_id="300",
+                        status="not_buyable",
+                        captured_at=now,
+                    ),
                 ]
             )
     with Session(engine) as session, session.begin():
@@ -83,6 +103,8 @@ def test_automatic_targets_cover_connected_stores_dedupe_and_rotate() -> None:
     assert all_available == 3
     assert len(all_targets) == 3
     assert [target.plid for target in targets] == ["100", "300", "200"]
+    # Disabled own Offers still identify PLIDs that must remain in follower monitoring.
+    assert {target.plid for target in all_targets} == {"100", "200", "300"}
     assert targets[2].store_codes == ("alpha", "beta")
 
 

@@ -1,4 +1,9 @@
-import type { CompetitorItem, CompetitorOfferItem } from "./types";
+import type {
+  CompetitorItem,
+  CompetitorOfferItem,
+  OwnStoreTrafficPoint,
+  OwnStoreTrafficSeries,
+} from "./types";
 
 export interface CompetitorOfferHistoryPoint {
   snapshot: CompetitorItem;
@@ -10,6 +15,21 @@ export interface CompetitorOfferTrendPoint extends CompetitorOfferHistoryPoint {
   price: number | null;
   exactStock: number | null;
   reviews: number | null;
+}
+
+export interface OwnStoreTrafficTrendPoint extends OwnStoreTrafficPoint {
+  sourceIndex: number;
+  capturedAtMs: number;
+}
+
+export interface AlignedOwnStoreTrafficTrendPoint extends OwnStoreTrafficTrendPoint {
+  alignedCapturedAtMs: number;
+  alignedOfferIndex: number | null;
+}
+
+export interface CompetitorOfferIntervalInventoryMovement {
+  salesUnits: number;
+  replenishmentUnits: number;
 }
 
 export interface CompetitorSellerOfferGroup {
@@ -109,6 +129,154 @@ export function buildCompetitorOfferTrend(
       left.capturedAtMs - right.capturedAtMs
       || left.snapshot.快照ID - right.snapshot.快照ID,
     );
+}
+
+export function buildOwnStoreTrafficTrend(
+  series: OwnStoreTrafficSeries | null,
+): OwnStoreTrafficTrendPoint[] {
+  if (!series) return [];
+  return series.points
+    .map((point, sourceIndex) => {
+      const capturedAtMs = Date.parse(
+        point.captured_at ?? `${point.date}T12:00:00+08:00`,
+      );
+      return {
+        ...point,
+        sourceIndex,
+        capturedAtMs: Number.isFinite(capturedAtMs) ? capturedAtMs : sourceIndex,
+      };
+    })
+    .sort((left, right) =>
+      left.capturedAtMs - right.capturedAtMs
+      || left.sourceIndex - right.sourceIndex,
+    );
+}
+
+export function alignOwnStoreTrafficTrendToOfferTrend(
+  trafficTrend: OwnStoreTrafficTrendPoint[],
+  offerTrend: CompetitorOfferTrendPoint[],
+): AlignedOwnStoreTrafficTrendPoint[] {
+  return trafficTrend.map((point) => {
+    if (!offerTrend.length || !Number.isFinite(point.capturedAtMs)) {
+      return {
+        ...point,
+        alignedCapturedAtMs: point.capturedAtMs,
+        alignedOfferIndex: null,
+      };
+    }
+    const alignedOfferIndex = offerTrend.reduce(
+      (nearestIndex, offerPoint, index) =>
+        Math.abs(offerPoint.capturedAtMs - point.capturedAtMs)
+          < Math.abs(offerTrend[nearestIndex]!.capturedAtMs - point.capturedAtMs)
+          ? index
+          : nearestIndex,
+      0,
+    );
+    return {
+      ...point,
+      alignedCapturedAtMs: offerTrend[alignedOfferIndex]!.capturedAtMs,
+      alignedOfferIndex,
+    };
+  });
+}
+
+export function nearestObservedOwnStoreTrafficPoint(
+  trend: OwnStoreTrafficTrendPoint[],
+  capturedAtMs: number | null,
+): OwnStoreTrafficTrendPoint | null {
+  const observed = trend.filter((point) => point.data_status === "observed");
+  if (!observed.length) return null;
+  if (capturedAtMs === null || !Number.isFinite(capturedAtMs)) {
+    return observed[observed.length - 1] ?? null;
+  }
+  return observed.reduce((nearest, point) =>
+    Math.abs(point.capturedAtMs - capturedAtMs)
+      < Math.abs(nearest.capturedAtMs - capturedAtMs)
+      ? point
+      : nearest,
+  );
+}
+
+function offerInventoryScopeKey(offer: CompetitorOfferItem): string {
+  const scopeFields: Array<keyof CompetitorOfferItem> = [
+    "卖家ID",
+    "卖家",
+    "SKU",
+    "变体键",
+    "条件",
+  ];
+  return scopeFields
+    .map((field) => normalizedIdentity(String(offer[field] ?? "")))
+    .join("\u001f");
+}
+
+export function offerIntervalInventoryMovement(
+  history: CompetitorItem[],
+  selectedOffer: CompetitorOfferItem | null,
+): CompetitorOfferIntervalInventoryMovement | null {
+  if (!selectedOffer) return null;
+
+  const selectedSource = selectedOffer.报价来源;
+  const sourceTimeline = history
+    .slice()
+    .sort((left, right) => {
+      const leftTime = Date.parse(left.采集时间);
+      const rightTime = Date.parse(right.采集时间);
+      const safeLeftTime = Number.isFinite(leftTime) ? leftTime : left.快照ID;
+      const safeRightTime = Number.isFinite(rightTime) ? rightTime : right.快照ID;
+      return safeLeftTime - safeRightTime || left.快照ID - right.快照ID;
+    })
+    .filter((snapshot) => {
+      const offers = comparisonOffers(snapshot);
+      return selectedSource
+        ? offers.some((offer) => offer.报价来源 === selectedSource)
+        : offers.length > 0;
+    })
+    .map((snapshot) => ({
+      snapshot,
+      offer: findSnapshotOffer(comparisonOffers(snapshot), selectedOffer),
+    }));
+
+  const exactStockByScope = new Map<string, number[]>();
+  for (const point of sourceTimeline) {
+    const offer = point.offer;
+    if (!offer?.库存精确 || offer.库存数量 === null) continue;
+    const scopeKey = offerInventoryScopeKey(offer);
+    const timeline = exactStockByScope.get(scopeKey) ?? [];
+    timeline.push(offer.库存数量);
+    exactStockByScope.set(scopeKey, timeline);
+  }
+  const comparableTimelines = [...exactStockByScope.values()]
+    .filter((timeline) => timeline.length >= 2);
+  if (comparableTimelines.length === 0) return null;
+
+  let salesUnits = 0;
+  let replenishmentUnits = 0;
+  for (const timeline of comparableTimelines) {
+    for (let index = 1; index < timeline.length; index += 1) {
+      const previousStock = timeline[index - 1];
+      const currentStock = timeline[index];
+      if (previousStock === undefined || currentStock === undefined) continue;
+      const change = currentStock - previousStock;
+      if (change < 0) salesUnits += Math.abs(change);
+      if (change > 0) replenishmentUnits += change;
+    }
+  }
+  return { salesUnits, replenishmentUnits };
+}
+
+export function offerIntervalSalesUnits(
+  history: CompetitorItem[],
+  selectedOffer: CompetitorOfferItem | null,
+): number | null {
+  return offerIntervalInventoryMovement(history, selectedOffer)?.salesUnits ?? null;
+}
+
+export function offerIntervalReplenishmentUnits(
+  history: CompetitorItem[],
+  selectedOffer: CompetitorOfferItem | null,
+): number | null {
+  return offerIntervalInventoryMovement(history, selectedOffer)?.replenishmentUnits ?? null;
 }
 
 export function comparisonOffers(item: CompetitorItem): CompetitorOfferItem[] {

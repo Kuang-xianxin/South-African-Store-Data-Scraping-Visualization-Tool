@@ -2,6 +2,10 @@ import type {
   CollectResult,
   CompetitorDetail,
   CompetitorLinkHealthItem,
+  CompetitorListingCommitResult,
+  CompetitorListingOperationItemPayload,
+  CompetitorListingOperationPayload,
+  CompetitorListingPreview,
   CompetitorOverview,
   CompetitorPersonalWatchlistItem,
   CompetitorPersonalWatchlistPayload,
@@ -24,18 +28,21 @@ import type {
   ProductDetailPayload,
   ProductsPayload,
   QuadrantPayload,
+  SalesRevenueRevisionPayload,
   StoreOverviewPayload,
   SummaryPayload,
-  DailyReportExport,
-  DailyReportPayload,
-  DailyReportReminders,
   OwnStoreScope,
+  OwnStoreCompetitorOverview,
   PlatformWarehouseDraft,
   PlatformWarehousePayload,
 } from "./types";
 import type {
+  SearchRootExpansionLibraryPayload,
+  SearchRankingBatchPreviewPayload,
+  SearchRankingBatchStatusPayload,
   SearchRankingDetailPayload,
   SearchRankingListPayload,
+  SearchRankingProductFactType,
 } from "./types";
 import { templatePermissions } from "./permissions";
 import { AuthSessionRevision } from "./authSessionRevision";
@@ -267,13 +274,30 @@ export function fetchCompetitors(
   startDate?: string,
   endDate?: string,
   ownStoreScope: OwnStoreScope = "current",
+  signal?: AbortSignal,
 ): Promise<CompetitorOverview> {
   const query = new URLSearchParams();
   if (startDate) query.set("start_date", startDate);
   if (endDate) query.set("end_date", endDate);
   query.set("own_store_scope", ownStoreScope);
   const suffix = query.size ? `?${query.toString()}` : "";
-  return request<CompetitorOverview>(`/api/competitors${suffix}`);
+  return request<CompetitorOverview>(`/api/competitors${suffix}`, { signal });
+}
+
+export function fetchOwnStoreCompetitors(
+  startDate?: string,
+  endDate?: string,
+  ownStoreScope: OwnStoreScope = "current",
+  signal?: AbortSignal,
+): Promise<OwnStoreCompetitorOverview> {
+  const query = new URLSearchParams();
+  if (startDate) query.set("start_date", startDate);
+  if (endDate) query.set("end_date", endDate);
+  query.set("own_store_scope", ownStoreScope);
+  return request<OwnStoreCompetitorOverview>(
+    `/api/competitors/own-store?${query.toString()}`,
+    { signal },
+  );
 }
 
 export async function fetchCompetitorLinkHealth(): Promise<
@@ -296,6 +320,17 @@ export function fetchCompetitorPersonalWatchlist(): Promise<CompetitorPersonalWa
   return request<CompetitorPersonalWatchlistPayload>(
     "/api/competitors/personal-watchlist",
   );
+}
+
+export function fetchCompetitorPersonalWatchlistOverview(
+  startDate?: string,
+  endDate?: string,
+): Promise<CompetitorOverview> {
+  const query = new URLSearchParams();
+  if (startDate) query.set("start_date", startDate);
+  if (endDate) query.set("end_date", endDate);
+  const suffix = query.size ? `?${query.toString()}` : "";
+  return request<CompetitorOverview>(`/api/competitors/personal-watchlist/overview${suffix}`);
 }
 
 export async function fetchPersonalWatchlistShareUsers(): Promise<PersonalWatchlistShareUser[]> {
@@ -415,10 +450,12 @@ export function updatePersonalWatchlistItemLibraries(
 
 export async function fetchCompetitorStoreTargets(
   ownStoreScope: OwnStoreScope = "current",
+  signal?: AbortSignal,
 ): Promise<CompetitorStoreTargetPayload> {
   const query = new URLSearchParams({ own_store_scope: ownStoreScope });
   return request<CompetitorStoreTargetPayload>(
     `/api/competitors/store-targets?${query.toString()}`,
+    { signal },
   );
 }
 
@@ -437,6 +474,66 @@ export async function createCompetitorTarget(
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ url }),
   });
+}
+
+export function previewCompetitorListing(input: {
+  source_type: "seller" | "category";
+  url: string;
+  price_min?: number;
+  price_max?: number;
+  sorts: string[];
+  product_limit?: number;
+}): Promise<CompetitorListingPreview> {
+  return request("/api/competitors/listing-preview", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(input),
+  });
+}
+
+export function commitCompetitorListing(
+  previewToken: string,
+  libraryId: number,
+  productLimit?: number,
+): Promise<CompetitorListingCommitResult> {
+  return request("/api/competitors/listing-targets", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      preview_token: previewToken,
+      library_id: libraryId,
+      product_limit: productLimit,
+    }),
+  });
+}
+
+export function fetchCompetitorListingOperations(
+  sourceType: "seller" | "category",
+  page = 1,
+  pageSize = 10,
+): Promise<CompetitorListingOperationPayload> {
+  const query = new URLSearchParams({
+    source_type: sourceType,
+    page: String(page),
+    page_size: String(pageSize),
+  });
+  return request<CompetitorListingOperationPayload>(
+    `/api/competitors/listing-operations?${query.toString()}`,
+  );
+}
+
+export function fetchCompetitorListingOperationItems(
+  operationId: number,
+  page = 1,
+  pageSize = 20,
+): Promise<CompetitorListingOperationItemPayload> {
+  const query = new URLSearchParams({
+    page: String(page),
+    page_size: String(pageSize),
+  });
+  return request<CompetitorListingOperationItemPayload>(
+    `/api/competitors/listing-operations/${encodeURIComponent(operationId)}/items?${query.toString()}`,
+  );
 }
 
 export async function updateCompetitorTarget(
@@ -590,6 +687,12 @@ export interface CompetitorBatchStatus {
     url: string;
     message: string;
   }>;
+  scheduled_resume_available?: boolean;
+  scheduled_resume_pending?: number;
+  scheduled_wait_kind?: "network" | "pending_retry" | null;
+  scheduled_auto_resume_at?: string | null;
+  scheduled_retry_round?: number;
+  scheduled_retry_round_limit?: number;
 }
 
 export async function collectCompetitor(
@@ -696,6 +799,20 @@ export async function stopCompetitorBatch(
   return result.status;
 }
 
+export async function resumeStoppedScheduledCompetitorBatch(
+  batchId: string,
+): Promise<CompetitorBatchStatus> {
+  const result = await request<{ ok: boolean; status: CompetitorBatchStatus }>(
+    "/api/competitors/batch-resume",
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ batch_id: batchId }),
+    },
+  );
+  return result.status;
+}
+
 function query(asOf: string) {
   return `as_of=${encodeURIComponent(asOf)}`;
 }
@@ -708,8 +825,45 @@ export async function fetchSummary(asOf: string): Promise<SummaryPayload> {
   return request<SummaryPayload>(`/api/erp/summary?${query(asOf)}`);
 }
 
-export async function fetchStoreOverview(asOf: string): Promise<StoreOverviewPayload> {
-  return request<StoreOverviewPayload>(`/api/erp/summary/stores?${query(asOf)}`);
+export async function fetchSummaryRange(
+  startDate: string,
+  endDate: string,
+): Promise<SummaryPayload> {
+  const params = new URLSearchParams({ start_date: startDate, as_of: endDate });
+  return request<SummaryPayload>(`/api/erp/summary?${params.toString()}`);
+}
+
+export async function fetchStoreOverview(
+  startDate: string,
+  endDate: string,
+  storeScope: Exclude<OwnStoreScope, "current"> = "all",
+): Promise<StoreOverviewPayload> {
+  const params = new URLSearchParams({
+    start_date: startDate,
+    as_of: endDate,
+    store_scope: storeScope,
+  });
+  return request<StoreOverviewPayload>(
+    `/api/erp/summary/stores?${params.toString()}`,
+  );
+}
+
+export async function fetchSalesRevenueRevisions(options: {
+  startDate?: string;
+  endDate?: string;
+  page?: number;
+  pageSize?: number;
+  storeScope?: Exclude<OwnStoreScope, "current">;
+} = {}): Promise<SalesRevenueRevisionPayload> {
+  const params = new URLSearchParams();
+  if (options.startDate) params.set("start_date", options.startDate);
+  if (options.endDate) params.set("end_date", options.endDate);
+  if (options.storeScope) params.set("store_scope", options.storeScope);
+  params.set("page", String(options.page ?? 1));
+  params.set("page_size", String(options.pageSize ?? 20));
+  return request<SalesRevenueRevisionPayload>(
+    `/api/erp/summary/stores/sales-revisions?${params.toString()}`,
+  );
 }
 
 export async function fetchProducts(asOf: string): Promise<ProductsPayload> {
@@ -758,6 +912,64 @@ export function fetchSearchRankingProducts(): Promise<SearchRankingListPayload> 
   return request<SearchRankingListPayload>("/api/erp/search-ranking");
 }
 
+export function fetchSearchRankingRootExpansionLibrary(
+  search = "",
+): Promise<SearchRootExpansionLibraryPayload> {
+  const params = new URLSearchParams();
+  if (search.trim()) params.set("search", search.trim());
+  params.set("limit", "100");
+  return request<SearchRootExpansionLibraryPayload>(
+    `/api/erp/search-ranking/root-expansion-library?${params.toString()}`,
+  );
+}
+
+export function fetchSearchRankingBatchPreview(): Promise<SearchRankingBatchPreviewPayload> {
+  return request<SearchRankingBatchPreviewPayload>("/api/erp/search-ranking/batch");
+}
+
+export function fetchSearchRankingBatchStatus(): Promise<SearchRankingBatchStatusPayload> {
+  return request<SearchRankingBatchStatusPayload>("/api/erp/search-ranking/batch/status");
+}
+
+export function startSearchRankingBatch(
+  snapshotId: string,
+): Promise<SearchRankingBatchStatusPayload> {
+  return request<SearchRankingBatchStatusPayload>("/api/erp/search-ranking/batch/start", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      snapshot_id: snapshotId,
+      confirmed_paid_model_calls: true,
+      confirmed_public_takealot_requests: true,
+      confirmed_strict_serial_no_retry: true,
+    }),
+  });
+}
+
+export function controlSearchRankingBatch(
+  action: "pause" | "resume" | "stop",
+): Promise<SearchRankingBatchStatusPayload> {
+  return request<SearchRankingBatchStatusPayload>(
+    `/api/erp/search-ranking/batch/${action}`,
+    { method: "POST" },
+  );
+}
+
+export function restartSearchRankingBatch(
+  snapshotId: string,
+): Promise<SearchRankingBatchStatusPayload> {
+  return request<SearchRankingBatchStatusPayload>("/api/erp/search-ranking/batch/restart", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      snapshot_id: snapshotId,
+      confirmed_paid_model_calls: true,
+      confirmed_public_takealot_requests: true,
+      confirmed_strict_serial_no_retry: true,
+    }),
+  });
+}
+
 export function fetchSearchRankingDetail(
   offerId: string,
 ): Promise<SearchRankingDetailPayload> {
@@ -772,6 +984,68 @@ export function analyzeSearchRanking(
   return request<SearchRankingDetailPayload>(
     `/api/erp/search-ranking/${encodeURIComponent(offerId)}/analyze`,
     { method: "POST" },
+  );
+}
+
+export function confirmSearchRankingDecisionParameters(
+  offerId: string,
+  choices: Array<{
+    parameter_key: string;
+    is_decision_parameter: boolean;
+  }>,
+): Promise<SearchRankingDetailPayload> {
+  return request<SearchRankingDetailPayload>(
+    `/api/erp/search-ranking/${encodeURIComponent(offerId)}/decision-parameters/confirm`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        choices,
+        confirmed_current_title: true,
+        acknowledged_search_validation: true,
+        acknowledged_no_ranking_guarantee: true,
+      }),
+    },
+  );
+}
+
+export function confirmSearchRankingProductFacts(
+  offerId: string,
+  payload: {
+    source_analysis_id: number;
+    reason_code: string;
+    facts: Array<{
+      fact_type: SearchRankingProductFactType;
+      fact_term: string;
+      statement: string;
+    }>;
+    confirmed: true;
+    acknowledged_fact_accuracy: true;
+    acknowledged_ranking_revalidation: true;
+  },
+): Promise<SearchRankingDetailPayload> {
+  return request<SearchRankingDetailPayload>(
+    `/api/erp/search-ranking/${encodeURIComponent(offerId)}/product-facts/confirm`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    },
+  );
+}
+
+export function revokeSearchRankingProductFact(
+  offerId: string,
+  factId: number,
+  reason: string,
+): Promise<SearchRankingDetailPayload> {
+  return request<SearchRankingDetailPayload>(
+    `/api/erp/search-ranking/${encodeURIComponent(offerId)}/product-facts/${factId}/revoke`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ reason }),
+    },
   );
 }
 
@@ -946,195 +1220,4 @@ export async function refreshStoreData(): Promise<{
   refresh_status: RefreshStatus;
 }> {
   return request("/api/erp/refresh", { method: "POST" });
-}
-
-export function fetchDailyReport(
-  businessDate: string,
-  captureStart?: string,
-  captureEnd?: string,
-): Promise<DailyReportPayload> {
-  const params = new URLSearchParams({ business_date: businessDate });
-  if (captureStart) params.set("capture_start", captureStart);
-  if (captureEnd) params.set("capture_end", captureEnd);
-  return request<DailyReportPayload>(`/api/erp/daily-report?${params.toString()}`);
-}
-
-export function fetchDailyReportReminders(): Promise<DailyReportReminders> {
-  return request<DailyReportReminders>("/api/erp/daily-report/reminders");
-}
-
-export function saveDailyReportManual(
-  businessDate: string,
-  offerId: string,
-  input: {
-    page_views_30_days?: number | null;
-    ordered_units?: number | null;
-    platform_stock?: number | null;
-    reason: string;
-    note?: string;
-  },
-): Promise<{ ok: boolean }> {
-  return request(
-    `/api/erp/daily-report/${encodeURIComponent(businessDate)}/${encodeURIComponent(offerId)}/manual`,
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(input),
-    },
-  );
-}
-
-export function confirmDailyReportEntry(
-  businessDate: string,
-  offerId: string,
-  source: "morning" | "evening" | "latest" | "manual",
-  note: string,
-): Promise<{ ok: boolean; exported: boolean }> {
-  return request(
-    `/api/erp/daily-report/${encodeURIComponent(businessDate)}/${encodeURIComponent(offerId)}/confirm`,
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ source, note }),
-    },
-  );
-}
-
-export function revertDailyReportConfirmation(
-  businessDate: string,
-  offerId: string,
-  note: string,
-): Promise<{ ok: boolean }> {
-  return request(
-    `/api/erp/daily-report/${encodeURIComponent(businessDate)}/${encodeURIComponent(offerId)}/revert-confirmation`,
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ note }),
-    },
-  );
-}
-
-export function confirmReadyDailyReportEntries(
-  businessDate: string,
-  note: string,
-): Promise<{ ok: boolean; confirmed: number; exported: boolean }> {
-  return request(
-    `/api/erp/daily-report/${encodeURIComponent(businessDate)}/confirm-ready`,
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ note }),
-    },
-  );
-}
-
-export function dismissDailyReportStockAlert(
-  businessDate: string,
-  offerId: string,
-  note: string,
-): Promise<{ ok: boolean }> {
-  return request(
-    `/api/erp/daily-report/${encodeURIComponent(businessDate)}/${encodeURIComponent(offerId)}/stock-alert`,
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ note }),
-    },
-  );
-}
-
-export function eliminateDailyReportStockAlert(
-  businessDate: string,
-  offerId: string,
-  note: string,
-): Promise<{ ok: boolean }> {
-  return request(
-    `/api/erp/daily-report/${encodeURIComponent(businessDate)}/${encodeURIComponent(offerId)}/stock-alert/eliminate`,
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ note }),
-    },
-  );
-}
-
-export function reopenDailyReportStockAlert(
-  businessDate: string,
-  offerId: string,
-  note: string,
-): Promise<{ ok: boolean }> {
-  return request(
-    `/api/erp/daily-report/${encodeURIComponent(businessDate)}/${encodeURIComponent(offerId)}/stock-alert/reopen`,
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ note }),
-    },
-  );
-}
-
-export function saveDailyReportNote(
-  businessDate: string,
-  offerId: string,
-  note: string,
-  issueType: "general" | "capture_difference" | "stock_continuity",
-): Promise<{ ok: boolean }> {
-  return request(
-    `/api/erp/daily-report/${encodeURIComponent(businessDate)}/${encodeURIComponent(offerId)}/note`,
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ note, issue_type: issueType }),
-    },
-  );
-}
-
-export function updateDailyReportNote(
-  businessDate: string,
-  offerId: string,
-  noteId: number,
-  note: string,
-  issueType: "general" | "capture_difference" | "stock_continuity",
-): Promise<{ ok: boolean }> {
-  return request(
-    `/api/erp/daily-report/${encodeURIComponent(businessDate)}/${encodeURIComponent(offerId)}/note/${noteId}`,
-    {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ note, issue_type: issueType }),
-    },
-  );
-}
-
-export function deleteDailyReportNote(
-  businessDate: string,
-  offerId: string,
-  noteId: number,
-  note = "",
-): Promise<{ ok: boolean }> {
-  return request(
-    `/api/erp/daily-report/${encodeURIComponent(businessDate)}/${encodeURIComponent(offerId)}/note/${noteId}`,
-    {
-      method: "DELETE",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ note }),
-    },
-  );
-}
-
-export function fetchDailyReportExport(through: string): Promise<DailyReportExport> {
-  return request<DailyReportExport>(
-    `/api/erp/daily-report/export?through=${encodeURIComponent(through)}`,
-  );
-}
-
-export function generateDailyReportExport(
-  through: string,
-): Promise<DailyReportExport> {
-  return request<DailyReportExport>("/api/erp/daily-report/export", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ as_of: through }),
-  });
 }
