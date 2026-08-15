@@ -348,6 +348,18 @@ class CompetitorRepository:
             url=product.url,
             title=product.title,
             image_url=product.image_url,
+            category_path=(
+                [
+                    {
+                        "name": breadcrumb.name,
+                        "id": breadcrumb.category_id,
+                        "type": breadcrumb.category_type,
+                        "slug": breadcrumb.slug,
+                    }
+                    for breadcrumb in product.category_path
+                ]
+                or None
+            ),
             sku=product.sku,
             seller_id=product.seller_id,
             seller_name=product.seller_name,

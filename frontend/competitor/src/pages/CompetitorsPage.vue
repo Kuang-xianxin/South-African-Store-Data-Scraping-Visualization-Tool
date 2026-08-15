@@ -446,6 +446,7 @@ const selectedOfferKey = ref("");
 const offerSort = ref<CompetitorOfferSort>("net_outflow_desc");
 const hoveredOfferTrendIndex = ref<number | null>(null);
 const detail = ref<CompetitorDetail>({
+  category_path: [],
   history: [],
   reviews: [],
   variants: [],
@@ -618,6 +619,13 @@ const selectedOfferLink = computed(
 );
 const selectedHeroImage = computed(
   () => selectedOffer.value?.图片 || selected.value?.图片 || null,
+);
+const selectedCategoryPath = computed(() => detail.value.category_path ?? []);
+const selectedCategoryPathText = computed(() =>
+  selectedCategoryPath.value.map((item) => item.name).join(" › "),
+);
+const selectedLeafCategory = computed(() =>
+  selectedCategoryPath.value[selectedCategoryPath.value.length - 1] ?? null,
 );
 const selectedSellerGroups = computed(() =>
   groupCompetitorOffersBySeller(selectedComparisonOffers.value, offerSort.value),
@@ -1823,6 +1831,7 @@ watch(
     const requestId = ++detailRequestId;
     if (!plid) {
       detail.value = {
+        category_path: [],
         history: [],
         reviews: [],
         variants: [],
@@ -8168,6 +8177,24 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
                 <small v-if="selectedOffer?.offer_id" class="offer-id-secondary">
                   Offer ID {{ selectedOffer.offer_id }}
                 </small>
+                <div
+                  class="competitor-category-path"
+                  :class="{ 'is-missing': !detailLoading && !selectedCategoryPath.length }"
+                  aria-label="商品具体类目"
+                >
+                  <small>商品具体类目</small>
+                  <span v-if="detailLoading">正在读取本地类目记录…</span>
+                  <span v-else-if="detailError">类目暂无法读取</span>
+                  <template v-else-if="selectedCategoryPath.length">
+                    <span>{{ selectedCategoryPathText }}</span>
+                    <em v-if="selectedLeafCategory?.id">
+                      末级类目 ID {{ selectedLeafCategory.id }}
+                    </em>
+                  </template>
+                  <span v-else>
+                    本地历史快照暂无具体类目；成功完成一次公开商品采集后自动补齐。
+                  </span>
+                </div>
                 <div
                   v-if="selected.来源 === 'own_store' && selectedOffer?.报价来源 === 'seller_api'"
                   class="competitor-modal-current-offer-status"

@@ -879,6 +879,22 @@ async def test_public_client_parses_product_offers_and_all_review_pages() -> Non
         "https://api.takealot.com/rest/v-1-10-0/product-details/PLID123": {
             "desktop_href": "https://www.takealot.com/example/PLID123",
             "core": {"title": "Example", "reviews": 2, "star_rating": 4.5},
+            "breadcrumbs": {
+                "items": [
+                    {
+                        "slug": "home-kitchen",
+                        "type": "department",
+                        "id": 10,
+                        "name": "Home & Kitchen",
+                    },
+                    {
+                        "slug": "small-appliances-1234",
+                        "type": "category",
+                        "id": 1234,
+                        "name": "Small Appliances",
+                    },
+                ]
+            },
             "buybox": {
                 "tsin": "TSIN-1",
                 "items": [
@@ -980,6 +996,13 @@ async def test_public_client_parses_product_offers_and_all_review_pages() -> Non
     assert product.seller_name == "Seller One"
     assert product.is_leadtime is True
     assert product.stock_status == "没货（非平台仓/供应商调货）"
+    assert [item.name for item in product.category_path] == [
+        "Home & Kitchen",
+        "Small Appliances",
+    ]
+    assert product.category_path[-1].category_id == "1234"
+    assert product.category_path[-1].category_type == "category"
+    assert product.category_path[-1].slug == "small-appliances-1234"
     assert len(product.offers) == 3
     assert product.offers[0].plid == "123"
     assert product.offers[0].url == "https://www.takealot.com/example/PLID123"

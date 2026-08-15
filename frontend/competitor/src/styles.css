@@ -3941,6 +3941,38 @@ td small {
   font-size: 0.72rem;
 }
 
+.competitor-category-path {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+  margin-top: 7px;
+  line-height: 1.45;
+}
+
+.competitor-category-path > small {
+  color: #67776b;
+  font-size: 0.64rem;
+  font-weight: 800;
+}
+
+.competitor-category-path > span {
+  color: #244c36;
+  font-size: 0.7rem;
+  font-weight: 650;
+}
+
+.competitor-category-path > em {
+  color: #76827a;
+  font-size: 0.62rem;
+  font-style: normal;
+}
+
+.competitor-category-path.is-missing > span {
+  color: #8b6b38;
+  font-weight: 500;
+}
+
 .competitor-modal-close {
   flex: 0 0 auto;
   width: 38px;

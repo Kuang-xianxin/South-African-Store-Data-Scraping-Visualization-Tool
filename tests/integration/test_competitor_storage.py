@@ -10,6 +10,7 @@ from sqlalchemy import create_engine, event
 from sqlalchemy.orm import Session
 
 from takealot_ops.competitors.domain import (
+    CompetitorCategoryBreadcrumb,
     CompetitorOffer,
     CompetitorProduct,
     CompetitorReviewRecord,
@@ -383,6 +384,20 @@ def test_competitor_observation_persists_snapshot_and_deduplicated_reviews(
                 image_url="https://example.invalid/laser-lipo-black.jpg",
             ),
         ),
+        category_path=(
+            CompetitorCategoryBreadcrumb(
+                name="Health & Beauty",
+                category_id="8",
+                category_type="department",
+                slug="health-beauty",
+            ),
+            CompetitorCategoryBreadcrumb(
+                name="Beauty Devices",
+                category_id="15431",
+                category_type="category",
+                slug="beauty-devices-15431",
+            ),
+        ),
     )
     reviews = [
         CompetitorReviewRecord(
@@ -461,6 +476,20 @@ def test_competitor_observation_persists_snapshot_and_deduplicated_reviews(
     assert dataset.current.iloc[0]["图片"] == "https://example.invalid/laser-lipo.jpg"
     assert dataset.history.iloc[0]["图片"] == "https://example.invalid/laser-lipo.jpg"
     assert dataset.variants.iloc[0]["图片"] == "https://example.invalid/laser-lipo-black.jpg"
+    assert dataset.category_paths[product.plid] == [
+        {
+            "name": "Health & Beauty",
+            "id": "8",
+            "type": "department",
+            "slug": "health-beauty",
+        },
+        {
+            "name": "Beauty Devices",
+            "id": "15431",
+            "type": "category",
+            "slug": "beauty-devices-15431",
+        },
+    ]
     limited_variant = dataset.variants.loc[dataset.variants["每位客户限购"].notna()].iloc[0]
     assert limited_variant["每位客户限购"] == 10
     assert "累计销量估算" not in dataset.current.columns
@@ -477,6 +506,12 @@ def test_competitor_observation_persists_snapshot_and_deduplicated_reviews(
         detail = client.get("/api/competitors/72189176").json()
     assert len(detail["history"]) == 2
     assert len(detail["variants"]) == 2
+    assert detail["category_path"][-1] == {
+        "name": "Beauty Devices",
+        "id": "15431",
+        "type": "category",
+        "slug": "beauty-devices-15431",
+    }
     assert {variant["图片"] for variant in detail["variants"]} == {
         "https://example.invalid/laser-lipo-black.jpg"
     }
@@ -1727,6 +1762,27 @@ def test_schema_upgrade_backfills_competitor_offer_groups(tmp_path: Path) -> Non
 
     assert group_plid == "123"
     assert any(row[1] == "ix_competitor_targets_offer_group_plid" for row in indexes)
+
+
+def test_schema_upgrade_adds_competitor_category_path(tmp_path: Path) -> None:
+    engine = create_engine(f"sqlite:///{(tmp_path / 'legacy-snapshots.db').as_posix()}")
+    with engine.begin() as connection:
+        connection.exec_driver_sql(
+            "CREATE TABLE competitor_snapshots (id INTEGER PRIMARY KEY)"
+        )
+
+    create_schema(engine)
+
+    with engine.connect() as connection:
+        columns = {
+            row[1]
+            for row in connection.exec_driver_sql(
+                "PRAGMA table_info('competitor_snapshots')"
+            ).fetchall()
+        }
+    engine.dispose()
+
+    assert "category_path" in columns
 
 
 def test_competitor_api_reads_the_shared_sqlite(

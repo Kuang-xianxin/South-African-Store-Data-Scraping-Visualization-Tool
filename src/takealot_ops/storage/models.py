@@ -706,6 +706,7 @@ class CompetitorSnapshot(Base):
     url: Mapped[str] = mapped_column(Text, nullable=False)
     title: Mapped[str] = mapped_column(Text, nullable=False)
     image_url: Mapped[str | None] = mapped_column(Text)
+    category_path: Mapped[list[dict[str, Any]] | None] = mapped_column(JSON)
     sku: Mapped[str | None] = mapped_column(String(100))
     seller_id: Mapped[str | None] = mapped_column(String(100))
     seller_name: Mapped[str | None] = mapped_column(String(255))

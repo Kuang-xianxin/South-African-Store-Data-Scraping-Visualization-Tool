@@ -409,6 +409,13 @@ export interface CompetitorVariantItem {
   链接: string;
 }
 
+export interface CompetitorCategoryBreadcrumb {
+  name: string;
+  id: string | null;
+  type: string | null;
+  slug: string | null;
+}
+
 export interface OwnStoreSalesPoint {
   date: string;
   ordered_units: number | null;
@@ -462,6 +469,7 @@ export interface OwnStoreTrafficSeries {
 }
 
 export interface CompetitorDetail {
+  category_path: CompetitorCategoryBreadcrumb[];
   history: CompetitorItem[];
   reviews: ReviewItem[];
   variants: CompetitorVariantItem[];

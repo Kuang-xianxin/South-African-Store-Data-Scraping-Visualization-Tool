@@ -93,6 +93,7 @@ def create_schema(engine: Engine) -> None:
     _add_erp_user_store_access_column(engine)
     _ensure_default_erp_store(engine)
     _add_competitor_target_group_column(engine)
+    _add_competitor_snapshot_category_column(engine)
     _add_competitor_listing_operation_library_columns(engine)
     _add_competitor_variant_observation_columns(engine)
     _add_platform_warehouse_upstream_columns(engine)
@@ -690,6 +691,27 @@ def _add_competitor_target_group_column(engine: Engine) -> None:
             connection.exec_driver_sql(
                 f"CREATE INDEX {index_name} ON {table} ({group_column})"
             )
+
+
+def _add_competitor_snapshot_category_column(engine: Engine) -> None:
+    """Retain the public Takealot department/category breadcrumb path."""
+
+    with engine.begin() as connection:
+        table_name = "competitor_snapshots"
+        if not inspect(connection).has_table(table_name):
+            return
+        existing = {
+            str(column["name"])
+            for column in inspect(connection).get_columns(table_name)
+        }
+        if "category_path" in existing:
+            return
+        preparer = connection.dialect.identifier_preparer
+        table = preparer.quote(table_name)
+        column = preparer.quote("category_path")
+        connection.exec_driver_sql(
+            f"ALTER TABLE {table} ADD COLUMN {column} JSON NULL"
+        )
 
 
 def _add_competitor_listing_operation_library_columns(engine: Engine) -> None:

@@ -180,6 +180,16 @@ def test_competitor_detail_requests_only_the_selected_plid(
             history=pd.DataFrame(),
             reviews=pd.DataFrame(),
             variants=pd.DataFrame(),
+            category_paths={
+                "101163999": [
+                    {
+                        "name": "Camping & Outdoor",
+                        "id": "27895",
+                        "type": "category",
+                        "slug": "family-tents-27895",
+                    }
+                ]
+            },
             store_current=pd.DataFrame([{"plid": "101163999"}]),
             store_history=pd.DataFrame(),
         )
@@ -216,6 +226,14 @@ def test_competitor_detail_requests_only_the_selected_plid(
 
     assert response.status_code == 200
     assert response.json() == {
+        "category_path": [
+            {
+                "name": "Camping & Outdoor",
+                "id": "27895",
+                "type": "category",
+                "slug": "family-tents-27895",
+            }
+        ],
         "history": [],
         "reviews": [],
         "variants": [],

@@ -4625,6 +4625,7 @@ def create_app(project_root: Path | None = None) -> FastAPI:
             else []
         )
         return {
+            "category_path": dataset.category_paths.get(plid, []),
             "history": frame_records(history),
             "reviews": frame_records(reviews),
             "variants": frame_records(variants),

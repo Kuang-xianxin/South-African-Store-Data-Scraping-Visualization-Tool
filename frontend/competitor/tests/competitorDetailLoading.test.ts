@@ -20,3 +20,11 @@ test("reuses a bounded detail cache for repeated card opens", () => {
   assert.match(pageSource, /const cached = cachedCompetitorDetail\(cacheKey\);/);
   assert.match(pageSource, /cacheCompetitorDetail\(cacheKey, result\);/);
 });
+
+test("the shared product detail modal always exposes the persisted category path", () => {
+  assert.match(pageSource, /class="competitor-category-path"/);
+  assert.match(pageSource, /商品具体类目/);
+  assert.match(pageSource, /selectedCategoryPathText/);
+  assert.match(pageSource, /末级类目 ID/);
+  assert.match(pageSource, /成功完成一次公开商品采集后自动补齐/);
+});
