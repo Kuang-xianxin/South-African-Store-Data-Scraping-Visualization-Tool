@@ -86,6 +86,7 @@ import {
   matchesCompetitorSellerFilter,
 } from "../competitorSellerFilter";
 import {
+  COMPETITOR_OFFER_TREND_HORIZONTAL_LAYOUT,
   buildCompetitorOfferTrendLayout,
   type CompetitorOfferTrendPanelCount,
 } from "../competitorTrendLayout";
@@ -666,8 +667,8 @@ const selectedOfferIntervalReplenishmentUnits = computed(() =>
   offerIntervalReplenishmentUnits(detail.value.history, selectedOffer.value),
 );
 const offerTrendChartWidth = 960;
-const offerTrendPlotLeft = 86;
-const offerTrendPlotRight = 936;
+const offerTrendPlotLeft = COMPETITOR_OFFER_TREND_HORIZONTAL_LAYOUT.plotLeft;
+const offerTrendPlotRight = COMPETITOR_OFFER_TREND_HORIZONTAL_LAYOUT.plotRight;
 const offerTrendPlotWidth = offerTrendPlotRight - offerTrendPlotLeft;
 const offerTrendPanelCount = computed<CompetitorOfferTrendPanelCount>(
   () => showOwnTrafficPanel.value ? 4 : 3,
@@ -8519,10 +8520,26 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
                             :y2="panel.top - offerTrendLayout.dividerOffset"
                             vector-effect="non-scaling-stroke"
                           />
-                          <text class="offer-trend-panel-label" x="8" :y="panel.top + 12">
+                          <line
+                            class="offer-trend-panel-text-divider"
+                            :x1="COMPETITOR_OFFER_TREND_HORIZONTAL_LAYOUT.panelTextDividerX"
+                            :x2="COMPETITOR_OFFER_TREND_HORIZONTAL_LAYOUT.panelTextDividerX"
+                            :y1="panel.top - 2"
+                            :y2="panel.bottom + 2"
+                            vector-effect="non-scaling-stroke"
+                          />
+                          <text
+                            class="offer-trend-panel-label"
+                            :x="COMPETITOR_OFFER_TREND_HORIZONTAL_LAYOUT.panelTextX"
+                            :y="panel.top + 12"
+                          >
                             {{ panel.label }}
                           </text>
-                          <text class="offer-trend-panel-note" x="8" :y="panel.top + 29">
+                          <text
+                            class="offer-trend-panel-note"
+                            :x="COMPETITOR_OFFER_TREND_HORIZONTAL_LAYOUT.panelTextX"
+                            :y="panel.top + 29"
+                          >
                             {{ panel.note }}
                           </text>
                           <g v-for="tick in panel.ticks" :key="`${panel.key}:${tick.y}`">
@@ -8535,7 +8552,7 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
                             />
                             <text
                               class="offer-trend-axis-label"
-                              :x="offerTrendPlotLeft - 8"
+                              :x="COMPETITOR_OFFER_TREND_HORIZONTAL_LAYOUT.axisLabelX"
                               :y="tick.y + 4"
                             >{{ tick.label }}</text>
                           </g>

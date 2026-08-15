@@ -2,7 +2,10 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 
-import { buildCompetitorOfferTrendLayout } from "../src/competitorTrendLayout.ts";
+import {
+  COMPETITOR_OFFER_TREND_HORIZONTAL_LAYOUT,
+  buildCompetitorOfferTrendLayout,
+} from "../src/competitorTrendLayout.ts";
 
 const pageSource = readFileSync(
   new URL("../src/pages/CompetitorsPage.vue", import.meta.url),
@@ -49,6 +52,21 @@ test("three and four-panel competitor trends use compact non-overlapping geometr
     assert.equal(lastSurfaceBottom, layout.cursorBottom);
     assert.ok(lastPanelTop + layout.plotHeight < layout.xAxisLabelY);
   }
+});
+
+test("trend metadata, y-axis labels, and plot use dedicated horizontal columns", () => {
+  const horizontal = COMPETITOR_OFFER_TREND_HORIZONTAL_LAYOUT;
+
+  assert.ok(horizontal.panelTextDividerX - horizontal.panelTextX >= 96);
+  assert.ok(horizontal.axisLabelX - horizontal.panelTextDividerX >= 48);
+  assert.ok(horizontal.plotLeft - horizontal.axisLabelX >= 12);
+  assert.ok(horizontal.plotRight - horizontal.plotLeft >= 760);
+  assert.match(pageSource, /class="offer-trend-panel-text-divider"/);
+  assert.match(
+    pageSource,
+    /COMPETITOR_OFFER_TREND_HORIZONTAL_LAYOUT\.axisLabelX/,
+  );
+  assert.match(styleSource, /\.offer-trend-panel-text-divider\s*\{/);
 });
 
 test("short desktop competitor details compact sticky chrome around the fixed readout", () => {

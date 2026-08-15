@@ -3449,6 +3449,11 @@ textarea.link-input-error-pulse {
   font-weight: 650;
 }
 
+.offer-trend-panel-text-divider {
+  stroke: #c6d2cb;
+  stroke-width: 1;
+}
+
 .offer-trend-grid-line {
   stroke: #d5ded8;
   stroke-width: 1;
