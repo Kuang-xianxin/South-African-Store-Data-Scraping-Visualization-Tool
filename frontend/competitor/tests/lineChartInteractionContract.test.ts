@@ -76,7 +76,7 @@ test("competitor three-panel line chart keeps a fixed detail panel with pointer 
   assert.doesNotMatch(competitorsSource, /offerTrendTooltipPosition/);
   assert.doesNotMatch(competitorsSource, /floatingChartTooltipStyle/);
   assert.match(competitorsSource, /if \(hoveredOfferTrendIndex\.value === null\) return selectedOfferTrend\.value\.length - 1/);
-  assert.match(competitorsSource, /图表上方固定显示当前时间点/);
+  assert.match(competitorsSource, /图表上方固定显示当前 Seller 刷新点/);
   assert.match(competitorsSource, /offerStockEvidenceLabel\(activeOfferTrendPoint\.offer\)/);
   assert.match(competitorsSource, /class="competitor-offer-period-metric"/);
   assert.match(competitorsSource, /区间内售出件数/);
@@ -93,7 +93,7 @@ test("competitor three-panel line chart keeps a fixed detail panel with pointer 
 test("own-store official sales sits below comments and preserves zero versus missing evidence", () => {
   assert.match(competitorsSource, /<OwnStoreSalesChart/);
   assert.ok(
-    competitorsSource.indexOf("图表上方固定显示当前时间点") <
+    competitorsSource.indexOf("图表上方固定显示当前 Seller 刷新点") <
       competitorsSource.indexOf("<OwnStoreSalesChart"),
   );
   assert.match(ownStoreSalesSource, /国内自然日（北京时间）/);

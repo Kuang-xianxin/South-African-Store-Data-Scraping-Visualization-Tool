@@ -478,6 +478,8 @@ class Repository:
                 total_stock=values.get("total_stock"),
                 takealot_available_stock=values.get("takealot_available_stock"),
                 seller_available_stock=values.get("seller_available_stock"),
+                page_views_30_days=values.get("page_views_30_days"),
+                page_views_30_days_recorded=True,
                 captured_at=captured_at,
             )
         )

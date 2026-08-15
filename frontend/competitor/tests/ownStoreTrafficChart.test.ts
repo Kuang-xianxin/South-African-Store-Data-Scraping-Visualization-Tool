@@ -23,8 +23,9 @@ test("own-store Seller API offers add rolling traffic to the aligned trend panel
   assert.match(pageSource, /offerTrendXAtTime/);
   assert.match(pageSource, /alignOwnStoreTrafficTrendToOfferTrend/);
   assert.match(pageSource, /offerTrendPanelCount\.value \? 4 : 3|showOwnTrafficPanel\.value \? 4 : 3/);
-  assert.match(pageSource, /按最近报价节点对齐/);
-  assert.match(pageSource, /真实流量快照时间/);
+  assert.match(pageSource, /与 Seller 刷新同时间/);
+  assert.match(pageSource, /只展示时间戳完全相同的 Seller 刷新记录/);
+  assert.doesNotMatch(pageSource, /吸附到时间最近/);
   assert.match(pageSource, /不是当天流量或访客数/);
   assert.match(pageSource, /'with-own-traffic': showOwnTrafficPanel/);
   assert.match(styleSource, /\.competitor-offer-workbench-grid\.with-own-traffic\s*\{[\s\S]*grid-template-columns: minmax\(0, 1fr\)/);

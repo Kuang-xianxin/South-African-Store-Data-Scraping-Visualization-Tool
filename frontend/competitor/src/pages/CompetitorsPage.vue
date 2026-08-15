@@ -760,7 +760,7 @@ const offerTrendPanels = computed<OfferTrendPanel[]>(() => {
     definitions.push({
       key: "traffic",
       label: "近30天浏览量",
-      note: "按最近报价节点对齐",
+      note: "与 Seller 刷新同时间",
       color: "#2874a6",
       entries: selectedOwnTrafficChartTrend.value.map((point) => ({
         index: point.sourceIndex,
@@ -876,21 +876,11 @@ const activeOfferTrendPoint = computed(() => {
   return index === null ? null : selectedOfferTrend.value[index] ?? null;
 });
 const activeOwnTrafficPoint = computed<AlignedOwnStoreTrafficTrendPoint | null>(() => {
-  const observed = selectedOwnTrafficChartTrend.value.filter(
-    (point) => point.data_status === "observed",
-  );
-  if (!observed.length) return null;
   const offerIndex = activeOfferTrendIndex.value;
-  if (offerIndex === null) return observed.at(-1) ?? null;
-  return observed.reduce((nearest, point) => {
-    const nearestDistance = nearest.alignedOfferIndex === null
-      ? Number.POSITIVE_INFINITY
-      : Math.abs(nearest.alignedOfferIndex - offerIndex);
-    const pointDistance = point.alignedOfferIndex === null
-      ? Number.POSITIVE_INFINITY
-      : Math.abs(point.alignedOfferIndex - offerIndex);
-    return pointDistance < nearestDistance ? point : nearest;
-  });
+  if (offerIndex === null) return null;
+  return selectedOwnTrafficChartTrend.value.find(
+    (point) => point.alignedOfferIndex === offerIndex,
+  ) ?? null;
 });
 const activeOwnTrafficIndex = computed(
   () => activeOwnTrafficPoint.value?.sourceIndex ?? null,
@@ -8495,10 +8485,13 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
                             ? "—"
                             : activeOwnTrafficPoint.page_views_30_days.toLocaleString("zh-CN") }}
                         </strong>
-                        <span v-if="activeOwnTrafficPoint?.captured_at">
-                          流量快照 {{ formatChinaDateTime(activeOwnTrafficPoint.captured_at) }}
+                        <span v-if="activeOwnTrafficPoint?.data_status === 'observed' && activeOwnTrafficPoint.captured_at">
+                          流量记录 {{ formatChinaDateTime(activeOwnTrafficPoint.captured_at) }}
                         </span>
-                        <span v-else>当前范围没有可用流量快照</span>
+                        <span v-else-if="activeOwnTrafficPoint?.captured_at">
+                          该次 Seller 刷新的历史流量无法证实
+                        </span>
+                        <span v-else>当前范围没有同次 Seller 流量记录</span>
                         <span
                           v-if="activeOwnTrafficPoint?.title_changed"
                           class="offer-trend-title-change-detail"
@@ -8670,9 +8663,9 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
                         >{{ tick.label }}</text>
                       </svg>
                       <p>
-                        图表共用同一北京时间横轴和绘图区边界；图表上方固定显示当前时间点的报价及最近真实流量快照。
+                        图表共用同一北京时间横轴和绘图区边界；图表上方固定显示当前 Seller 刷新点的报价、库存、评论和同次流量记录。
                         <template v-if="showOwnTrafficPanel">
-                          近30天浏览量是 Seller Offer 滚动快照，不是当天流量或访客数；流量节点会吸附到时间最近的上方报价观察节点以便纵向比较，固定详情仍显示真实流量快照时间；粗边节点表示商品名称发生变更。
+                          近30天浏览量是 Seller Offer 滚动值，不是当天流量或访客数；只展示时间戳完全相同的 Seller 刷新记录，历史无法证实的点保持缺口；粗边节点表示商品名称发生变更。
                         </template>
                         鼠标横向移动或键盘左右方向键可切换时间点。虚线只连接缺失区间两端的真实值，不代表中间数值或补零。
                       </p>
