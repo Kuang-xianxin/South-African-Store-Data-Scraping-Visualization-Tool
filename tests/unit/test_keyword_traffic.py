@@ -53,6 +53,25 @@ def _add_history(
             )
 
 
+def _add_stock_history(
+    engine,
+    values: dict[date, tuple[int | None, datetime]],
+) -> None:
+    with Session(engine) as session, session.begin():
+        for snapshot_date, (total_stock, captured_at) in values.items():
+            session.add(
+                OfferSnapshot(
+                    snapshot_date=snapshot_date,
+                    offer_id="offer-1",
+                    sku="SKU-1",
+                    title="Memory Foam Queen Mattress",
+                    captured_at=captured_at,
+                    page_views_30_days=100,
+                    total_stock=total_stock,
+                )
+            )
+
+
 def test_title_change_is_automatically_labeled_and_compared() -> None:
     engine = _engine()
     change_day = date(2026, 7, 20)
@@ -101,6 +120,66 @@ def test_title_change_is_automatically_labeled_and_compared() -> None:
     assert comparison["after"]["slope_per_day"] == 35.0
     assert comparison["trend_change"] == "improving"
     assert comparison["status"] == "complete"
+    engine.dispose()
+
+
+def test_product_lifecycle_uses_platform_listing_and_latest_valid_restock_snapshot() -> None:
+    engine = _engine()
+    with Session(engine) as session, session.begin():
+        offer = session.get(OfferCurrent, "offer-1")
+        assert offer is not None
+        offer.created_at = datetime(2026, 1, 15, 10, 34, tzinfo=UTC)
+    _add_stock_history(
+        engine,
+        {
+            date(2026, 7, 18): (5, datetime(2026, 7, 18, 1, tzinfo=UTC)),
+            date(2026, 7, 19): (None, datetime(2026, 7, 19, 1, tzinfo=UTC)),
+            date(2026, 7, 20): (8, datetime(2026, 7, 20, 9, tzinfo=UTC)),
+            date(2026, 7, 21): (7, datetime(2026, 7, 21, 9, tzinfo=UTC)),
+        },
+    )
+
+    with Session(engine) as session:
+        payload = build_keyword_product_detail(
+            session,
+            offer_id="offer-1",
+            as_of=date(2026, 7, 21),
+            history_days=30,
+            comparison_days=3,
+        )
+
+    assert payload is not None
+    assert payload["product"]["first_listed_at"] == "2026-01-15 12:34"
+    assert payload["product"]["first_listed_source"] == "platform"
+    assert payload["product"]["latest_restock_date"] == "2026-07-20 17:00"
+    assert payload["product"]["latest_restock_increase"] == 3
+    engine.dispose()
+
+
+def test_product_lifecycle_falls_back_to_first_observation_without_false_restock() -> None:
+    engine = _engine()
+    _add_stock_history(
+        engine,
+        {
+            date(2026, 7, 20): (5, datetime(2026, 7, 20, 1, tzinfo=UTC)),
+            date(2026, 7, 21): (5, datetime(2026, 7, 21, 1, tzinfo=UTC)),
+        },
+    )
+
+    with Session(engine) as session:
+        payload = build_keyword_product_detail(
+            session,
+            offer_id="offer-1",
+            as_of=date(2026, 7, 21),
+            history_days=30,
+            comparison_days=3,
+        )
+
+    assert payload is not None
+    assert payload["product"]["first_listed_at"] == "2026-07-20"
+    assert payload["product"]["first_listed_source"] == "first_observed"
+    assert payload["product"]["latest_restock_date"] is None
+    assert payload["product"]["latest_restock_increase"] is None
     engine.dispose()
 
 

@@ -33,6 +33,12 @@ export interface CompetitorOfferItem {
   店铺?: string;
   Takealot可售库存?: number | null;
   卖家可售库存?: number | null;
+  /** Latest current status for this exact connected-store Offer identity. */
+  最新Offer状态?: string | null;
+  最新Offer状态更新时间?: string | null;
+  /** Current total-stock projection for the same exact Offer identity. */
+  最新Offer库存数量?: number | null;
+  最新Offer库存状态?: "有货" | "没货" | "未探测" | null;
 }
 
 export interface CompetitorItem {
@@ -68,6 +74,11 @@ export interface CompetitorItem {
   库存净变化: number | null;
   库存净流入: number | null;
   库存净流出: number | null;
+  周期销售件数: number | null;
+  周期销售额: number | null;
+  周期补货量: number | null;
+  周期补货货值: number | null;
+  周期库存周转金额: number | null;
   新增评论: number | null;
   新增好评: number | null;
   新增差评: number | null;
@@ -84,6 +95,9 @@ export interface CompetitorItem {
   公开报价数?: number | null;
   跟卖报价: CompetitorOfferItem[];
   对比报价?: CompetitorOfferItem[];
+  /** Current Seller Offers status projection; independent of the observation date range. */
+  最新Offer状态?: string[];
+  最新Offer状态更新时间?: string | null;
   自有报价: OwnStoreOfferItem[];
   共享评论说明: string | null;
   跟卖发现日期: string[];
@@ -142,6 +156,11 @@ export interface CompetitorOverview {
   date_range: CompetitorDateRange;
 }
 
+export interface OwnStoreCompetitorOverview {
+  store_items: CompetitorItem[];
+  date_range: CompetitorDateRange;
+}
+
 export interface CompetitorStoreTargetItem {
   plid: string;
   url: string;
@@ -152,7 +171,7 @@ export interface CompetitorStoreTargetItem {
   captured_at: string;
 }
 
-export type OwnStoreScope = "current" | "all";
+export type OwnStoreScope = "current" | "all" | "operating";
 
 export interface CompetitorStoreTargetPayload {
   items: CompetitorStoreTargetItem[];
@@ -174,6 +193,111 @@ export interface CompetitorTargetItem {
   has_history: boolean;
 }
 
+export type CompetitorListingSourceType = "seller" | "category";
+
+export interface CompetitorListingProduct {
+  plid: string;
+  title: string;
+  url: string;
+  sort_ranks: Record<string, number>;
+}
+
+export interface CompetitorListingPreview {
+  source_type: CompetitorListingSourceType;
+  source_url: string;
+  source_label: string;
+  price_min: number | null;
+  price_max: number | null;
+  sorts: string[];
+  sort_options: Array<{ value: string; label: string }>;
+  source_total: number | null;
+  requires_limit: boolean;
+  product_limit: number | null;
+  can_commit: boolean;
+  scanned_candidate_count: number;
+  deduplicated_candidate_count: number;
+  candidate_capacity: number;
+  candidate_queue_frozen: boolean;
+  duplicate_count: number;
+  selected_count: number;
+  selection_rule: "balanced_rank_fusion_then_plid_deduplicate";
+  products: CompetitorListingProduct[];
+  candidate_products: CompetitorListingProduct[];
+  preview_token: string | null;
+}
+
+export interface CompetitorListingCommitResult {
+  source_type: CompetitorListingSourceType;
+  source_url: string;
+  operation_id: number;
+  personal_library_id: number;
+  personal_library_name: string;
+  selected_count: number;
+  added_target_count: number;
+  reactivated_target_count: number;
+  existing_target_count: number;
+  own_store_count: number;
+  personal_watchlist_added_count: number;
+  queued_to_active_batch_count: number;
+}
+
+export type CompetitorListingOperationItemResult =
+  | "added_target"
+  | "reactivated_target"
+  | "existing_target"
+  | "own_store";
+
+export interface CompetitorListingOperationItem {
+  id: number;
+  operation_id: number;
+  position: number;
+  plid: string;
+  title: string;
+  url: string;
+  result: CompetitorListingOperationItemResult;
+  personal_watchlist_added: boolean;
+  sort_ranks: Record<string, number>;
+}
+
+export interface CompetitorListingOperation {
+  id: number;
+  source_type: CompetitorListingSourceType;
+  source_url: string;
+  source_label: string;
+  personal_library_id: number | null;
+  personal_library_name: string | null;
+  price_min: number | null;
+  price_max: number | null;
+  sorts: string[];
+  selection_rule: "balanced_rank_fusion_then_plid_deduplicate";
+  product_limit: number | null;
+  selected_count: number;
+  added_target_count: number;
+  reactivated_target_count: number;
+  existing_target_count: number;
+  own_store_count: number;
+  personal_watchlist_added_count: number;
+  actor_username: string;
+  actor_display_name: string;
+  committed_at: string;
+}
+
+export interface CompetitorListingOperationPayload {
+  items: CompetitorListingOperation[];
+  total: number;
+  page: number;
+  page_size: number;
+  source_type: CompetitorListingSourceType | null;
+}
+
+export interface CompetitorListingOperationItemPayload {
+  items: CompetitorListingOperationItem[];
+  total: number;
+  page: number;
+  page_size: number;
+  operation_id: number;
+}
+
 export interface CompetitorPersonalWatchlistItem {
   plid: string;
   added_at: string;
@@ -181,10 +305,18 @@ export interface CompetitorPersonalWatchlistItem {
   library_ids: number[];
 }
 
+export type PersonalWatchlistDetailAccess =
+  | "public"
+  | "authorized"
+  | "store_access_denied"
+  | "unknown";
+
 export interface PersonalWatchlistSharedItem {
   plid: string;
   added_at: string;
   library_ids: number[];
+  source: "competitor" | "own_store" | "unknown";
+  detail_access: PersonalWatchlistDetailAccess;
 }
 
 export type PersonalWatchlistLibraryAccess = "owner" | "read" | "edit";
@@ -277,10 +409,64 @@ export interface CompetitorVariantItem {
   链接: string;
 }
 
+export interface OwnStoreSalesPoint {
+  date: string;
+  ordered_units: number | null;
+  data_status: "verified" | "partial" | "missing";
+  revision_count: number;
+}
+
+export interface OwnStoreSalesSeries {
+  store_code: string;
+  store_name: string;
+  plid: string;
+  offer_ids: string[];
+  skus: string[];
+  listing_date: string;
+  listing_date_source: "platform" | "first_observed";
+  through_date: string;
+  date_basis: "Asia/Shanghai";
+  source_date_basis: "Africa/Johannesburg";
+  total_ordered_units: number | null;
+  covered_days: number;
+  partial_days: number;
+  missing_days: number;
+  coverage_start: string | null;
+  coverage_end: string | null;
+  points: OwnStoreSalesPoint[];
+}
+
+export interface OwnStoreTrafficPoint {
+  date: string;
+  captured_at: string | null;
+  page_views_30_days: number | null;
+  title: string | null;
+  title_changed: boolean;
+  previous_title: string | null;
+  data_status: "observed" | "missing";
+}
+
+export interface OwnStoreTrafficSeries {
+  store_code: string;
+  store_name: string;
+  plid: string;
+  offer_id: string;
+  sku: string | null;
+  range_start: string | null;
+  range_end: string | null;
+  observed_count: number;
+  traffic_count: number;
+  missing_count: number;
+  points: OwnStoreTrafficPoint[];
+  metric_notice: string;
+}
+
 export interface CompetitorDetail {
   history: CompetitorItem[];
   reviews: ReviewItem[];
   variants: CompetitorVariantItem[];
+  own_store_sales: OwnStoreSalesSeries[];
+  own_store_traffic: OwnStoreTrafficSeries[];
 }
 
 export interface CollectResult {
@@ -350,6 +536,8 @@ export interface ProductItem {
 
 export interface SummaryPayload {
   as_of: string;
+  range_start: string;
+  range_end: string;
   latest_metric_date: string | null;
   kpis: StoreKpis;
   sales_series: SalesPoint[];
@@ -379,7 +567,7 @@ export interface StoreTrafficPoint {
 export interface StoreOperator {
   user_id: number;
   display_name: string;
-  role: "viewer" | "operator" | "selection";
+  role: UserRole;
 }
 
 export interface StoreInventorySummary {
@@ -401,6 +589,34 @@ export interface StoreHealth {
   data_reasons: string[];
 }
 
+export interface SalesRevenueSource {
+  kind: string;
+  label: string;
+  endpoint?: string;
+  table?: string;
+  run_id?: string | null;
+  requested_start?: string;
+  requested_end?: string;
+  record_count?: number;
+  collected_at?: string;
+  verified_at?: string | null;
+  recorded_at?: string;
+  metric_date?: string;
+}
+
+export interface StoreSalesReconciliation {
+  store_code: string;
+  store_name: string;
+  status: "verified" | "recovered" | "pending" | "unverified";
+  period_end_business_date: string | null;
+  period_end_status: "success" | "failed" | null;
+  period_end_captured_at: string | null;
+  period_end_failure_reason: string | null;
+  latest_sales_verified_at: string | null;
+  revision_count: number;
+  latest_revision_at: string | null;
+}
+
 export interface StoreOverviewItem {
   store_code: string;
   store_name: string;
@@ -409,6 +625,7 @@ export interface StoreOverviewItem {
   latest_traffic_point: StoreTrafficPoint | null;
   operators: StoreOperator[];
   inventory: StoreInventorySummary;
+  sales_reconciliation: StoreSalesReconciliation;
   health: StoreHealth;
 }
 
@@ -435,10 +652,65 @@ export interface MultiStoreRevenuePoint {
   covered_store_count: number;
   store_count: number;
   missing_store_count: number;
+  data_status: "verified" | "revised" | "pending";
+  source_verified_store_count: number;
+  pending_reconciliation_store_count: number;
+  unverified_source_store_count: number;
+  revised_store_count: number;
+  revision_count: number;
+  latest_sales_verified_at: string | null;
+  latest_revision_at: string | null;
+}
+
+export interface SalesReconciliationSummary {
+  period_end_business_date: string | null;
+  failed_store_count: number;
+  pending_store_count: number;
+  recovered_store_count: number;
+  verified_store_count: number;
+  unverified_store_count: number;
+  revision_count: number;
+  latest_sales_verified_at: string | null;
+  latest_revision_at: string | null;
+  stores: StoreSalesReconciliation[];
+}
+
+export interface SalesRevenueRevision {
+  id: number;
+  store_code: string;
+  store_name: string;
+  metric_date: string;
+  change_type: "corrected" | "backfilled";
+  before_ordered_units: number | null;
+  after_ordered_units: number | null;
+  before_ordered_revenue: number | null;
+  after_ordered_revenue: number | null;
+  revenue_delta: number | null;
+  units_delta: number | null;
+  before_source: SalesRevenueSource;
+  after_source: SalesRevenueSource;
+  source_run_id: string | null;
+  detected_at: string;
+}
+
+export interface SalesRevenueRevisionPayload {
+  items: SalesRevenueRevision[];
+  total: number;
+  page: number;
+  page_size: number;
+  start_date: string | null;
+  end_date: string | null;
+  source_policy: {
+    before: string;
+    after: string;
+    immutable: true;
+  };
 }
 
 export interface StoreOverviewPayload {
   as_of: string;
+  range_start: string;
+  range_end: string;
   store_count: number;
   health_summary: {
     attention: number;
@@ -450,6 +722,8 @@ export interface StoreOverviewPayload {
     platform_warehouse: PlatformWarehouseSummary;
   };
   sales_revenue_series: MultiStoreRevenuePoint[];
+  sales_revenue_completed_through: string;
+  sales_reconciliation: SalesReconciliationSummary;
   stores: StoreOverviewItem[];
 }
 
@@ -471,14 +745,17 @@ export type QuadrantKey =
   | "optimize"
   | "unclassified";
 
-export interface QuadrantItem extends ProductItem {
-  ordered_units: number | null;
-  page_views_rank: number | null;
-  ordered_units_rank: number | null;
+export interface ProductLifecycleContext {
   first_listed_at: string | null;
   first_listed_source: "platform" | "first_observed";
   latest_restock_date: string | null;
   latest_restock_increase: number | null;
+}
+
+export interface QuadrantItem extends ProductItem, ProductLifecycleContext {
+  ordered_units: number | null;
+  page_views_rank: number | null;
+  ordered_units_rank: number | null;
   quadrant: QuadrantKey;
 }
 
@@ -560,21 +837,179 @@ export interface KeywordTrafficEvent {
   comparison: KeywordTrafficComparison;
 }
 
+export interface KeywordTrafficProduct extends ProductLifecycleContext {
+  offer_id: string;
+  sku: string | null;
+  title: string | null;
+  image_url: string | null;
+  current_keywords: string[];
+}
+
 export interface KeywordTrafficDetailPayload {
   as_of: string;
   history_days: number;
   comparison_days: number;
-  product: {
-    offer_id: string;
-    sku: string | null;
-    title: string | null;
-    image_url: string | null;
-    current_keywords: string[];
-  };
+  product: KeywordTrafficProduct;
   history: KeywordTrafficHistoryPoint[];
   events: KeywordTrafficEvent[];
   metric_notice: string;
 }
+
+export interface SearchRankingProductFactRecommendation {
+  recommended: boolean;
+  reason_code: string;
+  reason: string;
+  source_analysis_id: number;
+  requires_human_confirmation: true;
+  external_lookup_available: false;
+  evidence_use: "operator_confirmed_terms_only";
+}
+
+export type SearchRankingProductFactType =
+  | "product_type"
+  | "construction"
+  | "material"
+  | "function"
+  | "packaging"
+  | "usage";
+
+export interface SearchRankingProductFactRecord {
+  id: number;
+  productline_id: string;
+  source_offer_id?: string;
+  fact_type: SearchRankingProductFactType;
+  fact_term: string;
+  statement: string | null;
+  status: "active" | "revoked" | "superseded";
+  source_type: "manual_confirmation";
+  source_analysis_id: number | null;
+  source_title: string;
+  source_image_url: string;
+  current_image_matches: boolean;
+  applied_to_current_image: boolean;
+  needs_image_reconfirmation: boolean;
+  evidence: Record<string, unknown>;
+  confirmed_by_username: string;
+  confirmed_by_display_name: string;
+  confirmed_at: string;
+  revoked_by_username: string | null;
+  revoked_by_display_name: string | null;
+  revoked_at: string | null;
+  revoke_reason: string | null;
+}
+
+export interface SearchRankingProductFactProfile {
+  applied_terms: string[];
+  active_count: number;
+  applied_count: number;
+  needs_image_reconfirmation_count: number;
+  archive_count: number;
+  requires_current_image_match: true;
+  source_policy: "manual_confirmation_only";
+  facts: SearchRankingProductFactRecord[];
+}
+
+export type SearchRankingDecisionParameterType =
+  | "power"
+  | "voltage"
+  | "current"
+  | "capacity"
+  | "size"
+  | "dimensions"
+  | "weight"
+  | "quantity"
+  | "resolution"
+  | "protection_rating"
+  | "specification";
+
+export interface SearchRankingDecisionParameterCandidate {
+  parameter_key: string;
+  parameter_value: string;
+  parameter_type: SearchRankingDecisionParameterType;
+  title_order: number;
+  system_recommendation: "decision_parameter" | "ordinary_specification";
+  system_reason: string;
+  manual_decision: boolean | null;
+}
+
+export interface SearchRankingDecisionParameterConfirmationRecord {
+  id: number;
+  productline_id: string;
+  source_offer_id: string;
+  source_analysis_id: number | null;
+  source_title: string;
+  current_title_matches: boolean;
+  decisions: Array<Omit<SearchRankingDecisionParameterCandidate, "manual_decision"> & {
+    is_decision_parameter: boolean;
+  }>;
+  policy_version: string;
+  confirmed_by_username: string;
+  confirmed_by_display_name: string;
+  confirmed_at: string;
+}
+
+export interface SearchRankingDecisionParameterProfile {
+  policy_version: string;
+  source_policy: "current_seller_title_human_confirmation";
+  fronting_requires_search_validation: true;
+  max_positive_decisions: number;
+  current_title: string;
+  current_title_confirmed: boolean;
+  requires_confirmation: boolean;
+  candidate_count: number;
+  decision_parameter_count: number;
+  ordinary_parameter_count: number;
+  unconfirmed_count: number;
+  candidates: SearchRankingDecisionParameterCandidate[];
+  applied_decision_parameters: SearchRankingDecisionParameterCandidate[];
+  applied_decision_values: string[];
+  latest_confirmation: SearchRankingDecisionParameterConfirmationRecord | null;
+  archive: SearchRankingDecisionParameterConfirmationRecord[];
+}
+
+export interface SearchRootExpansionLibraryPayload {
+  policy: {
+    scope: "shared_across_all_store_analyses";
+    ttl_hours: number;
+    refresh_mode: "refresh_on_first_hit_after_ttl";
+    scheduled_refresh: false;
+    passive_read_triggers_external_request: false;
+    root_expansion_rank_is_search_volume: false;
+    legacy_partial_input_states_hidden: true;
+    phrase_roots_supported: true;
+    raw_expansions_require_product_context_selection: true;
+    note: string;
+  };
+  summary: {
+    root_count: number;
+    stale_root_count: number;
+    matching_root_count: number;
+    matching_expansion_count: number;
+    legacy_partial_input_state_count: number;
+  };
+  roots: Array<{
+    root: string;
+    expansions: Array<{ phrase: string; rank: number }>;
+    captured_at: string;
+    age_hours: number;
+    stale: boolean;
+    last_hit_at: string;
+    system_input_hit_count: number;
+    refresh_count: number;
+    last_refresh_status: "success" | "failed";
+    last_error: string | null;
+  }>;
+}
+
+export type SearchAutocompleteLibraryPayload = SearchRootExpansionLibraryPayload;
+
+export type SearchRankingRootSource =
+  | "human_confirmed_product_fact"
+  | "image_title_first_instinct"
+  | "title_word_root"
+  | "result_page_learning"
+  | "image_title_need_state"
+  | "title_cross_check";
 
 export interface SearchRankingStatus {
   configured: boolean;
@@ -588,24 +1023,63 @@ export interface SearchRankingStatus {
   pricing_snapshot_date: string;
   max_pages: number;
   max_keywords: number;
-  autocomplete_path_state_limit: number;
+  root_expansion_input_limit: number;
+  root_expansion_followup_root_limit: number;
+  root_expansion_phrase_roots_enabled: true;
+  root_expansion_selection_policy:
+    "same_product_identity_or_structured_adjacent_product_family";
+  root_expansion_raw_suggestions_are_selected: false;
+  root_source_priority: SearchRankingRootSource[];
+  model_market_context: "South Africa";
+  model_language_variant: "South African English";
+  model_shopper_context: "South African local customer habits";
+  model_localization_policy_version: string;
+  model_localization_scope: "all_model_generated_text_fields";
+  model_localization_is_measured_demand: false;
   search_query_attempt_limit: number;
   public_request_min_interval_seconds: number;
-  operation_scope: "manual_single_offer_one_click";
+  public_request_jitter_seconds: number;
+  public_request_retry_policy: "no_automatic_retry_for_search_endpoints";
+  query_source_targets: {
+    model_south_african_direct: number;
+    takealot_root_expansion: number;
+    adjacent_opportunity: number;
+    adaptive_recovery: number;
+  };
+  operation_scope: "manual_single_offer_or_confirmed_serial_batch";
   offer_max_age_hours: number;
   image_max_dimension: number;
   organic_page_size: number;
   columns_per_row: number;
   core_first_page_threshold: number;
+  semantic_relation_grades: ["S", "A", "C/I"];
+  semantic_relation_source_priority_decides_grade: false;
+  semantic_adjacent_ratio_floor: number;
+  semantic_supported_ratio_floor: number;
+  semantic_adjacent_min_results: number;
   opportunity_max_direct_competitors: number;
   opportunity_max_organic_rank: number;
   position_scope: "organic_results_excluding_sponsored";
   passive_reads_are_local_only: boolean;
+  product_fact_manual_confirmation_available: true;
+  product_fact_profile_requires_current_image: true;
+  autocomplete_cache_shared_across_stores: true;
+  autocomplete_cache_ttl_hours: number;
+  autocomplete_cache_refresh_mode: "refresh_on_first_hit_after_ttl";
+  root_expansion_rank_is_search_volume: false;
+  product_fact_confirmation_mode: "manual_only";
+  decision_parameter_confirmation_mode: "manual_per_title";
+  decision_parameter_max_candidates: number;
+  decision_parameter_max_positive: number;
+  title_score_version: "evidence-title-v2";
+  title_score_scope: "current_title_text_against_frozen_product_and_query_evidence";
+  title_score_excludes_search_performance: true;
 }
 
 export interface SearchRankingAnalysisSummary {
   id: number;
   status: "running" | "completed" | "failed";
+  source_offer_id: string;
   source_title: string;
   provider: string;
   model: string;
@@ -622,6 +1096,54 @@ export interface SearchRankingAnalysisSummary {
   };
   estimated_cost_cny: number | null;
   title_validation_status: string | null;
+  title_score_value?: number | null;
+  title_score_band?: SearchRankingTitleScoreBand | null;
+  title_score_evidence_coverage?: number | null;
+  title_score_current_title_match?: boolean;
+  identity_difference_level?: "aligned" | "moderate" | "high" | null;
+  identity_large_difference?: boolean;
+  manual_fact_required?: boolean;
+  manual_fact_reason?: string | null;
+  variant_projection_applied?: boolean;
+  variant_parameters?: SearchRankingVariantParameter[];
+}
+
+export type SearchRankingVariantParameterType =
+  | SearchRankingDecisionParameterType
+  | "colour"
+  | "variant_value";
+
+export interface SearchRankingVariantParameter {
+  value: string;
+  parameter_type: SearchRankingVariantParameterType;
+  source: "seller_offer_title_difference";
+  visually_verified: false;
+}
+
+export interface SearchRankingVariantFamilyVariant {
+  offer_id: string;
+  productline_id: string | null;
+  sku: string | null;
+  title: string;
+  image_url: string | null;
+  available_stock: number;
+  parameters: SearchRankingVariantParameter[];
+}
+
+export interface SearchRankingVariantFamily {
+  productline_id: string | null;
+  representative_offer_id: string;
+  representative_title: string;
+  shared_title: string;
+  shared_title_source:
+    | "all_variant_titles"
+    | "representative_fallback_no_common_sequence";
+  variant_count: number;
+  distinct_image_count: number;
+  image_evidence_scope: "representative_offer_only";
+  variant_parameter_source: "current_seller_offer_titles";
+  variant_parameters_visually_verified: false;
+  variants: SearchRankingVariantFamilyVariant[];
 }
 
 export interface SearchRankingProduct {
@@ -638,6 +1160,12 @@ export interface SearchRankingProduct {
   snapshot_age_hours: number;
   ownership_source: "authenticated_store_seller_offers";
   analyzable: boolean;
+  shared_family_title?: string | null;
+  family_representative_offer_id?: string | null;
+  variant_count?: number;
+  variant_parameters?: SearchRankingVariantParameter[];
+  variant_parameter_source?: "current_seller_offer_titles" | null;
+  variant_parameters_visually_verified?: false;
   latest_analysis: SearchRankingAnalysisSummary | null;
 }
 
@@ -662,6 +1190,37 @@ export interface SearchRankingKeywordResult {
     matched_first_page_results?: number;
     evaluated_first_page_results?: number;
     first_page_same_type_ratio?: number;
+    semantic_relation_grade?: "S" | "A" | "C/I";
+    semantic_relation_label?:
+      | "same_product_or_direct_alias"
+      | "adjacent_demand_alternative"
+      | "complementary_or_irrelevant_rejected";
+    semantic_relation_decision?: string;
+    semantic_relation_source_priority_decides_grade?: false;
+    semantic_relation_current_title_alias?: string | null;
+    semantic_relation_query_same_product_terms?: string[];
+    semantic_relation_same_product_terms?: string[];
+    semantic_relation_buyer_jobs?: string[];
+    semantic_relation_adjacent_roots?: string[];
+    semantic_relation_alternative_product_terms?: string[];
+    semantic_relation_excluded_product_terms?: string[];
+    semantic_relation_same_product_result_count?: number;
+    semantic_relation_adjacent_result_count?: number;
+    semantic_relation_rejected_result_count?: number;
+    semantic_relation_evaluated_result_count?: number;
+    semantic_relation_same_product_ratio?: number;
+    semantic_relation_adjacent_ratio?: number;
+    semantic_relation_supported_ratio?: number;
+    semantic_relation_adjacent_page_qualified?: boolean;
+    semantic_relation_adjacent_ratio_floor?: number;
+    semantic_relation_supported_ratio_floor?: number;
+    semantic_relation_min_adjacent_results?: number;
+    semantic_relation_same_product_result_titles?: string[];
+    semantic_relation_adjacent_result_titles?: string[];
+    semantic_relation_evidence_scope?: "first_page_organic_result_titles";
+    semantic_relation_uses_per_result_image_or_category?: false;
+    semantic_relation_limitations?: string;
+    page_validation_status?: "completed" | "not_run";
     first_page_majority?: boolean;
     direct_competitor_count_first_page?: number;
     direct_competitor_count_excluding_target_first_page?: number;
@@ -672,6 +1231,11 @@ export interface SearchRankingKeywordResult {
     opportunity_max_direct_competitors?: number;
     opportunity_max_organic_rank?: number;
     opportunity_candidate?: boolean;
+    blue_ocean_candidate?: boolean;
+    blue_ocean_platform_expansion_observed?: boolean;
+    blue_ocean_semantic_relation_grade?: "S" | "A" | "C/I" | null;
+    blue_ocean_qualified?: boolean;
+    blue_ocean_rejection_reasons?: string[];
     opportunity_claims_safe?: boolean;
     opportunity_qualified?: boolean;
     opportunity_rejection_reasons?: string[];
@@ -679,8 +1243,27 @@ export interface SearchRankingKeywordResult {
     effective_relevance_status?: SearchRankingKeywordResult["relevance_status"];
     candidate_source?:
       | "image_precise"
+      | "image_title_fused_precise"
+      | "takealot_root_expansion"
       | "takealot_autocomplete"
-      | "comparison_resample";
+      | "comparison_resample"
+      | "title_verified_parameter";
+    query_source_channel?:
+      | "model_south_african_direct"
+      | "takealot_root_expansion"
+      | "takealot_autocomplete_path"
+      | "comparison_resample"
+      | "title_verified_parameter"
+      | "human_confirmed_decision_parameter"
+      | "unknown";
+    query_source_channels?: Array<
+      | "model_south_african_direct"
+      | "takealot_root_expansion"
+      | "takealot_autocomplete_path"
+      | "comparison_resample"
+      | "title_verified_parameter"
+      | "human_confirmed_decision_parameter"
+    >;
     intended_strategy?: "core" | "opportunity" | "comparison";
     intended_strategies?: Array<"core" | "opportunity" | "comparison">;
     effective_strategy?:
@@ -696,21 +1279,66 @@ export interface SearchRankingKeywordResult {
       | "image_shopper_root"
       | "image_need_state"
       | "image_only_model"
+      | "image_title_first_instinct"
+      | "image_title_need_state"
+      | "image_title_fusion_model"
+      | "human_confirmed_product_fact"
+      | "title_word_root"
       | "title_cross_check"
+      | "title_decision_parameter"
+      | "human_confirmed_decision_parameter"
       | "result_page_learning"
       | "previous_analysis_baseline"
       | null;
     autocomplete_rank?: number | null;
+    root_expansion_root?: string | null;
+    root_expansion_source?: string | null;
+    root_expansion_sources?: SearchRankingRootSource[];
+    root_expansion_rank?: number | null;
+    root_expansion_origin_phrase?: string | null;
+    root_expansion_rank_is_search_volume?: false;
     autocomplete_endpoint?: string | null;
     autocomplete_is_search_volume?: boolean;
+    autocomplete_cache_status?:
+      | "fresh_hit"
+      | "miss_refreshed"
+      | "stale_refreshed"
+      | "not_configured"
+      | "not_recorded"
+      | null;
+    autocomplete_observed_at?: string | null;
+    autocomplete_cache_age_hours?: number | null;
+    autocomplete_cache_ttl_hours?: number | null;
+    autocomplete_shared_across_stores?: boolean | null;
     demand_signal_note?: string;
+    same_type_validation_method?:
+      | "canonicalized_title_token_subset"
+      | "canonicalized_title_token_subset_with_controlled_product_aliases"
+      | "semantic_alias_token_subset_with_retarget_rejection";
+    same_type_validation_controlled_aliases?: string[];
+    same_type_validation_term_source?:
+      | "image_primary_physical_form"
+      | "query_matched_confirmed_product_type"
+      | "image_title_fused_same_product_terms"
+      | "semantic_verified_same_product_terms";
+    same_type_validation_uses_multimodal_per_result?: false;
+    same_type_validation_requires_contiguous_phrase?: false;
+    same_type_validation_limitations?: string;
     journey_type?:
       | "known_long_tail"
+      | "platform_root_expansion"
+      | "human_confirmed_fact_root_expansion"
+      | "title_cross_check_root_expansion"
+      | "model_fusion_root_expansion"
+      | "title_root_expansion"
+      | "result_page_root_expansion"
       | "first_instinct_autocomplete"
       | "autocomplete_backtrack"
       | "switched_instinct_root"
       | "result_page_learning"
       | "title_cross_check"
+      | "title_decision_parameter"
+      | "human_confirmed_decision_parameter"
       | "adjacent_opportunity"
       | null;
     journey_root?: string | null;
@@ -720,6 +1348,12 @@ export interface SearchRankingKeywordResult {
     journey_paths?: string[][];
     journey_depth?: number;
     journey_parent_query?: string | null;
+    adaptive_recovery?: boolean;
+    adaptive_recovery_source?:
+      | "result_page_learning"
+      | "second_best_root_expansion"
+      | "second_best_autocomplete"
+      | null;
     api_version?: string | null;
     reason?: string;
   };
@@ -752,11 +1386,55 @@ export interface SearchRankingTitleStrategy {
   evidence?: Record<string, unknown>;
 }
 
+export type SearchRankingTitleScoreBand =
+  | "strong"
+  | "solid"
+  | "needs_improvement"
+  | "weak"
+  | "insufficient_evidence";
+
+export interface SearchRankingTitleScoreComponent {
+  key: string;
+  label: string;
+  weight: number;
+  available: boolean;
+  score: number | null;
+  max_points: number;
+  summary: string;
+  evidence: Array<Record<string, unknown>>;
+}
+
+export interface SearchRankingTitleScore {
+  score: number;
+  band: SearchRankingTitleScoreBand;
+  label: string;
+  evidence_coverage: number;
+  available_points: number;
+  earned_points: number;
+  current_title: string;
+  current_title_match: boolean;
+  components: SearchRankingTitleScoreComponent[];
+  limitations: string[];
+  scoring_version: "evidence-title-v2";
+  score_scope: "current_title_text_against_frozen_product_and_query_evidence";
+  title_quality_only: true;
+  non_scoring_signals: Array<{
+    key: string;
+    label: string;
+    reason: string;
+  }>;
+  compatibility_projection?: {
+    source_version: string;
+    persisted_payload_changed: false;
+  };
+}
+
 export interface SearchRankingAnalysis extends SearchRankingAnalysisSummary {
   product_name: string | null;
   category: string | null;
   profile: {
     product_type_terms?: string[];
+    same_product_aliases?: string[];
     distinctive_terms?: string[];
     exclusions?: string[];
     title_strategies?: SearchRankingTitleStrategy[];
@@ -764,7 +1442,11 @@ export interface SearchRankingAnalysis extends SearchRankingAnalysisSummary {
     opportunity_title_reason?: string | null;
   };
   recognition?: {
-    basis?: "image_only_then_title_cross_check";
+    basis?:
+      | "image_only_then_title_cross_check"
+      | "isolated_image_then_title_cross_check_then_image_title_fusion";
+    visual_stage_received_source_title?: false;
+    fusion_stage_received_source_title?: true;
     model_received_source_title?: boolean;
     model_received_sku?: boolean;
     original_model_product_name?: string;
@@ -772,7 +1454,63 @@ export interface SearchRankingAnalysis extends SearchRankingAnalysisSummary {
     removed_unconfirmed_identity_terms?: string[];
     source_title_similarity?: number;
     title_reference_terms?: string[];
+    title_root_expansions?: string[];
+    title_identity_support?: boolean;
+    title_identity_supported_terms?: string[];
+    title_identity_matches?: Array<{
+      term: string;
+      identity_supported: boolean;
+      matched_identity_anchor: string | null;
+      identity_match_rule: string;
+      model_product_name_supported: boolean;
+    }>;
+    title_identity_decision_rule?:
+      "product_subject_or_controlled_generic_form_not_modifier_overlap";
+    confirmed_fact_reference_terms?: string[];
+    confirmed_identity_fact_terms?: string[];
+    confirmed_identity_fact_supported_terms?: string[];
+    confirmed_identity_fact_matches?: Array<{
+      term: string;
+      similarity: number;
+      matched_tokens: string[];
+      matched_identity_anchors: string[];
+      rejected_modifier_overlap: string[];
+      identity_supported: boolean;
+      identity_match_rule: string;
+    }>;
+    confirmed_identity_fact_similarity?: number;
+    confirmed_identity_fact_similarity_decides_support?: false;
+    confirmed_identity_fact_similarity_floor?: number;
+    confirmed_identity_fact_decision_rule?:
+      "product_subject_or_alias_not_modifier_overlap";
+    confirmed_identity_fact_support?: boolean;
+    confirmed_fact_resolved_title_conflict?: boolean;
+    title_identity_conflict?: boolean;
+    provider_identity_reference_included_confirmed_facts?: boolean;
+    identity_deviation_branch?:
+      | "title_consistent"
+      | "confirmed_fact_support_continue"
+      | "unresolved_conflict_stop"
+      | "moderate_difference_warning"
+      | "large_difference_warning";
     title_reference_role?: "post_recognition_cross_check_only";
+    cross_validation_isolated?: true;
+    cross_validation_completed_before_fusion_generation?: true;
+    identity_difference_level?: "aligned" | "moderate" | "high";
+    identity_large_difference?: boolean;
+    identity_difference_warning?: string | null;
+    manual_fact_requested_by_fusion_model?: boolean;
+    manual_fact_required?: boolean;
+    manual_fact_resolved_by_confirmation?: boolean;
+    manual_fact_reason?: string | null;
+    missing_facts?: string[];
+    manual_fact_confirmation_optional?: true;
+    batch_action?: "skip_without_retry" | "continue";
+    image_evidence_scope?: "representative_offer_only";
+    current_image_matches_representative?: boolean;
+    variant_parameter_source?: "current_seller_offer_titles";
+    variant_parameters_visually_verified?: false;
+    family_variant_count?: number;
   };
   autocomplete_checks?: Array<{
     seed: string;
@@ -785,15 +1523,109 @@ export interface SearchRankingAnalysis extends SearchRankingAnalysisSummary {
     status: "observed" | "unavailable" | "reused_observed";
     suggestions?: string[];
     parent_query?: string;
+    cache_status?:
+      | "fresh_hit"
+      | "miss_refreshed"
+      | "stale_refreshed"
+      | "not_configured"
+      | "not_recorded";
+    captured_at?: string;
+    age_hours?: number;
+    ttl_hours?: number;
+    refresh_policy?: "refresh_on_first_hit_after_ttl";
+    shared_across_stores?: boolean;
+    input_hit_count?: number;
+    refresh_count?: number;
+  }>;
+  root_expansion_checks?: Array<{
+    root?: string;
+    seed?: string;
+    input_state?: string;
+    shopper_root?: string;
+    root_source?: string;
+    seed_sources?: SearchRankingRootSource[];
+    origin_phrases?: string[];
+    input_kind: "complete_root_expansion";
+    status: "observed" | "unavailable" | "reused_observed";
+    journey_path?: string[];
+    journey_type?: string;
+    journey_depth?: number;
+    parent_root?: string | null;
+    raw_suggestions_are_selected?: false;
+    selection_policy?: "same_product_identity_or_structured_adjacent_product_family";
+    eligible_expansion_count?: number;
+    rejected_expansion_count?: number;
+    expansions?: Array<{
+      phrase: string;
+      rank: number;
+      relevance_status?: "eligible" | "rejected_irrelevant";
+      relation?: "same_product" | "adjacent_demand" | "irrelevant";
+      reason?: string;
+      matched_terms?: string[];
+      used_as_followup_root?: boolean;
+    }>;
+    cache_status?:
+      | "fresh_hit"
+      | "miss_refreshed"
+      | "stale_refreshed"
+      | "not_configured"
+      | "not_recorded";
+    captured_at?: string;
+    age_hours?: number;
+    ttl_hours?: number;
   }>;
   shopper_journey?: {
     mode?: "manual_single_offer_one_click";
-    autocomplete_state_limit?: number;
+    root_expansion_input_limit?: number;
+    root_expansion_followup_root_limit?: number;
+    root_expansion_phrase_roots_enabled?: true;
+    root_expansion_selection_policy?:
+      "same_product_identity_or_structured_adjacent_product_family";
+    root_expansion_raw_suggestions_are_selected?: false;
+    root_source_priority?: SearchRankingRootSource[];
+    model_localization?: {
+      market_context: "South Africa";
+      language_variant: "South African English";
+      shopper_context: "South African local customer habits";
+      policy_version: string;
+      scope: "all_model_generated_text_fields";
+      is_measured_demand: false;
+    };
     search_query_attempt_limit?: number;
     public_request_min_interval_seconds?: number;
+    public_request_jitter_seconds?: number;
+    query_source_targets?: {
+      model_south_african_direct: number;
+      takealot_root_expansion: number;
+      adjacent_opportunity: number;
+      adaptive_recovery: number;
+    };
+    adaptive_policy?: {
+      base_query_target: number;
+      recovery_query_target: number;
+      valid_platform_root_target: number;
+      recovery_priority: Array<
+        "result_page_learning" | "second_best_root_expansion"
+      >;
+    };
+    valid_platform_root_target?: number;
+    valid_platform_root_count?: number;
+    valid_platform_roots?: string[];
+    adaptive_recovery_used?: boolean;
+    adaptive_recovery_query?: string | null;
+    adaptive_recovery_source?:
+      | "result_page_learning"
+      | "second_best_root_expansion"
+      | "second_best_autocomplete"
+      | null;
+    adaptive_recovery_skipped_reason?: string | null;
     public_request_count?: number;
+    skipped_for_manual_fact?: boolean;
+    manual_fact_reason?: string | null;
+    missing_facts?: string[];
     steps?: Array<{
       query: string;
+      query_source_channel?: string;
       journey_type?: string | null;
       shopper_root?: string | null;
       path?: string[];
@@ -802,6 +1634,12 @@ export interface SearchRankingAnalysis extends SearchRankingAnalysisSummary {
       first_page_same_type_ratio?: number;
       target_found?: boolean;
       pages_scanned?: number;
+      adaptive_recovery?: boolean;
+      adaptive_recovery_source?:
+        | "result_page_learning"
+        | "second_best_root_expansion"
+        | "second_best_autocomplete"
+        | null;
     }>;
   };
   provider_attempts?: Array<{
@@ -813,6 +1651,8 @@ export interface SearchRankingAnalysis extends SearchRankingAnalysisSummary {
       | "cached_identity_conflict";
     reason?: string;
     source_title_similarity?: number;
+    title_identity_support?: boolean;
+    title_identity_supported_terms?: string[];
     usage?: {
       input_tokens?: number;
       output_tokens?: number;
@@ -820,6 +1660,58 @@ export interface SearchRankingAnalysis extends SearchRankingAnalysisSummary {
     };
     estimated_cost_cny?: number | null;
   }>;
+  title_score?: SearchRankingTitleScore | null;
+  visual_profile?: {
+    market_context?: "South Africa";
+    language_variant?: "South African English";
+    shopper_context?: "South African local customer habits";
+    product_name?: string;
+    category?: string;
+    product_type_terms?: string[];
+    distinctive_terms?: string[];
+  };
+  fusion_profile?: {
+    market_context?: "South Africa";
+    language_variant?: "South African English";
+    shopper_context?: "South African local customer habits";
+    product_name?: string;
+    category?: string;
+    product_type_terms?: string[];
+    same_product_aliases?: string[];
+    distinctive_terms?: string[];
+    keywords?: Array<{ phrase: string; rationale: string }>;
+    autocomplete_seeds?: Array<{ phrase: string; rationale: string }>;
+    opportunity_seeds?: Array<{
+      phrase: string;
+      rationale: string;
+      buyer_job?: string;
+      alternative_product_terms?: string[];
+      excluded_product_terms?: string[];
+    }>;
+  };
+  product_fact_profile?: {
+    applied_terms?: string[];
+    facts?: SearchRankingProductFactRecord[];
+    requires_current_image_match?: boolean;
+    source_policy?: string;
+  };
+  product_fact_recommendation: SearchRankingProductFactRecommendation;
+  variant_family?: SearchRankingVariantFamily;
+  variant_projection?: {
+    family_analysis_shared: true;
+    applied: boolean;
+    source_offer_id: string;
+    current_offer_id: string;
+    current_title: string;
+    title_review_available: boolean;
+    family_snapshot_current: boolean;
+    decision_parameter_confirmation_current: boolean;
+    variant_parameters: SearchRankingVariantParameter[];
+    variant_parameter_source: "current_seller_offer_titles";
+    variant_parameters_visually_verified: false;
+    image_evidence_scope: "representative_offer_only";
+    current_image_matches_representative: boolean;
+  };
   usage: {
     input_tokens?: number;
     output_tokens?: number;
@@ -872,9 +1764,180 @@ export interface SearchRankingListPayload {
   items: SearchRankingProduct[];
 }
 
+export type SearchRankingBatchStatusValue =
+  | "queued"
+  | "running"
+  | "pausing"
+  | "paused"
+  | "paused_after_error"
+  | "stopping"
+  | "stopped"
+  | "interrupted"
+  | "completed";
+
+export interface SearchRankingBatchState {
+  batch_id: string | null;
+  status: SearchRankingBatchStatusValue | null;
+  owned_by_current_user: boolean;
+  details_available: boolean;
+  message?: string;
+  owner_username?: string;
+  owner_display_name?: string;
+  snapshot_id?: string;
+  created_at?: string;
+  started_at?: string | null;
+  updated_at?: string;
+  finished_at?: string | null;
+  store_count?: number;
+  target_count?: number;
+  next_index?: number;
+  processed_count?: number;
+  completed_count?: number;
+  skipped_count?: number;
+  failed_count?: number;
+  remaining_count?: number;
+  current_target?: {
+    index: number;
+    store_code: string;
+    store_name: string;
+    offer_id: string;
+    productline_id: string | null;
+    title: string | null;
+    variant_count: number;
+    shared_family_title?: string | null;
+    variant_parameters?: Array<{
+      offer_id: string;
+      parameters: SearchRankingVariantParameter[];
+    }>;
+  } | null;
+  usage?: {
+    input_tokens: number;
+    output_tokens: number;
+    total_tokens: number;
+    estimated_cost_cny: number;
+    cost_accounting_complete: boolean;
+  };
+  store_progress?: Array<{
+    code: string;
+    display_name: string;
+    target_count: number;
+    completed_count: number;
+    skipped_count: number;
+    failed_count: number;
+  }>;
+  last_error?: string | null;
+  deduplicated_pending_variant_count?: number;
+  recent_results?: Array<{
+    index: number;
+    store_code: string;
+    store_name: string;
+    offer_id: string;
+    productline_id: string | null;
+    title: string | null;
+    variant_count?: number;
+    outcome: "completed" | "skipped" | "failed";
+    message: string | null;
+    analysis_id: number | null;
+    vision_reused: boolean;
+    usage: {
+      input_tokens: number;
+      output_tokens: number;
+      total_tokens: number;
+    };
+    estimated_cost_cny: number;
+    cost_accounting_complete: boolean;
+    finished_at: string;
+  }>;
+  strict_serial?: true;
+  max_concurrency?: 1;
+  automatic_retry?: false;
+  can_pause?: boolean;
+  can_resume?: boolean;
+  can_stop?: boolean;
+  can_restart?: boolean;
+}
+
+export interface SearchRankingBatchPreviewPayload {
+  policy: {
+    scope: "all_accessible_active_connected_stores";
+    target_scope: "one_representative_offer_per_store_productline_id";
+    strict_serial: true;
+    max_concurrency: 1;
+    automatic_retry: false;
+    pause_after_provider_or_network_error: true;
+    reverse_image_search: false;
+    requires_snapshot_confirmation: true;
+    public_request_min_interval_seconds: number;
+    public_request_max_interval_seconds: number;
+  };
+  preview: {
+    snapshot_id: string;
+    generated_at: string;
+    store_count: number;
+    stores: Array<{
+      code: string;
+      display_name: string;
+      current_offer_count: number;
+      eligible_offer_count: number;
+      eligible_count: number;
+      variant_family_count: number;
+      existing_vision_cache_hit_count: number;
+      same_batch_vision_reuse_count: number;
+      fresh_vision_count: number;
+    }>;
+    current_offer_count: number;
+    eligible_offer_count: number;
+    eligible_count: number;
+    variant_family_count: number;
+    existing_vision_cache_hit_count: number;
+    same_batch_vision_reuse_count: number;
+    fresh_vision_count: number;
+    maximum_fresh_vision_count: number;
+    estimated_usage: {
+      historical_sample_count: number;
+      input_tokens_per_fresh_image: number;
+      output_tokens_per_fresh_image: number;
+      total_tokens_per_fresh_image: number;
+      input_tokens_total: number;
+      output_tokens_total: number;
+      total_tokens: number;
+    };
+    estimated_cost: {
+      currency: "CNY";
+      base_cny: number;
+      typical_low_cny: number;
+      typical_high_cny: number;
+      conservative_upper_cny: number;
+      primary_provider: string;
+      primary_model: string;
+      pricing_snapshot_date: string;
+      input_price_cny_per_million: number;
+      output_price_cny_per_million: number;
+      fallback_may_add_cost: boolean;
+    };
+    estimated_duration: {
+      historical_request_sample_count: number;
+      public_requests_per_offer_median: number;
+      average_interval_seconds: number;
+      pacing_floor_hours: number;
+      likely_min_hours: number;
+      likely_max_hours: number;
+      note: string;
+    };
+  };
+  batch: SearchRankingBatchState | null;
+}
+
+export interface SearchRankingBatchStatusPayload {
+  batch: SearchRankingBatchState | null;
+}
+
 export interface SearchRankingDetailPayload {
   status: SearchRankingStatus;
   product: SearchRankingProduct;
+  variant_family?: SearchRankingVariantFamily;
+  product_fact_profile: SearchRankingProductFactProfile;
+  decision_parameter_profile: SearchRankingDecisionParameterProfile;
   analysis: SearchRankingAnalysis | null;
   latest_attempt: SearchRankingAnalysisSummary | null;
   history: SearchRankingAnalysisSummary[];
@@ -889,9 +1952,6 @@ export type PermissionKey =
   | "search_ranking.run"
   | "competitors.view"
   | "competitors.collect"
-  | "daily_report.view"
-  | "daily_report.manage"
-  | "daily_report.export"
   | "refresh.run"
   | "users.manage";
 
@@ -1284,342 +2344,4 @@ export interface PlatformWarehousePayload {
   drafts: PlatformWarehouseDraft[];
   platform_shipments: PlatformWarehouseShipment[];
   platform_snapshot_synced_at: string | null;
-}
-
-export type DailyReportStatus =
-  | "awaiting_evening"
-  | "ready"
-  | "needs_review"
-  | "missing_capture"
-  | "confirmed";
-
-export interface DailyReportValues {
-  page_views_30_days: number | null;
-  ordered_units: number | null;
-  platform_stock: number | null;
-}
-
-export interface DailyReportConfirmationRevert {
-  previous_confirmation: {
-    values: DailyReportValues;
-    source: "morning" | "evening" | "latest" | "manual";
-    source_label: string;
-    confirmed_by: string | null;
-    confirmed_at: string | null;
-    confirm_note: string | null;
-  };
-  previous_stock_alert: {
-    dismissed: boolean;
-    note: string | null;
-    dismissed_by: string | null;
-    dismissed_at: string | null;
-  };
-  reverted_by: string | null;
-  reverted_at: string;
-  revert_note: string;
-}
-
-export interface DailyReportItem {
-  offer_id: string;
-  sku: string | null;
-  title: string;
-  image_url: string | null;
-  status: DailyReportStatus;
-  morning: DailyReportValues | null;
-  evening: DailyReportValues | null;
-  capture_versions: Array<{
-    run_id: string;
-    slot: "morning" | "evening" | "pre_close" | "manual";
-    label: string;
-    captured_at: string;
-    values: DailyReportValues;
-  }>;
-  manual: DailyReportValues | null;
-  manual_reason: string | null;
-  manual_note: string | null;
-  manual_at: string | null;
-  final: DailyReportValues | null;
-  confirmation_baseline: {
-    values: DailyReportValues;
-    source: "morning" | "evening" | "latest" | "manual";
-    source_label: string;
-    confirmed_by: string;
-    confirmed_at: string;
-    confirm_note: string | null;
-  } | null;
-  confirmation_revert: DailyReportConfirmationRevert | null;
-  review_versions: Array<{
-    kind: "confirmed" | "capture" | "manual";
-    run_id: string | null;
-    slot: "morning" | "evening" | "pre_close" | "manual" | null;
-    label: string;
-    captured_at: string | null;
-    values: DailyReportValues;
-    source_label: string | null;
-    user_name: string | null;
-    note: string | null;
-  }>;
-  selected_source: "morning" | "evening" | "latest" | "manual" | null;
-  confirm_note: string | null;
-  operator_note: string | null;
-  operator_notes: Array<{
-    id: number;
-    issue_type: "general" | "capture_difference" | "stock_continuity";
-    note: string;
-    user_id: number | null;
-    user_name: string;
-    created_at: string;
-    updated_by: string | null;
-    updated_at: string | null;
-  }>;
-  confirmation_trigger: {
-    kind: "previous_confirmation";
-    message: string;
-    trigger_business_date: string;
-    affected_business_date: string;
-    confirmation_source: "morning" | "evening" | "latest" | "manual";
-    confirmation_source_label: string;
-    confirmed_by: string | null;
-    confirmed_at: string;
-    confirmation_note: string;
-    previous_stock_before_confirmation: number | null;
-    confirmed_previous_stock: number;
-    current_ordered_units: number;
-    expected_stock_before_confirmation: number | null;
-    comparison_before_state?: "matched" | "mismatch" | "unavailable";
-    expected_stock_after_confirmation: number;
-    actual_stock: number;
-    affected_previous_status: DailyReportStatus;
-    affected_previous_final: DailyReportValues | null;
-    affected_previous_confirmed_by: string | null;
-    affected_previous_confirmed_at: string | null;
-    affected_previous_confirm_note: string | null;
-    affected_current_values: DailyReportValues;
-  } | null;
-  differences: Array<keyof DailyReportValues>;
-  review_issues: Array<{
-    type:
-      | "capture_difference"
-      | "stock_continuity"
-      | "confirmation_reverted"
-      | "confirmation_revert_impact";
-    fields: Array<keyof DailyReportValues>;
-  }>;
-  missing_capture: boolean;
-  missing_slots: Array<"morning" | "evening">;
-  missing_run_ids: string[];
-  missing_fields: Array<keyof DailyReportValues>;
-  missing_reason: string | null;
-  current: DailyReportValues;
-  stock_context: {
-    business_date: string;
-    stock: number | null;
-    source:
-      | "confirmed"
-      | "latest_capture"
-      | "version_difference"
-      | "confirmation_reverted";
-    source_label: string;
-    selected_source: "morning" | "evening" | "latest" | "manual" | null;
-    confirmed_by: string | null;
-    confirmed_at: string | null;
-    confirm_note: string | null;
-    capture_label: string | null;
-    continuity_ready: boolean;
-    version_differences: Array<keyof DailyReportValues>;
-    confirmation_revert?: DailyReportConfirmationRevert | null;
-  } | null;
-  stock_check: {
-    previous_stock: number | null;
-    expected_stock: number | null;
-    actual_stock: number | null;
-    mismatch: boolean;
-    dismissed: boolean;
-    note: string | null;
-    resolution_action: "eliminate" | "confirm_difference";
-    deferred_reason: string | null;
-  };
-}
-
-export interface DailyReportPendingAction extends DailyReportItem {
-  business_date: string;
-}
-
-export interface DailyReportHandledAction {
-  id: number;
-  action_type:
-    | "confirmation"
-    | "stock_difference"
-    | "stock_eliminated"
-    | "manual_candidate"
-    | "operator_note"
-    | "operator_note_updated"
-    | "operator_note_deleted"
-    | "confirmation_reverted"
-    | "stock_alert_reopened";
-  business_date: string;
-  offer_id: string;
-  sku: string | null;
-  title: string;
-  image_url: string | null;
-  handled_by: string;
-  handled_at: string;
-  note: string | null;
-  active: boolean;
-  reversal: {
-    kind: string;
-    handled_by: string;
-    handled_at: string;
-    note: string | null;
-  } | null;
-  current: DailyReportValues;
-  detail: {
-    source: "morning" | "evening" | "latest" | "manual" | null;
-    source_label: string | null;
-    previous_stock: number | null;
-    ordered_units: number | null;
-    expected_stock: number | null;
-    actual_stock: number | null;
-    reason: string | null;
-    issue_type:
-      | "general"
-      | "capture_difference"
-      | "stock_continuity"
-      | null;
-    before_note: string | null;
-    after_note: string | null;
-    deleted_note: string | null;
-    before_values: DailyReportValues | null;
-    after_values: DailyReportValues | null;
-  };
-}
-
-export interface DailyReportPayload {
-  business_date: string;
-  runs: Array<{
-    run_id: string;
-    slot: "morning" | "evening" | "pre_close" | "manual";
-    captured_at: string;
-    status: string;
-    counts: Record<string, unknown>;
-  }>;
-  capture_status: Record<
-    "morning" | "evening" | "pre_close",
-    {
-      status: "success" | "failed" | "missing" | "pending" | "not_applicable";
-      captured_at: string | null;
-      product_count: number;
-      reason: string | null;
-      attempts: Array<{
-        attempt: number;
-        strategy: string;
-        trust_env: boolean;
-        started_at: string;
-        finished_at: string;
-        status: "success" | "failed";
-        workflow_status: string;
-        reason: string;
-        offer_run_id: string | null;
-        sales_run_id: string | null;
-      }>;
-      attempt_count: number;
-      recovered: boolean;
-      capture_method: string | null;
-    }
-  >;
-  capture_issues: Array<{
-    business_date: string;
-    kind: "slot" | "product";
-    slot: "morning" | "evening" | "pre_close" | "manual" | null;
-    offer_id: string | null;
-    sku: string | null;
-    title: string | null;
-    reason: string;
-  }>;
-  capture_issue_range: {
-    available_start: string;
-    available_end: string;
-    selected_start: string;
-    selected_end: string;
-  };
-  comparison_history: Array<{
-    business_date: string;
-    inventory_context: {
-      inventory_date: string;
-      captured_at: string | null;
-      source_slot: "morning" | "evening" | "pre_close" | "manual" | null;
-      source_label: string | null;
-      delayed: boolean;
-      resolved_after_missing: boolean;
-      complete: boolean;
-      product_count: number;
-      missing_count: number;
-      note: string;
-      exception_note: string | null;
-    };
-    items: Array<
-      Pick<
-        DailyReportItem,
-        | "offer_id"
-        | "sku"
-        | "title"
-        | "image_url"
-        | "status"
-        | "missing_capture"
-        | "missing_reason"
-        | "current"
-        | "stock_check"
-        | "operator_note"
-        | "operator_notes"
-        | "confirmation_baseline"
-        | "confirmation_revert"
-      >
-    >;
-  }>;
-  pending_actions: DailyReportPendingAction[];
-  handled_actions: DailyReportHandledAction[];
-  counts: {
-    products: number;
-    current_stock_total: number | null;
-    current_stock_missing: number;
-    with_sales: number;
-    awaiting_evening: number;
-    ready: number;
-    needs_review: number;
-    missing_capture: number;
-    confirmed: number;
-    stock_alerts: number;
-  };
-  items: DailyReportItem[];
-  prior_reminders: DailyReportReminderDate[];
-  deadline_snapshot: {
-    snapped_at: string;
-    unresolved_count: number;
-    resolved_at: string | null;
-  } | null;
-}
-
-export interface DailyReportReminderDate {
-  business_date: string;
-  unresolved_count: number;
-}
-
-export interface DailyReportReminders {
-  count: number;
-  dates: DailyReportReminderDate[];
-}
-
-export interface DailyReportExport {
-  through: string;
-  blocked: boolean;
-  unresolved: Array<{
-    business_date: string;
-    offer_id: string;
-    sku: string | null;
-    title: string | null;
-    status: DailyReportStatus;
-  }>;
-  exists: boolean;
-  download_url: string | null;
-  name?: string;
 }

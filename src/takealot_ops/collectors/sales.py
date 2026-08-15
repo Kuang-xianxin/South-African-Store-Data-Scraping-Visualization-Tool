@@ -17,7 +17,7 @@ def collect_sales(
     client: TakealotClient, repository: Repository, start: date, end: date
 ) -> CollectionResult:
     """Fetch and convert all inclusive sales pages before atomic upsert."""
-    run_id = _persist_run_start(repository, "sales")
+    run_id = _persist_run_start(repository, "sales", scope_date=end)
     params = {
         "order_date__gte": start.isoformat(),
         "order_date__lte": end.isoformat(),

@@ -17,6 +17,9 @@ from takealot_ops.storage.models import (
     ErpStore,
     ErpUser,
     OfferCurrent,
+    SearchAutocompleteCache,
+    SearchAutocompleteSnapshot,
+    SearchRankingAnalysis,
     StoreOfferBaseline,
     StoreOfferObservation,
 )
@@ -90,12 +93,14 @@ def create_schema(engine: Engine) -> None:
     _add_erp_user_store_access_column(engine)
     _ensure_default_erp_store(engine)
     _add_competitor_target_group_column(engine)
+    _add_competitor_listing_operation_library_columns(engine)
     _add_competitor_variant_observation_columns(engine)
     _add_platform_warehouse_upstream_columns(engine)
     if engine.dialect.name == "sqlite":
         _add_sqlite_offer_stock_columns(engine)
     _seed_store_offer_baselines(engine)
     _seed_store_offer_observations(engine)
+    _seed_search_autocomplete_cache(engine)
 
 
 def sync_configured_erp_stores(
@@ -137,17 +142,115 @@ def sync_configured_erp_stores(
             user.store_access_all = True
 
 
+def _seed_search_autocomplete_cache(engine: Engine) -> None:
+    """Backfill ordered completion evidence already captured by successful analyses."""
+
+    analysis = SearchRankingAnalysis.__table__
+    with Session(engine) as session, session.begin():
+        rows = session.execute(
+            select(
+                analysis.c.id,
+                analysis.c.created_at,
+                analysis.c.completed_at,
+                analysis.c.vision_payload,
+            )
+            .where(analysis.c.status == "completed")
+            .order_by(analysis.c.created_at, analysis.c.id)
+        ).all()
+        observations: dict[str, list[tuple[datetime, str, list[str]]]] = {}
+        for row in rows:
+            payload = row.vision_payload
+            if not isinstance(payload, dict):
+                continue
+            checks = payload.get("autocomplete_checks")
+            if not isinstance(checks, list):
+                continue
+            captured_at = row.completed_at or row.created_at
+            for check in checks:
+                if not isinstance(check, dict) or not isinstance(
+                    check.get("suggestions"),
+                    list,
+                ):
+                    continue
+                input_text = " ".join(
+                    str(check.get("input_state") or check.get("seed") or "").split()
+                )[:200]
+                input_key = input_text.casefold()
+                if not input_key:
+                    continue
+                suggestions = _historical_autocomplete_suggestions(
+                    check["suggestions"]
+                )
+                observations.setdefault(input_key, []).append(
+                    (captured_at, input_text, suggestions)
+                )
+
+        for input_key, captured in observations.items():
+            if session.scalar(
+                select(SearchAutocompleteCache.id).where(
+                    SearchAutocompleteCache.input_key == input_key
+                )
+            ) is not None:
+                continue
+            captured.sort(key=lambda item: item[0])
+            latest_at, latest_input, latest_suggestions = captured[-1]
+            cache = SearchAutocompleteCache(
+                input_key=input_key,
+                input_text=latest_input,
+                suggestions=latest_suggestions,
+                captured_at=latest_at,
+                last_hit_at=latest_at,
+                hit_count=len(captured),
+                refresh_count=len(captured),
+                last_refresh_status="success",
+                last_error=None,
+                created_at=captured[0][0],
+                updated_at=latest_at,
+            )
+            session.add(cache)
+            session.flush()
+            session.add_all(
+                SearchAutocompleteSnapshot(
+                    cache_id=cache.id,
+                    input_key=input_key,
+                    input_text=input_text,
+                    suggestions=suggestions,
+                    captured_at=captured_at,
+                )
+                for captured_at, input_text, suggestions in captured
+            )
+
+
+def _historical_autocomplete_suggestions(raw: list[Any]) -> list[str]:
+    output: list[str] = []
+    seen: set[str] = set()
+    for value in raw:
+        phrase = " ".join(str(value).split())[:200]
+        key = phrase.casefold()
+        if not phrase or key in seen:
+            continue
+        seen.add(key)
+        output.append(phrase)
+        if len(output) >= 5:
+            break
+    return output
+
+
 _STORE_SCOPED_TABLES = (
     "collection_runs",
     "offer_current",
     "offer_snapshots",
     "search_ranking_analyses",
     "search_ranking_keyword_results",
+    "search_ranking_product_facts",
+    "search_ranking_decision_parameter_confirmations",
     "store_offer_baselines",
     "store_offer_observations",
     "sale_items",
     "return_items",
     "daily_product_metrics",
+    "daily_sales_metric_states",
+    "sales_revenue_revisions",
     "anomaly_events",
     "data_quality_events",
     "logistics_provider_snapshots",
@@ -586,6 +689,31 @@ def _add_competitor_target_group_column(engine: Engine) -> None:
             index_name = preparer.quote("ix_competitor_targets_offer_group_plid")
             connection.exec_driver_sql(
                 f"CREATE INDEX {index_name} ON {table} ({group_column})"
+            )
+
+
+def _add_competitor_listing_operation_library_columns(engine: Engine) -> None:
+    """Retain the explicitly selected personal library on listing audits."""
+    with engine.begin() as connection:
+        table_name = "competitor_listing_operations"
+        if not inspect(connection).has_table(table_name):
+            return
+        existing = {
+            str(column["name"])
+            for column in inspect(connection).get_columns(table_name)
+        }
+        preparer = connection.dialect.identifier_preparer
+        table = preparer.quote(table_name)
+        columns = {
+            "personal_library_id": "INTEGER NULL",
+            "personal_library_name": "VARCHAR(40) NULL",
+        }
+        for column_name, column_type in columns.items():
+            if column_name in existing:
+                continue
+            column = preparer.quote(column_name)
+            connection.exec_driver_sql(
+                f"ALTER TABLE {table} ADD COLUMN {column} {column_type}"
             )
 
 

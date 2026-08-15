@@ -23,6 +23,7 @@ from takealot_ops.competitors.domain import (
     summarize_reviews,
 )
 from takealot_ops.competitors.repository import CompetitorRepository
+from takealot_ops.competitors.own_store import load_connected_store_offer_points
 from takealot_ops.competitors.service import (
     _variant_row,
     load_competitor_dataset,
@@ -33,10 +34,83 @@ from takealot_ops.competitors.web import create_app
 from takealot_ops.storage.migrations import create_schema
 from takealot_ops.storage.models import (
     CompetitorTarget,
+    ErpStore,
     OfferCurrent,
     StoreOfferBaseline,
     StoreOfferObservation,
 )
+from takealot_ops.storage.store_context import store_scope
+
+
+def test_store_offer_points_filter_scope_and_skip_observation_duplicates(
+    tmp_path: Path,
+) -> None:
+    engine = create_engine(
+        f"sqlite:///{(tmp_path / 'store-offer-points.db').as_posix()}"
+    )
+    create_schema(engine)
+    captured_at = datetime(2026, 8, 14, 1, tzinfo=UTC)
+    with Session(engine) as session, session.begin():
+        session.add(
+            ErpStore(
+                code="store-02",
+                display_name="Beta Store",
+                active=True,
+                data_connected=True,
+                created_at=captured_at,
+                updated_at=captured_at,
+            )
+        )
+
+    def point(
+        model: type[StoreOfferBaseline] | type[StoreOfferObservation],
+        offer_id: str,
+        plid: str,
+        captured: datetime,
+    ) -> StoreOfferBaseline | StoreOfferObservation:
+        return model(
+            display_date=date(2026, 8, 14),
+            offer_id=offer_id,
+            productline_id=plid,
+            sku=f"SKU-{offer_id}",
+            title=offer_id,
+            image_url=None,
+            selling_price=100,
+            status="buyable",
+            total_stock=5,
+            captured_at=captured,
+        )
+
+    with store_scope("current"), Session(engine) as session, session.begin():
+        session.add_all(
+            [
+                point(StoreOfferObservation, "duplicate", "11111111", captured_at),
+                point(StoreOfferBaseline, "duplicate", "11111111", captured_at),
+                point(
+                    StoreOfferBaseline,
+                    "legacy-only",
+                    "11111111",
+                    datetime(2026, 8, 14, 2, tzinfo=UTC),
+                ),
+            ]
+        )
+    with store_scope("store-02"), Session(engine) as session, session.begin():
+        session.add(
+            point(StoreOfferObservation, "other-store", "11111111", captured_at)
+        )
+
+    with Session(engine) as session:
+        points = load_connected_store_offer_points(
+            session,
+            plids={"11111111"},
+            store_codes={"current"},
+        )
+    engine.dispose()
+
+    assert [point.offer_id for point in points] == ["duplicate", "legacy-only"]
+    assert isinstance(points[0], StoreOfferObservation)
+    assert isinstance(points[1], StoreOfferBaseline)
+    assert {point.store_code for point in points} == {"current"}
 
 
 def test_only_default_variant_falls_back_to_snapshot_product_image() -> None:
@@ -968,6 +1042,7 @@ def test_own_store_product_is_separated_and_only_exposes_follower_offers(
                 productline_id=plid,
                 title="Own Store Product",
                 selling_price=100,
+                status="disabled_by_seller",
                 total_stock=7,
                 captured_at=captured_at,
             )
@@ -1043,6 +1118,16 @@ def test_own_store_product_is_separated_and_only_exposes_follower_offers(
         )
 
     dataset = load_competitor_dataset(engine)
+    ranged_dataset = load_competitor_dataset(
+        engine,
+        start_date=date(2026, 8, 2),
+        end_date=date(2026, 8, 2),
+    )
+    list_only_dataset = load_competitor_dataset(
+        engine,
+        include_detail_frames=False,
+        own_store_only=True,
+    )
     engine.dispose()
 
     assert dataset.current.empty
@@ -1056,6 +1141,23 @@ def test_own_store_product_is_separated_and_only_exposes_follower_offers(
     assert item["库存数量"] == 6
     assert item["库存净变化"] == -1
     assert item["库存净流出"] == 1
+    assert item["周期销售件数"] == 1
+    assert item["周期销售额"] == 95.0
+    assert item["周期补货量"] == 0
+    assert item["周期补货货值"] == 0.0
+    assert item["周期库存周转金额"] == 95.0
+    assert item["最新Offer状态"] == ["disabled_by_seller"]
+    assert item["最新Offer状态更新时间"].date() == captured_at.date()
+    assert item["自有报价"][0]["状态"] == "buyable"
+    assert ranged_dataset.store_current.iloc[0]["最新Offer状态"] == [
+        "disabled_by_seller"
+    ]
+    assert list_only_dataset.current.empty
+    assert len(list_only_dataset.store_current) == 1
+    assert list_only_dataset.history.empty
+    assert list_only_dataset.reviews.empty
+    assert list_only_dataset.variants.empty
+    assert list_only_dataset.store_history.empty
     assert bool(item["库存可比"])
     assert item["跟卖发现日期"] == ["2026-08-02"]
     assert item["新增跟卖卖家数"] == 1
@@ -1072,6 +1174,19 @@ def test_own_store_product_is_separated_and_only_exposes_follower_offers(
     ]
     assert item["对比报价"][0]["卖家"] == "当前店铺"
     assert item["对比报价"][0]["库存数量"] == 6
+    assert item["对比报价"][0]["库存原始状态"] == "buyable"
+    assert item["对比报价"][0]["最新Offer状态"] == "disabled_by_seller"
+    assert item["对比报价"][0]["最新Offer状态更新时间"].date() == captured_at.date()
+    assert item["对比报价"][0]["最新Offer库存数量"] == 7
+    assert item["对比报价"][0]["最新Offer库存状态"] == "有货"
+    assert (
+        ranged_dataset.store_current.iloc[0]["对比报价"][0]["最新Offer状态"]
+        == "disabled_by_seller"
+    )
+    assert (
+        ranged_dataset.store_current.iloc[0]["对比报价"][0]["最新Offer库存状态"]
+        == "有货"
+    )
     seller_api_history = dataset.store_history.loc[
         dataset.store_history["评论数可用"].eq(False)
     ]
@@ -1512,6 +1627,11 @@ def test_competitor_signals_recompute_from_oldest_and_latest_in_date_range(
     all_signal = all_range.current.iloc[0]
     assert all_signal["库存净变化"] == -6
     assert all_signal["库存净流出"] == 6
+    assert all_signal["周期销售件数"] == 6
+    assert all_signal["周期销售额"] == 1220.0
+    assert all_signal["周期补货量"] == 0
+    assert all_signal["周期补货货值"] == 0.0
+    assert all_signal["周期库存周转金额"] == 1220.0
     assert all_signal["新增评论"] == 3
     assert all_signal["新增好评"] == 2
     assert all_signal["新增差评"] == 1
@@ -1554,6 +1674,11 @@ def test_competitor_signals_recompute_from_oldest_and_latest_in_date_range(
     recent_signal = recent_range.current.iloc[0]
     assert recent_signal["库存净变化"] == -4
     assert recent_signal["库存净流出"] == 4
+    assert recent_signal["周期销售件数"] == 4
+    assert recent_signal["周期销售额"] == 800.0
+    assert recent_signal["周期补货量"] == 0
+    assert recent_signal["周期补货货值"] == 0.0
+    assert recent_signal["周期库存周转金额"] == 800.0
     assert recent_signal["新增评论"] == 2
     assert recent_signal["新增好评"] == 1
     assert recent_signal["新增差评"] == 1

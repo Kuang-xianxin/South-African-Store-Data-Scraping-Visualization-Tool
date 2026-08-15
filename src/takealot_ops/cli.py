@@ -44,6 +44,10 @@ from takealot_ops.erp.daily_report import (
     record_daily_report_failure,
     unresolved_locations,
 )
+from takealot_ops.google_search_autocomplete import (
+    GoogleSearchAutocompleteService,
+    collect_google_autocomplete_inputs,
+)
 from takealot_ops.logistics.service import LogisticsOverviewService
 from takealot_ops.metrics.service import MetricService
 from takealot_ops.platform_warehouse.credentials import (
@@ -221,6 +225,21 @@ def build_parser() -> argparse.ArgumentParser:
         "trigger-competitor-collection",
         help="登记并唤醒 ERP 内可见的每日竞品共享采集批次",
     )
+    google_autocomplete = commands.add_parser(
+        "collect-google-autocomplete",
+        help="按南非区域参数采集并双入口核验Google Chrome搜索框补全词",
+    )
+    google_autocomplete.add_argument(
+        "inputs",
+        nargs="+",
+        help="一个或多个完整英文词根；每个词根必须整体加引号",
+    )
+    google_autocomplete.add_argument(
+        "--delay-seconds",
+        type=float,
+        default=2.0,
+        help="相邻词根采集间隔，默认2秒",
+    )
 
     verify = commands.add_parser("verify", help="检查数据库完整性和数据质量")
     verify.add_argument("--date", type=_parse_date, help="检查日期 YYYY-MM-DD")
@@ -329,6 +348,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
         elif args.command == "trigger-competitor-collection":
             exit_code = _trigger_competitor_collection_command(project_root)
+        elif args.command == "collect-google-autocomplete":
+            exit_code = _collect_google_autocomplete_command(
+                project_root,
+                args.inputs,
+                delay_seconds=args.delay_seconds,
+            )
         elif args.command == "verify":
             exit_code = _run_store_targets(
                 project_root,
@@ -984,6 +1009,35 @@ def _trigger_competitor_collection_command(project_root: Path) -> int:
     registration = "新登记" if created else "当日登记已存在"
     print(f"竞品自动批次 {registration}：{requested_for}；ERP 状态：{state}。")
     return 0
+
+
+def _collect_google_autocomplete_command(
+    project_root: Path,
+    inputs: Sequence[str],
+    *,
+    delay_seconds: float,
+) -> int:
+    """Persist only dual-endpoint-consensus Google Chrome ZA predictions."""
+
+    service = GoogleSearchAutocompleteService(project_root)
+    results = collect_google_autocomplete_inputs(
+        service,
+        inputs,
+        delay_seconds=delay_seconds,
+    )
+    print(
+        json.dumps(
+            {
+                "source": "google_chrome_autocomplete",
+                "region_code": "ZA",
+                "language_code": "en",
+                "results": [result.as_dict() for result in results],
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+    )
+    return 0 if all(result.verified for result in results) else EXIT_COLLECTION
 
 
 def _migrate_to_mysql_command(

@@ -7,6 +7,7 @@ import re
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, replace
 from datetime import UTC, date, datetime
+from decimal import Decimal
 from pathlib import Path
 from typing import cast
 from zoneinfo import ZoneInfo
@@ -129,6 +130,27 @@ class CompetitorDataset:
                 self.selected_end_date.isoformat() if self.selected_end_date is not None else None
             ),
         }
+
+
+@dataclass(frozen=True)
+class _InventoryTurnoverObservation:
+    """One ordered stock/price point used only for read-only interval turnover."""
+
+    scope: tuple[object, ...]
+    stock_quantity: int | None
+    stock_exact: bool
+    price: Decimal | None
+
+
+@dataclass(frozen=True)
+class _PeriodInventoryTurnover:
+    """Cumulative exact-stock decreases and replenishments for one interval."""
+
+    sales_units: int | None = None
+    sales_amount: float | None = None
+    replenishment_units: int | None = None
+    replenishment_value: float | None = None
+    turnover_value: float | None = None
 
 
 def _discovered_offer_targets(
@@ -724,6 +746,97 @@ def load_competitor_link_health(engine: Engine) -> list[dict[str, object]]:
 COMPETITOR_DISPLAY_TIMEZONE = ZoneInfo("Asia/Shanghai")
 
 
+def _period_inventory_turnover(
+    observations: list[_InventoryTurnoverObservation],
+) -> _PeriodInventoryTurnover:
+    """Value comparable exact-stock movements at each later point's price.
+
+    Inventory scopes are isolated before calculation.  Inexact observations and
+    scopes with fewer than two exact points are skipped, while repeated exact points
+    from the same scope remain comparable across missing or unusable observations.
+    Only an interval with no comparable exact pair remains unavailable.  Amounts are
+    inventory observations, not Takealot order revenue: cart occupancy,
+    cancellations and replenishment can all affect the underlying stock sequence.
+    """
+
+    exact_timelines_by_scope: dict[
+        tuple[object, ...], list[_InventoryTurnoverObservation]
+    ] = {}
+    for observation in observations:
+        if not observation.stock_exact or observation.stock_quantity is None:
+            continue
+        exact_timelines_by_scope.setdefault(observation.scope, []).append(observation)
+
+    comparable_timelines = [
+        timeline for timeline in exact_timelines_by_scope.values() if len(timeline) >= 2
+    ]
+    if not comparable_timelines:
+        return _PeriodInventoryTurnover()
+
+    sales_units = 0
+    replenishment_units = 0
+    sales_amount: Decimal | None = Decimal("0")
+    replenishment_value: Decimal | None = Decimal("0")
+    for timeline in comparable_timelines:
+        for previous, current in zip(timeline, timeline[1:]):
+            previous_quantity = previous.stock_quantity
+            current_quantity = current.stock_quantity
+            if previous_quantity is None or current_quantity is None:
+                continue
+            change = current_quantity - previous_quantity
+            if change < 0:
+                units = abs(change)
+                sales_units += units
+                if current.price is None:
+                    sales_amount = None
+                elif sales_amount is not None:
+                    sales_amount += current.price * units
+            elif change > 0:
+                replenishment_units += change
+                if current.price is None:
+                    replenishment_value = None
+                elif replenishment_value is not None:
+                    replenishment_value += current.price * change
+
+    turnover_value = (
+        sales_amount + replenishment_value
+        if sales_amount is not None and replenishment_value is not None
+        else None
+    )
+    return _PeriodInventoryTurnover(
+        sales_units=sales_units,
+        sales_amount=float(sales_amount) if sales_amount is not None else None,
+        replenishment_units=replenishment_units,
+        replenishment_value=(
+            float(replenishment_value) if replenishment_value is not None else None
+        ),
+        turnover_value=float(turnover_value) if turnover_value is not None else None,
+    )
+
+
+def _snapshot_period_inventory_turnover(
+    snapshots: list[CompetitorSnapshot],
+    *,
+    variant_signatures: dict[int, frozenset[tuple[str, str, str]]],
+) -> _PeriodInventoryTurnover:
+    ordered = sorted(snapshots, key=lambda row: (row.collected_at, row.id))
+    return _period_inventory_turnover(
+        [
+            _InventoryTurnoverObservation(
+                scope=(
+                    row.sku,
+                    row.seller_id,
+                    variant_signatures.get(row.id, frozenset()),
+                ),
+                stock_quantity=row.stock_quantity,
+                stock_exact=row.stock_exact,
+                price=Decimal(str(row.price)) if row.price is not None else None,
+            )
+            for row in ordered
+        ],
+    )
+
+
 def load_competitor_dataset(
     engine: Engine,
     *,
@@ -731,13 +844,17 @@ def load_competitor_dataset(
     end_date: date | None = None,
     own_store_codes: set[str] | None = None,
     plids: set[str] | None = None,
+    include_detail_frames: bool = True,
+    own_store_only: bool = False,
 ) -> CompetitorDataset:
     """Load competitor views and recompute signals across the selected interval.
 
     True competitors always exclude private PLIDs from every connected store.  The
     optional ``own_store_codes`` filter only controls which private-store cards are
     projected, so a single-store view cannot leak or misclassify another store's
-    private products.
+    private products. List-only callers can skip detail-only frames, while scope
+    switches can request only the private-store partition without rebuilding the
+    invariant true-competitor list.
     """
     if start_date is not None and end_date is not None and start_date > end_date:
         raise ValueError("开始日期不能晚于结束日期")
@@ -757,6 +874,18 @@ def load_competitor_dataset(
         )
     try:
         with Session(engine) as session:
+            connected_store_offers = load_connected_store_offers(
+                session,
+                plids=normalized_plids,
+            )
+            selected_store_plids_for_query = {
+                str(item.offer.productline_id).strip()
+                for item in connected_store_offers
+                if (
+                    (own_store_codes is None or item.store_code in own_store_codes)
+                    and str(item.offer.productline_id or "").strip()
+                )
+            }
             target_statement = (
                 select(CompetitorTarget)
                 .where(CompetitorTarget.active.is_(True))
@@ -772,7 +901,18 @@ def load_competitor_dataset(
                 CompetitorVariantSnapshot.collected_at.desc(),
                 CompetitorVariantSnapshot.id.asc(),
             )
-            if normalized_plids is not None:
+            if own_store_only:
+                selected_plids = selected_store_plids_for_query
+                snapshot_statement = snapshot_statement.where(
+                    CompetitorSnapshot.plid.in_(selected_plids)
+                )
+                review_statement = review_statement.where(
+                    CompetitorReview.plid.in_(selected_plids)
+                )
+                variant_statement = variant_statement.where(
+                    CompetitorVariantSnapshot.plid.in_(selected_plids)
+                )
+            elif normalized_plids is not None:
                 target_statement = target_statement.where(
                     CompetitorTarget.plid.in_(normalized_plids)
                 )
@@ -785,17 +925,31 @@ def load_competitor_dataset(
                 variant_statement = variant_statement.where(
                     CompetitorVariantSnapshot.plid.in_(normalized_plids)
                 )
-            targets = list(session.scalars(target_statement))
-            snapshots = list(session.scalars(snapshot_statement))
-            reviews = list(session.scalars(review_statement))
-            variants = list(session.scalars(variant_statement))
-            connected_store_offers = load_connected_store_offers(
-                session,
-                plids=normalized_plids,
+            targets = (
+                [] if own_store_only else list(session.scalars(target_statement))
+            )
+            should_load_projection_rows = (
+                not own_store_only or bool(selected_store_plids_for_query)
+            )
+            snapshots = (
+                list(session.scalars(snapshot_statement))
+                if should_load_projection_rows
+                else []
+            )
+            reviews = (
+                list(session.scalars(review_statement))
+                if include_detail_frames and should_load_projection_rows
+                else []
+            )
+            variants = (
+                list(session.scalars(variant_statement))
+                if should_load_projection_rows
+                else []
             )
             store_baselines = load_connected_store_offer_points(
                 session,
                 plids=normalized_plids,
+                store_codes=own_store_codes,
             )
     except SQLAlchemyError:
         return CompetitorDataset(
@@ -892,10 +1046,14 @@ def load_competitor_dataset(
             or _competitor_display_date(row.collected_at) <= selected_end_date
         )
     ]
-    competitor_follower_timelines = _follower_seller_timelines(
-        active_snapshots,
-        selected_start_date=selected_start_date,
-        selected_end_date=selected_end_date,
+    competitor_follower_timelines = (
+        _follower_seller_timelines(
+            active_snapshots,
+            selected_start_date=selected_start_date,
+            selected_end_date=selected_end_date,
+        )
+        if not own_store_only
+        else {}
     )
     store_follower_timelines = _follower_seller_timelines(
         store_snapshots,
@@ -954,6 +1112,10 @@ def load_competitor_dataset(
             oldest,
             latest,
         )
+        inventory_turnover = _snapshot_period_inventory_turnover(
+            interval,
+            variant_signatures=variant_signatures,
+        )
         price_start, price_change, price_signal = _interval_price_signal(oldest, latest)
         offer_rows = _interval_offer_rows(
             oldest,
@@ -971,6 +1133,7 @@ def load_competitor_dataset(
                 interval_snapshot_count=len(interval),
                 stock_change=stock_change,
                 stock_comparable=stock_comparable,
+                inventory_turnover=inventory_turnover,
                 positive_review_delta=positive_review_delta,
                 negative_review_delta=negative_review_delta,
                 price_start=price_start,
@@ -981,34 +1144,42 @@ def load_competitor_dataset(
             )
         )
     current = pd.DataFrame(current_rows)
-    history = pd.DataFrame(
-        [
-            _snapshot_row(
-                row,
-                offer_rows=_interval_offer_rows(
+    history = (
+        pd.DataFrame(
+            [
+                _snapshot_row(
                     row,
-                    row,
-                    oldest_variants=variants_by_snapshot.get(row.id, []),
-                    latest_variants=variants_by_snapshot.get(row.id, []),
+                    offer_rows=_interval_offer_rows(
+                        row,
+                        row,
+                        oldest_variants=variants_by_snapshot.get(row.id, []),
+                        latest_variants=variants_by_snapshot.get(row.id, []),
+                        raw_history=True,
+                    ),
                     raw_history=True,
-                ),
-                raw_history=True,
-            )
-            for row in interval_snapshots
-        ]
+                )
+                for row in interval_snapshots
+            ]
+        )
+        if include_detail_frames
+        else pd.DataFrame()
     )
-    review_frame = pd.DataFrame(
-        [
-            {
-                "plid": row.plid,
-                "评论日期": row.review_date,
-                "星级": row.rating,
-                "标题": row.title,
-                "评论内容": row.body,
-                "评论人": row.customer_name,
-            }
-            for row in reviews
-        ]
+    review_frame = (
+        pd.DataFrame(
+            [
+                {
+                    "plid": row.plid,
+                    "评论日期": row.review_date,
+                    "星级": row.rating,
+                    "标题": row.title,
+                    "评论内容": row.body,
+                    "评论人": row.customer_name,
+                }
+                for row in reviews
+            ]
+        )
+        if include_detail_frames
+        else pd.DataFrame()
     )
     latest_store_snapshots: dict[str, CompetitorSnapshot] = {}
     for snapshot in interval_store_snapshots:
@@ -1016,20 +1187,25 @@ def load_competitor_dataset(
     detail_snapshots = [*interval_snapshots, *latest_store_snapshots.values()]
     interval_snapshot_ids = {snapshot.id for snapshot in detail_snapshots}
     snapshot_images = {snapshot.id: snapshot.image_url for snapshot in detail_snapshots}
-    variant_frame = pd.DataFrame(
-        [
-            _variant_row(
-                row,
-                default_image_url=snapshot_images.get(row.snapshot_id),
-            )
-            for row in variants
-            if row.snapshot_id in interval_snapshot_ids
-        ]
+    variant_frame = (
+        pd.DataFrame(
+            [
+                _variant_row(
+                    row,
+                    default_image_url=snapshot_images.get(row.snapshot_id),
+                )
+                for row in variants
+                if row.snapshot_id in interval_snapshot_ids
+            ]
+        )
+        if include_detail_frames
+        else pd.DataFrame()
     )
     store_current = pd.DataFrame(
         _store_snapshot_rows(
             store_baselines,
             interval_store_snapshots,
+            current_store_offers=selected_store_offers,
             selected_start_date=selected_start_date,
             selected_end_date=selected_end_date,
             store_names_by_code=store_names_by_code,
@@ -1039,16 +1215,20 @@ def load_competitor_dataset(
             store_tsin_by_offer=store_tsin_by_offer,
         )
     )
-    store_history = pd.DataFrame(
-        _store_history_rows(
-            store_baselines,
-            interval_store_snapshots,
-            selected_start_date=selected_start_date,
-            selected_end_date=selected_end_date,
-            store_names_by_code=store_names_by_code,
-            own_offer_ids_by_plid=own_offer_ids_by_plid,
-            own_skus_by_plid=own_skus_by_plid,
+    store_history = (
+        pd.DataFrame(
+            _store_history_rows(
+                store_baselines,
+                interval_store_snapshots,
+                selected_start_date=selected_start_date,
+                selected_end_date=selected_end_date,
+                store_names_by_code=store_names_by_code,
+                own_offer_ids_by_plid=own_offer_ids_by_plid,
+                own_skus_by_plid=own_skus_by_plid,
+            )
         )
+        if include_detail_frames
+        else pd.DataFrame()
     )
     return CompetitorDataset(
         current=current,
@@ -1672,6 +1852,7 @@ def _snapshot_row(
     interval_snapshot_count: int | None = None,
     stock_change: int | None = None,
     stock_comparable: bool | None = None,
+    inventory_turnover: _PeriodInventoryTurnover | None = None,
     positive_review_delta: int | None = None,
     negative_review_delta: int | None = None,
     price_start: float | None = None,
@@ -1682,6 +1863,7 @@ def _snapshot_row(
     raw_history: bool = False,
 ) -> dict[str, object]:
     stock_text = _stock_text(row)
+    inventory_turnover = inventory_turnover or _PeriodInventoryTurnover()
     (
         follow_opportunity,
         follow_opportunity_type,
@@ -1751,6 +1933,11 @@ def _snapshot_row(
         "库存净变化": stock_change,
         "库存净流入": max(0, stock_change) if stock_change is not None else None,
         "库存净流出": observed_stock_outflow,
+        "周期销售件数": inventory_turnover.sales_units,
+        "周期销售额": inventory_turnover.sales_amount,
+        "周期补货量": inventory_turnover.replenishment_units,
+        "周期补货货值": inventory_turnover.replenishment_value,
+        "周期库存周转金额": inventory_turnover.turnover_value,
         "新增评论": review_delta,
         "新增好评": positive_review_delta,
         "新增差评": negative_review_delta,
@@ -1797,6 +1984,75 @@ def _latest_store_baselines(
     ):
         latest[(row.store_code, row.offer_id)] = row
     return sorted(latest.values(), key=lambda row: (row.store_code, row.offer_id))
+
+
+def _store_offer_period_inventory_turnover(
+    history: list[StoreOfferPoint],
+) -> _PeriodInventoryTurnover:
+    distinct_points: dict[tuple[date, datetime], StoreOfferPoint] = {}
+    for row in sorted(history, key=lambda item: (item.display_date, item.captured_at, item.id)):
+        distinct_points[(row.display_date, row.captured_at)] = row
+    return _period_inventory_turnover(
+        [
+            _InventoryTurnoverObservation(
+                scope=(row.store_code, row.offer_id, row.productline_id, row.sku),
+                stock_quantity=row.total_stock,
+                stock_exact=row.total_stock is not None,
+                price=(
+                    Decimal(str(row.selling_price))
+                    if row.selling_price is not None
+                    else None
+                ),
+            )
+            for row in distinct_points.values()
+        ]
+    )
+
+
+def _store_period_inventory_turnover(
+    baselines: list[StoreOfferPoint],
+) -> _PeriodInventoryTurnover:
+    by_identity: dict[tuple[str, str], list[StoreOfferPoint]] = {}
+    for row in baselines:
+        by_identity.setdefault((row.store_code, row.offer_id), []).append(row)
+    turnovers = [
+        _store_offer_period_inventory_turnover(history)
+        for history in by_identity.values()
+    ]
+    if (
+        not turnovers
+        or any(
+            item.sales_units is None or item.replenishment_units is None
+            for item in turnovers
+        )
+    ):
+        return _PeriodInventoryTurnover()
+
+    sales_amount = (
+        sum(item.sales_amount for item in turnovers if item.sales_amount is not None)
+        if all(item.sales_amount is not None for item in turnovers)
+        else None
+    )
+    replenishment_value = (
+        sum(
+            item.replenishment_value
+            for item in turnovers
+            if item.replenishment_value is not None
+        )
+        if all(item.replenishment_value is not None for item in turnovers)
+        else None
+    )
+    return _PeriodInventoryTurnover(
+        sales_units=sum(int(item.sales_units or 0) for item in turnovers),
+        sales_amount=sales_amount,
+        replenishment_units=sum(int(item.replenishment_units or 0) for item in turnovers),
+        replenishment_value=replenishment_value,
+        turnover_value=(
+            sales_amount + replenishment_value
+            if sales_amount is not None and replenishment_value is not None
+            else None
+        ),
+    )
 
 
 def _seller_api_offer_rows(
@@ -2125,6 +2381,7 @@ def _store_snapshot_rows(
     baselines: list[StoreOfferPoint],
     follower_snapshots: list[CompetitorSnapshot],
     *,
+    current_store_offers: list[ConnectedStoreOffer],
     selected_start_date: date | None,
     selected_end_date: date | None,
     store_names_by_code: dict[str, str],
@@ -2134,6 +2391,12 @@ def _store_snapshot_rows(
     store_tsin_by_offer: dict[tuple[str, str], str],
 ) -> list[dict[str, object]]:
     """Build own-store cards from every Seller API refresh plus follower offers."""
+    current_offers_by_plid: dict[str, list[ConnectedStoreOffer]] = {}
+    for current_offer in current_store_offers:
+        plid = str(current_offer.offer.productline_id or "").strip()
+        if plid:
+            current_offers_by_plid.setdefault(plid, []).append(current_offer)
+
     selected_baselines = [
         row
         for row in baselines
@@ -2155,12 +2418,52 @@ def _store_snapshot_rows(
 
     result: list[dict[str, object]] = []
     for plid, plid_baselines in baselines_by_plid.items():
+        current_offers = current_offers_by_plid.get(plid, [])
+        current_offer_by_identity = {
+            (item.store_code, str(item.offer.offer_id)): item.offer
+            for item in current_offers
+        }
+        current_statuses = _ordered_current_offer_statuses(current_offers)
+        current_status_updated_at = max(
+            (item.offer.captured_at for item in current_offers),
+            default=None,
+        )
         own_offers = _latest_store_baselines(plid_baselines)
         own_offer_rows = _seller_api_offer_rows(
             plid_baselines,
             store_names_by_code=store_names_by_code,
         )
         for own_offer_row in own_offer_rows:
+            current_offer_state = current_offer_by_identity.get(
+                (
+                    str(own_offer_row["卖家ID"]),
+                    str(own_offer_row["offer_id"]),
+                )
+            )
+            current_status = (
+                str(current_offer_state.status or "").strip()
+                if current_offer_state is not None
+                else ""
+            )
+            own_offer_row["最新Offer状态"] = current_status or None
+            own_offer_row["最新Offer状态更新时间"] = (
+                current_offer_state.captured_at
+                if current_offer_state is not None
+                else None
+            )
+            current_stock = (
+                current_offer_state.total_stock
+                if current_offer_state is not None
+                else None
+            )
+            own_offer_row["最新Offer库存数量"] = current_stock
+            own_offer_row["最新Offer库存状态"] = (
+                "未探测"
+                if current_stock is None
+                else "有货"
+                if current_stock > 0
+                else "没货"
+            )
             own_offer_row["TSIN"] = store_tsin_by_offer.get(
                 (
                     str(own_offer_row["卖家ID"]),
@@ -2215,6 +2518,7 @@ def _store_snapshot_rows(
             if aggregate_stock_comparable
             else None
         )
+        inventory_turnover = _store_period_inventory_turnover(plid_baselines)
 
         observations = followers_by_plid.get(plid, [])
         observations.sort(key=lambda row: row.collected_at, reverse=True)
@@ -2309,6 +2613,11 @@ def _store_snapshot_rows(
                     if aggregate_stock_change is not None
                     else None
                 ),
+                "周期销售件数": inventory_turnover.sales_units,
+                "周期销售额": inventory_turnover.sales_amount,
+                "周期补货量": inventory_turnover.replenishment_units,
+                "周期补货货值": inventory_turnover.replenishment_value,
+                "周期库存周转金额": inventory_turnover.turnover_value,
                 "新增评论": (
                     max(0, latest_observation.review_count - oldest_observation.review_count)
                     if latest_observation is not None
@@ -2341,6 +2650,10 @@ def _store_snapshot_rows(
                 "链接": f"https://www.takealot.com/p/PLID{plid}",
                 "跟卖报价": follower_rows,
                 "对比报价": [*own_offer_rows, *follower_rows],
+                # This projection deliberately comes from OfferCurrent and must not
+                # change when the operator changes the historical observation range.
+                "最新Offer状态": current_statuses,
+                "最新Offer状态更新时间": current_status_updated_at,
                 "自有报价": [
                     {
                         "offer_id": row.offer_id,
@@ -2381,6 +2694,27 @@ def _store_snapshot_rows(
         )
     result.sort(key=lambda item: (str(item["趋势判断"]), str(item["商品"])))
     return result
+
+
+def _ordered_current_offer_statuses(
+    offers: list[ConnectedStoreOffer],
+) -> list[str]:
+    """Return unique current Seller Offers statuses in the UI's canonical order."""
+    canonical_order = {
+        "not_buyable": 0,
+        "buyable": 1,
+        "disabled_by_takealot": 2,
+        "disabled_by_seller": 3,
+    }
+    statuses = {
+        str(item.offer.status or "").strip()
+        for item in offers
+        if str(item.offer.status or "").strip()
+    }
+    return sorted(
+        statuses,
+        key=lambda status: (canonical_order.get(status, len(canonical_order)), status),
+    )
 
 
 def _store_baseline_history_row(
@@ -2432,6 +2766,11 @@ def _store_baseline_history_row(
         "库存净变化": None,
         "库存净流入": None,
         "库存净流出": None,
+        "周期销售件数": None,
+        "周期销售额": None,
+        "周期补货量": None,
+        "周期补货货值": None,
+        "周期库存周转金额": None,
         "新增评论": None,
         "新增好评": None,
         "新增差评": None,

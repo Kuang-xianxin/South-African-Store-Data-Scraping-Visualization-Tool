@@ -186,6 +186,156 @@ class SearchRankingKeywordResult(StoreScopedMixin, Base):
     observed_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, index=True)
 
 
+class SearchRankingProductFact(StoreScopedMixin, Base):
+    """One auditable product fact confirmed by a human."""
+
+    __tablename__ = "search_ranking_product_facts"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    productline_id: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
+    source_offer_id: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
+    fact_type: Mapped[str] = mapped_column(String(40), nullable=False, index=True)
+    fact_term: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
+    normalized_term: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
+    statement: Mapped[str | None] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(String(30), nullable=False, index=True)
+    source_type: Mapped[str] = mapped_column(String(40), nullable=False, index=True)
+    source_analysis_id: Mapped[int | None] = mapped_column(
+        ForeignKey("search_ranking_analyses.id", ondelete="SET NULL"),
+        index=True,
+    )
+    source_title: Mapped[str] = mapped_column(Text, nullable=False)
+    source_image_url: Mapped[str] = mapped_column(Text, nullable=False)
+    evidence: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+    confirmed_by_username: Mapped[str] = mapped_column(String(64), nullable=False)
+    confirmed_by_display_name: Mapped[str] = mapped_column(String(100), nullable=False)
+    confirmed_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, index=True)
+    revoked_by_username: Mapped[str | None] = mapped_column(String(64))
+    revoked_by_display_name: Mapped[str | None] = mapped_column(String(100))
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime, index=True)
+    revoke_reason: Mapped[str | None] = mapped_column(Text)
+
+
+class SearchRankingDecisionParameterConfirmation(StoreScopedMixin, Base):
+    """Immutable operator classification of parameters in one current title."""
+
+    __tablename__ = "search_ranking_decision_parameter_confirmations"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    productline_id: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
+    source_offer_id: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
+    source_analysis_id: Mapped[int | None] = mapped_column(
+        ForeignKey("search_ranking_analyses.id", ondelete="SET NULL"),
+        index=True,
+    )
+    source_title: Mapped[str] = mapped_column(Text, nullable=False)
+    decisions: Mapped[list[dict[str, Any]]] = mapped_column(JSON, nullable=False)
+    policy_version: Mapped[str] = mapped_column(String(30), nullable=False)
+    confirmed_by_username: Mapped[str] = mapped_column(String(64), nullable=False)
+    confirmed_by_display_name: Mapped[str] = mapped_column(String(100), nullable=False)
+    confirmed_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, index=True)
+
+
+class SearchAutocompleteCache(Base):
+    """Latest shared Takealot completion list for one normalized input state."""
+
+    __tablename__ = "search_autocomplete_cache"
+    __table_args__ = (
+        UniqueConstraint("input_key", name="uq_search_autocomplete_cache_input_key"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    input_key: Mapped[str] = mapped_column(String(200), nullable=False, index=True)
+    input_text: Mapped[str] = mapped_column(String(200), nullable=False)
+    suggestions: Mapped[list[str]] = mapped_column(JSON, nullable=False)
+    captured_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, index=True)
+    last_hit_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, index=True)
+    hit_count: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    refresh_count: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    last_refresh_status: Mapped[str] = mapped_column(String(30), nullable=False)
+    last_error: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+
+
+class SearchAutocompleteSnapshot(Base):
+    """Immutable ordered completion evidence captured after one live refresh."""
+
+    __tablename__ = "search_autocomplete_snapshots"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    cache_id: Mapped[int] = mapped_column(
+        ForeignKey("search_autocomplete_cache.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    input_key: Mapped[str] = mapped_column(String(200), nullable=False, index=True)
+    input_text: Mapped[str] = mapped_column(String(200), nullable=False)
+    suggestions: Mapped[list[str]] = mapped_column(JSON, nullable=False)
+    captured_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, index=True)
+
+
+class GoogleSearchAutocompleteCapture(Base):
+    """One immutable attempt to capture public South-African Google predictions."""
+
+    __tablename__ = "google_search_autocomplete_captures"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    region_code: Mapped[str] = mapped_column(String(2), nullable=False, index=True)
+    language_code: Mapped[str] = mapped_column(String(12), nullable=False, index=True)
+    client_name: Mapped[str] = mapped_column(String(30), nullable=False, index=True)
+    input_key: Mapped[str] = mapped_column(String(200), nullable=False, index=True)
+    input_text: Mapped[str] = mapped_column(String(200), nullable=False)
+    verification_status: Mapped[str] = mapped_column(
+        String(50),
+        nullable=False,
+        index=True,
+    )
+    suggestions: Mapped[list[str] | None] = mapped_column(JSON)
+    primary_endpoint: Mapped[str] = mapped_column(String(255), nullable=False)
+    mirror_endpoint: Mapped[str] = mapped_column(String(255), nullable=False)
+    primary_evidence: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+    mirror_evidence: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+    source_contract_version: Mapped[str] = mapped_column(String(40), nullable=False)
+    error: Mapped[str | None] = mapped_column(Text)
+    captured_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, index=True)
+
+
+class GoogleSearchAutocompleteCurrent(Base):
+    """Latest dual-endpoint-consensus Google predictions for one regional input."""
+
+    __tablename__ = "google_search_autocomplete_current"
+    __table_args__ = (
+        UniqueConstraint(
+            "region_code",
+            "language_code",
+            "client_name",
+            "input_key",
+            name="uq_google_autocomplete_current_scope_input",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    capture_id: Mapped[int] = mapped_column(
+        ForeignKey("google_search_autocomplete_captures.id", ondelete="RESTRICT"),
+        nullable=False,
+        unique=True,
+        index=True,
+    )
+    region_code: Mapped[str] = mapped_column(String(2), nullable=False, index=True)
+    language_code: Mapped[str] = mapped_column(String(12), nullable=False, index=True)
+    client_name: Mapped[str] = mapped_column(String(30), nullable=False, index=True)
+    input_key: Mapped[str] = mapped_column(String(200), nullable=False, index=True)
+    input_text: Mapped[str] = mapped_column(String(200), nullable=False)
+    suggestions: Mapped[list[str]] = mapped_column(JSON, nullable=False)
+    verification_status: Mapped[str] = mapped_column(String(50), nullable=False)
+    source_contract_version: Mapped[str] = mapped_column(String(40), nullable=False)
+    captured_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, index=True)
+    refresh_count: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+
+
 class StoreOfferBaseline(StoreScopedMixin, Base):
     """Earliest Seller API offer pull retained for one Beijing display day."""
 
@@ -310,6 +460,65 @@ class DailyProductMetric(StoreScopedMixin, Base):
     offer_status: Mapped[str | None] = mapped_column(String(100))
 
 
+class DailySalesMetricState(StoreScopedMixin, Base):
+    """Current published store-day sales total and the source that verified it."""
+
+    __tablename__ = "daily_sales_metric_states"
+    __table_args__ = (
+        UniqueConstraint(
+            "store_code",
+            "metric_date",
+            name="uq_daily_sales_metric_states_store_date",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    metric_date: Mapped[date] = mapped_column(Date, nullable=False, index=True)
+    ordered_units: Mapped[int | None] = mapped_column(Integer)
+    ordered_revenue: Mapped[Decimal | None] = mapped_column(Numeric(14, 2))
+    source_kind: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
+    source_run_id: Mapped[str | None] = mapped_column(String(36), index=True)
+    source_details: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    verified_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        index=True,
+    )
+    first_published_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        index=True,
+    )
+    revision_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+
+
+class SalesRevenueRevision(StoreScopedMixin, Base):
+    """Immutable before/after audit for one changed published store-day sales total."""
+
+    __tablename__ = "sales_revenue_revisions"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    metric_date: Mapped[date] = mapped_column(Date, nullable=False, index=True)
+    change_type: Mapped[str] = mapped_column(String(30), nullable=False, index=True)
+    before_ordered_units: Mapped[int | None] = mapped_column(Integer)
+    after_ordered_units: Mapped[int | None] = mapped_column(Integer)
+    before_ordered_revenue: Mapped[Decimal | None] = mapped_column(Numeric(14, 2))
+    after_ordered_revenue: Mapped[Decimal | None] = mapped_column(Numeric(14, 2))
+    revenue_delta: Mapped[Decimal | None] = mapped_column(Numeric(14, 2))
+    units_delta: Mapped[int | None] = mapped_column(Integer)
+    before_source: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    after_source: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    source_run_id: Mapped[str | None] = mapped_column(String(36), index=True)
+    detected_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        index=True,
+    )
+
+
 class AnomalyEvent(StoreScopedMixin, Base):
     """A date-stamped anomaly classification for an offer."""
 
@@ -380,6 +589,74 @@ class CompetitorTargetAudit(Base):
         nullable=False,
         index=True,
     )
+
+
+class CompetitorListingOperation(Base):
+    """One confirmed seller/category source selection and its aggregate result."""
+
+    __tablename__ = "competitor_listing_operations"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    source_type: Mapped[str] = mapped_column(String(20), nullable=False, index=True)
+    source_url: Mapped[str] = mapped_column(Text, nullable=False)
+    source_label: Mapped[str] = mapped_column(String(255), nullable=False)
+    personal_library_id: Mapped[int | None] = mapped_column(Integer)
+    personal_library_name: Mapped[str | None] = mapped_column(String(40))
+    price_min: Mapped[int | None] = mapped_column(Integer)
+    price_max: Mapped[int | None] = mapped_column(Integer)
+    sorts: Mapped[list[str]] = mapped_column(JSON, nullable=False)
+    selection_rule: Mapped[str] = mapped_column(String(80), nullable=False)
+    product_limit: Mapped[int | None] = mapped_column(Integer)
+    selected_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    added_target_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    reactivated_target_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    existing_target_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    own_store_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    personal_watchlist_added_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    actor_user_id: Mapped[int | None] = mapped_column(Integer)
+    actor_username: Mapped[str] = mapped_column(String(64), nullable=False)
+    actor_display_name: Mapped[str] = mapped_column(String(100), nullable=False)
+    committed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        index=True,
+    )
+
+
+class CompetitorListingOperationItem(Base):
+    """One PLID in the frozen ordered result of a listing operation."""
+
+    __tablename__ = "competitor_listing_operation_items"
+    __table_args__ = (
+        UniqueConstraint(
+            "operation_id",
+            "position",
+            name="uq_listing_operation_item_position",
+        ),
+        UniqueConstraint(
+            "operation_id",
+            "plid",
+            name="uq_listing_operation_item_plid",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    operation_id: Mapped[int] = mapped_column(
+        ForeignKey("competitor_listing_operations.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    position: Mapped[int] = mapped_column(Integer, nullable=False)
+    plid: Mapped[str] = mapped_column(String(30), nullable=False, index=True)
+    title: Mapped[str] = mapped_column(Text, nullable=False)
+    url: Mapped[str] = mapped_column(Text, nullable=False)
+    result: Mapped[str] = mapped_column(String(30), nullable=False)
+    personal_watchlist_added: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+    )
+    sort_ranks: Mapped[dict[str, int]] = mapped_column(JSON, nullable=False)
 
 
 class CompetitorLinkHealth(Base):

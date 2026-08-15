@@ -92,9 +92,11 @@ class CompetitorPublicClient:
         *,
         timeout_seconds: float = 30.0,
         headless: bool = True,
+        search_endpoint_retries: int = 3,
     ) -> None:
         self._timeout_ms = int(timeout_seconds * 1000)
         self._headless = headless
+        self._search_endpoint_retries = max(0, min(3, search_endpoint_retries))
         self._started = False
         self._playwright: Playwright | None = None
         self._browser: Browser | None = None
@@ -425,6 +427,25 @@ class CompetitorPublicClient:
         query = " ".join(keyword.split())
         if not query or len(query) > 200:
             raise ValueError("搜索词必须为1到200个字符")
+        return await self.fetch_listing_first_page(
+            f"https://www.takealot.com/all?{urlencode({'qsearch': query})}"
+        )
+
+    async def fetch_listing_first_page(
+        self,
+        source_url: str,
+    ) -> tuple[str, dict[str, Any]]:
+        """Capture one safe Takealot seller/category/search listing response."""
+        parsed = urlsplit(source_url)
+        hostname = (parsed.hostname or "").casefold()
+        if (
+            parsed.scheme != "https"
+            or (hostname != "takealot.com" and not hostname.endswith(".takealot.com"))
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.port not in {None, 443}
+        ):
+            raise ValueError("Takealot 列表地址无效")
         page = self._page
         if page is None:
             raise RuntimeError("竞品浏览器尚未启动")
@@ -454,7 +475,7 @@ class CompetitorPublicClient:
         page.on("response", on_response)
         try:
             response = await page.goto(
-                f"https://www.takealot.com/all?{urlencode({'qsearch': query})}",
+                source_url,
                 wait_until="domcontentloaded",
                 timeout=max(self._timeout_ms, 45_000),
             )
@@ -487,7 +508,10 @@ class CompetitorPublicClient:
         params.pop("start", None)
         params["after"] = after
         next_url = parsed._replace(query=urlencode(params)).geturl()
-        return await self._get_json(next_url)
+        return await self._get_json(
+            next_url,
+            retries=self._search_endpoint_retries,
+        )
 
     async def fetch_search_suggestions(self, keyword: str) -> list[str]:
         """Return Takealot's ranked search-box completions for a shopper prefix."""
@@ -496,7 +520,8 @@ class CompetitorPublicClient:
             raise ValueError("补全词根必须为1到100个字符")
         payload = await self._get_json(
             f"{PUBLIC_API_BASE}/searches/search_suggestions?"
-            f"{urlencode({'qsearch': query})}"
+            f"{urlencode({'qsearch': query})}",
+            retries=self._search_endpoint_retries,
         )
         sections = payload.get("sections")
         section = (

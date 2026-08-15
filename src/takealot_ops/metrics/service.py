@@ -180,7 +180,13 @@ class MetricService:
         self._included, self._excluded = _load_status_rules(sale_status_rules_path)
         self._now = now or (lambda: datetime.now(UTC))
 
-    def rebuild(self, start: date, end: date) -> int:
+    def rebuild(
+        self,
+        start: date,
+        end: date,
+        *,
+        sales_source: Mapping[str, Any] | None = None,
+    ) -> int:
         """Atomically replace daily metrics and events for an inclusive range."""
         if start > end:
             raise ValueError("start must be on or before end")
@@ -199,6 +205,8 @@ class MetricService:
                 anomalies=anomalies,
                 quality_events=quality_events,
                 anomaly_types=METRIC_ANOMALY_TYPES,
+                sales_source=sales_source,
+                observed_at=self._now(),
             )
         return len(product_rows)
 

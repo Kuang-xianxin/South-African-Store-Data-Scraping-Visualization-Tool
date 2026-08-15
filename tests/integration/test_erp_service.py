@@ -22,12 +22,22 @@ def test_erp_summary_and_products_share_canonical_metric_dataset(
     dashboard_dataset: DashboardDataset,
 ) -> None:
     summary = build_summary_payload(dashboard_dataset, AS_OF)
+    ranged_summary = build_summary_payload(
+        dashboard_dataset,
+        AS_OF,
+        start_date=AS_OF,
+    )
     products = build_products_payload(dashboard_dataset, AS_OF)
 
     assert summary["latest_metric_date"] == "2026-07-20"
     assert summary["kpis"]["latest_ordered_units"] == 7
     assert summary["kpis"]["latest_ordered_revenue"] == 1299.95
     assert summary["kpis"]["seven_day_ordered_units"] == 10
+    assert ranged_summary["range_start"] == "2026-07-20"
+    assert ranged_summary["range_end"] == "2026-07-20"
+    assert {
+        item["metric_date"] for item in ranged_summary["sales_series"]
+    } == {"2026-07-20"}
     assert [item["offer_id"] for item in products["items"]] == [
         "offer-a",
         "offer-b",
