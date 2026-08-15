@@ -93,6 +93,10 @@ _OFFER_CURRENT_COLUMNS = (
     "updated_at",
     "captured_at",
     "total_stock",
+    "takealot_available_stock",
+    "seller_available_stock",
+    "takealot_stock_in_receiving",
+    "takealot_stock_on_way",
 )
 _OFFER_HISTORY_COLUMNS = ("snapshot_date",) + _OFFER_CURRENT_COLUMNS
 _ANOMALY_COLUMNS = (

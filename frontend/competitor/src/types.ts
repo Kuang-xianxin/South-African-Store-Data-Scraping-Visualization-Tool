@@ -746,6 +746,78 @@ export interface ProductDetailPayload {
   history: ProductItem[];
 }
 
+export type AnomalyProductType =
+  | "sudden_sales_stop"
+  | "not_buyable_with_stock"
+  | "disabled_by_takealot_with_stock"
+  | "disabled_by_seller_with_stock"
+  | "slow_moving";
+
+export interface AnomalyProductItem {
+  anomaly_type: AnomalyProductType;
+  anomaly_label: string;
+  offer_id: string;
+  plid: string;
+  tsin_id: string | null;
+  sku: string | null;
+  title: string;
+  image_url: string | null;
+  selling_price: number | null;
+  page_views_30_days: number | null;
+  conversion_percentage_30_days: number | null;
+  offer_status: string;
+  offer_status_label: string;
+  available_stock: number;
+  takealot_available_stock: number;
+  seller_available_stock: number;
+  receiving_stock: number;
+  on_way_stock: number;
+  inventory_units: number;
+  data_through: string | null;
+  latest_ordered_units: number | null;
+  no_sales_days: number;
+  no_sales_days_exact: boolean;
+  last_sale_on: string | null;
+  stop_started_on?: string;
+  zero_sales_dates?: string[];
+  baseline_start_on?: string;
+  baseline_end_on?: string;
+  baseline_total_units?: number;
+  baseline_selling_days?: number;
+  baseline_daily_average?: number;
+}
+
+export interface AnomalyProductPayload {
+  requested_as_of: string;
+  completed_through: string;
+  data_through: string | null;
+  date_basis: "Africa/Johannesburg";
+  sales_zero_evidence: "verified_complete_business_days_only";
+  rules: {
+    sales_stop_zero_days: number;
+    sales_stop_baseline_days: number;
+    sales_stop_min_selling_days: number;
+    sales_stop_min_baseline_units: number;
+    slow_day_options: number[];
+    slow_moving_requires_status: "buyable";
+    slow_moving_requires_available_stock: boolean;
+  };
+  summary: {
+    sudden_sales_stop: number;
+    not_buyable_with_stock: number;
+    disabled_by_takealot_with_stock: number;
+    disabled_by_seller_with_stock: number;
+    slow_moving_by_days: Record<string, number>;
+  };
+  sudden_sales_stop: AnomalyProductItem[];
+  stock_status_anomalies: {
+    not_buyable: AnomalyProductItem[];
+    disabled_by_takealot: AnomalyProductItem[];
+    disabled_by_seller: AnomalyProductItem[];
+  };
+  slow_moving: AnomalyProductItem[];
+}
+
 export type QuadrantKey =
   | "star"
   | "conversion_issue"

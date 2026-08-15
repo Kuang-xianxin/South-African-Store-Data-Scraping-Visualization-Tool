@@ -1,0 +1,396 @@
+"""Read-only, mutually separated anomaly-product projections for the Vue ERP."""
+
+from __future__ import annotations
+
+import math
+from collections.abc import Iterable, Mapping
+from datetime import UTC, date, datetime, timedelta
+from typing import Any, TypeGuard, cast
+
+import pandas as pd
+
+from takealot_ops.dashboard.labels import OFFER_STATUS_LABELS
+from takealot_ops.metrics.service import DashboardDataset
+from takealot_ops.storage.models import DailySalesMetricState
+
+
+SLOW_DAY_OPTIONS = (4, 7, 10, 15, 20, 30)
+SALES_STOP_ZERO_DAYS = 3
+SALES_STOP_BASELINE_DAYS = 7
+SALES_STOP_MIN_SELLING_DAYS = 5
+SALES_STOP_MIN_BASELINE_UNITS = 7
+STOCK_STATUS_TYPES = (
+    "not_buyable",
+    "disabled_by_takealot",
+    "disabled_by_seller",
+)
+
+
+def verified_sales_metric_dates(
+    states: Iterable[DailySalesMetricState],
+) -> set[date]:
+    """Return SAST business dates backed by a successful Sales API source."""
+
+    result: set[date] = set()
+    for state in states:
+        if state.source_kind != "takealot_sales_api":
+            continue
+        if _state_verified_at(state) is None:
+            continue
+        result.add(state.metric_date)
+    return result
+
+
+def build_anomaly_product_payload(
+    dataset: DashboardDataset,
+    *,
+    requested_as_of: date,
+    completed_through: date,
+    verified_dates: set[date],
+) -> dict[str, Any]:
+    """Build independent anomaly groups without changing legacy risk records."""
+
+    product_daily = _normalized_product_daily(dataset.product_daily, completed_through)
+    offer_current = _normalized_offer_current(dataset.offer_current)
+    available_metric_dates = {
+        metric_date
+        for metric_date in product_daily.get("_metric_date", pd.Series(dtype="object"))
+        if isinstance(metric_date, date)
+    }
+    eligible_dates = {
+        metric_date
+        for metric_date in verified_dates
+        if metric_date <= completed_through and metric_date in available_metric_dates
+    }
+    data_through = max(eligible_dates) if eligible_dates else None
+    contiguous_dates = _contiguous_dates(data_through, verified_dates)
+    sales_by_offer = _sales_by_offer(product_daily, data_through, eligible_dates)
+
+    sudden_sales_stop: list[dict[str, Any]] = []
+    stock_status_anomalies: dict[str, list[dict[str, Any]]] = {
+        status: [] for status in STOCK_STATUS_TYPES
+    }
+    slow_moving: list[dict[str, Any]] = []
+
+    for row in offer_current.to_dict(orient="records"):
+        offer_id = _text(row.get("offer_id"))
+        plid = _text(row.get("productline_id"))
+        if not offer_id or not plid:
+            continue
+        daily_sales = sales_by_offer.get(offer_id, {})
+        zero_streak = _zero_sales_streak(daily_sales, contiguous_dates)
+        item = _base_item(
+            cast("Mapping[str, Any]", row),
+            data_through,
+            daily_sales,
+            zero_streak,
+        )
+
+        status = item["offer_status"]
+        if status in stock_status_anomalies and item["inventory_units"] > 0:
+            stock_item = dict(item)
+            stock_item["anomaly_type"] = f"{status}_with_stock"
+            stock_item["anomaly_label"] = (
+                f"{item['offer_status_label']}但仍有库存"
+            )
+            stock_status_anomalies[status].append(stock_item)
+
+        sudden_evidence = _sudden_sales_stop_evidence(daily_sales, data_through)
+        if sudden_evidence is not None:
+            sudden_item = dict(item)
+            sudden_item.update(sudden_evidence)
+            sudden_item["anomaly_type"] = "sudden_sales_stop"
+            sudden_item["anomaly_label"] = "动销突然中断"
+            sudden_sales_stop.append(sudden_item)
+
+        if (
+            status == "buyable"
+            and item["available_stock"] > 0
+            and item["no_sales_days"] >= min(SLOW_DAY_OPTIONS)
+        ):
+            slow_item = dict(item)
+            slow_item["anomaly_type"] = "slow_moving"
+            slow_item["anomaly_label"] = "有库存滞销"
+            slow_moving.append(slow_item)
+
+    sudden_sales_stop.sort(
+        key=lambda item: (
+            -int(item.get("baseline_total_units") or 0),
+            str(item.get("title") or ""),
+        )
+    )
+    for items in stock_status_anomalies.values():
+        items.sort(
+            key=lambda item: (
+                -int(item.get("inventory_units") or 0),
+                str(item.get("title") or ""),
+            )
+        )
+    slow_moving.sort(
+        key=lambda item: (
+            -int(item.get("no_sales_days") or 0),
+            -int(item.get("available_stock") or 0),
+            str(item.get("title") or ""),
+        )
+    )
+
+    slow_counts = {
+        str(days): sum(
+            int(item["no_sales_days"]) >= days for item in slow_moving
+        )
+        for days in SLOW_DAY_OPTIONS
+    }
+    return {
+        "requested_as_of": requested_as_of.isoformat(),
+        "completed_through": completed_through.isoformat(),
+        "data_through": data_through.isoformat() if data_through else None,
+        "date_basis": "Africa/Johannesburg",
+        "sales_zero_evidence": "verified_complete_business_days_only",
+        "rules": {
+            "sales_stop_zero_days": SALES_STOP_ZERO_DAYS,
+            "sales_stop_baseline_days": SALES_STOP_BASELINE_DAYS,
+            "sales_stop_min_selling_days": SALES_STOP_MIN_SELLING_DAYS,
+            "sales_stop_min_baseline_units": SALES_STOP_MIN_BASELINE_UNITS,
+            "slow_day_options": list(SLOW_DAY_OPTIONS),
+            "slow_moving_requires_status": "buyable",
+            "slow_moving_requires_available_stock": True,
+        },
+        "summary": {
+            "sudden_sales_stop": len(sudden_sales_stop),
+            "not_buyable_with_stock": len(stock_status_anomalies["not_buyable"]),
+            "disabled_by_takealot_with_stock": len(
+                stock_status_anomalies["disabled_by_takealot"]
+            ),
+            "disabled_by_seller_with_stock": len(
+                stock_status_anomalies["disabled_by_seller"]
+            ),
+            "slow_moving_by_days": slow_counts,
+        },
+        "sudden_sales_stop": sudden_sales_stop,
+        "stock_status_anomalies": stock_status_anomalies,
+        "slow_moving": slow_moving,
+    }
+
+
+def _normalized_product_daily(frame: pd.DataFrame, through: date) -> pd.DataFrame:
+    required = {"metric_date", "offer_id", "ordered_units"}
+    if frame.empty or not required.issubset(frame.columns):
+        return pd.DataFrame(columns=[*required, "_metric_date"])
+    result = frame.copy()
+    result["_metric_date"] = pd.to_datetime(
+        result["metric_date"], errors="coerce"
+    ).dt.date
+    result["ordered_units"] = pd.to_numeric(
+        result["ordered_units"], errors="coerce"
+    )
+    return result.loc[
+        result["offer_id"].notna()
+        & result["_metric_date"].notna()
+        & (result["_metric_date"] <= through)
+    ].sort_values(["offer_id", "_metric_date"])
+
+
+def _normalized_offer_current(frame: pd.DataFrame) -> pd.DataFrame:
+    if frame.empty or "offer_id" not in frame.columns:
+        return pd.DataFrame(columns=["offer_id", "productline_id"])
+    result = frame.copy()
+    if "productline_id" not in result.columns:
+        result["productline_id"] = None
+    return result.drop_duplicates("offer_id", keep="last")
+
+
+def _sales_by_offer(
+    frame: pd.DataFrame,
+    through: date | None,
+    allowed_dates: set[date],
+) -> dict[str, dict[date, int | None]]:
+    if through is None or frame.empty:
+        return {}
+    result: dict[str, dict[date, int | None]] = {}
+    for row in frame.to_dict(orient="records"):
+        offer_id = _text(row.get("offer_id"))
+        metric_date = row.get("_metric_date")
+        if (
+            not offer_id
+            or not isinstance(metric_date, date)
+            or metric_date > through
+            or metric_date not in allowed_dates
+        ):
+            continue
+        units_value = row.get("ordered_units")
+        units = (
+            max(0, int(units_value))
+            if _finite_number(units_value)
+            else None
+        )
+        result.setdefault(offer_id, {})[metric_date] = units
+    return result
+
+
+def _contiguous_dates(
+    through: date | None,
+    verified_dates: set[date],
+) -> list[date]:
+    if through is None:
+        return []
+    result: list[date] = []
+    cursor = through
+    while cursor in verified_dates:
+        result.append(cursor)
+        cursor -= timedelta(days=1)
+    return result
+
+
+def _zero_sales_streak(
+    daily_sales: Mapping[date, int | None],
+    contiguous_dates: list[date],
+) -> dict[str, Any]:
+    count = 0
+    encountered_positive = False
+    for metric_date in contiguous_dates:
+        units = daily_sales.get(metric_date)
+        if units is None:
+            break
+        if units > 0:
+            encountered_positive = True
+            break
+        count += 1
+    positive_dates = [
+        metric_date
+        for metric_date, units in daily_sales.items()
+        if units is not None and units > 0
+    ]
+    return {
+        "days": count,
+        "exact": encountered_positive,
+        "last_sale_on": max(positive_dates).isoformat() if positive_dates else None,
+    }
+
+
+def _sudden_sales_stop_evidence(
+    daily_sales: Mapping[date, int | None],
+    through: date | None,
+) -> dict[str, Any] | None:
+    if through is None:
+        return None
+    zero_dates = [
+        through - timedelta(days=offset)
+        for offset in range(SALES_STOP_ZERO_DAYS - 1, -1, -1)
+    ]
+    baseline_end = zero_dates[0] - timedelta(days=1)
+    baseline_dates = [
+        baseline_end - timedelta(days=offset)
+        for offset in range(SALES_STOP_BASELINE_DAYS - 1, -1, -1)
+    ]
+    zero_values = [daily_sales.get(metric_date) for metric_date in zero_dates]
+    baseline_values = [daily_sales.get(metric_date) for metric_date in baseline_dates]
+    if any(value is None for value in [*zero_values, *baseline_values]):
+        return None
+    normalized_zero = [int(value or 0) for value in zero_values]
+    normalized_baseline = [int(value or 0) for value in baseline_values]
+    baseline_total = sum(normalized_baseline)
+    baseline_selling_days = sum(value > 0 for value in normalized_baseline)
+    if (
+        any(value != 0 for value in normalized_zero)
+        or normalized_baseline[-1] <= 0
+        or baseline_selling_days < SALES_STOP_MIN_SELLING_DAYS
+        or baseline_total < SALES_STOP_MIN_BASELINE_UNITS
+    ):
+        return None
+    return {
+        "stop_started_on": zero_dates[0].isoformat(),
+        "zero_sales_dates": [metric_date.isoformat() for metric_date in zero_dates],
+        "baseline_start_on": baseline_dates[0].isoformat(),
+        "baseline_end_on": baseline_dates[-1].isoformat(),
+        "baseline_total_units": baseline_total,
+        "baseline_selling_days": baseline_selling_days,
+        "baseline_daily_average": round(
+            baseline_total / SALES_STOP_BASELINE_DAYS,
+            2,
+        ),
+    }
+
+
+def _base_item(
+    row: Mapping[str, Any],
+    data_through: date | None,
+    daily_sales: Mapping[date, int | None],
+    zero_streak: Mapping[str, Any],
+) -> dict[str, Any]:
+    status = _text(row.get("status")) or "unknown"
+    total_stock = _non_negative_integer(row.get("total_stock"))
+    takealot_available = _non_negative_integer(row.get("takealot_available_stock"))
+    seller_available = _non_negative_integer(row.get("seller_available_stock"))
+    receiving = _non_negative_integer(row.get("takealot_stock_in_receiving"))
+    on_way = _non_negative_integer(row.get("takealot_stock_on_way"))
+    available_stock = max(total_stock, takealot_available + seller_available)
+    latest_units = daily_sales.get(data_through) if data_through else None
+    return {
+        "offer_id": _text(row.get("offer_id")),
+        "plid": _text(row.get("productline_id")),
+        "tsin_id": _text(row.get("tsin_id")) or None,
+        "sku": _text(row.get("sku")) or None,
+        "title": _text(row.get("title")) or "未命名商品",
+        "image_url": _text(row.get("image_url")) or None,
+        "selling_price": _number(row.get("selling_price")),
+        "page_views_30_days": _integer_or_none(row.get("page_views_30_days")),
+        "conversion_percentage_30_days": _number(
+            row.get("conversion_percentage_30_days")
+        ),
+        "offer_status": status,
+        "offer_status_label": OFFER_STATUS_LABELS.get(status, status or "未知"),
+        "available_stock": available_stock,
+        "takealot_available_stock": takealot_available,
+        "seller_available_stock": seller_available,
+        "receiving_stock": receiving,
+        "on_way_stock": on_way,
+        "inventory_units": available_stock + receiving + on_way,
+        "data_through": data_through.isoformat() if data_through else None,
+        "latest_ordered_units": latest_units,
+        "no_sales_days": int(zero_streak.get("days") or 0),
+        "no_sales_days_exact": bool(zero_streak.get("exact")),
+        "last_sale_on": zero_streak.get("last_sale_on"),
+    }
+
+
+def _state_verified_at(state: DailySalesMetricState) -> datetime | None:
+    raw_value: object = state.verified_at
+    if raw_value is None:
+        details = state.source_details if isinstance(state.source_details, dict) else {}
+        raw_value = details.get("verified_at") or details.get("collected_at")
+    if isinstance(raw_value, datetime):
+        parsed = raw_value
+    elif isinstance(raw_value, str):
+        try:
+            parsed = datetime.fromisoformat(raw_value.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    else:
+        return None
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
+
+
+def _text(value: object) -> str:
+    return " ".join(str(value or "").split())
+
+
+def _finite_number(value: object) -> TypeGuard[int | float]:
+    return (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and math.isfinite(value)
+    )
+
+
+def _non_negative_integer(value: object) -> int:
+    return max(0, int(value)) if _finite_number(value) else 0
+
+
+def _integer_or_none(value: object) -> int | None:
+    return int(value) if _finite_number(value) else None
+
+
+def _number(value: object) -> float | None:
+    return float(value) if _finite_number(value) else None

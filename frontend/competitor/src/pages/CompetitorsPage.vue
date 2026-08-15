@@ -174,6 +174,8 @@ const props = defineProps<{
   accessibleConnectedStoreCount?: number;
   operatingConnectedStoreCount?: number;
   ownStoreScope?: OwnStoreScope;
+  requestedDetailPlid?: string;
+  requestedDetailRevision?: number;
   onPermissionDenied?: () => void;
 }>();
 
@@ -2113,6 +2115,32 @@ function openProductModal(
   clearPersonalWatchlistFeedback();
   detailModalOpen.value = true;
 }
+
+let handledRequestedDetailRevision = 0;
+watch(
+  [
+    () => props.requestedDetailRevision ?? 0,
+    () => props.requestedDetailPlid ?? "",
+    storeCompetitors,
+    loading,
+  ],
+  ([revision, plid, ownItems, pageLoading]) => {
+    if (
+      pageLoading
+      || !revision
+      || revision <= handledRequestedDetailRevision
+      || !plid
+    ) {
+      return;
+    }
+    const ownItem = ownItems.find((item) => item.plid === plid);
+    if (!ownItem) return;
+    competitorSourceView.value = "own_store";
+    openProductModal(ownItem);
+    handledRequestedDetailRevision = revision;
+  },
+  { immediate: true },
+);
 
 function closeProductModal() {
   detailModalOpen.value = false;

@@ -14,6 +14,7 @@ import {
   setAuthSession,
   type RefreshStatus,
 } from "./api";
+import AnomalyProductsPage from "./pages/AnomalyProductsPage.vue";
 import CompetitorsPage from "./pages/CompetitorsPage.vue";
 import LoginPage from "./pages/LoginPage.vue";
 import LogisticsPage from "./pages/LogisticsPage.vue";
@@ -25,6 +26,8 @@ import ProductsPage from "./pages/ProductsPage.vue";
 import QuadrantsPage from "./pages/QuadrantsPage.vue";
 import UsersPage from "./pages/UsersPage.vue";
 import {
+  competitorDetailPageHref,
+  competitorDetailPlidFromHash,
   isErpModuleKey,
   modulePageFromHash,
   modulePageHref,
@@ -61,6 +64,7 @@ const storeScopedPages = new Set<PageKey>([
   "keyword-traffic",
   "search-ranking",
   "quadrants",
+  "anomaly-products",
   "logistics",
   "platform-warehouse",
 ]);
@@ -78,15 +82,16 @@ const basePages = [
   { key: "keyword-traffic", label: "关键词流量", hint: "变更节点与趋势对比", mark: "03", permission: "store.view" },
   { key: "search-ranking", label: "搜索定位", hint: "图片热词与自然排名", mark: "04", permission: "store.view" },
   { key: "quadrants", label: "经营坐标", hint: "流量与下单分布", mark: "05", permission: "store.view" },
-  { key: "logistics", label: "物流管理", hint: "长睿与平台货件", mark: "06", permission: "store.view" },
-  { key: "platform-warehouse", label: "约平台仓", hint: "补货草稿与 PO", mark: "07", permission: "store.view" },
-  { key: "competitors", label: "竞品雷达", hint: "库存评论与销量", mark: "08", permission: "competitors.view" },
+  { key: "anomaly-products", label: "异常商品", hint: "停销、禁售库存与滞销", mark: "06", permission: "store.view" },
+  { key: "logistics", label: "物流管理", hint: "长睿与平台货件", mark: "07", permission: "store.view" },
+  { key: "platform-warehouse", label: "约平台仓", hint: "补货草稿与 PO", mark: "08", permission: "store.view" },
+  { key: "competitors", label: "竞品雷达", hint: "库存评论与销量", mark: "09", permission: "competitors.view" },
 ] as const;
 const adminPage = {
   key: "users",
   label: "用户权限",
   hint: "账号与权限管理",
-  mark: "09",
+  mark: "10",
   permission: "users.manage",
 } as const;
 
@@ -96,6 +101,11 @@ const session = ref<AuthSession | null>(null);
 const selectedStoreId = ref<number | null>(null);
 const overviewStoreScope = ref<OwnStoreScope>("current");
 const competitorOwnStoreScope = ref<OwnStoreScope>("current");
+const initialCompetitorDetailPlid = competitorDetailPlidFromHash(window.location.hash);
+const competitorDetailRequest = ref({
+  plid: initialCompetitorDetailPlid ?? "",
+  revision: initialCompetitorDetailPlid ? 1 : 0,
+});
 const currentPage = ref<PageKey>(initialPage());
 const dataToday = localDate();
 const initialDataViewport = calendarMonthViewport(dataToday, dataToday);
@@ -208,6 +218,7 @@ const pageComponent = computed(() => {
     "keyword-traffic": KeywordTrafficPage,
     "search-ranking": SearchRankingPage,
     quadrants: QuadrantsPage,
+    "anomaly-products": AnomalyProductsPage,
     logistics: LogisticsPage,
     "platform-warehouse": PlatformWarehousePage,
     competitors: CompetitorsPage,
@@ -394,6 +405,8 @@ const activePageProps = computed(() => {
       accessibleConnectedStoreCount: accessibleConnectedStoreCount.value,
       operatingConnectedStoreCount: operatingConnectedStoreCount.value,
       ownStoreScope: competitorOwnStoreScope.value,
+      requestedDetailPlid: competitorDetailRequest.value.plid,
+      requestedDetailRevision: competitorDetailRequest.value.revision,
       onPermissionDenied: showPermissionDenied,
     };
   }
@@ -468,11 +481,15 @@ function openPage(event: MouseEvent, page: (typeof allPages)[number]) {
 
 function handleModuleHashChange() {
   const requestedPage = modulePageFromHash(window.location.hash);
+  const requestedDetailPlid = competitorDetailPlidFromHash(window.location.hash);
   if (!requestedPage) {
     syncModuleUrl(currentPage.value);
     return;
   }
-  if (requestedPage === currentPage.value) return;
+  if (requestedPage === currentPage.value) {
+    if (requestedDetailPlid) requestCompetitorDetail(requestedDetailPlid);
+    return;
+  }
   if (!session.value) {
     currentPage.value = requestedPage;
     return;
@@ -484,6 +501,7 @@ function handleModuleHashChange() {
     return;
   }
   switchPage(requestedPage, false);
+  if (requestedDetailPlid) requestCompetitorDetail(requestedDetailPlid);
 }
 
 async function restoreSession() {
@@ -547,7 +565,11 @@ function acceptSession(next: AuthSession) {
     );
     switchPage((firstUsablePage ?? pages.value[0]).key);
   } else {
-    syncModuleUrl(currentPage.value);
+    if (currentPage.value === "competitors" && initialCompetitorDetailPlid) {
+      syncCompetitorDetailUrl(initialCompetitorDetailPlid);
+    } else {
+      syncModuleUrl(currentPage.value);
+    }
   }
   authReady.value = true;
   void loadFreshness();
@@ -650,6 +672,40 @@ function syncModuleUrl(page: PageKey) {
   } catch {
     // Module switching remains usable if the browser blocks history updates.
   }
+}
+
+function syncCompetitorDetailUrl(plid: string) {
+  const nextHash = competitorDetailPageHref(plid);
+  if (window.location.hash === nextHash) return;
+  try {
+    window.history.replaceState(
+      window.history.state,
+      "",
+      `${window.location.pathname}${window.location.search}${nextHash}`,
+    );
+  } catch {
+    // Detail handoff remains usable if the browser blocks history updates.
+  }
+}
+
+function requestCompetitorDetail(plid: string) {
+  const normalized = plid.trim();
+  if (!normalized) return;
+  competitorOwnStoreScope.value = "current";
+  competitorDetailRequest.value = {
+    plid: normalized,
+    revision: competitorDetailRequest.value.revision + 1,
+  };
+}
+
+function openOwnLinkDetail(plid: string) {
+  if (!hasPermission("competitors.view")) {
+    showPermissionDenied();
+    return;
+  }
+  requestCompetitorDetail(plid);
+  switchPage("competitors", false);
+  syncCompetitorDetailUrl(plid);
 }
 
 function switchPage(page: PageKey, updateUrl = true) {
@@ -963,7 +1019,7 @@ function localDate() {
             {{
               selectedStore
                 ? "当前页面不会复用其他店铺的数据；管理员完成该店铺凭据和采集任务配置后才会开放。"
-                : "经营总览、商品、关键词流量、搜索定位、经营坐标、物流管理与约平台仓属于店铺数据模块；竞品雷达等公共模块仍可按账号已开放的功能权限正常使用。"
+                : "经营总览、商品、关键词流量、搜索定位、经营坐标、异常商品、物流管理与约平台仓属于店铺数据模块；竞品雷达等公共模块仍可按账号已开放的功能权限正常使用。"
             }}
           </span>
           <button
@@ -981,6 +1037,7 @@ function localDate() {
             :key="pageComponentKey"
             v-bind="activePageProps"
             @select-store="selectStoreFromOverview"
+            @open-own-link-detail="openOwnLinkDetail"
           />
         </KeepAlive>
         <div v-if="!pages.length" class="state-card">

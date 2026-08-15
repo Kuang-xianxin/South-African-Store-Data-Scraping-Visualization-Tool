@@ -1,4 +1,5 @@
 import type {
+  AnomalyProductPayload,
   CollectResult,
   CompetitorDetail,
   CompetitorLinkHealthItem,
@@ -868,6 +869,14 @@ export async function fetchSalesRevenueRevisions(options: {
 
 export async function fetchProducts(asOf: string): Promise<ProductsPayload> {
   return request<ProductsPayload>(`/api/erp/products?${query(asOf)}`);
+}
+
+export async function fetchAnomalyProducts(
+  asOf: string,
+): Promise<AnomalyProductPayload> {
+  return request<AnomalyProductPayload>(
+    `/api/erp/anomaly-products?${query(asOf)}`,
+  );
 }
 
 export async function fetchProductDetail(

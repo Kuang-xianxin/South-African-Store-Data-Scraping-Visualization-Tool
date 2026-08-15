@@ -4,6 +4,7 @@ export const ERP_MODULE_KEYS = [
   "keyword-traffic",
   "search-ranking",
   "quadrants",
+  "anomaly-products",
   "logistics",
   "platform-warehouse",
   "competitors",
@@ -27,6 +28,23 @@ export function modulePageFromHash(hash: string): ErpModuleKey | null {
   if (!normalizedHash) return null;
   const requestedModule = new URLSearchParams(normalizedHash).get("module");
   return isErpModuleKey(requestedModule) ? requestedModule : null;
+}
+
+export function competitorDetailPageHref(plid: string): string {
+  const params = new URLSearchParams({
+    module: "competitors",
+    detail_plid: plid.trim(),
+  });
+  return `#${params.toString()}`;
+}
+
+export function competitorDetailPlidFromHash(hash: string): string | null {
+  const normalizedHash = hash.trim().replace(/^#/, "");
+  if (!normalizedHash) return null;
+  const params = new URLSearchParams(normalizedHash);
+  if (params.get("module") !== "competitors") return null;
+  const plid = params.get("detail_plid")?.trim() ?? "";
+  return /^\d{1,20}$/.test(plid) ? plid : null;
 }
 
 export interface ModuleNavigationClick {

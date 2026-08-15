@@ -91,6 +91,10 @@ from takealot_ops.erp.auth import (
     StoreIdentity,
     UserIdentity,
 )
+from takealot_ops.erp.anomaly_products import (
+    build_anomaly_product_payload,
+    verified_sales_metric_dates,
+)
 from takealot_ops.erp.coordination import RefreshBusyError, RefreshCoordinator
 from takealot_ops.erp.daily_report import (
     DailyReportConflictError,
@@ -2355,6 +2359,36 @@ def create_app(project_root: Path | None = None) -> FastAPI:
     def risks(as_of: date = Query(default_factory=date.today)) -> dict[str, Any]:
         settings = DashboardSettings.from_env(root)
         return build_risk_payload(load_erp_dataset(settings, as_of), as_of)
+
+    @app.get("/api/erp/anomaly-products")
+    def anomaly_products(
+        as_of: date = Query(default_factory=date.today),
+    ) -> dict[str, Any]:
+        """Return the new separated anomaly workspace from local evidence only."""
+
+        settings = DashboardSettings.from_env(root)
+        completed_through = min(
+            as_of,
+            sast_date(datetime.now(UTC)) - timedelta(days=1),
+        )
+        engine = create_read_only_erp_engine(settings.database_url)
+        try:
+            with Session(engine) as session:
+                states = list(
+                    session.scalars(
+                        select(DailySalesMetricState).where(
+                            DailySalesMetricState.metric_date <= completed_through
+                        )
+                    )
+                )
+        finally:
+            engine.dispose()
+        return build_anomaly_product_payload(
+            load_erp_dataset(settings, as_of),
+            requested_as_of=as_of,
+            completed_through=completed_through,
+            verified_dates=verified_sales_metric_dates(states),
+        )
 
     @app.get("/api/erp/logistics")
     def logistics(refresh: bool = Query(False)) -> dict[str, Any]:
@@ -6400,6 +6434,7 @@ def _required_permission(path: str, method: str) -> str | tuple[str, ...] | None
             "/api/erp/summary",
             "/api/erp/products",
             "/api/erp/quadrants",
+            "/api/erp/anomaly-products",
             "/api/erp/risks",
             "/api/erp/logistics",
         )
@@ -6424,6 +6459,7 @@ def _requires_connected_store_access(path: str) -> bool:
                 "/api/erp/keyword-traffic",
                 "/api/erp/search-ranking",
                 "/api/erp/quadrants",
+                "/api/erp/anomaly-products",
                 "/api/erp/risks",
                 "/api/erp/logistics",
                 "/api/erp/platform-warehouse",
