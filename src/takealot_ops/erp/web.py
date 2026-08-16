@@ -217,7 +217,6 @@ from takealot_ops.storage.models import (
 )
 from takealot_ops.storage.store_context import (
     STORE_CODE_HEADER,
-    current_store_code,
     store_scope,
 )
 
@@ -1487,6 +1486,14 @@ def create_app(project_root: Path | None = None) -> FastAPI:
                 detail="竞品批次的开始、继续和停止仅限 kxx 账号",
             )
 
+    def require_full_refresh_controller(request: Request) -> None:
+        user = request.state.erp_user
+        if user.username.casefold() != "kxx":
+            raise HTTPException(
+                status_code=403,
+                detail="刷新全部店铺数据仅限 kxx 账号",
+            )
+
     def require_competitor_admin(request: Request) -> None:
         user = request.state.erp_user
         if user.role != "admin":
@@ -2615,6 +2622,7 @@ def create_app(project_root: Path | None = None) -> FastAPI:
 
     @app.post("/api/erp/refresh")
     def refresh(request: Request) -> dict[str, object]:
+        require_full_refresh_controller(request)
         user = request.state.erp_user
         coordination_role = _refresh_coordination_role(user)
         try:
@@ -2626,12 +2634,7 @@ def create_app(project_root: Path | None = None) -> FastAPI:
         except RefreshBusyError as exc:
             raise HTTPException(status_code=429, detail=str(exc)) from exc
         try:
-            selected_store_code = current_store_code()
-            result = (
-                run_dashboard_refresh(root)
-                if selected_store_code == "current"
-                else run_dashboard_refresh(root, store_code=selected_store_code)
-            )
+            result = run_dashboard_refresh(root, all_stores=True)
         except BaseException:
             refresh_coordinator.finish(
                 username=user.username,
@@ -6500,7 +6503,7 @@ def _permission_denied_message(permission: str | tuple[str, ...]) -> str:
 
 
 def _refresh_coordination_role(user: UserIdentity) -> str:
-    if not user.can(REFRESH_RUN):
+    if user.username.casefold() != "kxx" or not user.can(REFRESH_RUN):
         return "viewer"
     return "admin" if user.role == "admin" else "operator"
 

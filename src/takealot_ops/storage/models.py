@@ -1200,7 +1200,7 @@ class PlatformWarehouseShipment(StoreScopedMixin, Base):
 
 
 class ErpRefreshState(StoreScopedMixin, Base):
-    """Persistent per-store cooldown state for the ERP full-refresh action."""
+    """Persistent coordination state for the ERP full-refresh action."""
 
     __tablename__ = "erp_refresh_state"
 

@@ -4179,15 +4179,14 @@ def test_competitor_manual_retry_priority_is_audited_once(
         assert [item["action"] for item in audits] == ["manual_retry", "add"]
 
 
-def test_refresh_cooldown_is_shared_for_operators_and_admin_is_exempt(
+def test_refresh_is_kxx_only_and_always_targets_all_configured_stores(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    calls = 0
+    calls: list[bool] = []
 
-    def successful_refresh(_: Path):
-        nonlocal calls
-        calls += 1
+    def successful_refresh(_: Path, *, all_stores: bool = False):
+        calls.append(all_stores)
         return SimpleNamespace(succeeded=True, message="刷新成功")
 
     database_path = tmp_path / "erp.db"
@@ -4215,18 +4214,16 @@ def test_refresh_cooldown_is_shared_for_operators_and_admin_is_exempt(
             },
         )
         operator_csrf = str(login.json()["csrf_token"])
-        first = operator.post(
-            "/api/erp/refresh",
-            headers={"X-CSRF-Token": operator_csrf},
-        )
-        assert first.status_code == 200
-        assert first.json()["refresh_status"]["can_refresh"] is False
+        status = operator.get("/api/erp/refresh-status")
+        assert status.status_code == 200
+        assert status.json()["can_refresh"] is False
         blocked = operator.post(
             "/api/erp/refresh",
             headers={"X-CSRF-Token": operator_csrf},
         )
-        assert blocked.status_code == 429
-        assert "全员冷却" in blocked.json()["detail"]
+        assert blocked.status_code == 403
+        assert blocked.json()["detail"] == "刷新全部店铺数据仅限 kxx 账号"
+        assert calls == []
 
     with TestClient(app, client=("127.0.0.1", 50002)) as admin:
         login = admin.post(
@@ -4237,13 +4234,15 @@ def test_refresh_cooldown_is_shared_for_operators_and_admin_is_exempt(
         status = admin.get("/api/erp/refresh-status")
         assert status.json()["admin_exempt"] is True
         assert status.json()["can_refresh"] is True
-        override = admin.post(
+        refreshed = admin.post(
             "/api/erp/refresh",
             headers={"X-CSRF-Token": admin_csrf},
         )
-        assert override.status_code == 200
+        assert refreshed.status_code == 200
+        assert refreshed.json()["message"] == "刷新成功"
+        assert refreshed.json()["refresh_status"]["can_refresh"] is True
 
-    assert calls == 2
+    assert calls == [True]
 
 
 def test_csrf_and_last_admin_protection(

@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 from takealot_ops.settings import DashboardSettings
 from takealot_ops.storage.migrations import create_engine_for_settings, create_schema
 from takealot_ops.storage.models import ErpRefreshState
-from takealot_ops.storage.store_context import current_store_code
+from takealot_ops.storage.store_context import DEFAULT_STORE_CODE, store_scope
 
 
 REFRESH_ACTION_KEY = "full_store_refresh"
@@ -81,22 +81,24 @@ class RefreshCoordinator:
         with self._lock:
             if succeeded:
                 now = _utc_now()
-                with Session(self._get_engine()) as session:
-                    state = session.get(
-                        ErpRefreshState,
-                        (current_store_code(), REFRESH_ACTION_KEY),
-                    )
-                    if state is None:
-                        state = ErpRefreshState(
-                            action_key=REFRESH_ACTION_KEY,
-                            updated_at=now,
+                with store_scope(DEFAULT_STORE_CODE):
+                    with Session(self._get_engine()) as session:
+                        state = session.get(
+                            ErpRefreshState,
+                            (DEFAULT_STORE_CODE, REFRESH_ACTION_KEY),
                         )
-                        session.add(state)
-                    state.last_success_at = now
-                    state.last_success_by = username
-                    state.last_success_display_name = display_name
-                    state.updated_at = now
-                    session.commit()
+                        if state is None:
+                            state = ErpRefreshState(
+                                store_code=DEFAULT_STORE_CODE,
+                                action_key=REFRESH_ACTION_KEY,
+                                updated_at=now,
+                            )
+                            session.add(state)
+                        state.last_success_at = now
+                        state.last_success_by = username
+                        state.last_success_display_name = display_name
+                        state.updated_at = now
+                        session.commit()
             self._in_progress = False
             self._in_progress_by = None
             self._in_progress_display_name = None
@@ -105,16 +107,17 @@ class RefreshCoordinator:
 
     def _status_locked(self, *, role: str) -> dict[str, object]:
         now = _utc_now()
-        with Session(self._get_engine()) as session:
-            state = session.get(
-                ErpRefreshState,
-                (current_store_code(), REFRESH_ACTION_KEY),
-            )
-            last_success_at = state.last_success_at if state is not None else None
-            last_success_by = state.last_success_by if state is not None else None
-            last_success_display_name = (
-                state.last_success_display_name if state is not None else None
-            )
+        with store_scope(DEFAULT_STORE_CODE):
+            with Session(self._get_engine()) as session:
+                state = session.get(
+                    ErpRefreshState,
+                    (DEFAULT_STORE_CODE, REFRESH_ACTION_KEY),
+                )
+                last_success_at = state.last_success_at if state is not None else None
+                last_success_by = state.last_success_by if state is not None else None
+                last_success_display_name = (
+                    state.last_success_display_name if state is not None else None
+                )
         if last_success_at is not None and last_success_at.tzinfo is None:
             last_success_at = last_success_at.replace(tzinfo=UTC)
         cooldown_until = (

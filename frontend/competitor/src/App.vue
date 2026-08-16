@@ -145,7 +145,16 @@ const hasPermission = (permission: PermissionKey) =>
 const canManageUsers = computed(() => hasPermission("users.manage"));
 const canManageLogistics = computed(() => hasPermission("logistics.manage"));
 const canRunSearchRanking = computed(() => hasPermission("search_ranking.run"));
-const canRefresh = computed(() => hasPermission("refresh.run"));
+const canRefresh = computed(
+  () =>
+    hasPermission("refresh.run")
+    && session.value?.user.username.toLowerCase() === "kxx",
+);
+const refreshTargetStoreCount = computed(
+  () => session.value?.user.accessible_stores.filter(
+    (store) => store.active && store.data_connected,
+  ).length ?? 0,
+);
 const canCollectCompetitors = computed(() => hasPermission("competitors.collect"));
 const canControlCompetitorCollection = computed(
   () =>
@@ -174,7 +183,9 @@ const refreshButtonLabel = computed(() => {
   if (!refreshStatus.value.admin_exempt && refreshCooldownRemaining.value > 0) {
     return `刷新冷却 ${formatCooldown(refreshCooldownRemaining.value)}`;
   }
-  return "刷新全部数据";
+  return refreshTargetStoreCount.value > 0
+    ? `刷新全部数据（${refreshTargetStoreCount.value}店）`
+    : "刷新全部数据";
 });
 const refreshStatusNotice = computed(() => {
   if (refreshStatus.value.in_progress) {
@@ -193,7 +204,7 @@ const refreshStatusNotice = computed(() => {
       || refreshStatus.value.last_success_by
       || "其他用户";
     const suffix = refreshStatus.value.admin_exempt
-      ? "；管理员可在必要时再次刷新"
+      ? "；仅 kxx 可在必要时再次刷新"
       : `；普通账号还需等待 ${formatCooldown(refreshCooldownRemaining.value)}`;
     return `${owner} 已刷新全部数据${suffix}。`;
   }
@@ -968,11 +979,10 @@ function localDate() {
               !['logistics', 'users'].includes(currentPage)
               && !selectedStorePending
               && canAccessConnectedStore
-              && !competitorMultiStoreSelected
-              && !overviewMultiStoreSelected
+              && canRefresh
             "
             class="refresh-button"
-            :disabled="refreshing || (canRefresh && !refreshStatus.can_refresh)"
+            :disabled="refreshing || !refreshStatus.can_refresh"
             @click="runRefresh"
           >
             {{ refreshButtonLabel }}

@@ -14,7 +14,7 @@ export const permissionLabels: Record<PermissionKey, string> = {
   "search_ranking.run": "调用多模态模型并采集搜索定位",
   "competitors.view": "查看竞品雷达",
   "competitors.collect": "采集竞品",
-  "refresh.run": "刷新全部数据",
+  "refresh.run": "刷新全部店铺数据（仅 kxx 生效）",
   "users.manage": "管理账号与权限",
 };
 
