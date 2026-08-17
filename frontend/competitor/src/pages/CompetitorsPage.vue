@@ -177,6 +177,7 @@ const props = defineProps<{
   requestedDetailPlid?: string;
   requestedDetailRevision?: number;
   onPermissionDenied?: () => void;
+  detailOnly?: boolean;
 }>();
 
 interface CollectionQueueItem {
@@ -1660,6 +1661,23 @@ function isAbortError(error: unknown): boolean {
 
 onMounted(async () => {
   window.addEventListener("keydown", handleWindowKeydown);
+  if (props.detailOnly) {
+    loading.value = true;
+    await Promise.all([
+      loadOwnStoreScope(),
+      loadPersonalWatchlist().catch(() => undefined),
+    ]);
+    if (!appliedStartDate.value && competitorDateRange.value.selected_start) {
+      appliedStartDate.value = competitorDateRange.value.selected_start;
+    }
+    if (!appliedEndDate.value && competitorDateRange.value.selected_end) {
+      appliedEndDate.value = competitorDateRange.value.selected_end;
+    }
+    if (!rangeStartDate.value) rangeStartDate.value = appliedStartDate.value;
+    if (!rangeEndDate.value) rangeEndDate.value = appliedEndDate.value;
+    loading.value = false;
+    return;
+  }
   let checkpoint: CollectionCheckpoint | null = null;
   if (props.isAdmin) {
     window.addEventListener("beforeunload", closeCollectionClientChannel);
@@ -5172,6 +5190,7 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
     class="competitor-module"
     :class="{ 'admin-priority-layout': props.isAdmin }"
   >
+    <template v-if="!props.detailOnly">
     <header class="hero">
       <div>
         <p class="eyebrow">TAKEALOT MARKET INTELLIGENCE</p>
@@ -8151,6 +8170,7 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
         </section>
       </div>
     </section>
+    </template>
 
     <Teleport to="body">
       <div
@@ -9165,7 +9185,7 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
       </div>
     </Teleport>
 
-    <footer class="module-footer">
+    <footer v-if="!props.detailOnly" class="module-footer">
       价格和库存按每个卖家报价分开展示；同一 PLID 的商品评论共用。所有观察信号均需结合连续快照判断。
     </footer>
   </div>

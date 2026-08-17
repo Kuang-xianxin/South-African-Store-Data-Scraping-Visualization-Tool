@@ -107,7 +107,7 @@ test("slow-moving selector filters by actual no-sales days", () => {
   assert.equal(countForAnomalyView(payload, "slow_moving", 20), 1);
 });
 
-test("cards hand off to the existing competitor own-link modal", () => {
+test("cards open the existing full own-link detail modal in the anomaly page", () => {
   const pageSource = readFileSync(
     new URL("../src/pages/AnomalyProductsPage.vue", import.meta.url),
     "utf8",
@@ -118,12 +118,34 @@ test("cards hand off to the existing competitor own-link modal", () => {
     "utf8",
   );
 
-  assert.match(pageSource, /:href="competitorDetailPageHref\(item\.plid\)"/);
-  assert.match(pageSource, /emit\("open-own-link-detail", item\.plid\)/);
-  assert.match(appSource, /@open-own-link-detail="openOwnLinkDetail"/);
+  assert.match(pageSource, /import CompetitorsPage from "\.\/CompetitorsPage\.vue"/);
+  assert.match(pageSource, /const detailRequest = ref\(\{ plid: "", revision: 0 \}\)/);
+  assert.match(pageSource, /<button[\s\S]*class="anomaly-card"/);
+  assert.match(pageSource, /在当前页面查看 \$\{item\.title\} 的自有链接详情/);
+  assert.match(pageSource, /<CompetitorsPage[\s\S]*detail-only/);
+  assert.match(pageSource, /own-store-scope="current"/);
+  assert.match(pageSource, /:requested-detail-plid="detailRequest\.plid"/);
+  assert.doesNotMatch(pageSource, /competitorDetailPageHref/);
+  assert.doesNotMatch(pageSource, /open-own-link-detail/);
+  assert.match(appSource, /if \(key === "anomaly-products"\)/);
+  assert.match(appSource, /canViewCompetitors: hasPermission\("competitors\.view"\)/);
+  assert.doesNotMatch(appSource, /@open-own-link-detail=/);
   assert.match(appSource, /requestedDetailPlid: competitorDetailRequest\.value\.plid/);
+  assert.match(competitorSource, /detailOnly\?: boolean/);
+  assert.match(competitorSource, /if \(props\.detailOnly\)/);
+  assert.match(competitorSource, /loadOwnStoreScope\(\)/);
+  assert.match(competitorSource, /loadPersonalWatchlist\(\)\.catch/);
+  assert.match(competitorSource, /<template v-if="!props\.detailOnly">/);
   assert.match(competitorSource, /const ownItem = ownItems\.find/);
   assert.match(competitorSource, /openProductModal\(ownItem\)/);
+  assert.match(
+    competitorSource,
+    /<\/section>\s*<\/template>\s*<Teleport to="body">\s*<div\s*v-if="detailModalOpen && selected"/,
+  );
+  assert.match(
+    competitorSource,
+    /<footer v-if="!props\.detailOnly" class="module-footer">/,
+  );
 });
 
 test("stock-status cards state that on-way units do not count", () => {

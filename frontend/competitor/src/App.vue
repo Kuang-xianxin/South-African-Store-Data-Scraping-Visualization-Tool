@@ -434,6 +434,15 @@ const activePageProps = computed(() => {
       onPermissionDenied: showPermissionDenied,
     };
   }
+  if (key === "anomaly-products") {
+    return {
+      ...common,
+      canViewCompetitors: hasPermission("competitors.view"),
+      currentStoreCode: selectedStore.value?.code ?? "",
+      currentStoreName: selectedStore.value?.display_name ?? "当前店铺",
+      onPermissionDenied: showPermissionDenied,
+    };
+  }
   if (key === "logistics" || key === "platform-warehouse") {
     return {
       ...common,
@@ -721,16 +730,6 @@ function requestCompetitorDetail(plid: string) {
     plid: normalized,
     revision: competitorDetailRequest.value.revision + 1,
   };
-}
-
-function openOwnLinkDetail(plid: string) {
-  if (!hasPermission("competitors.view")) {
-    showPermissionDenied();
-    return;
-  }
-  requestCompetitorDetail(plid);
-  switchPage("competitors", false);
-  syncCompetitorDetailUrl(plid);
 }
 
 function switchPage(page: PageKey, updateUrl = true) {
@@ -1062,7 +1061,6 @@ function localDate() {
             :key="pageComponentKey"
             v-bind="activePageProps"
             @select-store="selectStoreFromOverview"
-            @open-own-link-detail="openOwnLinkDetail"
           />
         </KeepAlive>
         <div v-if="!pages.length" class="state-card">

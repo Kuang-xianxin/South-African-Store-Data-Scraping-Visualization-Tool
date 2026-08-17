@@ -9,16 +9,16 @@ import {
   type AnomalyProductView,
 } from "../anomalyProducts";
 import { fetchAnomalyProducts } from "../api";
-import {
-  competitorDetailPageHref,
-  shouldHandleModulePageClick,
-} from "../moduleNavigation";
 import { PRODUCT_IMAGE_SIZE, productThumbnailUrl } from "../productImages";
 import type { AnomalyProductItem, AnomalyProductPayload } from "../types";
+import CompetitorsPage from "./CompetitorsPage.vue";
 
-const props = defineProps<{ asOf: string }>();
-const emit = defineEmits<{
-  "open-own-link-detail": [plid: string];
+const props = defineProps<{
+  asOf: string;
+  canViewCompetitors?: boolean;
+  currentStoreCode?: string;
+  currentStoreName?: string;
+  onPermissionDenied?: () => void;
 }>();
 
 const payload = ref<AnomalyProductPayload | null>(null);
@@ -28,6 +28,7 @@ const query = ref("");
 const loading = ref(true);
 const error = ref("");
 const failedImages = ref(new Set<string>());
+const detailRequest = ref({ plid: "", revision: 0 });
 
 const slowDayOptions = computed(
   () => payload.value?.rules.slow_day_options ?? [4, 7, 10, 15, 20, 30],
@@ -67,10 +68,15 @@ function viewCount(view: AnomalyProductView): number {
   return countForAnomalyView(payload.value, view, slowDays.value);
 }
 
-function openOwnLinkDetail(event: MouseEvent, item: AnomalyProductItem): void {
-  if (!shouldHandleModulePageClick(event)) return;
-  event.preventDefault();
-  emit("open-own-link-detail", item.plid);
+function openOwnLinkDetail(item: AnomalyProductItem): void {
+  if (!props.canViewCompetitors) {
+    props.onPermissionDenied?.();
+    return;
+  }
+  detailRequest.value = {
+    plid: item.plid,
+    revision: detailRequest.value.revision + 1,
+  };
 }
 
 function imageUrl(item: AnomalyProductItem): string {
@@ -205,15 +211,14 @@ function emptyMessage(): string {
       <button type="button" @click="loadAnomalies">重新读取</button>
     </div>
     <section v-else-if="filteredItems.length" class="anomaly-grid">
-      <a
+      <button
         v-for="item in filteredItems"
         :key="`${activeView}-${item.offer_id}`"
+        type="button"
         class="anomaly-card"
-        :href="competitorDetailPageHref(item.plid)"
         aria-haspopup="dialog"
-        :aria-label="`在竞品雷达查看 ${item.title} 的自有链接详情`"
-        @click="openOwnLinkDetail($event, item)"
-        @keydown.space.prevent="emit('open-own-link-detail', item.plid)"
+        :aria-label="`在当前页面查看 ${item.title} 的自有链接详情`"
+        @click="openOwnLinkDetail(item)"
       >
         <div class="card-topline">
           <span class="type-badge" :class="`type-${item.anomaly_type}`">
@@ -286,14 +291,28 @@ function emptyMessage(): string {
 
         <div class="card-footer">
           <span>数据截至 {{ item.data_through || "暂无" }}</span>
-          <strong>打开竞品雷达自有链接详情 <b aria-hidden="true">↗</b></strong>
+          <strong>查看完整商品详情</strong>
         </div>
-      </a>
+      </button>
     </section>
     <div v-else class="anomaly-state empty">
       <strong>{{ emptyMessage() }}</strong>
       <span>切换上方异常类型或调整搜索条件继续查看。</span>
     </div>
+
+    <CompetitorsPage
+      v-if="props.canViewCompetitors"
+      detail-only
+      :can-operate="false"
+      :can-control-collection="false"
+      :is-admin="false"
+      :current-store-code="props.currentStoreCode"
+      :current-store-name="props.currentStoreName"
+      own-store-scope="current"
+      :requested-detail-plid="detailRequest.plid"
+      :requested-detail-revision="detailRequest.revision"
+      :on-permission-denied="props.onPermissionDenied"
+    />
   </div>
 </template>
 
@@ -490,16 +509,22 @@ function emptyMessage(): string {
 }
 
 .anomaly-card {
+  width: 100%;
   min-width: 0;
   display: grid;
   gap: 15px;
+  margin: 0;
   padding: 18px;
   border: 1px solid #dce4dd;
   border-radius: 18px;
   color: inherit;
   background: #fff;
   box-shadow: 0 9px 26px rgb(42 67 55 / 6%);
+  font: inherit;
+  text-align: left;
   text-decoration: none;
+  appearance: none;
+  cursor: pointer;
   transition: border-color 180ms ease, box-shadow 180ms ease, transform 180ms ease;
 }
 
