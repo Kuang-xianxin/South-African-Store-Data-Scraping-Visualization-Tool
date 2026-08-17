@@ -42,6 +42,7 @@ import {
   type DateViewport,
   type DateViewportMode,
 } from "./dateViewport";
+import { defaultMultiStoreScope } from "./defaultStoreScope";
 import {
   templateLabels,
   userHasPermission,
@@ -366,6 +367,18 @@ function selectStoreFromOverview(storeCode: string) {
   selectedStoreId.value = store.id;
 }
 
+function applyDefaultStoreScopeForPage(page: PageKey) {
+  const scope = defaultMultiStoreScope(
+    accessibleConnectedStoreCount.value,
+    operatingConnectedStoreCount.value,
+  );
+  if (page === "overview") {
+    overviewStoreScope.value = scope;
+  } else if (page === "competitors") {
+    competitorOwnStoreScope.value = scope;
+  }
+}
+
 const selectedStorePending = computed(
   () =>
     storeScopedPages.has(activePage.value.key as PageKey)
@@ -560,6 +573,7 @@ function acceptSession(next: AuthSession) {
   );
   selectedStoreId.value = nextStore?.id ?? null;
   setActiveStoreCode(nextStore?.code);
+  applyDefaultStoreScopeForPage(currentPage.value);
   const allowedPage = pages.value.find((page) => page.key === currentPage.value);
   const allowedPageNeedsStore = (
     allowedPage
@@ -720,6 +734,7 @@ function openOwnLinkDetail(plid: string) {
 }
 
 function switchPage(page: PageKey, updateUrl = true) {
+  applyDefaultStoreScopeForPage(page);
   currentPage.value = page;
   try {
     localStorage.setItem(pageStorageKey, page);
