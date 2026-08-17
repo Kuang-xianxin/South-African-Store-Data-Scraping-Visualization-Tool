@@ -778,6 +778,7 @@ export interface AnomalyProductItem {
   no_sales_days: number;
   no_sales_days_exact: boolean;
   last_sale_on: string | null;
+  slow_moving_started_on?: string | null;
   stop_started_on?: string;
   zero_sales_dates?: string[];
   baseline_start_on?: string;
@@ -801,6 +802,7 @@ export interface AnomalyProductPayload {
     slow_day_options: number[];
     slow_moving_requires_status: "buyable";
     slow_moving_requires_available_stock: boolean;
+    slow_moving_day_basis: "verified_zero_sales_and_positive_stock_days";
   };
   summary: {
     sudden_sales_stop: number;

@@ -65,6 +65,7 @@ def build_anomaly_product_payload(
     data_through = max(eligible_dates) if eligible_dates else None
     contiguous_dates = _contiguous_dates(data_through, verified_dates)
     sales_by_offer = _sales_by_offer(product_daily, data_through, eligible_dates)
+    stock_by_offer = _stock_by_offer(dataset.offer_history, data_through)
 
     sudden_sales_stop: list[dict[str, Any]] = []
     stock_status_anomalies: dict[str, list[dict[str, Any]]] = {
@@ -79,6 +80,11 @@ def build_anomaly_product_payload(
             continue
         daily_sales = sales_by_offer.get(offer_id, {})
         zero_streak = _zero_sales_streak(daily_sales, contiguous_dates)
+        stocked_zero_streak = _stocked_zero_sales_streak(
+            daily_sales,
+            stock_by_offer.get(offer_id, {}),
+            contiguous_dates,
+        )
         item = _base_item(
             cast("Mapping[str, Any]", row),
             data_through,
@@ -106,9 +112,12 @@ def build_anomaly_product_payload(
         if (
             status == "buyable"
             and item["available_stock"] > 0
-            and item["no_sales_days"] >= min(SLOW_DAY_OPTIONS)
+            and stocked_zero_streak["days"] >= min(SLOW_DAY_OPTIONS)
         ):
             slow_item = dict(item)
+            slow_item["no_sales_days"] = stocked_zero_streak["days"]
+            slow_item["no_sales_days_exact"] = stocked_zero_streak["exact"]
+            slow_item["slow_moving_started_on"] = stocked_zero_streak["started_on"]
             slow_item["anomaly_type"] = "slow_moving"
             slow_item["anomaly_label"] = "有库存滞销"
             slow_moving.append(slow_item)
@@ -154,6 +163,7 @@ def build_anomaly_product_payload(
             "slow_day_options": list(SLOW_DAY_OPTIONS),
             "slow_moving_requires_status": "buyable",
             "slow_moving_requires_available_stock": True,
+            "slow_moving_day_basis": "verified_zero_sales_and_positive_stock_days",
         },
         "summary": {
             "sudden_sales_stop": len(sudden_sales_stop),
@@ -227,6 +237,36 @@ def _sales_by_offer(
     return result
 
 
+def _stock_by_offer(
+    frame: pd.DataFrame,
+    through: date | None,
+) -> dict[str, dict[date, int | None]]:
+    """Return daily available-stock evidence for each exact Offer identity."""
+
+    required = {"snapshot_date", "offer_id"}
+    if through is None or frame.empty or not required.issubset(frame.columns):
+        return {}
+    result: dict[str, dict[date, int | None]] = {}
+    normalized = frame.copy()
+    normalized["_snapshot_date"] = pd.to_datetime(
+        normalized["snapshot_date"], errors="coerce"
+    ).dt.date
+    normalized = normalized.loc[
+        normalized["offer_id"].notna()
+        & normalized["_snapshot_date"].notna()
+        & (normalized["_snapshot_date"] <= through)
+    ].drop_duplicates(["offer_id", "_snapshot_date"], keep="last")
+    for row in normalized.to_dict(orient="records"):
+        offer_id = _text(row.get("offer_id"))
+        snapshot_date = row.get("_snapshot_date")
+        if not offer_id or not isinstance(snapshot_date, date):
+            continue
+        result.setdefault(offer_id, {})[snapshot_date] = _available_stock_or_none(
+            cast("Mapping[str, Any]", row)
+        )
+    return result
+
+
 def _contiguous_dates(
     through: date | None,
     verified_dates: set[date],
@@ -264,6 +304,38 @@ def _zero_sales_streak(
         "days": count,
         "exact": encountered_positive,
         "last_sale_on": max(positive_dates).isoformat() if positive_dates else None,
+    }
+
+
+def _stocked_zero_sales_streak(
+    daily_sales: Mapping[date, int | None],
+    daily_stock: Mapping[date, int | None],
+    contiguous_dates: list[date],
+) -> dict[str, Any]:
+    """Count only consecutive verified zero-sale days with positive stock evidence."""
+
+    count = 0
+    boundary_observed = False
+    started_on: date | None = None
+    for metric_date in contiguous_dates:
+        units = daily_sales.get(metric_date)
+        if units is None:
+            break
+        if units > 0:
+            boundary_observed = True
+            break
+        stock = daily_stock.get(metric_date)
+        if stock is None:
+            break
+        if stock <= 0:
+            boundary_observed = True
+            break
+        count += 1
+        started_on = metric_date
+    return {
+        "days": count,
+        "exact": boundary_observed,
+        "started_on": started_on.isoformat() if started_on else None,
     }
 
 
@@ -355,6 +427,24 @@ def _base_item(
     }
 
 
+def _available_stock_or_none(row: Mapping[str, Any]) -> int | None:
+    total_stock = _optional_non_negative_integer(row.get("total_stock"))
+    takealot_available = _optional_non_negative_integer(
+        row.get("takealot_available_stock")
+    )
+    seller_available = _optional_non_negative_integer(
+        row.get("seller_available_stock")
+    )
+    if (
+        total_stock is None
+        and takealot_available is None
+        and seller_available is None
+    ):
+        return None
+    component_stock = (takealot_available or 0) + (seller_available or 0)
+    return max(total_stock or 0, component_stock)
+
+
 def _state_verified_at(state: DailySalesMetricState) -> datetime | None:
     raw_value: object = state.verified_at
     if raw_value is None:
@@ -388,6 +478,10 @@ def _finite_number(value: object) -> TypeGuard[int | float]:
 
 def _non_negative_integer(value: object) -> int:
     return max(0, int(value)) if _finite_number(value) else 0
+
+
+def _optional_non_negative_integer(value: object) -> int | None:
+    return max(0, int(value)) if _finite_number(value) else None
 
 
 def _integer_or_none(value: object) -> int | None:

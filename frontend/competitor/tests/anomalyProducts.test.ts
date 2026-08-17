@@ -39,6 +39,7 @@ function item(
     no_sales_days: noSalesDays,
     no_sales_days_exact: true,
     last_sale_on: "2026-08-02",
+    slow_moving_started_on: "2026-08-03",
   };
 }
 
@@ -63,6 +64,7 @@ const payload: AnomalyProductPayload = {
     slow_day_options: [4, 7, 10, 15, 20, 30],
     slow_moving_requires_status: "buyable",
     slow_moving_requires_available_stock: true,
+    slow_moving_day_basis: "verified_zero_sales_and_positive_stock_days",
   },
   summary: {
     sudden_sales_stop: 1,
@@ -105,6 +107,17 @@ test("slow-moving selector filters by actual no-sales days", () => {
   assert.deepEqual(itemsForAnomalyView(payload, "slow_moving", 15), [slow20]);
   assert.deepEqual(itemsForAnomalyView(payload, "slow_moving", 30), []);
   assert.equal(countForAnomalyView(payload, "slow_moving", 20), 1);
+});
+
+test("slow-moving copy starts the count from stocked days", () => {
+  const pageSource = readFileSync(
+    new URL("../src/pages/AnomalyProductsPage.vue", import.meta.url),
+    "utf8",
+  );
+
+  assert.match(pageSource, /从连续有库存的完整日开始累计/);
+  assert.match(pageSource, /库存归零后，重新有货时重新起算/);
+  assert.match(pageSource, /滞销起算 \{\{ item\.slow_moving_started_on/);
 });
 
 test("cards open the existing full own-link detail modal in the anomaly page", () => {
