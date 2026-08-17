@@ -91,7 +91,7 @@ def build_anomaly_product_payload(
             stock_item = dict(item)
             stock_item["anomaly_type"] = f"{status}_with_stock"
             stock_item["anomaly_label"] = (
-                f"{item['offer_status_label']}但仍有库存"
+                f"{item['offer_status_label']}但平台仓仍有库存"
             )
             stock_status_anomalies[status].append(stock_item)
 
@@ -344,7 +344,9 @@ def _base_item(
         "seller_available_stock": seller_available,
         "receiving_stock": receiving,
         "on_way_stock": on_way,
-        "inventory_units": available_stock + receiving + on_way,
+        # Stock that is still on the way has not reached the platform warehouse
+        # and must not make a non-buyable offer look like landed inventory.
+        "inventory_units": available_stock + receiving,
         "data_through": data_through.isoformat() if data_through else None,
         "latest_ordered_units": latest_units,
         "no_sales_days": int(zero_streak.get("days") or 0),

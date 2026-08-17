@@ -45,7 +45,8 @@ test("overview revenue line discloses pending reconciliation and immutable sourc
   assert.match(overviewSource, /storeData\.sales_reconciliation\.pending_store_count/);
   assert.match(overviewSource, /class="revenue-line reconciliation-pending"/);
   assert.match(overviewSource, /class="revenue-line revised"/);
-  assert.match(overviewSource, /销售额历史修订记录/);
+  assert.match(overviewSource, /销售额日终后历史修订记录/);
+  assert.match(overviewSource, /业务日内正常累计和第一次日终基线不计纠偏/);
   assert.match(overviewSource, /更新前来源/);
   assert.match(overviewSource, /更新后来源/);
   assert.match(overviewSource, /fetchSalesRevenueRevisions/);

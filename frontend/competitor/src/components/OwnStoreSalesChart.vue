@@ -187,7 +187,7 @@ function number(value: number | null): string {
                     : "Seller Sales /sales · 完整自然日"
               }}
             </strong>
-            <span v-if="activePoint.revision_count">含 {{ activePoint.revision_count }} 次源数据修订</span>
+            <span v-if="activePoint.revision_count">含 {{ activePoint.revision_count }} 次日终基线后修订</span>
           </div>
         </div>
 

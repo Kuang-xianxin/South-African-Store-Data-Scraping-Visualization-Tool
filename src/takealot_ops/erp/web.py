@@ -215,6 +215,7 @@ from takealot_ops.storage.models import (
     PersonalWatchlistPreference,
     SalesRevenueRevision,
 )
+from takealot_ops.storage.repository import is_closed_day_sales_revision
 from takealot_ops.storage.store_context import (
     STORE_CODE_HEADER,
     store_scope,
@@ -957,26 +958,29 @@ def _store_sales_metric_states(
             state_statement = state_statement.limit(limit)
         states = session.scalars(state_statement).all()
         revision_statement = (
-            select(
-                SalesRevenueRevision.metric_date,
-                func.count(SalesRevenueRevision.id),
-                func.max(SalesRevenueRevision.detected_at),
-            )
+            select(SalesRevenueRevision)
             .where(SalesRevenueRevision.metric_date <= as_of)
-            .group_by(SalesRevenueRevision.metric_date)
+            .order_by(
+                SalesRevenueRevision.metric_date,
+                SalesRevenueRevision.detected_at,
+                SalesRevenueRevision.id,
+            )
         )
         if start_date is not None:
             revision_statement = revision_statement.where(
                 SalesRevenueRevision.metric_date >= start_date
             )
-        revision_rows = session.execute(revision_statement).all()
-    revisions = {
-        metric_date: {
-            "count": int(count or 0),
-            "latest_at": latest_at.isoformat() if latest_at is not None else None,
-        }
-        for metric_date, count, latest_at in revision_rows
-    }
+        revision_rows = session.scalars(revision_statement).all()
+    revisions: dict[date, dict[str, Any]] = {}
+    for revision in revision_rows:
+        if not is_closed_day_sales_revision(revision):
+            continue
+        summary = revisions.setdefault(
+            revision.metric_date,
+            {"count": 0, "latest_at": None},
+        )
+        summary["count"] = int(summary["count"]) + 1
+        summary["latest_at"] = revision.detected_at.isoformat()
     return {
         state.metric_date.isoformat(): {
             "source_kind": state.source_kind,
@@ -985,10 +989,7 @@ def _store_sales_metric_states(
             "verified_at": (
                 state.verified_at.isoformat() if state.verified_at is not None else None
             ),
-            "revision_count": revisions.get(state.metric_date, {}).get(
-                "count",
-                int(state.revision_count or 0),
-            ),
+            "revision_count": revisions.get(state.metric_date, {}).get("count", 0),
             "latest_revision_at": revisions.get(state.metric_date, {}).get(
                 "latest_at"
             ),
@@ -1061,18 +1062,22 @@ def _store_sales_reconciliation(
                 )
                 or 0
             )
-        revision_total = int(
-            session.scalar(
-                select(func.count(SalesRevenueRevision.id)).where(
-                    SalesRevenueRevision.metric_date <= as_of
-                )
-            )
-            or 0
-        )
-        latest_revision_at = session.scalar(
-            select(func.max(SalesRevenueRevision.detected_at)).where(
+        revision_rows = session.scalars(
+            select(SalesRevenueRevision)
+            .where(
                 SalesRevenueRevision.metric_date <= as_of
             )
+            .order_by(
+                SalesRevenueRevision.detected_at,
+                SalesRevenueRevision.id,
+            )
+        ).all()
+        meaningful_revisions = [
+            row for row in revision_rows if is_closed_day_sales_revision(row)
+        ]
+        revision_total = len(meaningful_revisions)
+        latest_revision_at = (
+            meaningful_revisions[-1].detected_at if meaningful_revisions else None
         )
 
     period_end_captured_at = period_end.captured_at if period_end is not None else None
@@ -1265,7 +1270,7 @@ def _sales_revenue_revision_rows(
     start_date: date | None,
     end_date: date | None,
 ) -> list[dict[str, Any]]:
-    """Return auditable revisions for the caller's visible connected stores."""
+    """Return post-close revisions for the caller's visible connected stores."""
     output: list[dict[str, Any]] = []
     for store in stores:
         with store_scope(store.code), Session(engine) as session:
@@ -1282,6 +1287,7 @@ def _sales_revenue_revision_rows(
                     SalesRevenueRevision.id.desc(),
                 )
             ).all()
+        rows = [row for row in rows if is_closed_day_sales_revision(row)]
         output.extend(
             {
                 "id": row.id,
@@ -2006,7 +2012,7 @@ def create_app(project_root: Path | None = None) -> FastAPI:
             alias="store_scope",
         ),
     ) -> dict[str, Any]:
-        """Return immutable before/after revenue revisions for the chosen scope."""
+        """Return immutable post-close revenue revisions for the chosen scope."""
         if start_date is not None and end_date is not None and start_date > end_date:
             raise HTTPException(status_code=422, detail="开始日期不能晚于结束日期")
         stores = _multi_store_identities_for_request(request, selected_store_scope)
@@ -2030,8 +2036,8 @@ def create_app(project_root: Path | None = None) -> FastAPI:
             "start_date": start_date.isoformat() if start_date is not None else None,
             "end_date": end_date.isoformat() if end_date is not None else None,
             "source_policy": {
-                "before": "上一次已发布店铺日指标及其保存的来源",
-                "after": "触发本次修订的成功 Sales API 批次或明确标注的本地重建",
+                "before": "南非业务日结束后最近一次成功 Sales API 验证的正式基线",
+                "after": "正式基线建立后再次改变该业务日金额或件数的成功 Sales API 批次",
                 "immutable": True,
             },
         }

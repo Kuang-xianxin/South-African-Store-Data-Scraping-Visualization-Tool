@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
 from typing import Any
 from uuid import uuid4
@@ -32,6 +32,53 @@ from takealot_ops.storage.store_context import current_store_code
 
 
 STORE_DISPLAY_TIMEZONE = ZoneInfo("Asia/Shanghai")
+SAST_TIMEZONE = ZoneInfo("Africa/Johannesburg")
+
+
+def has_closed_sast_sales_baseline(
+    metric_date: date,
+    source: Mapping[str, Any] | None,
+) -> bool:
+    """Return whether ``source`` verified the metric after its SAST day closed."""
+    if not isinstance(source, Mapping) or source.get("kind") != "takealot_sales_api":
+        return False
+    verified_at = _source_verified_at(source)
+    if verified_at is None:
+        return False
+    closed_at = datetime.combine(
+        metric_date + timedelta(days=1),
+        time.min,
+        tzinfo=SAST_TIMEZONE,
+    ).astimezone(UTC)
+    return verified_at >= closed_at
+
+
+def changes_closed_sast_sales_baseline(
+    metric_date: date,
+    before_source: Mapping[str, Any] | None,
+    after_source: Mapping[str, Any] | None,
+) -> bool:
+    """Return whether a later Sales pull changed an established closed-day baseline."""
+    if not has_closed_sast_sales_baseline(metric_date, before_source):
+        return False
+    if not has_closed_sast_sales_baseline(metric_date, after_source):
+        return False
+    before_verified_at = _source_verified_at(before_source or {})
+    after_verified_at = _source_verified_at(after_source or {})
+    return bool(
+        before_verified_at is not None
+        and after_verified_at is not None
+        and after_verified_at > before_verified_at
+    )
+
+
+def is_closed_day_sales_revision(row: SalesRevenueRevision) -> bool:
+    """Return whether an audit row changed an already closed-day Sales baseline."""
+    return changes_closed_sast_sales_baseline(
+        row.metric_date,
+        row.before_source,
+        row.after_source,
+    )
 
 
 class Repository:
@@ -256,6 +303,19 @@ class Repository:
                 )
             )
         }
+        meaningful_revision_counts: dict[date, int] = {}
+        for revision in self._session.scalars(
+            select(SalesRevenueRevision).where(
+                SalesRevenueRevision.store_code == store_code,
+                SalesRevenueRevision.metric_date >= start,
+                SalesRevenueRevision.metric_date <= end,
+            )
+        ):
+            if not is_closed_day_sales_revision(revision):
+                continue
+            meaningful_revision_counts[revision.metric_date] = (
+                meaningful_revision_counts.get(revision.metric_date, 0) + 1
+            )
 
         for metric_date, (after_units, after_revenue) in sorted(new_totals.items()):
             state = states.get(metric_date)
@@ -287,7 +347,12 @@ class Repository:
             changed = changed and (
                 before_units != after_units or before_revenue != after_revenue
             )
-            if changed:
+            auditable_revision = changed and changes_closed_sast_sales_baseline(
+                metric_date,
+                before_source,
+                source,
+            )
+            if auditable_revision:
                 revenue_delta = (
                     after_revenue - before_revenue
                     if after_revenue is not None and before_revenue is not None
@@ -347,7 +412,10 @@ class Repository:
                     verified_at=source_verified_at,
                     first_published_at=detected_at,
                     updated_at=detected_at,
-                    revision_count=1 if changed else 0,
+                    revision_count=(
+                        meaningful_revision_counts.get(metric_date, 0)
+                        + (1 if auditable_revision else 0)
+                    ),
                 )
                 self._session.add(state)
                 states[metric_date] = state
@@ -361,8 +429,10 @@ class Repository:
                 state.source_run_id = source_run_id
                 state.source_details = source
                 state.verified_at = source_verified_at
-            if changed:
-                state.revision_count += 1
+            state.revision_count = meaningful_revision_counts.get(
+                metric_date,
+                0,
+            ) + (1 if auditable_revision else 0)
 
     def list_daily_product_metrics(self, as_of: date) -> list[DailyProductMetric]:
         """Return all calculated product rows through an inclusive date."""

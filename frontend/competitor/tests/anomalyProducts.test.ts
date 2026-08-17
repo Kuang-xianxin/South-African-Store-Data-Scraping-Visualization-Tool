@@ -125,3 +125,17 @@ test("cards hand off to the existing competitor own-link modal", () => {
   assert.match(competitorSource, /const ownItem = ownItems\.find/);
   assert.match(competitorSource, /openProductModal\(ownItem\)/);
 });
+
+test("stock-status cards state that on-way units do not count", () => {
+  const pageSource = readFileSync(
+    new URL("../src/pages/AnomalyProductsPage.vue", import.meta.url),
+    "utf8",
+  );
+
+  assert.match(pageSource, /在途不计入异常库存/);
+  assert.match(pageSource, /在途 .*（不计入）/);
+  assert.doesNotMatch(
+    pageSource,
+    /item\.on_way_stock > 0 \? `在途 .*` : "",\s*\]\.filter/,
+  );
+});
