@@ -18,6 +18,7 @@ from takealot_ops.erp.daily_report import (
     daily_report_payload,
     delete_operator_note,
     dismiss_stock_alert,
+    eliminate_stock_alert,
     export_operations_workbook,
     operations_business_date,
     record_daily_report_failure,
@@ -1357,6 +1358,7 @@ def test_stock_continuity_mismatch_is_a_cross_date_pending_action(
         "mismatch": True,
         "dismissed": False,
         "note": None,
+        "resolution_action": "confirm_difference",
         "deferred_reason": None,
     }
     assert reminder_payload(engine, REPORT_DATE.replace(day=26))["count"] == 1
@@ -1458,6 +1460,127 @@ def test_stock_continuity_mismatch_is_a_cross_date_pending_action(
     assert history["reversal"]["handled_by"] == "Operator"
     assert history["reversal"]["note"] == "误点确认，恢复库存差异待办"
     assert reminder_payload(engine, REPORT_DATE.replace(day=26))["count"] == 1
+
+
+def test_stock_review_only_allows_the_action_matching_the_manual_formula() -> None:
+    engine = _engine()
+    for slot, hour in (("morning", 2), ("evening", 10)):
+        capture_daily_report(
+            engine,
+            business_date=REPORT_DATE,
+            slot=slot,
+            captured_at=datetime(2026, 7, 24, hour, tzinfo=UTC),
+        )
+    next_date = REPORT_DATE + timedelta(days=1)
+    with Session(engine) as session, session.begin():
+        session.get(OfferCurrent, "offer-a").takealot_available_stock = 8
+    for slot, hour in (("morning", 2), ("evening", 10)):
+        capture_daily_report(
+            engine,
+            business_date=next_date,
+            slot=slot,
+            captured_at=datetime(2026, 7, 25, hour, tzinfo=UTC),
+        )
+
+    save_manual_candidate(
+        engine,
+        business_date=next_date,
+        offer_id="offer-a",
+        values={"platform_stock": 9},
+        reason="stock_adjustment",
+        note="盘点确认库存应为9",
+        user_id=1,
+    )
+    matching = next(
+        item
+        for item in daily_report_payload(engine, next_date)["pending_actions"]
+        if item["offer_id"] == "offer-a"
+    )
+    assert matching["stock_check"]["resolution_action"] == "eliminate"
+    with pytest.raises(DailyReportConflictError, match="只能消除差异"):
+        dismiss_stock_alert(
+            engine,
+            business_date=next_date,
+            offer_id="offer-a",
+            note="错误尝试确认差异",
+            user_id=1,
+        )
+
+    eliminate_stock_alert(
+        engine,
+        business_date=next_date,
+        offer_id="offer-a",
+        note="采用盘点后的正确库存",
+        user_id=1,
+    )
+    eliminated_payload = daily_report_payload(engine, next_date)
+    eliminated = next(
+        item
+        for item in eliminated_payload["items"]
+        if item["offer_id"] == "offer-a"
+    )
+    assert eliminated["status"] == "confirmed"
+    assert eliminated["final"]["platform_stock"] == 9
+    assert eliminated["stock_check"]["mismatch"] is False
+    eliminated_audit = next(
+        item
+        for item in eliminated_payload["handled_actions"]
+        if item["action_type"] == "stock_eliminated"
+    )
+    assert eliminated_audit["active"] is True
+    assert eliminated_audit["detail"]["expected_stock"] == 9
+    assert eliminated_audit["detail"]["actual_stock"] == 9
+
+    revert_confirmation(
+        engine,
+        business_date=next_date,
+        offer_id="offer-a",
+        note="演练撤销消除差异",
+        user_id=1,
+    )
+    save_manual_candidate(
+        engine,
+        business_date=next_date,
+        offer_id="offer-a",
+        values={"platform_stock": 7},
+        reason="stock_adjustment",
+        note="再次盘点后库存为7",
+        user_id=1,
+    )
+    still_mismatched = next(
+        item
+        for item in daily_report_payload(engine, next_date)["pending_actions"]
+        if item["offer_id"] == "offer-a"
+    )
+    assert (
+        still_mismatched["stock_check"]["resolution_action"]
+        == "confirm_difference"
+    )
+    with pytest.raises(DailyReportConflictError, match="只能确认库存差异"):
+        eliminate_stock_alert(
+            engine,
+            business_date=next_date,
+            offer_id="offer-a",
+            note="错误尝试消除差异",
+            user_id=1,
+        )
+
+    dismiss_stock_alert(
+        engine,
+        business_date=next_date,
+        offer_id="offer-a",
+        note="确认盘点后仍存在非订单库存差异",
+        user_id=1,
+    )
+    confirmed_difference = next(
+        item
+        for item in daily_report_payload(engine, next_date)["items"]
+        if item["offer_id"] == "offer-a"
+    )
+    assert confirmed_difference["status"] == "confirmed"
+    assert confirmed_difference["final"]["platform_stock"] == 7
+    assert confirmed_difference["stock_check"]["mismatch"] is True
+    assert confirmed_difference["stock_check"]["dismissed"] is True
 
 
 def test_continuity_waits_until_previous_day_version_difference_is_confirmed() -> None:
@@ -1818,6 +1941,7 @@ def test_manual_confirmation_reopens_following_stock_conflict_and_keeps_context(
         "mismatch": True,
         "dismissed": False,
         "note": None,
+        "resolution_action": "confirm_difference",
         "deferred_reason": None,
     }
     assert third_pending["confirmation_trigger"]["trigger_business_date"] == (

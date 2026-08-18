@@ -57,6 +57,7 @@ from takealot_ops.erp.daily_report import (
     daily_report_payload,
     delete_operator_note,
     dismiss_stock_alert,
+    eliminate_stock_alert,
     export_operations_workbook,
     operations_business_date,
     reminder_payload,
@@ -628,6 +629,27 @@ def create_app(project_root: Path | None = None) -> FastAPI:
         _write_daily_report(
             root,
             lambda engine: dismiss_stock_alert(
+                engine,
+                business_date=business_date,
+                offer_id=offer_id,
+                note=payload.note,
+                user_id=request.state.erp_user.id,
+            ),
+        )
+        return {"ok": True}
+
+    @app.post(
+        "/api/erp/daily-report/{business_date}/{offer_id}/stock-alert/eliminate"
+    )
+    def operations_daily_report_eliminate_stock_alert(
+        business_date: date,
+        offer_id: str,
+        payload: DailyReportNoteRequest,
+        request: Request,
+    ) -> dict[str, object]:
+        _write_daily_report(
+            root,
+            lambda engine: eliminate_stock_alert(
                 engine,
                 business_date=business_date,
                 offer_id=offer_id,

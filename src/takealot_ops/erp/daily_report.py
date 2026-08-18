@@ -43,7 +43,14 @@ NOTE_ISSUE_TYPES = frozenset({"general", "capture_difference", "stock_continuity
 NOTE_AUDIT_ACTIONS = frozenset(
     {"operator_note", "operator_note_updated", "operator_note_deleted"}
 )
-HANDLED_ACTIONS = frozenset({"confirm", "bulk_confirm", "dismiss_stock_alert"})
+HANDLED_ACTIONS = frozenset(
+    {
+        "confirm",
+        "bulk_confirm",
+        "dismiss_stock_alert",
+        "eliminate_stock_alert",
+    }
+)
 HANDLED_REVERSALS = frozenset(
     {"confirmation_reverted", "stock_alert_reopened"}
 )
@@ -491,6 +498,10 @@ def save_manual_candidate(
         resolution.manual_note = clean_note
         resolution.manual_by = user_id
         resolution.manual_at = now
+        resolution.stock_alert_dismissed = False
+        resolution.stock_alert_note = None
+        resolution.stock_alert_dismissed_by = None
+        resolution.stock_alert_dismissed_at = None
         if resolution.status == "confirmed":
             resolution.status = "needs_review"
         elif _latest_observation_any_slot(session, business_date, offer_id) is None:
@@ -864,17 +875,45 @@ def dismiss_stock_alert(
             offer_id,
             [],
         )
-        values = (
-            _final_values(resolution)
-            if _has_confirmation_baseline(resolution)
-            else _coalesced_capture_values(
-                [_value_dict(observation) for _, observation in capture_rows]
+        differences = _version_differences(capture_rows, resolution)
+        if differences:
+            raise DailyReportConflictError(
+                "当前仍有同周期版本差异，请先确认合并正确版本"
             )
-        )
+        pending_manual = _manual_candidate_is_pending(resolution)
+        if pending_manual:
+            values = _source_values(session, resolution, "manual")
+        else:
+            values = (
+                _final_values(resolution)
+                if _has_confirmation_baseline(resolution)
+                else _coalesced_capture_values(
+                    [_value_dict(observation) for _, observation in capture_rows]
+                )
+            )
+        if values is None:
+            raise DailyReportConflictError("当前没有可用于核对的库存数据")
         previous_stock = _previous_values(session, business_date).get(offer_id)
         if not _stock_continuity_mismatch(previous_stock, values):
+            if pending_manual:
+                raise DailyReportConflictError(
+                    "修改后的库存公式已经相符，只能消除差异"
+                )
             raise DailyReportConflictError("当前库存连续性已经相符，无需确认差异")
         previous_status = resolution.status
+        previous_effective_stock = _effective_stock_before_confirmation(
+            session,
+            resolution,
+        )
+        if pending_manual:
+            _apply_final(
+                resolution,
+                values,
+                "manual",
+                clean_note,
+                user_id,
+                now,
+            )
         resolution.stock_alert_dismissed = True
         resolution.stock_alert_note = clean_note
         resolution.stock_alert_dismissed_by = user_id
@@ -896,6 +935,7 @@ def dismiss_stock_alert(
             "dismiss_stock_alert",
             {
                 "previous_status": previous_status,
+                "source": "manual" if pending_manual else None,
                 "previous_stock": previous_stock,
                 "ordered_units": values.get("ordered_units"),
                 "expected_stock": (
@@ -910,7 +950,100 @@ def dismiss_stock_alert(
             user_id,
             now,
         )
+        if pending_manual:
+            _propagate_confirmation_stock_conflict(
+                session,
+                resolution=resolution,
+                previous_effective_stock=previous_effective_stock,
+                confirmed_values=values,
+                source="manual",
+                note=clean_note,
+                user_id=user_id,
+                confirmed_at=now,
+            )
         _refresh_deadline_snapshot(session, business_date, now)
+
+
+def eliminate_stock_alert(
+    engine: Engine,
+    *,
+    business_date: date,
+    offer_id: str,
+    note: str,
+    user_id: int,
+) -> None:
+    """Apply a matching manual candidate and close the continuity todo."""
+    clean_note = _required_note(note, "消除库存差异必须填写备注")
+    now = _utc_now()
+    with Session(engine) as session, session.begin():
+        resolution = _resolution_or_error(session, business_date, offer_id)
+        capture_rows = _all_observations(session, business_date).get(
+            offer_id,
+            [],
+        )
+        if _version_differences(capture_rows, resolution):
+            raise DailyReportConflictError(
+                "当前仍有同周期版本差异，请先确认合并正确版本"
+            )
+        if not _manual_candidate_is_pending(resolution):
+            raise DailyReportConflictError(
+                "请先人工修改库存，使库存连续性公式相符"
+            )
+        values = _source_values(session, resolution, "manual")
+        if values is None:
+            raise DailyReportConflictError("当前没有可用于核对的人工修改值")
+        previous_stock = _previous_values(session, business_date).get(offer_id)
+        if previous_stock is None or values.get("platform_stock") is None:
+            raise DailyReportConflictError("库存连续性数据不完整，暂时无法消除差异")
+        if _stock_continuity_mismatch(previous_stock, values):
+            raise DailyReportConflictError(
+                "修改后的库存公式仍不相符，只能确认库存差异"
+            )
+        previous_effective_stock = _effective_stock_before_confirmation(
+            session,
+            resolution,
+        )
+        resolution.stock_alert_dismissed = False
+        resolution.stock_alert_note = None
+        resolution.stock_alert_dismissed_by = None
+        resolution.stock_alert_dismissed_at = None
+        _apply_final(
+            resolution,
+            values,
+            "manual",
+            clean_note,
+            user_id,
+            now,
+        )
+        expected_stock = previous_stock - int(values.get("ordered_units") or 0)
+        _audit(
+            session,
+            business_date,
+            offer_id,
+            "eliminate_stock_alert",
+            {
+                "source": "manual",
+                "previous_stock": previous_stock,
+                "ordered_units": values.get("ordered_units"),
+                "expected_stock": expected_stock,
+                "actual_stock": values.get("platform_stock"),
+                "values": values,
+            },
+            clean_note,
+            user_id,
+            now,
+        )
+        _propagate_confirmation_stock_conflict(
+            session,
+            resolution=resolution,
+            previous_effective_stock=previous_effective_stock,
+            confirmed_values=values,
+            source="manual",
+            note=clean_note,
+            user_id=user_id,
+            confirmed_at=now,
+        )
+        _resolve_deadline_if_complete(session, business_date, now)
 
 
 def reopen_stock_alert(
@@ -2377,6 +2510,34 @@ def _item_payload(
         and current_stock is not None
         and expected_stock != current_stock
     )
+    pending_manual = _manual_candidate_is_pending(resolution)
+    manual_candidate = (
+        {
+            key: (
+                manual_values[key]
+                if manual_values is not None and manual_values[key] is not None
+                else current.get(key)
+            )
+            for key in _VALUE_KEYS
+        }
+        if pending_manual
+        else None
+    )
+    manual_candidate_mismatch = (
+        _stock_continuity_mismatch(previous_stock, manual_candidate)
+        if manual_candidate is not None
+        and previous_ready
+        and not differences
+        else None
+    )
+    stock_resolution_action = (
+        "eliminate"
+        if mismatch
+        and manual_candidate is not None
+        and manual_candidate.get("platform_stock") is not None
+        and manual_candidate_mismatch is False
+        else "confirm_difference"
+    )
     dismissed = (
         resolution.stock_alert_dismissed if resolution is not None else False
     )
@@ -2483,6 +2644,7 @@ def _item_payload(
             "mismatch": mismatch,
             "dismissed": dismissed,
             "note": resolution.stock_alert_note if resolution is not None else None,
+            "resolution_action": stock_resolution_action,
             "deferred_reason": (
                 "当前日报日仍有同周期版本差异，确认正确版本后再计算库存连续性"
                 if differences
@@ -2773,12 +2935,19 @@ def _handled_actions(
         action_type = (
             "stock_difference"
             if audit.action == "dismiss_stock_alert"
+            else "stock_eliminated"
+            if audit.action == "eliminate_stock_alert"
             else "confirmation"
             if audit.action in {"confirm", "bulk_confirm"}
             else None
         )
         if action_type is not None:
-            key = (audit.business_date, offer_id, action_type)
+            state_type = (
+                "confirmation"
+                if action_type in {"confirmation", "stock_eliminated"}
+                else action_type
+            )
+            key = (audit.business_date, offer_id, state_type)
             previous = active.get(key)
             if previous is not None and previous["active"]:
                 previous["active"] = False
@@ -2807,7 +2976,7 @@ def _handled_actions(
                     "source": payload.get("source"),
                     "source_label": (
                         _confirmation_source_label(str(payload.get("source")))
-                        if action_type == "confirmation"
+                        if action_type in {"confirmation", "stock_eliminated"}
                         and payload.get("source") is not None
                         else None
                     ),
@@ -2850,17 +3019,17 @@ def _handled_actions(
             }
         result.append(support_entry(audit, payload))
     for key, entry in active.items():
-        report_date, offer_id, action_type = key
+        report_date, offer_id, state_type = key
         resolution = resolutions.get((report_date, offer_id))
         currently_active = bool(
             resolution is not None
             and (
                 (
-                    action_type == "confirmation"
+                    state_type == "confirmation"
                     and _has_confirmation_baseline(resolution)
                 )
                 or (
-                    action_type == "stock_difference"
+                    state_type == "stock_difference"
                     and resolution.stock_alert_dismissed
                 )
             )
