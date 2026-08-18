@@ -82,6 +82,7 @@ PLATFORM_ROOT_EXPANSION_SOURCES = {
 SHOPPER_JOURNEY_CANDIDATE_POOL_LIMIT = 18
 MODEL_DIRECT_QUERY_TARGET = 6
 ROOT_EXPANSION_CORE_QUERY_TARGET = 6
+SELLER_TITLE_COMPLETE_PHRASE_QUERY_MAX = 1
 ROOT_EXPANSION_OPPORTUNITY_QUERY_TARGET = 1
 ADAPTIVE_RECOVERY_QUERY_TARGET = 1
 ADAPTIVE_BASE_QUERY_TARGET = (
@@ -308,6 +309,7 @@ GENERIC_IDENTITY_HEAD_TOKENS = {
     "accessory",
     "bar",
     "board",
+    "box",
     "case",
     "cover",
     "device",
@@ -1646,6 +1648,10 @@ class SearchRankingService:
             "query_source_targets": {
                 "model_south_african_direct": MODEL_DIRECT_QUERY_TARGET,
                 "takealot_root_expansion": ROOT_EXPANSION_CORE_QUERY_TARGET,
+                "seller_title_complete_phrase_max": (
+                    SELLER_TITLE_COMPLETE_PHRASE_QUERY_MAX
+                ),
+                "root_related_core_total": ROOT_EXPANSION_CORE_QUERY_TARGET,
                 "adjacent_opportunity": ROOT_EXPANSION_OPPORTUNITY_QUERY_TARGET,
                 "adaptive_recovery": ADAPTIVE_RECOVERY_QUERY_TARGET,
             },
@@ -2662,6 +2668,10 @@ class SearchRankingService:
                 "query_source_targets": {
                     "model_south_african_direct": MODEL_DIRECT_QUERY_TARGET,
                     "takealot_root_expansion": ROOT_EXPANSION_CORE_QUERY_TARGET,
+                    "seller_title_complete_phrase_max": (
+                        SELLER_TITLE_COMPLETE_PHRASE_QUERY_MAX
+                    ),
+                    "root_related_core_total": ROOT_EXPANSION_CORE_QUERY_TARGET,
                     "adjacent_opportunity": ROOT_EXPANSION_OPPORTUNITY_QUERY_TARGET,
                     "adaptive_recovery": ADAPTIVE_RECOVERY_QUERY_TARGET,
                 },
@@ -2792,11 +2802,6 @@ class SearchRankingService:
                     observations,
                     evidence_source_title,
                 )
-                title_suggestion = _build_title_suggestion(
-                    title,
-                    accepted_title_keywords,
-                    decision_parameter_values=applied_decision_parameter_values,
-                )
                 title_reason = _title_suggestion_reason(
                     accepted_title_keywords,
                     validated_keyword_count=sum(
@@ -2809,8 +2814,16 @@ class SearchRankingService:
                     accepted_keywords=accepted_title_keywords,
                     hot_term_keywords=hot_term_title_keywords,
                     opportunity_keywords=opportunity_title_keywords,
+                    validated_core_keywords=accepted_title_keywords,
                     decision_parameter_values=applied_decision_parameter_values,
-                    keyword_journey_evidence=_title_keyword_journey_evidence(observations),
+                    keyword_journey_evidence=_title_keyword_journey_evidence(
+                        observations,
+                        source_title=evidence_source_title,
+                    ),
+                )
+                title_suggestion = str(
+                    title_strategies[0]["title"]
+                    or _build_title_suggestion(title, accepted_title_keywords)
                 )
                 opportunity_title_suggestion = title_strategies[2]["title"]
                 profile_payload = profile.model_dump(mode="json")
@@ -3155,7 +3168,13 @@ async def _collect_keyword_observation(
             else (
                 "Takealot 完整根词的扩展及其顺序是平台直接意图信号，但不是公开搜索量。"
                 if observed_autocomplete_rank is not None
-                else "该词来自图片精准识别，不把模型判断当作平台搜索量。"
+                else (
+                    "该词来自当前主标题完整词组直验；平台未返回可采用补全词，"
+                    "因此不能把它表述为平台热词。"
+                    if "seller_title_complete_phrase"
+                    in _query_source_channels(candidate)
+                    else "该词来自图片精准识别，不把模型判断当作平台搜索量。"
+                )
             )
         ),
         "validation_terms": validation_terms,
@@ -4520,6 +4539,120 @@ def _title_supported_keywords(
     return output
 
 
+def _validated_identity_title_phrase(
+    item: KeywordObservation | SearchRankingKeywordResult,
+    source_title: str,
+) -> str | None:
+    """Project a page-verified S query onto a safe product-identity phrase.
+
+    A current title can be wrong about the product noun, so requiring every
+    accepted query token to already exist in that title creates a deadlock. We
+    only relax that rule when the stored evidence names a verified same-product
+    term *and* the complete first page has a same-product majority. Unsupported
+    feature, material, colour, audience, brand, or specification claims remain
+    blocked.
+    """
+
+    evidence = (
+        item.validation_evidence
+        if isinstance(item.validation_evidence, Mapping)
+        else {}
+    )
+    if (
+        item.relevance_status != "accepted"
+        or str(evidence.get("semantic_relation_grade") or "") != "S"
+        or str(evidence.get("page_validation_status") or "") != "completed"
+    ):
+        return None
+    evaluated = (
+        _optional_int(evidence.get("semantic_relation_evaluated_result_count"))
+        or _optional_int(evidence.get("evaluated_first_page_results"))
+        or 0
+    )
+    same_count = (
+        _optional_int(evidence.get("semantic_relation_same_product_result_count"))
+        or _optional_int(evidence.get("matched_first_page_results"))
+        or 0
+    )
+    threshold = float(evidence.get("core_threshold") or CORE_MAJORITY_FLOOR)
+    if evaluated <= 0 or not (
+        bool(evidence.get("first_page_majority"))
+        or (same_count / evaluated) >= max(CORE_MAJORITY_FLOOR, threshold)
+    ):
+        return None
+    raw_terms = evidence.get("semantic_relation_query_same_product_terms")
+    same_product_terms = (
+        [str(value) for value in raw_terms if str(value).strip()]
+        if isinstance(raw_terms, list)
+        else []
+    )
+    if not same_product_terms:
+        return None
+
+    keyword_tokens = _title_tokens(item.keyword)
+    keyword_parts: list[tuple[str, int]] = []
+    for raw_index, raw_token in enumerate(keyword_tokens):
+        for canonical_part in _canonical_token_parts(raw_token.casefold()):
+            keyword_parts.append(
+                (IDENTITY_TOKEN_ALIASES.get(canonical_part, canonical_part), raw_index)
+            )
+    source_tokens = _canonical_tokens(source_title)
+    blocked_new_claims = (
+        HIGH_RISK_CLAIM_TOKENS
+        | FACT_ATTRIBUTE_CLAIM_TOKENS
+        | MEASUREMENT_CLAIM_TOKENS
+        | TITLE_PARAMETER_UNIT_TOKENS
+    )
+    candidates: list[tuple[int, int, int, str]] = []
+    for same_product_term in same_product_terms:
+        term_tokens = _identity_term_tokens(same_product_term)
+        if len(term_tokens) < 2:
+            continue
+        matched_raw_indexes: list[int] = []
+        search_index = 0
+        for term_token in term_tokens:
+            match = next(
+                (
+                    (part_index, raw_index)
+                    for part_index, (part, raw_index) in enumerate(
+                        keyword_parts[search_index:],
+                        start=search_index,
+                    )
+                    if part == term_token
+                ),
+                None,
+            )
+            if match is None:
+                matched_raw_indexes = []
+                break
+            search_index = match[0] + 1
+            matched_raw_indexes.append(match[1])
+        if not matched_raw_indexes:
+            continue
+        start = min(matched_raw_indexes)
+        end = max(matched_raw_indexes)
+        phrase_tokens = keyword_tokens[start : end + 1]
+        phrase = " ".join(phrase_tokens)
+        phrase_canonical = _canonical_tokens(phrase)
+        term_canonical = set(term_tokens)
+        inserted_context = phrase_canonical - term_canonical
+        new_identity_claims = term_canonical - source_tokens
+        if inserted_context - source_tokens:
+            continue
+        if new_identity_claims & blocked_new_claims:
+            continue
+        if any(
+            token.isdigit()
+            or COMBINED_MEASUREMENT_PATTERN.fullmatch(token.casefold())
+            for token in phrase_tokens
+        ):
+            continue
+        candidates.append((-len(term_tokens), len(phrase_tokens), start, phrase))
+    if not candidates:
+        return None
+    return min(candidates)[3]
+
+
 def _opportunity_gate_from_result(
     *,
     keyword: str,
@@ -4695,11 +4828,21 @@ def _title_strategy_keywords(
             item.keyword.casefold(),
         )
     )
-    accepted_title_keywords = _title_supported_keywords(
-        [item.keyword for item in accepted_rows],
-        source_title,
-    )
-    accepted_keys = {keyword.casefold() for keyword in accepted_title_keywords}
+    accepted_title_keywords: list[str] = []
+    supported_accepted_source_keys: set[str] = set()
+    for item in accepted_rows:
+        supported = _title_supported_keywords([item.keyword], source_title)
+        projected_keyword: str | None
+        if supported:
+            projected_keyword = supported[0]
+            supported_accepted_source_keys.add(item.keyword.casefold())
+        else:
+            projected_keyword = _validated_identity_title_phrase(item, source_title)
+        if not projected_keyword or projected_keyword.casefold() in {
+            value.casefold() for value in accepted_title_keywords
+        }:
+            continue
+        accepted_title_keywords.append(projected_keyword)
     autocomplete_rows: list[tuple[int, int, str, tuple[str, ...]]] = []
     opportunity_title_keywords: list[str] = []
     for item in results:
@@ -4716,7 +4859,7 @@ def _title_strategy_keywords(
         )
         if (
             item.relevance_status == "accepted"
-            and item.keyword.casefold() in accepted_keys
+            and item.keyword.casefold() in supported_accepted_source_keys
             and any(
                 _is_platform_root_expansion_source(source.get("candidate_source"))
                 for source in provenance
@@ -4816,6 +4959,8 @@ def _journey_roots_from_evidence(evidence: Mapping[str, Any]) -> tuple[str, ...]
 
 def _title_keyword_journey_evidence(
     results: list[KeywordObservation] | list[SearchRankingKeywordResult],
+    *,
+    source_title: str = "",
 ) -> dict[str, dict[str, Any]]:
     output: dict[str, dict[str, Any]] = {}
     for item in results:
@@ -4831,11 +4976,16 @@ def _title_keyword_journey_evidence(
             path = [str(value) for value in raw_source_path if str(value).strip()]
             if path and path not in paths:
                 paths.append(path)
-        output[item.keyword.casefold()] = {
+        row = {
             "journey_types": list(_journey_types_from_evidence(evidence)),
             "shopper_roots": list(_journey_roots_from_evidence(evidence)),
             "paths": paths,
         }
+        output[item.keyword.casefold()] = row
+        if source_title and (
+            projected_keyword := _validated_identity_title_phrase(item, source_title)
+        ):
+            output.setdefault(projected_keyword.casefold(), row)
     return output
 
 
@@ -4888,6 +5038,9 @@ def _title_root_expansions(
         for row in identity_rows
         if row and row[-1] not in GENERIC_IDENTITY_HEAD_TOKENS
     }
+    generic_identity_rows = [
+        row for row in identity_rows if row and row[-1] in GENERIC_IDENTITY_HEAD_TOKENS
+    ]
     phrase_candidates: list[tuple[int, int, int, str]] = []
     segments = re.split(r"\s+(?:[-–—|:/])\s+|[,;()]", source_title.casefold())
     for segment_index, segment in enumerate(segments):
@@ -4910,19 +5063,42 @@ def _title_root_expansions(
                 phrase_tokens = set(_identity_term_tokens(phrase))
                 full_identity_match = any(set(row).issubset(phrase_tokens) for row in identity_rows)
                 matched_heads = phrase_tokens & identity_heads
-                if not full_identity_match and not matched_heads:
+                contextual_generic_matches = [
+                    row
+                    for row in generic_identity_rows
+                    if row[-1] in phrase_tokens
+                    and bool((set(row[:-1]) & phrase_tokens) - GENERIC_IDENTITY_HEAD_TOKENS)
+                ]
+                if not full_identity_match and not matched_heads and not contextual_generic_matches:
                     continue
                 matched_identity = set().union(
                     *(set(row) for row in identity_rows if set(row).issubset(phrase_tokens)),
                     matched_heads,
+                    *(
+                        ({row[-1]} | (set(row[:-1]) & phrase_tokens))
+                        for row in contextual_generic_matches
+                    ),
                 )
                 if matched_identity and _semantic_retargets_product(phrase, matched_identity):
                     continue
                 score = (
                     (20 if full_identity_match else 0)
                     + (5 * len(matched_heads))
+                    + (12 if contextual_generic_matches else 0)
+                    + sum(
+                        len(set(row[:-1]) & phrase_tokens)
+                        for row in contextual_generic_matches
+                    )
                     + (6 - phrase_length)
-                    + (2 if _canonical_token(window[-1]) in matched_heads else 0)
+                    + (
+                        2
+                        if _canonical_token(window[-1])
+                        in (
+                            matched_heads
+                            | {row[-1] for row in contextual_generic_matches}
+                        )
+                        else 0
+                    )
                 )
                 phrase_candidates.append((score, segment_index, start, phrase))
 
@@ -5780,19 +5956,22 @@ def _variant_reviews_payload(
             evidence_source_title,
             profile_distinctive_terms=list(variant_profile.distinctive_terms),
         )
-        title_suggestion = _build_title_suggestion(
-            title,
-            accepted,
-            decision_parameter_values=decision_values,
-        )
         title_strategies = _build_title_strategies(
             source_title=title,
             evidence_source_title=evidence_source_title,
             accepted_keywords=accepted,
             hot_term_keywords=hot_terms,
             opportunity_keywords=opportunity,
+            validated_core_keywords=accepted,
             decision_parameter_values=decision_values,
-            keyword_journey_evidence=_title_keyword_journey_evidence(observations),
+            keyword_journey_evidence=_title_keyword_journey_evidence(
+                observations,
+                source_title=evidence_source_title,
+            ),
+        )
+        title_suggestion = str(
+            title_strategies[0]["title"]
+            or _build_title_suggestion(title, accepted)
         )
         title_score = _title_score_payload(
             source_title=title,
@@ -6518,6 +6697,70 @@ async def _discover_keyword_candidates(
         )
         followup_count += 1
 
+    seller_title_targets: list[SearchKeywordCandidate] = []
+    for root in title_roots:
+        normalized_root = " ".join(root.split())
+        if len(_identity_term_tokens(normalized_root)) < 2:
+            continue
+        root_check = next(
+            (
+                check
+                for check in checks
+                if " ".join(str(check.get("root") or "").split()).casefold()
+                == normalized_root.casefold()
+            ),
+            None,
+        )
+        if (
+            root_check is None
+            or root_check.get("status") != "observed"
+            or int(root_check.get("eligible_expansion_count") or 0) > 0
+        ):
+            continue
+        suggestions = root_check.get("suggestions")
+        suggestion_count = len(suggestions) if isinstance(suggestions, list) else 0
+        fallback_reason = (
+            "platform_returned_no_suggestions"
+            if suggestion_count == 0
+            else "platform_returned_no_relevant_suggestions"
+        )
+        root_check["direct_query_fallback_selected"] = True
+        root_check["direct_query_fallback_reason"] = fallback_reason
+        seller_title_targets.append(
+            SearchKeywordCandidate(
+                phrase=normalized_root,
+                rationale=(
+                    "当前主标题中的完整商品词组；平台未返回可采用补全词，"
+                    "因此占用一个既有核心查询位直接验证完整搜索结果页"
+                ),
+                candidate_source="seller_title_complete_phrase",
+                intended_strategy="core",
+                seed=normalized_root,
+                seed_source="title_word_root",
+                journey_type="title_complete_phrase_direct",
+                journey_root=normalized_root,
+                journey_path=(normalized_root,),
+                candidate_provenance=(
+                    {
+                        "candidate_source": "seller_title_complete_phrase",
+                        "intended_strategy": "core",
+                        "seed": normalized_root,
+                        "root": normalized_root,
+                        "seed_source": "title_word_root",
+                        "root_source": "title_word_root",
+                        "journey_type": "title_complete_phrase_direct",
+                        "journey_root": normalized_root,
+                        "journey_path": [normalized_root],
+                        "journey_depth": 0,
+                        "title_phrase_direct_reason": fallback_reason,
+                        "platform_suggestion_count": suggestion_count,
+                    },
+                ),
+            )
+        )
+        if len(seller_title_targets) >= SELLER_TITLE_COMPLETE_PHRASE_QUERY_MAX:
+            break
+
     ranked = [
         item
         for _, _, item in sorted(
@@ -6568,8 +6811,11 @@ async def _discover_keyword_candidates(
         else:
             deferred_core_pool.append(candidate)
     diverse_core_pool.extend(deferred_core_pool)
-    platform_query_target = (
-        max(1, ROOT_EXPANSION_CORE_QUERY_TARGET - len(decision_parameter_candidates))
+    platform_query_target = max(
+        0,
+        ROOT_EXPANSION_CORE_QUERY_TARGET
+        - len(decision_parameter_candidates)
+        - len(seller_title_targets),
     )
     platform_targets = diverse_core_pool[:platform_query_target]
     model_targets = precise[:MODEL_DIRECT_QUERY_TARGET]
@@ -6577,16 +6823,20 @@ async def _discover_keyword_candidates(
         :ROOT_EXPANSION_OPPORTUNITY_QUERY_TARGET
     ]
     # The normal phase is at most thirteen queries: six core slots shared by
-    # platform-root-expansion winners and operator-confirmed parameter probes,
-    # six South-African model long tails, and one adjacent-demand probe. The
-    # fourteenth search-query slot stays outside this list for adaptive recovery.
+    # platform-root-expansion winners, at most one seller-title complete phrase,
+    # and operator-confirmed parameter probes; plus six South-African model long
+    # tails and one adjacent-demand probe. The fourteenth search-query slot stays
+    # outside this list for adaptive recovery.
     priority_candidates: list[SearchKeywordCandidate] = []
     channel_span = max(
         len(platform_targets),
         len(model_targets),
         len(decision_parameter_candidates),
+        len(seller_title_targets),
     )
     for channel_index in range(channel_span):
+        if channel_index < len(seller_title_targets):
+            priority_candidates.append(seller_title_targets[channel_index])
         if channel_index < len(platform_targets):
             priority_candidates.append(platform_targets[channel_index])
         if channel_index < len(model_targets):
@@ -6599,6 +6849,7 @@ async def _discover_keyword_candidates(
     for candidate in priority_candidates:
         _append_unique_candidate(selected, candidate, base_limit)
     for candidate in (
+        *seller_title_targets,
         *diverse_core_pool,
         *precise,
         *decision_parameter_candidates,
@@ -7056,6 +7307,8 @@ def _query_source_channels(candidate: SearchKeywordCandidate) -> list[str]:
             channel = "takealot_root_expansion"
         elif candidate_source in {"image_precise", "image_title_fused_precise"}:
             channel = "model_south_african_direct"
+        elif candidate_source == "seller_title_complete_phrase":
+            channel = "seller_title_complete_phrase"
         elif candidate_source == "comparison_resample":
             channel = "comparison_resample"
         elif candidate_source == "title_verified_parameter":
@@ -7075,6 +7328,8 @@ def _query_source_channel(candidate: SearchKeywordCandidate) -> str:
         return "comparison_resample"
     if "takealot_root_expansion" in channels:
         return "takealot_root_expansion"
+    if "seller_title_complete_phrase" in channels:
+        return "seller_title_complete_phrase"
     if "model_south_african_direct" in channels:
         return "model_south_african_direct"
     if "title_verified_parameter" in channels:
@@ -8113,18 +8368,18 @@ def _previous_analysis_snapshot(
         previous_evidence_title,
         profile_distinctive_terms=previous_distinctive_terms,
     )
-    core_suggestion = _build_title_suggestion(
-        previous.source_title,
-        accepted_title_keywords,
-        decision_parameter_values=_decision_parameter_values_from_vision(previous_vision),
-    )
     title_strategies = _build_title_strategies(
         source_title=previous.source_title,
         evidence_source_title=previous_evidence_title,
         accepted_keywords=accepted_title_keywords,
         hot_term_keywords=hot_term_title_keywords,
         opportunity_keywords=opportunity_title_keywords,
+        validated_core_keywords=accepted_title_keywords,
         decision_parameter_values=_decision_parameter_values_from_vision(previous_vision),
+    )
+    core_suggestion = str(
+        title_strategies[0]["title"]
+        or _build_title_suggestion(previous.source_title, accepted_title_keywords)
     )
     issued_strategies = _issued_title_strategies(
         previous,
@@ -8555,6 +8810,54 @@ def _build_hot_term_title_suggestion(
     )
 
 
+def _build_validated_identity_title_suggestion(
+    source_title: str,
+    validated_identity_keyword: str,
+    *,
+    decision_parameter_values: list[str] | None = None,
+) -> str:
+    """Replace a contradicted product noun while preserving title-backed facts."""
+
+    source_tokens = _title_tokens(source_title)
+    source_parameter_indexes = _title_parameter_indexes(source_tokens)
+    suffix_start = next(
+        (
+            index
+            for index, token in enumerate(source_tokens)
+            if _canonical_token(token.casefold()) == "with"
+        ),
+        None,
+    )
+    retained: list[str] = []
+    if suffix_start is not None:
+        retained.extend(source_tokens[suffix_start:])
+    suffix_indexes = (
+        set(range(suffix_start, len(source_tokens)))
+        if suffix_start is not None
+        else set()
+    )
+    for index, token in enumerate(source_tokens):
+        canonical = _canonical_token(token.casefold())
+        if index in suffix_indexes:
+            continue
+        if (
+            index in source_parameter_indexes
+            or canonical in HIGH_RISK_CLAIM_TOKENS
+            or canonical in FACT_ATTRIBUTE_CLAIM_TOKENS
+            or canonical in _VARIANT_COLOUR_TOKENS
+        ):
+            retained.append(token)
+    return _build_title_from_priority_tokens(
+        " ".join(retained),
+        _title_tokens(validated_identity_keyword),
+        front_parameter_tokens=_validated_title_decision_parameter_tokens(
+            source_title,
+            [validated_identity_keyword],
+            decision_parameter_values=decision_parameter_values,
+        ),
+    )
+
+
 def _build_title_strategies(
     *,
     source_title: str,
@@ -8562,6 +8865,7 @@ def _build_title_strategies(
     accepted_keywords: list[str],
     hot_term_keywords: list[str],
     opportunity_keywords: list[str],
+    validated_core_keywords: list[str] | None = None,
     decision_parameter_values: list[str] | None = None,
     keyword_journey_evidence: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
@@ -8571,11 +8875,37 @@ def _build_title_strategies(
         accepted_keywords,
         supported_claim_source,
     )
+    validated_core_keys = {
+        keyword.casefold() for keyword in (validated_core_keywords or [])
+    }
+    for keyword in accepted_keywords:
+        if (
+            keyword.casefold() in validated_core_keys
+            and keyword.casefold()
+            not in {value.casefold() for value in safe_accepted_keywords}
+        ):
+            safe_accepted_keywords.append(keyword)
     validated_but_unsupported = bool(accepted_keywords and not safe_accepted_keywords)
-    core_title = _build_title_suggestion(
-        source_title,
-        safe_accepted_keywords,
-        decision_parameter_values=decision_parameter_values,
+    identity_rewrite_keyword = next(
+        (
+            keyword
+            for keyword in safe_accepted_keywords
+            if not _title_supported_keywords([keyword], supported_claim_source)
+        ),
+        None,
+    )
+    core_title = (
+        _build_validated_identity_title_suggestion(
+            source_title,
+            identity_rewrite_keyword,
+            decision_parameter_values=decision_parameter_values,
+        )
+        if identity_rewrite_keyword
+        else _build_title_suggestion(
+            source_title,
+            safe_accepted_keywords,
+            decision_parameter_values=decision_parameter_values,
+        )
     )
     safe_hot_keywords = _title_supported_keywords(
         hot_term_keywords,
@@ -8671,6 +9001,8 @@ def _build_title_strategies(
             "available": core_available,
             "explanation": (
                 "优先把已知长尾直接验证，或证据最明确且通过完整首页同类验证的词组连续前置；"
+                "当当前标题商品名与图文识别冲突时，仅允许S级同品词及完整首页同品多数共同支持的"
+                "商品身份词替换原商品名；"
                 "商品类型在前、功能卖点居中；运营逐项确认为决策参数且通过同商品族"
                 "搜索页验证的规格可以前置，"
                 "未确认或确认为非决策参数的功率、尺寸和防护等级等规格统一放在末尾；"
@@ -8738,6 +9070,16 @@ def _build_title_from_priority_tokens(
     suggestion_tokens = _title_tokens(raw_suggestion)
     suggestion_parameter_indexes = _title_parameter_indexes(suggestion_tokens)
     priority_parameter_indexes = _title_parameter_indexes(priority_tokens)
+    suggestion_colour_indexes = {
+        index
+        for index, token in enumerate(suggestion_tokens)
+        if _canonical_token(token.casefold()) in _VARIANT_COLOUR_TOKENS
+    }
+    priority_colour_indexes = {
+        index
+        for index, token in enumerate(priority_tokens)
+        if _canonical_token(token.casefold()) in _VARIANT_COLOUR_TOKENS
+    }
     front_parameters = front_parameter_tokens or []
     front_parameter_keys = {_title_dedup_key(token) for token in front_parameters}
     front_parameter_compact = "".join(token.casefold() for token in front_parameters)
@@ -8756,6 +9098,8 @@ def _build_title_from_priority_tokens(
         output_keys.add(key)
 
     for index, token in enumerate(priority_tokens):
+        if index in priority_colour_indexes:
+            continue
         if index in priority_parameter_indexes and _title_dedup_key(token) not in front_parameter_keys:
             continue
         key = _title_dedup_key(token)
@@ -8765,7 +9109,7 @@ def _build_title_from_priority_tokens(
         output_keys.add(key)
 
     for index, token in enumerate(suggestion_tokens):
-        if index in suggestion_parameter_indexes:
+        if index in suggestion_parameter_indexes or index in suggestion_colour_indexes:
             continue
         key = _title_dedup_key(token)
         if key in output_keys:
@@ -8775,6 +9119,21 @@ def _build_title_from_priority_tokens(
 
     if not output:
         output = ["Product"]
+    tail_colours = [
+        token
+        for index, token in enumerate(suggestion_tokens)
+        if index in suggestion_colour_indexes
+    ] or [
+        _title_token_case(token, preferred_case)
+        for index, token in enumerate(priority_tokens)
+        if index in priority_colour_indexes
+    ]
+    for token in tail_colours:
+        key = _title_dedup_key(token)
+        if key in output_keys:
+            continue
+        output.append(token)
+        output_keys.add(key)
     source_parameters = [
         token
         for index, token in enumerate(suggestion_tokens)
@@ -9313,11 +9672,6 @@ def _analysis_payload(
         for value in stored_decision_profile.get("applied_decision_values", [])
         if " ".join(str(value).split())
     ]
-    title_suggestion = _build_title_suggestion(
-        effective_title,
-        accepted_title_keywords,
-        decision_parameter_values=decision_parameter_values,
-    )
     title_reason = _title_suggestion_reason(
         accepted_title_keywords,
         validated_keyword_count=sum(item.relevance_status == "accepted" for item in results),
@@ -9328,8 +9682,16 @@ def _analysis_payload(
         accepted_keywords=accepted_title_keywords,
         hot_term_keywords=hot_term_title_keywords,
         opportunity_keywords=opportunity_title_keywords,
+        validated_core_keywords=accepted_title_keywords,
         decision_parameter_values=decision_parameter_values,
-        keyword_journey_evidence=_title_keyword_journey_evidence(results),
+        keyword_journey_evidence=_title_keyword_journey_evidence(
+            results,
+            source_title=evidence_source_title,
+        ),
+    )
+    title_suggestion = str(
+        title_strategies[0]["title"]
+        or _build_title_suggestion(effective_title, accepted_title_keywords)
     )
     opportunity_title_suggestion = title_strategies[2]["title"]
     profile["title_suggestion"] = title_suggestion

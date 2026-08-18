@@ -425,6 +425,132 @@ def test_title_root_expansions_include_lazy_and_remove_variant_noise() -> None:
     assert "blue" not in roots
 
 
+def test_cat_storage_box_root_keeps_cat_context_and_rejects_generic_storage_boxes() -> None:
+    title = "Blue Cat Foldable Villa Cat Storage Box With Scratching Pad"
+    profile = VisionProfile(
+        product_name="Cream enclosed cat litter box with scratcher top",
+        category="Cat litter boxes",
+        product_type_terms=[
+            "covered litter tray",
+            "cat house with litter box",
+            "litter box with scratcher",
+            "enclosed cat toilet",
+            "stackable cat furniture",
+            "hooded litter box",
+        ],
+        same_product_aliases=["enclosed litter box"],
+        distinctive_terms=["scratcher top", "blue entry ring"],
+        keywords=[
+            KeywordCandidate(
+                phrase="enclosed cat litter box with scratcher top",
+                rationale="Visible product identity",
+            ),
+            KeywordCandidate(
+                phrase="hooded cat litter tray",
+                rationale="Direct marketplace alias",
+            ),
+        ],
+        autocomplete_seeds=[
+            KeywordCandidate(phrase="covered litter tray", rationale="Product root"),
+            KeywordCandidate(phrase="hooded litter box", rationale="Alias root"),
+        ],
+        opportunity_seeds=[
+            KeywordCandidate(phrase="odor control cat toilet", rationale="Adjacent need")
+        ],
+        exclusions=["storage container"],
+        confidence=0.95,
+        title_suggestion="Enclosed Cat Litter Box With Scratcher Top",
+        title_reason="Image-title fused identity",
+    )
+
+    roots = _title_root_expansions(
+        title,
+        identity_terms=(*profile.product_type_terms, *profile.same_product_aliases),
+    )
+
+    assert roots[0] == "cat storage box"
+    assert roots.index("cat storage box") < roots.index("storage")
+    for phrase in ("storage box", "storage boxes"):
+        decision = _root_expansion_relevance_decision(
+            phrase,
+            profile,
+            source_title=title,
+        )
+        assert decision["accepted"] is False
+        assert decision["relation"] == "irrelevant"
+    _, recognition = _cross_check_image_profile(profile, title)
+    assert recognition["title_identity_support"] is False
+    assert recognition["title_identity_supported_terms"] == []
+
+
+@pytest.mark.asyncio
+async def test_empty_cat_storage_box_autocomplete_uses_one_honest_title_phrase_query() -> None:
+    title = "Blue Cat Foldable Villa Cat Storage Box With Scratching Pad"
+    profile = VisionProfile(
+        product_name="Cream enclosed cat litter box with scratcher top",
+        category="Cat litter boxes",
+        product_type_terms=[
+            "covered litter tray",
+            "cat house with litter box",
+            "litter box with scratcher",
+            "enclosed cat toilet",
+            "stackable cat furniture",
+            "hooded litter box",
+        ],
+        same_product_aliases=["enclosed litter box"],
+        distinctive_terms=["scratcher top"],
+        keywords=[
+            KeywordCandidate(
+                phrase="enclosed cat litter box with scratcher top",
+                rationale="Visible product identity",
+            ),
+            KeywordCandidate(
+                phrase="hooded cat litter tray",
+                rationale="Direct marketplace alias",
+            ),
+        ],
+        autocomplete_seeds=[
+            KeywordCandidate(phrase="covered litter tray", rationale="Product root"),
+            KeywordCandidate(phrase="hooded litter box", rationale="Alias root"),
+        ],
+        opportunity_seeds=[
+            KeywordCandidate(phrase="odor control cat toilet", rationale="Adjacent need")
+        ],
+        exclusions=["storage container"],
+        confidence=0.95,
+        title_suggestion="Enclosed Cat Litter Box With Scratcher Top",
+        title_reason="Image-title fused identity",
+    )
+
+    class EmptySuggestionClient:
+        async def fetch_search_suggestions(self, keyword: str) -> list[str]:
+            return ["storage boxes"] if keyword == "storage box" else []
+
+    candidates, checks = await _discover_keyword_candidates(
+        EmptySuggestionClient(),  # type: ignore[arg-type]
+        profile=profile,
+        source_title=title,
+        official_title=title,
+        title_reference_terms=[],
+        max_keywords=14,
+    )
+
+    direct = [
+        item
+        for item in candidates
+        if item.candidate_source == "seller_title_complete_phrase"
+        and item.adaptive_recovery_source is None
+    ]
+    assert [item.phrase for item in direct] == ["cat storage box"]
+    assert direct[0].journey_type == "title_complete_phrase_direct"
+    cat_check = next(item for item in checks if item["root"] == "cat storage box")
+    assert cat_check["suggestions"] == []
+    assert cat_check["direct_query_fallback_selected"] is True
+    assert cat_check["direct_query_fallback_reason"] == (
+        "platform_returned_no_suggestions"
+    )
+
+
 def test_root_expansion_relevance_gate_keeps_s_and_a_but_rejects_blind_branches() -> None:
     profile = VisionProfile(
         product_name="Corduroy floor sofa chair",
@@ -1202,6 +1328,8 @@ async def test_service_validates_keywords_locates_cursor_page_and_reuses_vision(
     assert first["status"]["query_source_targets"] == {
         "model_south_african_direct": 6,
         "takealot_root_expansion": 6,
+        "seller_title_complete_phrase_max": 1,
+        "root_related_core_total": 6,
         "adjacent_opportunity": 1,
         "adaptive_recovery": 1,
     }
@@ -2290,6 +2418,78 @@ def test_title_suggestion_puts_validated_terms_first_and_removes_punctuation() -
     assert suggestion.startswith("Portable Projection Screen")
     assert suggestion.endswith("100 Inch")
     assert all(character.isalnum() or character == " " for character in suggestion)
+
+
+def test_cat_box_s_evidence_generates_identity_first_title_and_moves_blue_to_tail() -> None:
+    source_title = "Blue Cat Foldable Villa Cat Storage Box With Scratching Pad"
+    result = _observation(
+        "enclosed cat litter box with scratcher top",
+        101,
+        validation_evidence={
+            "semantic_relation_grade": "S",
+            "semantic_relation_query_same_product_terms": ["enclosed litter box"],
+            "semantic_relation_evaluated_result_count": 36,
+            "semantic_relation_same_product_result_count": 31,
+            "evaluated_first_page_results": 36,
+            "matched_first_page_results": 31,
+            "first_page_majority": True,
+            "core_threshold": 0.60,
+            "page_validation_status": "completed",
+            "journey_type": "known_long_tail",
+        },
+    )
+
+    accepted, hot_terms, opportunity = _title_strategy_keywords(
+        [result],
+        source_title,
+    )
+    strategies = _build_title_strategies(
+        source_title=source_title,
+        accepted_keywords=accepted,
+        hot_term_keywords=hot_terms,
+        opportunity_keywords=opportunity,
+        validated_core_keywords=accepted,
+    )
+
+    assert accepted == ["enclosed cat litter box"]
+    assert strategies[0]["available"] is True
+    assert strategies[0]["evidence_keywords"] == ["enclosed cat litter box"]
+    assert strategies[0]["title"] == (
+        "Enclosed Cat Litter Box With Scratching Pad Foldable Blue"
+    )
+
+
+def test_title_colour_parameter_never_leads_a_supported_core_phrase() -> None:
+    suggestion = _build_title_suggestion(
+        "Blue Cat Foldable Cat Storage Box With Scratching Pad",
+        ["cat storage box"],
+    )
+
+    assert suggestion.startswith("Cat Storage Box")
+    assert suggestion.endswith("Blue")
+
+
+def test_page_majority_never_unlocks_an_unsupported_smart_identity_claim() -> None:
+    result = _observation(
+        "smart cat litter box",
+        4,
+        validation_evidence={
+            "semantic_relation_grade": "S",
+            "semantic_relation_query_same_product_terms": ["smart litter box"],
+            "semantic_relation_evaluated_result_count": 36,
+            "semantic_relation_same_product_result_count": 30,
+            "first_page_majority": True,
+            "core_threshold": 0.60,
+            "page_validation_status": "completed",
+        },
+    )
+
+    accepted, _, _ = _title_strategy_keywords(
+        [result],
+        "Cat Foldable Storage Box With Scratching Pad",
+    )
+
+    assert accepted == []
 
 
 @pytest.mark.parametrize(
@@ -4526,15 +4726,21 @@ async def test_adaptive_ten_query_base_keeps_both_source_channels_and_five_roots
     model_direct = [
         item for item in selected if item.candidate_source == "image_title_fused_precise"
     ]
+    seller_title_direct = [
+        item
+        for item in selected
+        if item.candidate_source == "seller_title_complete_phrase"
+    ]
     platform_core_roots = {
         item.journey_root
         for item in platform
         if item.intended_strategy == "core" and item.journey_root
     }
 
-    assert len(selected) == 9
+    assert len(selected) == 10
     assert len(platform) == 6
     assert len(model_direct) == 3
+    assert len(seller_title_direct) == 1
     assert len(platform_core_roots) == 5
     assert sum(item.intended_strategy == "opportunity" for item in platform) == 1
 

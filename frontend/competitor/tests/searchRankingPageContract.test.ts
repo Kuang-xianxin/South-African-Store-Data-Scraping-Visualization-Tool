@@ -228,9 +228,11 @@ test("keeps the search method overview compact while preserving operating bounda
 test("separates platform root expansions from South African model-direct queries", () => {
   assert.match(statusTypeSource, /model_south_african_direct: number;/);
   assert.match(statusTypeSource, /takealot_root_expansion: number;/);
+  assert.match(statusTypeSource, /seller_title_complete_phrase_max: number;/);
   assert.match(typesSource, /query_source_channel\?:/);
   assert.match(pageSource, /平台根词扩展词/);
   assert.match(pageSource, /图文融合·南非完整搜索词/);
+  assert.match(pageSource, /主标题完整词组直验/);
   assert.match(pageSource, /平台根词扩展 \+ 南非模型/);
   assert.match(pageSource, /同词可同时属于多类/);
   assert.match(pageSource, /含图文融合南非完整搜索词/);
@@ -240,6 +242,7 @@ test("shows phrase roots and the per-product platform expansion relevance gate",
   assert.match(analysisTypeSource, /relevance_status\?: "eligible" \| "rejected_irrelevant";/);
   assert.match(analysisTypeSource, /relation\?: "same_product" \| "adjacent_demand" \| "irrelevant";/);
   assert.match(analysisTypeSource, /used_as_followup_root\?: boolean;/);
+  assert.match(analysisTypeSource, /direct_query_fallback_selected\?: boolean;/);
   assert.match(analysisTypeSource, /root\?: string;/);
   assert.match(analysisTypeSource, /seed\?: string;/);
   assert.match(pageSource, /rootExpansionCheckLabel\(check\)/);
@@ -248,6 +251,8 @@ test("shows phrase roots and the per-product platform expansion relevance gate",
   assert.match(pageSource, /本商品词根\/词组与平台扩展筛选/);
   assert.match(pageSource, /只有保留本商品身份，或命中结构化相邻需求所列替代商品族的扩展，才可进入搜索/);
   assert.match(pageSource, /已作为完整词组词根继续观察下一层平台扩展/);
+  assert.match(pageSource, /Takealot 本次未返回补全词/);
+  assert.match(pageSource, /不把空结果伪装成热词/);
   assert.match(pageSource, /平台原始词根\/词组扩展库/);
   assert.match(pageSource, /本区展示平台原始返回，不代表为当前商品入选/);
   assert.match(typesSource, /phrase_roots_supported: true;/);
@@ -256,10 +261,12 @@ test("shows phrase roots and the per-product platform expansion relevance gate",
 
 test("uses the expanded fusion query budget with one conditional recovery query", () => {
   assert.match(statusTypeSource, /adaptive_recovery: number;/);
+  assert.match(statusTypeSource, /root_related_core_total: number;/);
   assert.match(analysisTypeSource, /valid_platform_root_target\?: number;/);
   assert.match(analysisTypeSource, /adaptive_recovery_used\?: boolean;/);
   assert.match(pageSource, /search_query_attempt_limit \?\? 14/);
   assert.match(pageSource, /model_south_african_direct \?\? 6/);
+  assert.match(pageSource, /seller_title_complete_phrase_max \?\? 1/);
   assert.match(pageSource, /自适应补救词/);
 });
 

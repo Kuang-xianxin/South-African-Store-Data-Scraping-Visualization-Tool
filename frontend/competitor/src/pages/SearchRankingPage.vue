@@ -218,6 +218,7 @@ type QuerySourceChannel =
   | "takealot_root_expansion"
   | "takealot_autocomplete_path"
   | "model_south_african_direct"
+  | "seller_title_complete_phrase"
   | "comparison_resample"
   | "title_verified_parameter"
   | "human_confirmed_decision_parameter";
@@ -236,6 +237,11 @@ const platformExpansionKeywords = computed(() =>
 const modelDirectKeywords = computed(() =>
   analysis.value?.keywords.filter((item) =>
     hasQuerySourceChannel(item, "model_south_african_direct"),
+  ) ?? [],
+);
+const sellerTitleDirectKeywords = computed(() =>
+  analysis.value?.keywords.filter((item) =>
+    hasQuerySourceChannel(item, "seller_title_complete_phrase"),
   ) ?? [],
 );
 const titleParameterKeywords = computed(() =>
@@ -905,6 +911,10 @@ function sourceChannelLabel(item: SearchRankingKeywordResult) {
   const hasPlatformExpansion = hasQuerySourceChannel(item, "takealot_root_expansion")
     || hasQuerySourceChannel(item, "takealot_autocomplete_path");
   const hasModelDirect = hasQuerySourceChannel(item, "model_south_african_direct");
+  const hasSellerTitleDirect = hasQuerySourceChannel(
+    item,
+    "seller_title_complete_phrase",
+  );
   const hasTitleParameter = hasQuerySourceChannel(item, "title_verified_parameter");
   const hasHumanParameter = hasQuerySourceChannel(
     item,
@@ -913,10 +923,13 @@ function sourceChannelLabel(item: SearchRankingKeywordResult) {
   if (hasPlatformExpansion && hasHumanParameter) return "平台根词扩展 + 人工决策参数";
   if (hasPlatformExpansion && hasTitleParameter) return "平台根词扩展 + 标题确认参数";
   if (hasPlatformExpansion && hasModelDirect) return "平台根词扩展 + 南非模型";
+  if (hasPlatformExpansion && hasSellerTitleDirect) return "平台根词扩展 + 主标题直验";
+  if (hasSellerTitleDirect && hasModelDirect) return "主标题直验 + 南非模型";
   const channel = item.validation_evidence.query_source_channel;
   if (channel === "takealot_root_expansion") return "平台根词扩展词";
   if (channel === "takealot_autocomplete_path") return "历史补全路径词（旧口径）";
   if (channel === "model_south_african_direct") return "图文融合·南非完整搜索词";
+  if (channel === "seller_title_complete_phrase") return "主标题完整词组直验";
   if (channel === "comparison_resample") return "历史同词复采";
   if (channel === "title_verified_parameter") return "标题确认参数词";
   if (channel === "human_confirmed_decision_parameter") return "人工确认决策参数词";
@@ -952,6 +965,9 @@ function sourceLabel(item: SearchRankingKeywordResult) {
     ...(evidence.journey_types ?? []),
     ...(evidence.journey_type ? [evidence.journey_type] : []),
   ]);
+  if (journeyTypes.has("title_complete_phrase_direct")) {
+    return `${recoveryPrefix}主标题确定性拆出的完整商品词组；Takealot 未返回可采用补全词，因此占用既有核心查询位直接验证完整搜索页，不视为平台热词${resampleSuffix}`;
+  }
   if (journeyTypes.has("human_confirmed_decision_parameter")) {
     return `运营已将当前标题中的该规格确认为购买决策参数；参数值不是模型猜测，只有通过同商品族完整搜索页后才可前置${resampleSuffix}`;
   }
@@ -1786,6 +1802,7 @@ function errorMessage(caught: unknown, fallback: string) {
                 <small>
                   证据覆盖：{{ platformExpansionKeywords.length }} 个含平台根词扩展 ·
                   {{ modelDirectKeywords.length }} 个含图文融合南非完整搜索词 ·
+                  {{ sellerTitleDirectKeywords.length }} 个含主标题完整词组直验 ·
                   {{ titleParameterKeywords.length }} 个含标题确认参数（同词可同时属于多类）
                 </small>
               </div>
@@ -1830,6 +1847,17 @@ function errorMessage(caught: unknown, fallback: string) {
                       <mark v-if="expansion.used_as_followup_root">已作为词组词根继续扩展</mark>
                     </div>
                     <p v-if="check.status === 'unavailable'">该词根本次平台扩展不可用，没有扩展词被选中。</p>
+                    <p
+                      v-else-if="check.status === 'observed' && !(check.expansions?.length)"
+                    >
+                      Takealot 本次未返回补全词；该词根已留存，不把空结果伪装成热词。
+                      <mark v-if="check.direct_query_fallback_selected">已改为主标题完整词组直验。</mark>
+                    </p>
+                    <p
+                      v-else-if="check.status === 'observed' && check.direct_query_fallback_selected"
+                    >
+                      平台返回项均未通过同品相关性筛选；该完整词组已改为直接搜索页验证。
+                    </p>
                   </article>
                 </div>
               </details>
@@ -1884,7 +1912,9 @@ function errorMessage(caught: unknown, fallback: string) {
               <p class="position-notice">
                 本轮最多验证 {{ detail?.status.search_query_attempt_limit ?? 14 }} 个图文融合搜索词，
                 其中完整搜索词 {{ detail?.status.query_source_targets.model_south_african_direct ?? 6 }} 个、
-                平台根词扩展词 {{ detail?.status.query_source_targets.takealot_root_expansion ?? 6 }} 个。
+                词根相关核心位 {{ detail?.status.query_source_targets.root_related_core_total ?? 6 }} 个；
+                平台根词扩展最多占满这些位置，若补全为空或全部无关，主标题完整词组直验最多占
+                {{ detail?.status.query_source_targets.seller_title_complete_phrase_max ?? 1 }} 个，二者不叠加扩容。
                 实际公开请求 {{ analysis.shopper_journey?.public_request_count ?? 0 }} 次，均按 3–5 秒严格串行；
                 同一根词下的扩展顺序不是搜索量，自然位只统计非赞助 product_views，并会随时间、地区、库存与价格变化。
               </p>

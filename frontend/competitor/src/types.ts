@@ -1390,6 +1390,8 @@ export interface SearchRankingStatus {
   query_source_targets: {
     model_south_african_direct: number;
     takealot_root_expansion: number;
+    seller_title_complete_phrase_max: number;
+    root_related_core_total: number;
     adjacent_opportunity: number;
     adaptive_recovery: number;
   };
@@ -1593,12 +1595,14 @@ export interface SearchRankingKeywordResult {
       | "image_title_fused_precise"
       | "takealot_root_expansion"
       | "takealot_autocomplete"
+      | "seller_title_complete_phrase"
       | "comparison_resample"
       | "title_verified_parameter";
     query_source_channel?:
       | "model_south_african_direct"
       | "takealot_root_expansion"
       | "takealot_autocomplete_path"
+      | "seller_title_complete_phrase"
       | "comparison_resample"
       | "title_verified_parameter"
       | "human_confirmed_decision_parameter"
@@ -1607,6 +1611,7 @@ export interface SearchRankingKeywordResult {
       | "model_south_african_direct"
       | "takealot_root_expansion"
       | "takealot_autocomplete_path"
+      | "seller_title_complete_phrase"
       | "comparison_resample"
       | "title_verified_parameter"
       | "human_confirmed_decision_parameter"
@@ -1678,6 +1683,7 @@ export interface SearchRankingKeywordResult {
       | "title_cross_check_root_expansion"
       | "model_fusion_root_expansion"
       | "title_root_expansion"
+      | "title_complete_phrase_direct"
       | "result_page_root_expansion"
       | "first_instinct_autocomplete"
       | "autocomplete_backtrack"
@@ -1902,6 +1908,10 @@ export interface SearchRankingAnalysis extends SearchRankingAnalysisSummary {
     selection_policy?: "same_product_identity_or_structured_adjacent_product_family";
     eligible_expansion_count?: number;
     rejected_expansion_count?: number;
+    direct_query_fallback_selected?: boolean;
+    direct_query_fallback_reason?:
+      | "platform_returned_no_suggestions"
+      | "platform_returned_no_relevant_suggestions";
     expansions?: Array<{
       phrase: string;
       rank: number;
@@ -1944,6 +1954,8 @@ export interface SearchRankingAnalysis extends SearchRankingAnalysisSummary {
     query_source_targets?: {
       model_south_african_direct: number;
       takealot_root_expansion: number;
+      seller_title_complete_phrase_max: number;
+      root_related_core_total: number;
       adjacent_opportunity: number;
       adaptive_recovery: number;
     };
