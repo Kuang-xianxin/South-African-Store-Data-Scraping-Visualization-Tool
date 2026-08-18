@@ -122,11 +122,23 @@ def test_unverified_day_is_not_treated_as_zero_sales() -> None:
     assert payload["slow_moving"] == []
 
 
-def test_non_buyable_inventory_statuses_are_kept_in_separate_groups() -> None:
+def test_non_buyable_inventory_statuses_exclude_stock_still_on_the_way() -> None:
     offers = [
         _offer("not", status="not_buyable", total_stock=0, receiving=4),
         _offer("takealot", status="disabled_by_takealot", total_stock=3),
-        _offer("seller", status="disabled_by_seller", total_stock=0, on_way=2),
+        _offer(
+            "seller",
+            status="disabled_by_seller",
+            total_stock=1,
+            receiving=2,
+            on_way=5,
+        ),
+        _offer(
+            "transit-only",
+            status="disabled_by_seller",
+            total_stock=0,
+            on_way=9,
+        ),
     ]
 
     payload = build_anomaly_product_payload(
@@ -145,8 +157,10 @@ def test_non_buyable_inventory_statuses_are_kept_in_separate_groups() -> None:
         "seller"
     ]
     assert groups["not_buyable"][0]["inventory_units"] == 4
+    assert groups["not_buyable"][0]["anomaly_label"] == "不可购买但平台仓仍有库存"
     assert groups["disabled_by_takealot"][0]["available_stock"] == 3
-    assert groups["disabled_by_seller"][0]["on_way_stock"] == 2
+    assert groups["disabled_by_seller"][0]["inventory_units"] == 3
+    assert groups["disabled_by_seller"][0]["on_way_stock"] == 5
     assert payload["slow_moving"] == []
 
 
