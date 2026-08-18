@@ -45,7 +45,8 @@ test("overview revenue line discloses pending reconciliation and immutable sourc
   assert.match(overviewSource, /storeData\.sales_reconciliation\.pending_store_count/);
   assert.match(overviewSource, /class="revenue-line reconciliation-pending"/);
   assert.match(overviewSource, /class="revenue-line revised"/);
-  assert.match(overviewSource, /销售额历史修订记录/);
+  assert.match(overviewSource, /销售额日终后历史修订记录/);
+  assert.match(overviewSource, /业务日内正常累计和第一次日终基线不计纠偏/);
   assert.match(overviewSource, /更新前来源/);
   assert.match(overviewSource, /更新后来源/);
   assert.match(overviewSource, /fetchSalesRevenueRevisions/);
@@ -76,7 +77,7 @@ test("competitor three-panel line chart keeps a fixed detail panel with pointer 
   assert.doesNotMatch(competitorsSource, /offerTrendTooltipPosition/);
   assert.doesNotMatch(competitorsSource, /floatingChartTooltipStyle/);
   assert.match(competitorsSource, /if \(hoveredOfferTrendIndex\.value === null\) return selectedOfferTrend\.value\.length - 1/);
-  assert.match(competitorsSource, /图表上方固定显示当前时间点/);
+  assert.match(competitorsSource, /图表上方固定显示当前 Seller 刷新点/);
   assert.match(competitorsSource, /offerStockEvidenceLabel\(activeOfferTrendPoint\.offer\)/);
   assert.match(competitorsSource, /class="competitor-offer-period-metric"/);
   assert.match(competitorsSource, /区间内售出件数/);
@@ -93,7 +94,7 @@ test("competitor three-panel line chart keeps a fixed detail panel with pointer 
 test("own-store official sales sits below comments and preserves zero versus missing evidence", () => {
   assert.match(competitorsSource, /<OwnStoreSalesChart/);
   assert.ok(
-    competitorsSource.indexOf("图表上方固定显示当前时间点") <
+    competitorsSource.indexOf("图表上方固定显示当前 Seller 刷新点") <
       competitorsSource.indexOf("<OwnStoreSalesChart"),
   );
   assert.match(ownStoreSalesSource, /国内自然日（北京时间）/);

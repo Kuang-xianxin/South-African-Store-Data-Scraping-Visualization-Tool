@@ -25,10 +25,18 @@ from takealot_ops.competitors.service import (
     CompetitorDiscoveredTarget,
 )
 from takealot_ops.erp.daily_report import capture_daily_report
-from takealot_ops.erp.web import _aggregate_store_revenue_series, create_app
+from takealot_ops.erp.auth import StoreIdentity
+from takealot_ops.exchange_rates import ExchangeRateQuote
+from takealot_ops.erp.web import (
+    _aggregate_logistics_payloads,
+    _aggregate_platform_warehouse_payloads,
+    _aggregate_store_revenue_series,
+    create_app,
+)
 from takealot_ops.logistics.service import LogisticsOverviewService
 from takealot_ops.storage.migrations import create_schema
 from takealot_ops.storage.models import (
+    CollectionRun,
     CompetitorTarget,
     CompetitorSnapshot,
     DailyReportRun,
@@ -40,6 +48,7 @@ from takealot_ops.storage.models import (
     OfferCurrent,
     OfferSnapshot,
     OwnStorePersonalWatchlist,
+    ReturnItem,
     SalesRevenueRevision,
     StoreOfferBaseline,
 )
@@ -168,6 +177,8 @@ def test_competitor_detail_requests_only_the_selected_plid(
     calls: list[dict[str, object]] = []
     sales_calls: list[dict[str, object]] = []
     traffic_calls: list[dict[str, object]] = []
+    return_calls: list[dict[str, object]] = []
+    profitability_calls: list[dict[str, object]] = []
     database_path = tmp_path / "detail-route.db"
     monkeypatch.setenv(
         "TAKEALOT_DATABASE_URL",
@@ -180,6 +191,16 @@ def test_competitor_detail_requests_only_the_selected_plid(
             history=pd.DataFrame(),
             reviews=pd.DataFrame(),
             variants=pd.DataFrame(),
+            category_paths={
+                "101163999": [
+                    {
+                        "name": "Camping & Outdoor",
+                        "id": "27895",
+                        "type": "category",
+                        "slug": "family-tents-27895",
+                    }
+                ]
+            },
             store_current=pd.DataFrame([{"plid": "101163999"}]),
             store_history=pd.DataFrame(),
         )
@@ -206,6 +227,28 @@ def test_competitor_detail_requests_only_the_selected_plid(
         "takealot_ops.erp.web._load_own_store_traffic",
         load_traffic,
     )
+
+    def load_returns(_root: Path, **kwargs):
+        return_calls.append(kwargs)
+        return {"data_status": "collected", "items": []}
+
+    monkeypatch.setattr(
+        "takealot_ops.erp.web._load_own_store_returns",
+        load_returns,
+    )
+
+    def load_profitability(_root: Path, **kwargs):
+        profitability_calls.append(kwargs)
+        return {
+            "items": [],
+            "store_codes": ["current"],
+            "message": "test profitability",
+        }
+
+    monkeypatch.setattr(
+        "takealot_ops.erp.web._load_own_store_profitability",
+        load_profitability,
+    )
     app = create_app(tmp_path)
 
     with TestClient(app, client=("127.0.0.1", 50000)) as client:
@@ -216,11 +259,33 @@ def test_competitor_detail_requests_only_the_selected_plid(
 
     assert response.status_code == 200
     assert response.json() == {
+        "category_path": [
+            {
+                "name": "Camping & Outdoor",
+                "id": "27895",
+                "type": "category",
+                "slug": "family-tents-27895",
+            }
+        ],
         "history": [],
         "reviews": [],
         "variants": [],
         "own_store_sales": [],
         "own_store_traffic": [],
+        "own_store_returns": {"data_status": "collected", "items": []},
+        "own_store_profitability": {
+            "items": [],
+            "store_codes": ["current"],
+            "message": "test profitability",
+        },
+        "company_inventory": {
+            "items": [],
+            "store_codes": ["current"],
+            "company_sku_count": 0,
+            "w8_shared_once": True,
+            "stage_totals_are_additive": False,
+            "message": "该自有链接的平台 SKU 尚未关联公司 SKU。",
+        },
     }
     assert calls == [
         {
@@ -242,6 +307,100 @@ def test_competitor_detail_requests_only_the_selected_plid(
             "end_date": date(2026, 8, 14),
         }
     ]
+    assert return_calls == [
+        {
+            "plid": "101163999",
+            "own_store_codes": {"current"},
+            "start_date": date(2026, 8, 1),
+            "end_date": date(2026, 8, 14),
+        }
+    ]
+    assert len(profitability_calls) == 1
+    assert profitability_calls[0]["plid"] == "101163999"
+    assert profitability_calls[0]["own_store_codes"] == {"current"}
+    assert profitability_calls[0]["rate_service"] is app.state.cny_zar_rate_service
+    assert isinstance(profitability_calls[0]["cost_as_of"], date)
+    assert isinstance(profitability_calls[0]["fee_window_end"], date)
+
+
+def test_returns_route_exposes_detail_and_collection_coverage(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    database_path = tmp_path / "returns-route.db"
+    monkeypatch.setenv(
+        "TAKEALOT_DATABASE_URL",
+        f"sqlite:///{database_path.as_posix()}",
+    )
+    app = create_app(tmp_path)
+    captured_at = datetime(2026, 8, 17, 8, tzinfo=UTC)
+
+    with TestClient(app, client=("127.0.0.1", 50000)) as client:
+        _bootstrap(client)
+        engine = create_engine(f"sqlite:///{database_path.as_posix()}")
+        with store_scope("current"), Session(engine) as session, session.begin():
+            session.add(
+                OfferCurrent(
+                    offer_id="offer-return-1",
+                    sku="SKU-RETURN-1",
+                    title="Return Route Product",
+                    productline_id="99887766",
+                    quantity_returned_30_days=5,
+                    captured_at=captured_at,
+                )
+            )
+            session.add(
+                ReturnItem(
+                    seller_return_id="seller-return-1",
+                    order_id="order-return-1",
+                    offer_id="offer-return-1",
+                    sku="SKU-RETURN-1",
+                    return_reference_number="RRN-ROUTE-1",
+                    quantity=2,
+                    return_date=datetime(2026, 8, 12),
+                    return_status="removal_order",
+                    return_reason="defective_or_damaged",
+                    outcomes=[{"status": "removal_order"}],
+                    transactions=[
+                        {"transaction_type": "refund", "amount_incl_vat": "-50.00"}
+                    ],
+                    captured_at=captured_at,
+                    raw_payload={"seller_return_id": "seller-return-1"},
+                )
+            )
+            session.add(
+                CollectionRun(
+                    run_id="returns-route-run",
+                    run_type="returns",
+                    scope_date=date(2026, 8, 17),
+                    started_at=captured_at,
+                    finished_at=captured_at,
+                    status="success",
+                    counts={
+                        "records": 1,
+                        "requested_start_ordinal": date(2026, 8, 1).toordinal(),
+                        "requested_end_ordinal": date(2026, 8, 17).toordinal(),
+                    },
+                    error=None,
+                )
+            )
+        engine.dispose()
+
+        response = client.get(
+            "/api/erp/returns"
+            "?start_date=2026-08-01&end_date=2026-08-17&query=RRN-ROUTE"
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["data_status"] == "collected"
+    assert payload["offer_returned_30_days"]["units"] == 5
+    assert payload["summary"]["return_units"] == 2
+    assert payload["summary"]["removal_order_units"] == 2
+    assert payload["total"] == 1
+    assert payload["items"][0]["return_reason_label"] == "商品有缺陷或损坏"
+    assert payload["items"][0]["product_title"] == "Return Route Product"
+    assert payload["store_statuses"][0]["record_count"] == 1
 
 
 def test_personal_watchlist_overview_projects_only_visible_membership_plids(
@@ -499,9 +658,13 @@ def test_competitor_radar_returns_automatic_store_targets_and_separate_items(
         all_store_own_store_overview = client.get(
             "/api/competitors/own-store?own_store_scope=all"
         )
+        one_plid_own_store_overview = client.get(
+            "/api/competitors/own-store?own_store_scope=all&plid=87654321"
+        )
         operating_own_store_overview = client.get(
             "/api/competitors/own-store?own_store_scope=operating"
         )
+        current_store_detail = client.get("/api/competitors/12345678")
         own_default_library_response = client.post(
             "/api/competitors/personal-watchlist/libraries",
             headers={"X-CSRF-Token": str(issued["csrf_token"])},
@@ -528,6 +691,11 @@ def test_competitor_radar_returns_automatic_store_targets_and_separate_items(
         private_watchlist = client.get("/api/competitors/personal-watchlist")
 
     assert started_batch.status_code == 200
+    assert current_store_detail.status_code == 200
+    assert current_store_detail.json()["company_inventory"]["store_codes"] == [
+        "current",
+        "store-02",
+    ]
     assert private_priority.status_code == 200
     assert private_priority.json()["accepted"] is True
     assert private_priority.json()["status"]["priority_targets"][0]["plid"] == "12345678"
@@ -620,6 +788,11 @@ def test_competitor_radar_returns_automatic_store_targets_and_separate_items(
         item["plid"]
         for item in all_store_own_store_overview.json()["store_items"]
     } == {"12345678", "87654321"}
+    assert one_plid_own_store_overview.status_code == 200
+    assert [
+        item["plid"]
+        for item in one_plid_own_store_overview.json()["store_items"]
+    ] == ["87654321"]
     assert operating_own_store_overview.status_code == 200
     assert {
         item["plid"]
@@ -1473,6 +1646,7 @@ def test_store_summary_compares_only_accessible_connected_stores(
                             "kind": "takealot_sales_api",
                             "label": "Earlier Sales API batch",
                             "run_id": "current-before-run",
+                            "collected_at": "2026-08-06T02:00:00+00:00",
                         },
                         after_source={
                             "kind": "takealot_sales_api",
@@ -1480,6 +1654,31 @@ def test_store_summary_compares_only_accessible_connected_stores(
                             "run_id": "current-recovery-run",
                             "requested_start": "2026-07-08",
                             "requested_end": "2026-08-06",
+                            "collected_at": "2026-08-07T02:00:00+00:00",
+                        },
+                        source_run_id="current-recovery-run",
+                        detected_at=datetime(2026, 8, 7, 2, tzinfo=UTC),
+                    ),
+                    SalesRevenueRevision(
+                        store_code="current",
+                        metric_date=date(2026, 8, 6),
+                        change_type="corrected",
+                        before_ordered_units=1,
+                        after_ordered_units=10,
+                        before_ordered_revenue=Decimal("100.00"),
+                        after_ordered_revenue=Decimal("1000.00"),
+                        revenue_delta=Decimal("900.00"),
+                        units_delta=9,
+                        before_source={
+                            "kind": "takealot_sales_api",
+                            "label": "Intraday Sales API batch",
+                            "run_id": "current-intraday-run",
+                            "collected_at": "2026-08-06T02:00:00+00:00",
+                        },
+                        after_source={
+                            "kind": "takealot_sales_api",
+                            "label": "First post-close Sales API baseline",
+                            "run_id": "current-recovery-run",
                             "collected_at": "2026-08-07T02:00:00+00:00",
                         },
                         source_run_id="current-recovery-run",
@@ -4161,15 +4360,14 @@ def test_competitor_manual_retry_priority_is_audited_once(
         assert [item["action"] for item in audits] == ["manual_retry", "add"]
 
 
-def test_refresh_cooldown_is_shared_for_operators_and_admin_is_exempt(
+def test_refresh_is_kxx_only_and_always_targets_all_configured_stores(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    calls = 0
+    calls: list[bool] = []
 
-    def successful_refresh(_: Path):
-        nonlocal calls
-        calls += 1
+    def successful_refresh(_: Path, *, all_stores: bool = False):
+        calls.append(all_stores)
         return SimpleNamespace(succeeded=True, message="刷新成功")
 
     database_path = tmp_path / "erp.db"
@@ -4197,18 +4395,16 @@ def test_refresh_cooldown_is_shared_for_operators_and_admin_is_exempt(
             },
         )
         operator_csrf = str(login.json()["csrf_token"])
-        first = operator.post(
-            "/api/erp/refresh",
-            headers={"X-CSRF-Token": operator_csrf},
-        )
-        assert first.status_code == 200
-        assert first.json()["refresh_status"]["can_refresh"] is False
+        status = operator.get("/api/erp/refresh-status")
+        assert status.status_code == 200
+        assert status.json()["can_refresh"] is False
         blocked = operator.post(
             "/api/erp/refresh",
             headers={"X-CSRF-Token": operator_csrf},
         )
-        assert blocked.status_code == 429
-        assert "全员冷却" in blocked.json()["detail"]
+        assert blocked.status_code == 403
+        assert blocked.json()["detail"] == "刷新全部店铺数据仅限 kxx 账号"
+        assert calls == []
 
     with TestClient(app, client=("127.0.0.1", 50002)) as admin:
         login = admin.post(
@@ -4219,13 +4415,15 @@ def test_refresh_cooldown_is_shared_for_operators_and_admin_is_exempt(
         status = admin.get("/api/erp/refresh-status")
         assert status.json()["admin_exempt"] is True
         assert status.json()["can_refresh"] is True
-        override = admin.post(
+        refreshed = admin.post(
             "/api/erp/refresh",
             headers={"X-CSRF-Token": admin_csrf},
         )
-        assert override.status_code == 200
+        assert refreshed.status_code == 200
+        assert refreshed.json()["message"] == "刷新成功"
+        assert refreshed.json()["refresh_status"]["can_refresh"] is True
 
-    assert calls == 2
+    assert calls == [True]
 
 
 def test_csrf_and_last_admin_protection(
@@ -4600,3 +4798,296 @@ def test_daily_report_stock_difference_can_be_confirmed_logged_and_reopened(
         assert eliminated_payload["pending_actions"] == []
         assert eliminated_payload["items"][0]["stock_check"]["mismatch"] is False
         assert eliminated_payload["handled_actions"][0]["action_type"] == ("stock_eliminated")
+
+
+def test_products_all_store_scope_reads_every_authorized_connected_store(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    database_path = tmp_path / "erp-products-all-stores.db"
+    database_url = f"sqlite:///{database_path.as_posix()}"
+    monkeypatch.setenv("TAKEALOT_DATABASE_URL", database_url)
+    app = create_app(tmp_path)
+
+    loaded_store_codes: list[str] = []
+
+    def fake_load_dataset(_settings, _as_of):
+        store_code = current_store_code()
+        loaded_store_codes.append(store_code)
+        return store_code
+
+    def fake_products_payload(store_code, _as_of):
+        return {
+            "latest_metric_date": "2026-08-16",
+            "items": [
+                {
+                    "metric_date": "2026-08-16",
+                    "offer_id": f"offer-{store_code}",
+                    "sku": f"sku-{store_code}",
+                    "title": f"Product {store_code}",
+                    "ordered_units": 1,
+                    "page_views_30_days": 10,
+                }
+            ],
+        }
+
+    monkeypatch.setattr(
+        "takealot_ops.erp.web.load_erp_dataset",
+        fake_load_dataset,
+    )
+    monkeypatch.setattr(
+        "takealot_ops.erp.web.build_products_payload",
+        fake_products_payload,
+    )
+
+    with TestClient(app, client=("127.0.0.1", 50000)) as client:
+        session = _bootstrap(client)
+        csrf = str(session["csrf_token"])
+        created = client.post(
+            "/api/auth/stores",
+            headers={"X-CSRF-Token": csrf},
+            json={"code": "store-02", "display_name": "第二店铺"},
+        )
+        assert created.status_code == 200
+
+        engine = create_engine(database_url)
+        with Session(engine) as database_session, database_session.begin():
+            store = database_session.scalar(
+                select(ErpStore).where(ErpStore.code == "store-02")
+            )
+            assert store is not None
+            store.data_connected = True
+        engine.dispose()
+
+        response = client.get(
+            "/api/erp/products?as_of=2026-08-16&store_scope=all",
+            headers={"X-Store-Code": "current"},
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["store_scope"] == "all"
+    assert payload["store_count"] == 2
+    assert set(loaded_store_codes) == {"current", "store-02"}
+    assert {
+        (item["store_code"], item["store_name"], item["store_scope_key"])
+        for item in payload["items"]
+    } == {
+        ("current", "当前店铺", "current:offer-current"),
+        ("store-02", "第二店铺", "store-02:offer-store-02"),
+    }
+
+
+def test_product_detail_converts_rmb_cost_with_the_latest_reference_rate(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    database_path = tmp_path / "erp-product-cost-conversion.db"
+    monkeypatch.setenv(
+        "TAKEALOT_DATABASE_URL",
+        f"sqlite:///{database_path.as_posix()}",
+    )
+    monkeypatch.setattr(
+        "takealot_ops.erp.web.load_erp_dataset",
+        lambda _settings, _as_of: object(),
+    )
+    monkeypatch.setattr(
+        "takealot_ops.erp.web.build_product_detail_payload",
+        lambda _dataset, _as_of, offer_id: {
+            "identity": {"offer_id": offer_id, "sku": "9900000000001"},
+            "kpis": {},
+            "history": [],
+        },
+    )
+    monkeypatch.setattr(
+        "takealot_ops.erp.web._product_master_records",
+        lambda _root, records, **_kwargs: [
+            {
+                **dict(records[0]),
+                "company_sku": "COMPANY-001",
+                "cost_rmb": 268.7917,
+                "cost_effective_date": "2026-08-15",
+            }
+        ],
+    )
+    app = create_app(tmp_path)
+    app.state.cny_zar_rate_service = SimpleNamespace(
+        latest=lambda: ExchangeRateQuote(
+            rate=Decimal("2.3971"),
+            rate_date=date(2026, 8, 17),
+            fetched_at=datetime(2026, 8, 18, 2, 30, tzinfo=UTC),
+        )
+    )
+
+    with TestClient(app, client=("127.0.0.1", 50000)) as client:
+        _bootstrap(client)
+        response = client.get(
+            "/api/erp/products/offer-cost?as_of=2026-08-18",
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["identity"]["cost_rmb"] == 268.7917
+    assert payload["cost_conversion"] == {
+        "base_currency": "CNY",
+        "quote_currency": "ZAR",
+        "cost_rmb": 268.7917,
+        "cost_zar": 644.32,
+        "rate": 2.3971,
+        "rate_date": "2026-08-17",
+        "fetched_at": "2026-08-18T02:30:00+00:00",
+        "source": "Frankfurter 机构参考汇率",
+        "status": "converted",
+        "message": "按最新发布的机构参考汇率换算，仅供成本估算，非交易结算价。",
+    }
+
+
+def test_all_store_logistics_keeps_shared_w8_once_and_tags_takealot_rows() -> None:
+    stores = (
+        StoreIdentity(1, "store-01", "第一店铺", True, True),
+        StoreIdentity(2, "store-02", "第二店铺", True, True),
+    )
+    first_payload = {
+        "generated_at": "2026-08-17T01:00:00+00:00",
+        "cache_ttl_seconds": 900,
+        "cache_age_seconds": 20,
+        "w8": {
+            "data_source": "local_database",
+            "synced_at": "2026-08-17T02:00:00+00:00",
+            "summary": {"inbound_orders": 2, "stock_total": 50},
+        },
+        "takealot": {
+            "connected": True,
+            "live_connected": False,
+            "data_source": "local_database",
+            "synced_at": "2026-08-17T00:50:00+00:00",
+            "snapshot_saved": True,
+            "refresh_attempted": False,
+            "summary": {"shipments": 1, "units": 5},
+            "recent_shipments": [
+                {"shipment_id": "shipment-a", "created_at": "2026-08-17"}
+            ],
+            "warnings": [],
+        },
+        "matching": {
+            "items": [
+                {
+                    "takealot_shipment_id": "shipment-a",
+                    "w8_order_no": "w8-a",
+                }
+            ],
+            "warnings": [],
+        },
+        "boundaries": ["原始边界"],
+    }
+    second_payload = {
+        "generated_at": "2026-08-17T02:00:00+00:00",
+        "cache_ttl_seconds": 900,
+        "cache_age_seconds": 30,
+        # W8 is a company-wide shared feed and must not be summed per store.
+        "w8": {
+            "data_source": "local_database",
+            "synced_at": "2026-08-17T01:00:00+00:00",
+            "summary": {"inbound_orders": 999, "stock_total": 999},
+        },
+        "takealot": {
+            "connected": True,
+            "live_connected": False,
+            "data_source": "local_database",
+            "synced_at": "2026-08-17T01:50:00+00:00",
+            "snapshot_saved": True,
+            "refresh_attempted": False,
+            "summary": {"shipments": 2, "units": 7},
+            "recent_shipments": [
+                {"shipment_id": "shipment-b", "created_at": "2026-08-16"}
+            ],
+            "warnings": [],
+        },
+        "matching": {
+            "confirmed_links": [
+                {
+                    "id": 8,
+                    "takealot_shipment_id": "shipment-b",
+                    "w8_order_no": "w8-b",
+                }
+            ],
+            "warnings": [],
+        },
+        "boundaries": ["原始边界"],
+    }
+
+    payload = _aggregate_logistics_payloads(
+        [(stores[0], first_payload), (stores[1], second_payload)],
+        "all",
+    )
+
+    assert payload["store_count"] == 2
+    assert payload["w8"]["summary"] == {"inbound_orders": 2, "stock_total": 50}
+    assert payload["takealot"]["summary"] == {"shipments": 3, "units": 12}
+    assert {
+        (row["store_code"], row["store_scope_key"])
+        for row in payload["takealot"]["recent_shipments"]
+    } == {
+        ("store-01", "store-01:shipment-a"),
+        ("store-02", "store-02:shipment-b"),
+    }
+    assert payload["matching"]["confirmed_links"][0]["store_code"] == "store-02"
+    assert payload["automatic_page_refresh"] is False
+    assert "W8 共享仓只展示一次" in payload["boundaries"][0]
+
+
+def test_all_store_platform_warehouse_is_aggregated_but_read_only() -> None:
+    stores = (
+        StoreIdentity(1, "store-01", "第一店铺", True, True),
+        StoreIdentity(2, "store-02", "第二店铺", True, True),
+    )
+    common = {
+        "capability": {
+            "write_mode": "explicit_opt_in",
+            "official_shipment_write_supported": True,
+            "message": "single store",
+        },
+        "portal": {
+            "enabled": True,
+            "authenticated": True,
+            "requires_otp": True,
+        },
+    }
+    payload = _aggregate_platform_warehouse_payloads(
+        [
+            (
+                stores[0],
+                {
+                    **common,
+                    "generated_at": "2026-08-17T01:00:00+00:00",
+                    "offers": [{"offer_id": "offer-a"}],
+                    "drafts": [{"id": 1, "draft_number": "draft-a"}],
+                    "platform_shipments": [{"shipment_id": "shipment-a"}],
+                    "platform_snapshot_synced_at": "2026-08-17T00:00:00+00:00",
+                },
+            ),
+            (
+                stores[1],
+                {
+                    **common,
+                    "generated_at": "2026-08-17T02:00:00+00:00",
+                    "offers": [{"offer_id": "offer-b"}],
+                    "drafts": [{"id": 2, "draft_number": "draft-b"}],
+                    "platform_shipments": [{"shipment_id": "shipment-b"}],
+                    "platform_snapshot_synced_at": "2026-08-17T01:00:00+00:00",
+                },
+            ),
+        ],
+        "all",
+    )
+
+    assert payload["store_count"] == 2
+    assert {row["store_code"] for row in payload["offers"]} == {
+        "store-01",
+        "store-02",
+    }
+    assert payload["capability"]["official_shipment_write_supported"] is False
+    assert payload["portal"]["enabled"] is False
+    assert payload["portal"]["authenticated"] is False
+    assert "必须先切换到明确单店" in payload["capability"]["message"]
+    assert payload["platform_snapshot_synced_at"] == "2026-08-17T01:00:00+00:00"

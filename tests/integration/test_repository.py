@@ -98,6 +98,7 @@ def test_offer_snapshot_is_unique_by_day_and_offer_id(engine: Engine, offer: Off
         offer,
         title="Updated title",
         selling_price=Decimal("189.99"),
+        page_views_30_days=135,
         captured_at=datetime(2026, 7, 20, 9, 0, tzinfo=UTC),
     )
 
@@ -126,6 +127,8 @@ def test_offer_snapshot_is_unique_by_day_and_offer_id(engine: Engine, offer: Off
         offer.selling_price,
         updated_offer.selling_price,
     ]
+    assert [row.page_views_30_days for row in store_observations] == [120, 135]
+    assert all(row.page_views_30_days_recorded for row in store_observations)
     assert store_observations[-1].captured_at == updated_offer.captured_at.replace(
         tzinfo=None
     )

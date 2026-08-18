@@ -17,7 +17,7 @@ from takealot_ops.api.errors import (
     AuthenticationError,
     RateLimitError,
 )
-from takealot_ops.domain import OfferRecord, SaleRecord
+from takealot_ops.domain import OfferRecord, ReturnRecord, SaleRecord
 from takealot_ops.settings import Settings
 
 
@@ -351,11 +351,11 @@ def test_returns_query_uses_inclusive_dates_and_limit_100() -> None:
 
     def handler(request: httpx.Request) -> httpx.Response:
         requests.append(request)
-        return httpx.Response(200, json={"items": []})
+        return httpx.Response(200, json=_fixture("returns_page.json"))
 
     client = _client(handler)
     try:
-        assert list(client.list_returns(date(2026, 7, 1), date(2026, 7, 20))) == []
+        returns = list(client.list_returns(date(2026, 7, 1), date(2026, 7, 20)))
     finally:
         client.close()
 
@@ -363,7 +363,13 @@ def test_returns_query_uses_inclusive_dates_and_limit_100() -> None:
         "return_date__gte": "2026-07-01",
         "return_date__lte": "2026-07-20",
         "limit": "100",
+        "expands": "outcomes",
     }
+    assert requests[0].url.params.get_list("expands") == ["outcomes", "transactions"]
+    assert isinstance(returns[0], ReturnRecord)
+    assert returns[0].seller_return_id == "SR-2026-0001"
+    assert returns[0].return_date == date(2026, 7, 19)
+    assert returns[0].outcomes[0]["status"] == "sellable_stock"
 
 
 def test_shipments_query_expands_item_level_receiving_data() -> None:

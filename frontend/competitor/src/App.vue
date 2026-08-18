@@ -14,17 +14,20 @@ import {
   setAuthSession,
   type RefreshStatus,
 } from "./api";
+import AnomalyProductsPage from "./pages/AnomalyProductsPage.vue";
 import CompetitorsPage from "./pages/CompetitorsPage.vue";
 import LoginPage from "./pages/LoginPage.vue";
 import LogisticsPage from "./pages/LogisticsPage.vue";
-import PlatformWarehousePage from "./pages/PlatformWarehousePage.vue";
 import KeywordTrafficPage from "./pages/KeywordTrafficPage.vue";
 import SearchRankingPage from "./pages/SearchRankingPage.vue";
 import OverviewPage from "./pages/OverviewPage.vue";
 import ProductsPage from "./pages/ProductsPage.vue";
 import QuadrantsPage from "./pages/QuadrantsPage.vue";
+import ReturnsPage from "./pages/ReturnsPage.vue";
 import UsersPage from "./pages/UsersPage.vue";
 import {
+  competitorDetailPageHref,
+  competitorDetailPlidFromHash,
   isErpModuleKey,
   modulePageFromHash,
   modulePageHref,
@@ -39,6 +42,7 @@ import {
   type DateViewport,
   type DateViewportMode,
 } from "./dateViewport";
+import { defaultMultiStoreScope } from "./defaultStoreScope";
 import {
   templateLabels,
   userHasPermission,
@@ -61,8 +65,9 @@ const storeScopedPages = new Set<PageKey>([
   "keyword-traffic",
   "search-ranking",
   "quadrants",
+  "anomaly-products",
+  "returns",
   "logistics",
-  "platform-warehouse",
 ]);
 const pageStorageKey = "takealot-erp-active-page-v1";
 const competitorCheckpointKey = "takealot-competitor-collection-v1";
@@ -78,15 +83,16 @@ const basePages = [
   { key: "keyword-traffic", label: "关键词流量", hint: "变更节点与趋势对比", mark: "03", permission: "store.view" },
   { key: "search-ranking", label: "搜索定位", hint: "图片热词与自然排名", mark: "04", permission: "store.view" },
   { key: "quadrants", label: "经营坐标", hint: "流量与下单分布", mark: "05", permission: "store.view" },
-  { key: "logistics", label: "物流管理", hint: "长睿与平台货件", mark: "06", permission: "store.view" },
-  { key: "platform-warehouse", label: "约平台仓", hint: "补货草稿与 PO", mark: "07", permission: "store.view" },
-  { key: "competitors", label: "竞品雷达", hint: "库存评论与销量", mark: "08", permission: "competitors.view" },
+  { key: "anomaly-products", label: "异常商品", hint: "停销、禁售库存与滞销", mark: "06", permission: "store.view" },
+  { key: "returns", label: "退货管理", hint: "原因、结果与交易", mark: "07", permission: "store.view" },
+  { key: "logistics", label: "物流管理", hint: "长睿与平台货件", mark: "08", permission: "store.view" },
+  { key: "competitors", label: "竞品雷达", hint: "库存评论与销量", mark: "09", permission: "competitors.view" },
 ] as const;
 const adminPage = {
   key: "users",
   label: "用户权限",
   hint: "账号与权限管理",
-  mark: "09",
+  mark: "10",
   permission: "users.manage",
 } as const;
 
@@ -94,13 +100,18 @@ const authReady = ref(false);
 const authStatus = ref<AuthStatus>({ setup_required: false, bootstrap_allowed: false });
 const session = ref<AuthSession | null>(null);
 const selectedStoreId = ref<number | null>(null);
-const overviewStoreScope = ref<OwnStoreScope>("current");
-const competitorOwnStoreScope = ref<OwnStoreScope>("current");
+const selectedStoreScope = ref<OwnStoreScope>("current");
+const initialCompetitorDetailPlid = competitorDetailPlidFromHash(window.location.hash);
+const competitorDetailRequest = ref({
+  plid: initialCompetitorDetailPlid ?? "",
+  revision: initialCompetitorDetailPlid ? 1 : 0,
+});
 const currentPage = ref<PageKey>(initialPage());
 const dataToday = localDate();
 const initialDataViewport = calendarMonthViewport(dataToday, dataToday);
 const dataRangeStart = ref(initialDataViewport.startDate);
 const dataRangeEnd = ref(initialDataViewport.endDate);
+const anomalyAsOf = ref(initialDataViewport.endDate);
 const dataViewportMode = ref<DateViewportMode>(initialDataViewport.mode);
 const asOf = computed(() => dataRangeEnd.value);
 const freshness = ref<FreshnessPayload>({
@@ -135,7 +146,16 @@ const hasPermission = (permission: PermissionKey) =>
 const canManageUsers = computed(() => hasPermission("users.manage"));
 const canManageLogistics = computed(() => hasPermission("logistics.manage"));
 const canRunSearchRanking = computed(() => hasPermission("search_ranking.run"));
-const canRefresh = computed(() => hasPermission("refresh.run"));
+const canRefresh = computed(
+  () =>
+    hasPermission("refresh.run")
+    && session.value?.user.username.toLowerCase() === "kxx",
+);
+const refreshTargetStoreCount = computed(
+  () => session.value?.user.accessible_stores.filter(
+    (store) => store.active && store.data_connected,
+  ).length ?? 0,
+);
 const canCollectCompetitors = computed(() => hasPermission("competitors.collect"));
 const canControlCompetitorCollection = computed(
   () =>
@@ -164,7 +184,9 @@ const refreshButtonLabel = computed(() => {
   if (!refreshStatus.value.admin_exempt && refreshCooldownRemaining.value > 0) {
     return `刷新冷却 ${formatCooldown(refreshCooldownRemaining.value)}`;
   }
-  return "刷新全部数据";
+  return refreshTargetStoreCount.value > 0
+    ? `刷新全部数据（${refreshTargetStoreCount.value}店）`
+    : "刷新全部数据";
 });
 const refreshStatusNotice = computed(() => {
   if (refreshStatus.value.in_progress) {
@@ -183,7 +205,7 @@ const refreshStatusNotice = computed(() => {
       || refreshStatus.value.last_success_by
       || "其他用户";
     const suffix = refreshStatus.value.admin_exempt
-      ? "；管理员可在必要时再次刷新"
+      ? "；仅 kxx 可在必要时再次刷新"
       : `；普通账号还需等待 ${formatCooldown(refreshCooldownRemaining.value)}`;
     return `${owner} 已刷新全部数据${suffix}。`;
   }
@@ -208,8 +230,9 @@ const pageComponent = computed(() => {
     "keyword-traffic": KeywordTrafficPage,
     "search-ranking": SearchRankingPage,
     quadrants: QuadrantsPage,
+    "anomaly-products": AnomalyProductsPage,
+    returns: ReturnsPage,
     logistics: LogisticsPage,
-    "platform-warehouse": PlatformWarehousePage,
     competitors: CompetitorsPage,
     users: UsersPage,
   };
@@ -257,38 +280,21 @@ const operatingConnectedStoreCount = computed(
   () => operatingConnectedStores.value.length,
 );
 const showAllStoresOption = computed(
-  () =>
-    accessibleConnectedStoreCount.value > 1
-    && (
-      operatingConnectedStoreCount.value === 0
-      || operatingConnectedStoreCount.value !== accessibleConnectedStoreCount.value
-    ),
+  () => accessibleConnectedStoreCount.value > 1,
 );
 const selectedStore = computed<StoreAccessItem | null>(() => {
   const stores = session.value?.user.accessible_stores ?? [];
   return (
     stores.find((store) => store.id === selectedStoreId.value)
     ?? stores.find((store) => store.code === "current" && store.data_connected)
+    ?? stores.find((store) => store.active && store.data_connected)
     ?? stores[0]
     ?? null
   );
 });
-const competitorMultiStoreSelected = computed(
-  () =>
-    currentPage.value === "competitors"
-    && competitorOwnStoreScope.value !== "current",
-);
-const overviewMultiStoreSelected = computed(
-  () =>
-    currentPage.value === "overview"
-    && overviewStoreScope.value !== "current",
-);
+const multiStoreSelected = computed(() => selectedStoreScope.value !== "current");
 const selectedMultiStoreScopeLabel = computed(() =>
-  (
-    currentPage.value === "overview"
-      ? overviewStoreScope.value
-      : competitorOwnStoreScope.value
-  ) === "operating"
+  selectedStoreScope.value === "operating"
     ? "我的运营店铺"
     : "全部店铺",
 );
@@ -297,13 +303,9 @@ const canMoveDataViewportNext = computed(() =>
 );
 const selectedStoreChoice = computed({
   get: () =>
-    competitorMultiStoreSelected.value || overviewMultiStoreSelected.value
+    multiStoreSelected.value
       ? (
-          (
-            currentPage.value === "overview"
-              ? overviewStoreScope.value
-              : competitorOwnStoreScope.value
-          ) === "operating"
+          selectedStoreScope.value === "operating"
             ? operatingStoresSelectorValue
             : allStoresSelectorValue
         )
@@ -318,18 +320,16 @@ const selectedStoreChoice = computed({
       const scope: OwnStoreScope = value === operatingStoresSelectorValue
         ? "operating"
         : "all";
-      if (currentPage.value === "overview") {
-        overviewStoreScope.value = scope;
-      } else if (currentPage.value === "competitors") {
-        competitorOwnStoreScope.value = scope;
+      selectedStoreScope.value = scope;
+      if (!selectedStore.value?.data_connected) {
+        const connectedStore = (session.value?.user.accessible_stores ?? []).find(
+          (store) => store.active && store.data_connected,
+        );
+        selectedStoreId.value = connectedStore?.id ?? null;
       }
       return;
     }
-    if (currentPage.value === "overview") {
-      overviewStoreScope.value = "current";
-    } else if (currentPage.value === "competitors") {
-      competitorOwnStoreScope.value = "current";
-    }
+    selectedStoreScope.value = "current";
     const storeId = Number(value);
     selectedStoreId.value = Number.isFinite(storeId) ? storeId : null;
   },
@@ -340,16 +340,24 @@ function selectStoreFromOverview(storeCode: string) {
     (candidate) => candidate.code === storeCode && candidate.active && candidate.data_connected,
   );
   if (!store) return;
-  overviewStoreScope.value = "current";
+  selectedStoreScope.value = "current";
   selectedStoreId.value = store.id;
+}
+
+function applyDefaultStoreScope() {
+  selectedStoreScope.value = defaultMultiStoreScope(
+    accessibleConnectedStoreCount.value,
+    operatingConnectedStoreCount.value,
+  );
 }
 
 const selectedStorePending = computed(
   () =>
     storeScopedPages.has(activePage.value.key as PageKey)
     && (
-      selectedStore.value === null
-      || !selectedStore.value.data_connected
+      multiStoreSelected.value
+        ? accessibleConnectedStoreCount.value === 0
+        : selectedStore.value === null || !selectedStore.value.data_connected
     ),
 );
 
@@ -372,13 +380,18 @@ const activePageProps = computed(() => {
   const common = {
     asOf: asOf.value,
   };
+  const scopedCommon = {
+    ...common,
+    storeScope: selectedStoreScope.value,
+    multiStoreLabel: selectedMultiStoreScopeLabel.value,
+  };
   if (key === "overview") {
     return {
       rangeStart: dataRangeStart.value,
       rangeEnd: dataRangeEnd.value,
       currentStoreName: selectedStore.value?.display_name ?? "当前店铺",
-      allStoresSelected: overviewMultiStoreSelected.value,
-      storeScope: overviewStoreScope.value,
+      allStoresSelected: multiStoreSelected.value,
+      storeScope: selectedStoreScope.value,
       multiStoreLabel: selectedMultiStoreScopeLabel.value,
     };
   }
@@ -393,24 +406,45 @@ const activePageProps = computed(() => {
       currentStoreName: selectedStore.value?.display_name ?? "当前店铺",
       accessibleConnectedStoreCount: accessibleConnectedStoreCount.value,
       operatingConnectedStoreCount: operatingConnectedStoreCount.value,
-      ownStoreScope: competitorOwnStoreScope.value,
+      ownStoreScope: selectedStoreScope.value,
+      requestedDetailPlid: competitorDetailRequest.value.plid,
+      requestedDetailRevision: competitorDetailRequest.value.revision,
       onPermissionDenied: showPermissionDenied,
     };
   }
-  if (key === "logistics" || key === "platform-warehouse") {
+  if (key === "anomaly-products") {
     return {
-      ...common,
+      ...scopedCommon,
+      asOf: anomalyAsOf.value,
+      canViewCompetitors: hasPermission("competitors.view"),
+      currentStoreCode: selectedStore.value?.code ?? "",
+      currentStoreName: selectedStore.value?.display_name ?? "当前店铺",
+      onPermissionDenied: showPermissionDenied,
+    };
+  }
+  if (key === "returns") {
+    return {
+      ...scopedCommon,
+      rangeStart: dataRangeStart.value,
+      rangeEnd: dataRangeEnd.value,
+    };
+  }
+  if (key === "logistics") {
+    return {
+      ...scopedCommon,
       canManage: canManageLogistics.value,
       onPermissionDenied: showPermissionDenied,
     };
   }
   if (key === "search-ranking") {
     return {
+      storeScope: selectedStoreScope.value,
+      multiStoreLabel: selectedMultiStoreScopeLabel.value,
       canOperate: canRunSearchRanking.value,
       onPermissionDenied: showPermissionDenied,
     };
   }
-  return common;
+  return storeScopedPages.has(key as PageKey) ? scopedCommon : common;
 });
 
 onMounted(async () => {
@@ -468,11 +502,15 @@ function openPage(event: MouseEvent, page: (typeof allPages)[number]) {
 
 function handleModuleHashChange() {
   const requestedPage = modulePageFromHash(window.location.hash);
+  const requestedDetailPlid = competitorDetailPlidFromHash(window.location.hash);
   if (!requestedPage) {
     syncModuleUrl(currentPage.value);
     return;
   }
-  if (requestedPage === currentPage.value) return;
+  if (requestedPage === currentPage.value) {
+    if (requestedDetailPlid) requestCompetitorDetail(requestedDetailPlid);
+    return;
+  }
   if (!session.value) {
     currentPage.value = requestedPage;
     return;
@@ -484,6 +522,7 @@ function handleModuleHashChange() {
     return;
   }
   switchPage(requestedPage, false);
+  if (requestedDetailPlid) requestCompetitorDetail(requestedDetailPlid);
 }
 
 async function restoreSession() {
@@ -516,8 +555,7 @@ async function retryAuthentication() {
 function acceptSession(next: AuthSession) {
   session.value = next;
   setAuthSession(next);
-  overviewStoreScope.value = "current";
-  competitorOwnStoreScope.value = "current";
+  selectedStoreScope.value = "current";
   const currentSelection = next.user.accessible_stores.find(
     (store) => store.id === selectedStoreId.value,
   );
@@ -526,11 +564,15 @@ function acceptSession(next: AuthSession) {
     ?? next.user.accessible_stores.find(
       (store) => store.code === "current" && store.data_connected,
     )
+    ?? next.user.accessible_stores.find(
+      (store) => store.active && store.data_connected,
+    )
     ?? next.user.accessible_stores[0]
     ?? null
   );
   selectedStoreId.value = nextStore?.id ?? null;
   setActiveStoreCode(nextStore?.code);
+  applyDefaultStoreScope();
   const allowedPage = pages.value.find((page) => page.key === currentPage.value);
   const allowedPageNeedsStore = (
     allowedPage
@@ -547,7 +589,11 @@ function acceptSession(next: AuthSession) {
     );
     switchPage((firstUsablePage ?? pages.value[0]).key);
   } else {
-    syncModuleUrl(currentPage.value);
+    if (currentPage.value === "competitors" && initialCompetitorDetailPlid) {
+      syncCompetitorDetailUrl(initialCompetitorDetailPlid);
+    } else {
+      syncModuleUrl(currentPage.value);
+    }
   }
   authReady.value = true;
   void loadFreshness();
@@ -558,8 +604,7 @@ function handleExpired() {
   window.dispatchEvent(new CustomEvent(AUTH_SESSION_ENDING_EVENT));
   session.value = null;
   selectedStoreId.value = null;
-  overviewStoreScope.value = "current";
-  competitorOwnStoreScope.value = "current";
+  selectedStoreScope.value = "current";
   setAuthSession(null);
   currentPage.value = "overview";
   syncModuleUrl("overview");
@@ -652,6 +697,29 @@ function syncModuleUrl(page: PageKey) {
   }
 }
 
+function syncCompetitorDetailUrl(plid: string) {
+  const nextHash = competitorDetailPageHref(plid);
+  if (window.location.hash === nextHash) return;
+  try {
+    window.history.replaceState(
+      window.history.state,
+      "",
+      `${window.location.pathname}${window.location.search}${nextHash}`,
+    );
+  } catch {
+    // Detail handoff remains usable if the browser blocks history updates.
+  }
+}
+
+function requestCompetitorDetail(plid: string) {
+  const normalized = plid.trim();
+  if (!normalized) return;
+  competitorDetailRequest.value = {
+    plid: normalized,
+    revision: competitorDetailRequest.value.revision + 1,
+  };
+}
+
 function switchPage(page: PageKey, updateUrl = true) {
   currentPage.value = page;
   try {
@@ -731,6 +799,16 @@ function updateDataViewportBoundary(
       changedBoundary,
     ),
   );
+}
+
+function updateAnomalyAsOf(event: Event) {
+  const selectedDate = (event.target as HTMLInputElement).value;
+  anomalyAsOf.value = normalizeCustomViewport(
+    selectedDate,
+    selectedDate,
+    dataToday,
+    "end",
+  ).endDate;
 }
 
 function localDate() {
@@ -820,14 +898,14 @@ function localDate() {
             <span>当前查看店铺</span>
             <select v-model="selectedStoreChoice" aria-label="切换当前查看店铺">
               <option
-                v-if="['overview', 'competitors'].includes(currentPage) && operatingConnectedStoreCount > 0"
+                v-if="operatingConnectedStoreCount > 0"
                 :value="operatingStoresSelectorValue"
               >
                 我的运营店铺 · {{ operatingConnectedStoreCount }}
                 {{ operatingConnectedStoreCount > 1 ? "店合并" : "店" }}
               </option>
               <option
-                v-if="['overview', 'competitors'].includes(currentPage) && showAllStoresOption"
+                v-if="showAllStoresOption"
                 :value="allStoresSelectorValue"
               >
                 全部店铺 · {{ accessibleConnectedStoreCount }} 店合并
@@ -850,7 +928,31 @@ function localDate() {
           <section
             v-if="
               !selectedStorePending
-              && !['search-ranking', 'logistics', 'competitors', 'users'].includes(currentPage)
+              && currentPage === 'anomaly-products'
+            "
+            class="data-viewport"
+            aria-label="异常商品数据日期"
+          >
+            <div class="data-viewport-heading">
+              <span>数据日期</span>
+              <small>单日</small>
+            </div>
+            <div class="data-viewport-controls">
+              <label>
+                <span>选择日期</span>
+                <input
+                  :value="anomalyAsOf"
+                  type="date"
+                  :max="dataToday"
+                  @change="updateAnomalyAsOf"
+                />
+              </label>
+            </div>
+          </section>
+          <section
+            v-else-if="
+              !selectedStorePending
+              && !['search-ranking', 'logistics', 'anomaly-products', 'competitors', 'users'].includes(currentPage)
             "
             class="data-viewport"
             aria-label="全局数据日期范围"
@@ -912,11 +1014,10 @@ function localDate() {
               !['logistics', 'users'].includes(currentPage)
               && !selectedStorePending
               && canAccessConnectedStore
-              && !competitorMultiStoreSelected
-              && !overviewMultiStoreSelected
+              && canRefresh
             "
             class="refresh-button"
-            :disabled="refreshing || (canRefresh && !refreshStatus.can_refresh)"
+            :disabled="refreshing || !refreshStatus.can_refresh"
             @click="runRefresh"
           >
             {{ refreshButtonLabel }}
@@ -963,7 +1064,7 @@ function localDate() {
             {{
               selectedStore
                 ? "当前页面不会复用其他店铺的数据；管理员完成该店铺凭据和采集任务配置后才会开放。"
-                : "经营总览、商品、关键词流量、搜索定位、经营坐标、物流管理与约平台仓属于店铺数据模块；竞品雷达等公共模块仍可按账号已开放的功能权限正常使用。"
+                : "经营总览、商品、关键词流量、搜索定位、经营坐标、异常商品、退货管理与物流管理属于店铺数据模块；竞品雷达等公共模块仍可按账号已开放的功能权限正常使用。"
             }}
           </span>
           <button

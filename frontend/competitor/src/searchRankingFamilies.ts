@@ -19,10 +19,11 @@ export interface SearchRankingProductFamily {
 }
 
 export function searchRankingFamilyKey(product: SearchRankingProduct): string {
+  const storePrefix = String(product.store_code ?? "current").trim().toLocaleLowerCase();
   const productlineId = String(product.productline_id ?? "").trim().toLocaleLowerCase();
   return productlineId
-    ? `plid:${productlineId}`
-    : `offer:${String(product.offer_id).trim().toLocaleLowerCase()}`;
+    ? `store:${storePrefix}:plid:${productlineId}`
+    : `store:${storePrefix}:offer:${String(product.offer_id).trim().toLocaleLowerCase()}`;
 }
 
 function representativeFor(variants: SearchRankingProduct[]): SearchRankingProduct {

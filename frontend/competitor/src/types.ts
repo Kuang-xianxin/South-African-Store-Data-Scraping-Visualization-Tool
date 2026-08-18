@@ -1,4 +1,17 @@
-export interface CompetitorOfferItem {
+export interface StoreScopedRecord {
+  store_code?: string | null;
+  store_name?: string | null;
+  store_scope_key?: string | null;
+}
+
+export interface ProductMasterIdentity extends StoreScopedRecord {
+  company_sku?: string | null;
+  company_product_name?: string | null;
+  cost_rmb?: number | null;
+  cost_effective_date?: string | null;
+}
+
+export interface CompetitorOfferItem extends ProductMasterIdentity {
   报价键: string;
   报价来源?: "seller_api" | "public_offer";
   offer_id: string | null;
@@ -99,6 +112,8 @@ export interface CompetitorItem {
   最新Offer状态?: string[];
   最新Offer状态更新时间?: string | null;
   自有报价: OwnStoreOfferItem[];
+  company_skus?: string[];
+  company_sku?: string | null;
   共享评论说明: string | null;
   跟卖发现日期: string[];
   新增跟卖卖家数: number;
@@ -129,7 +144,7 @@ export interface OwnFollowerHistoryItem {
   跟卖卖家明细: OwnFollowerSellerEvent[];
 }
 
-export interface OwnStoreOfferItem {
+export interface OwnStoreOfferItem extends ProductMasterIdentity {
   offer_id: string;
   店铺: string;
   SKU: string | null;
@@ -409,6 +424,13 @@ export interface CompetitorVariantItem {
   链接: string;
 }
 
+export interface CompetitorCategoryBreadcrumb {
+  name: string;
+  id: string | null;
+  type: string | null;
+  slug: string | null;
+}
+
 export interface OwnStoreSalesPoint {
   date: string;
   ordered_units: number | null;
@@ -461,12 +483,242 @@ export interface OwnStoreTrafficSeries {
   metric_notice: string;
 }
 
+export interface ReturnFilterOption {
+  value: string;
+  label: string;
+  count: number;
+}
+
+export interface SellerReturnItem {
+  seller_return_id: string;
+  order_id: string | null;
+  order_item_id: string | null;
+  offer_id: string | null;
+  tsin_id: string | null;
+  sku: string | null;
+  return_reference_number: string | null;
+  quantity: number;
+  return_date: string | null;
+  return_region: string | null;
+  return_reason: string | null;
+  return_reason_label: string;
+  customer_comment: string | null;
+  outcome_statuses: string[];
+  outcome_labels: string[];
+  outcomes: Array<Record<string, unknown>>;
+  transactions: Array<Record<string, unknown>>;
+  transaction_total_incl_vat: number;
+  captured_at: string | null;
+  productline_id: string | null;
+  product_title: string | null;
+  image_url: string | null;
+  offer_quantity_returned_30_days: number | null;
+  company_sku?: string | null;
+  company_product_name?: string | null;
+  store_code: string;
+  store_name: string;
+  store_scope_key: string;
+}
+
+export interface ReturnSummary {
+  return_count: number;
+  return_units: number;
+  affected_product_count: number;
+  quality_related_units: number;
+  sellable_stock_units: number;
+  removal_order_units: number;
+  transaction_total_incl_vat: number;
+}
+
+export interface ReturnCollectionStoreStatus {
+  store_code: string;
+  store_name: string;
+  data_status: "collected" | "partial" | "stale" | "failed" | "uncollected" | "unavailable";
+  last_attempt_at: string | null;
+  last_success_at: string | null;
+  requested_from: string | null;
+  requested_through: string | null;
+  record_count: number | null;
+  latest_error: string | null;
+}
+
+export interface OfferReturnedCounter {
+  units: number | null;
+  covered_offer_count: number;
+  offer_count: number;
+  covered_store_count: number;
+  store_count: number;
+  captured_at: string | null;
+  metric: "quantity_returned_30_days";
+  window: "rolling_30_days";
+}
+
+export interface ReturnsPayload {
+  range_start: string;
+  range_end: string;
+  date_basis: "Africa/Johannesburg";
+  store_scope?: OwnStoreScope;
+  store_count?: number;
+  data_status: "collected" | "partial" | "failed" | "uncollected" | "unavailable";
+  store_statuses: ReturnCollectionStoreStatus[];
+  offer_returned_30_days: OfferReturnedCounter;
+  summary: ReturnSummary;
+  filters: {
+    reasons: ReturnFilterOption[];
+    outcomes: ReturnFilterOption[];
+  };
+  items: SellerReturnItem[];
+  total: number;
+  page: number;
+  page_size: number;
+  message?: string;
+  source_notice: string;
+}
+
+export interface OwnStoreProfitScenario {
+  key: "current_gross" | "current_fee_adjusted" | "rrp_gross";
+  label: string;
+  price_zar: number;
+  price_rmb: number;
+  estimated_fees_zar: number;
+  estimated_fees_rmb: number;
+  profit_rmb: number;
+  profit_margin_percentage: number;
+  cost_markup_percentage: number;
+  note: string;
+}
+
+export interface OwnStoreProfitFeeBasis {
+  status: "available" | "unverified" | "no_sales" | "incomplete";
+  window_days: number;
+  covered_days: number;
+  sales_days: number;
+  order_line_count: number;
+  ordered_units: number;
+  sales_revenue_zar: number | null;
+  total_fees_zar: number | null;
+  fee_rate_percentage: number | null;
+  invalid_line_count?: number;
+  source: string;
+  message: string;
+}
+
+export interface OwnStoreProfitabilityItem extends ProductMasterIdentity {
+  offer_key: string;
+  store_code: string;
+  store_name: string;
+  offer_id: string;
+  plid: string;
+  sku: string | null;
+  cost_rmb: number | null;
+  cost_effective_date: string | null;
+  cost_zar: number | null;
+  selling_price_zar: number | null;
+  rrp_zar: number | null;
+  fee_basis: OwnStoreProfitFeeBasis;
+  scenarios: {
+    current_gross: OwnStoreProfitScenario | null;
+    current_fee_adjusted: OwnStoreProfitScenario | null;
+    rrp_gross: OwnStoreProfitScenario | null;
+  };
+  message: string;
+}
+
+export interface OwnStoreProfitabilityPayload {
+  items: OwnStoreProfitabilityItem[];
+  store_codes: string[];
+  fee_window: {
+    start: string;
+    end: string;
+    days: number;
+    date_basis: "Africa/Johannesburg";
+  };
+  exchange_rate: {
+    base_currency: "CNY";
+    quote_currency: "ZAR";
+    rate: number | null;
+    rate_date: string | null;
+    fetched_at: string | null;
+    source: string;
+    status: "converted" | "stale" | "unavailable" | "not_required";
+    message: string;
+  };
+  message: string;
+}
+
 export interface CompetitorDetail {
+  category_path: CompetitorCategoryBreadcrumb[];
   history: CompetitorItem[];
   reviews: ReviewItem[];
   variants: CompetitorVariantItem[];
   own_store_sales: OwnStoreSalesSeries[];
   own_store_traffic: OwnStoreTrafficSeries[];
+  own_store_returns: ReturnsPayload;
+  own_store_profitability: OwnStoreProfitabilityPayload;
+  company_inventory?: CompanyInventoryPayload;
+}
+
+export interface InventoryStageValue {
+  value: number;
+  coverage: number;
+}
+
+export interface CompanyOverseasInventory {
+  available: boolean;
+  matched: boolean;
+  snapshot_at: string | null;
+  warehouse: { id?: number; code?: string; name?: string; country?: string } | null;
+  record_count: number;
+  message: string;
+  stages: Partial<Record<
+    | "stock_total"
+    | "usable_stock"
+    | "locked_stock"
+    | "outbound_allocated"
+    | "transit_stock"
+    | "defective_stock",
+    InventoryStageValue
+  >>;
+}
+
+export interface CompanyPlatformInventoryOffer {
+  store_code: string;
+  store_name: string;
+  offer_id: string;
+  plid: string | null;
+  platform_sku: string;
+  company_sku: string;
+  status: string | null;
+  platform_available_stock: number | null;
+  platform_stock_on_way: number | null;
+  platform_stock_in_receiving: number | null;
+  captured_at: string | null;
+}
+
+export interface CompanyInventoryItem extends ProductMasterIdentity {
+  company_sku: string;
+  company_product_name: string;
+  mapped_platform_skus: string[];
+  overseas_warehouse: CompanyOverseasInventory;
+  platform_warehouse: {
+    offer_count: number;
+    stages: {
+      available: InventoryStageValue;
+      on_way: InventoryStageValue;
+      in_receiving: InventoryStageValue;
+    };
+    offers: CompanyPlatformInventoryOffer[];
+    latest_captured_at: string | null;
+  };
+}
+
+export interface CompanyInventoryPayload {
+  items: CompanyInventoryItem[];
+  store_codes: string[];
+  company_sku_count: number;
+  w8_shared_once: true;
+  stage_totals_are_additive: false;
+  message: string;
 }
 
 export interface CollectResult {
@@ -509,7 +761,7 @@ export interface SalesPoint {
   ordered_revenue: number | null;
 }
 
-export interface ProductItem {
+export interface ProductItem extends ProductMasterIdentity {
   metric_date: string;
   offer_id: string;
   sku: string | null;
@@ -729,13 +981,106 @@ export interface StoreOverviewPayload {
 
 export interface ProductsPayload {
   latest_metric_date: string | null;
+  store_scope?: OwnStoreScope;
+  store_count?: number;
+  store_metric_dates?: Record<string, string | null>;
   items: ProductItem[];
 }
 
+export interface ProductCostConversion {
+  base_currency: "CNY";
+  quote_currency: "ZAR";
+  cost_rmb: number | null;
+  cost_zar: number | null;
+  rate: number | null;
+  rate_date: string | null;
+  fetched_at: string | null;
+  source: string;
+  status: "converted" | "stale" | "missing_cost" | "unavailable";
+  message: string;
+}
+
 export interface ProductDetailPayload {
-  identity: Record<string, unknown>;
+  identity: ProductMasterIdentity & Record<string, unknown>;
   kpis: Record<string, number | string | null>;
   history: ProductItem[];
+  cost_conversion: ProductCostConversion;
+}
+
+export type AnomalyProductType =
+  | "sudden_sales_stop"
+  | "not_buyable_with_stock"
+  | "disabled_by_takealot_with_stock"
+  | "disabled_by_seller_with_stock"
+  | "slow_moving";
+
+export interface AnomalyProductItem extends ProductMasterIdentity {
+  anomaly_type: AnomalyProductType;
+  anomaly_label: string;
+  offer_id: string;
+  plid: string;
+  tsin_id: string | null;
+  sku: string | null;
+  title: string;
+  image_url: string | null;
+  selling_price: number | null;
+  page_views_30_days: number | null;
+  conversion_percentage_30_days: number | null;
+  offer_status: string;
+  offer_status_label: string;
+  available_stock: number;
+  takealot_available_stock: number;
+  seller_available_stock: number;
+  receiving_stock: number;
+  on_way_stock: number;
+  inventory_units: number;
+  data_through: string | null;
+  latest_ordered_units: number | null;
+  no_sales_days: number;
+  no_sales_days_exact: boolean;
+  last_sale_on: string | null;
+  slow_moving_started_on?: string | null;
+  stop_started_on?: string;
+  zero_sales_dates?: string[];
+  baseline_start_on?: string;
+  baseline_end_on?: string;
+  baseline_total_units?: number;
+  baseline_selling_days?: number;
+  baseline_daily_average?: number;
+}
+
+export interface AnomalyProductPayload {
+  requested_as_of: string;
+  completed_through: string;
+  data_through: string | null;
+  date_basis: "Africa/Johannesburg";
+  sales_zero_evidence: "verified_complete_business_days_only";
+  rules: {
+    sales_stop_zero_days: number;
+    sales_stop_baseline_days: number;
+    sales_stop_min_selling_days: number;
+    sales_stop_min_baseline_units: number;
+    slow_day_options: number[];
+    slow_moving_requires_status: "buyable";
+    slow_moving_requires_available_stock: boolean;
+    slow_moving_day_basis: "verified_zero_sales_and_positive_stock_days";
+    stock_status_requires_available_stock: boolean;
+    stock_status_excluded_inventory: Array<"receiving" | "on_way">;
+  };
+  summary: {
+    sudden_sales_stop: number;
+    not_buyable_with_stock: number;
+    disabled_by_takealot_with_stock: number;
+    disabled_by_seller_with_stock: number;
+    slow_moving_by_days: Record<string, number>;
+  };
+  sudden_sales_stop: AnomalyProductItem[];
+  stock_status_anomalies: {
+    not_buyable: AnomalyProductItem[];
+    disabled_by_takealot: AnomalyProductItem[];
+    disabled_by_seller: AnomalyProductItem[];
+  };
+  slow_moving: AnomalyProductItem[];
 }
 
 export type QuadrantKey =
@@ -768,7 +1113,7 @@ export type KeywordTrendChange =
   | "stable"
   | "insufficient";
 
-export interface KeywordTrafficProductSummary {
+export interface KeywordTrafficProductSummary extends ProductMasterIdentity {
   offer_id: string;
   sku: string | null;
   title: string | null;
@@ -783,6 +1128,8 @@ export interface KeywordTrafficProductSummary {
 
 export interface KeywordTrafficListPayload {
   as_of: string;
+  store_scope?: OwnStoreScope;
+  store_count?: number;
   items: KeywordTrafficProductSummary[];
   summary: {
     product_count: number;
@@ -837,7 +1184,7 @@ export interface KeywordTrafficEvent {
   comparison: KeywordTrafficComparison;
 }
 
-export interface KeywordTrafficProduct extends ProductLifecycleContext {
+export interface KeywordTrafficProduct extends ProductLifecycleContext, ProductMasterIdentity {
   offer_id: string;
   sku: string | null;
   title: string | null;
@@ -1120,7 +1467,7 @@ export interface SearchRankingVariantParameter {
   visually_verified: false;
 }
 
-export interface SearchRankingVariantFamilyVariant {
+export interface SearchRankingVariantFamilyVariant extends ProductMasterIdentity {
   offer_id: string;
   productline_id: string | null;
   sku: string | null;
@@ -1146,7 +1493,7 @@ export interface SearchRankingVariantFamily {
   variants: SearchRankingVariantFamilyVariant[];
 }
 
-export interface SearchRankingProduct {
+export interface SearchRankingProduct extends ProductMasterIdentity {
   offer_id: string;
   productline_id: string | null;
   sku: string | null;
@@ -1751,6 +2098,8 @@ export interface SearchRankingAnalysis extends SearchRankingAnalysisSummary {
 
 export interface SearchRankingListPayload {
   status: SearchRankingStatus;
+  store_scope?: OwnStoreScope;
+  store_count?: number;
   eligibility: {
     source: "authenticated_store_seller_offers";
     rule: "current_offer_and_buyable_and_positive_available_stock_and_fresh";
@@ -2009,6 +2358,8 @@ export interface QuadrantPayload {
     ordered_units_rank: number | null;
   };
   counts: Record<QuadrantKey, number>;
+  store_scope?: OwnStoreScope;
+  store_count?: number;
   items: QuadrantItem[];
 }
 
@@ -2047,7 +2398,7 @@ export interface W8OutboundItem {
   has_document: boolean;
 }
 
-export interface TakealotShipmentItem {
+export interface TakealotShipmentItem extends StoreScopedRecord {
   shipment_id: number | null;
   reference: string;
   purchase_order_number: string;
@@ -2065,7 +2416,7 @@ export interface TakealotShipmentItem {
   quantity_damaged: number;
 }
 
-export interface LogisticsHighConfidenceCandidate {
+export interface LogisticsHighConfidenceCandidate extends StoreScopedRecord {
   confidence: "high" | "medium" | "low";
   method: string;
   w8_order_no: string;
@@ -2093,7 +2444,7 @@ export interface LogisticsHighConfidenceCandidate {
   ambiguous: boolean;
 }
 
-export interface LogisticsConfirmedLink {
+export interface LogisticsConfirmedLink extends StoreScopedRecord {
   id: number;
   w8_order_no: string;
   takealot_shipment_id: number;
@@ -2116,6 +2467,8 @@ export interface LogisticsOverviewPayload {
   cache_ttl_seconds: number;
   cache_age_seconds: number;
   automatic_page_refresh: boolean;
+  store_scope?: OwnStoreScope;
+  store_count?: number;
   w8: {
     connected: boolean;
     live_connected: boolean;
@@ -2210,138 +2563,4 @@ export interface LogisticsOverviewPayload {
     }>;
   };
   boundaries: string[];
-}
-
-export interface PlatformWarehouseOffer {
-  offer_id: string;
-  sku: string | null;
-  tsin_id: string | null;
-  title: string | null;
-  image_url: string | null;
-  status: string | null;
-  total_stock: number | null;
-  takealot_available_stock: number | null;
-  takealot_stock_on_way: number | null;
-  takealot_stock_in_receiving: number | null;
-  official_warehouse_capacity: number | null;
-  capacity_reason: string;
-}
-
-export interface PlatformWarehouseDraftLine {
-  id: number;
-  offer_id: string;
-  sku: string | null;
-  tsin_id: string | null;
-  title: string | null;
-  image_url: string | null;
-  cpt_quantity: number;
-  jhb_quantity: number;
-  dbn_quantity: number;
-  total_quantity: number;
-}
-
-export interface PlatformWarehouseDraftAudit {
-  id: number;
-  action: string;
-  action_label: string;
-  actor_username: string;
-  note: string | null;
-  details: Record<string, unknown> | null;
-  created_at: string;
-}
-
-export interface PlatformWarehouseDraft {
-  id: number;
-  draft_number: string;
-  client_request_id: string | null;
-  status: string;
-  status_label: string;
-  upstream_mode: "local_only" | "guarded_bff";
-  po_number: string | null;
-  platform_shipment_id: number | null;
-  tracking_reference: string | null;
-  review_task_id: number | null;
-  reviewed_at: string | null;
-  review_expires_at: string | null;
-  create_task_id: number | null;
-  last_error: string | null;
-  note: string | null;
-  created_by: string;
-  created_at: string;
-  updated_at: string;
-  po_confirmed_at: string | null;
-  shipped_at: string | null;
-  archived_at: string | null;
-  line_count: number;
-  quantity_totals: {
-    cpt_quantity: number;
-    jhb_quantity: number;
-    dbn_quantity: number;
-  };
-  lines: PlatformWarehouseDraftLine[];
-  shipments: PlatformWarehouseLinkedShipment[];
-  audits: PlatformWarehouseDraftAudit[];
-}
-
-export interface PlatformWarehouseLinkedShipment {
-  shipment_id: number;
-  region: string | null;
-  facility_code: string | null;
-  facility_id: number | null;
-  reference: string | null;
-  status: string;
-  status_label: string;
-  po_number: string | null;
-  tracking_reference: string | null;
-  last_task_id: number | null;
-  updated_at: string;
-}
-
-export interface PlatformWarehousePortalStatus {
-  enabled: boolean;
-  base_url: string;
-  max_total_quantity: number;
-  shipped_write_enabled: boolean;
-  authenticated: boolean;
-  requires_otp: boolean;
-  otp_destination: string | null;
-  expires_at: string | null;
-  identity: Record<string, unknown> | null;
-  credential_configured: boolean;
-  credential_email: string | null;
-  credential_error: string | null;
-  credentials_persisted: boolean;
-}
-
-export interface PlatformWarehouseShipment {
-  shipment_id: number | null;
-  reference: string;
-  purchase_order_number: string;
-  destination_region: string;
-  purchase_order_state: string;
-  shipment_type: string;
-  shipped: boolean;
-  archived: boolean;
-  cancelled: boolean;
-  due_date: string;
-  created_at: string;
-  date_unloaded: string;
-  tracking_info: string;
-  sku_lines: number;
-  quantity_sending: number;
-  quantity_received: number;
-}
-
-export interface PlatformWarehousePayload {
-  generated_at: string;
-  capability: {
-    write_mode: "disabled_by_default" | "guarded_seller_portal_bff";
-    official_shipment_write_supported: boolean;
-    message: string;
-  };
-  portal: PlatformWarehousePortalStatus;
-  offers: PlatformWarehouseOffer[];
-  drafts: PlatformWarehouseDraft[];
-  platform_shipments: PlatformWarehouseShipment[];
-  platform_snapshot_synced_at: string | null;
 }

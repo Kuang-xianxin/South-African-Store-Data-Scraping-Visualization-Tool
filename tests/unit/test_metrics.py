@@ -394,6 +394,98 @@ def test_rebuild_updates_historical_sales_and_keeps_source_audit(tmp_path: Path)
     assert revision.after_source["requested_start"] == "2026-06-21"
 
 
+def test_intraday_growth_only_establishes_post_close_baseline(tmp_path: Path) -> None:
+    metric_date = date(2026, 7, 20)
+    engine = create_engine("sqlite://")
+    create_schema(engine)
+    with Session(engine) as session:
+        _seed(
+            session,
+            sales=[
+                _sale(
+                    "open-day-line",
+                    datetime(2026, 7, 20, 8, tzinfo=UTC),
+                    quantity=1,
+                    price="100.00",
+                )
+            ],
+        )
+        repository = Repository(session)
+
+        def rebuild(run_id: str, collected_at: datetime) -> None:
+            service = _service(
+                session,
+                tmp_path,
+                included=("included",),
+                now=collected_at,
+            )
+            service.rebuild(
+                metric_date,
+                metric_date,
+                sales_source={
+                    "kind": "takealot_sales_api",
+                    "label": "Takealot Seller Sales API /sales 成功批次",
+                    "run_id": run_id,
+                    "requested_start": metric_date,
+                    "requested_end": metric_date,
+                    "record_count": 1,
+                    "collected_at": collected_at,
+                },
+            )
+
+        rebuild("intraday-first", datetime(2026, 7, 20, 2, tzinfo=UTC))
+        with repository.transaction():
+            repository.upsert_sale(
+                _sale(
+                    "open-day-line",
+                    datetime(2026, 7, 20, 8, tzinfo=UTC),
+                    quantity=2,
+                    price="150.00",
+                ),
+                {"order_item_id": "open-day-line", "selling_price": 150},
+            )
+        rebuild("intraday-later", datetime(2026, 7, 20, 16, tzinfo=UTC))
+        with repository.transaction():
+            repository.upsert_sale(
+                _sale(
+                    "open-day-line",
+                    datetime(2026, 7, 20, 8, tzinfo=UTC),
+                    quantity=3,
+                    price="200.00",
+                ),
+                {"order_item_id": "open-day-line", "selling_price": 200},
+            )
+        rebuild("post-close-baseline", datetime(2026, 7, 21, 2, tzinfo=UTC))
+
+        state = session.scalar(select(DailySalesMetricState))
+        assert state is not None
+        assert state.ordered_revenue == Decimal("200.00")
+        assert state.revision_count == 0
+        assert list(session.scalars(select(SalesRevenueRevision))) == []
+        session.commit()
+
+        with repository.transaction():
+            repository.upsert_sale(
+                _sale(
+                    "open-day-line",
+                    datetime(2026, 7, 20, 8, tzinfo=UTC),
+                    quantity=4,
+                    price="250.00",
+                ),
+                {"order_item_id": "open-day-line", "selling_price": 250},
+            )
+        rebuild("true-history-revision", datetime(2026, 7, 22, 2, tzinfo=UTC))
+        final_state = session.scalar(select(DailySalesMetricState))
+        assert final_state is not None
+        final_revision_count = final_state.revision_count
+        revisions = list(session.scalars(select(SalesRevenueRevision)))
+
+    assert final_revision_count == 1
+    assert len(revisions) == 1
+    assert revisions[0].before_ordered_revenue == Decimal("200.00")
+    assert revisions[0].after_ordered_revenue == Decimal("250.00")
+
+
 def test_unknown_status_is_excluded_from_effective_units_and_flagged(tmp_path: Path) -> None:
     metric_date = date(2026, 7, 20)
     engine = create_engine("sqlite://")

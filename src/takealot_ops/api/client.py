@@ -16,7 +16,7 @@ from takealot_ops.api.errors import (
     AuthenticationError,
     RateLimitError,
 )
-from takealot_ops.domain import OfferRecord, SaleRecord
+from takealot_ops.domain import OfferRecord, ReturnRecord, SaleRecord
 from takealot_ops.settings import Settings
 
 
@@ -92,16 +92,17 @@ class TakealotClient:
         for item in self.iter_items("/sales", params):
             yield self._sale_record(item)
 
-    def list_returns(self, start: date, end: date) -> Iterator[dict[str, Any]]:
-        """Yield return payloads within an inclusive SAST calendar-date range."""
-        return self.iter_items(
-            "/returns",
-            {
-                "return_date__gte": start.isoformat(),
-                "return_date__lte": end.isoformat(),
-                "limit": 100,
-            },
-        )
+    def list_returns(self, start: date, end: date) -> Iterator[ReturnRecord]:
+        """Yield typed expanded returns within an inclusive SAST date range."""
+        captured_at = datetime.now(UTC)
+        params = {
+            "return_date__gte": start.isoformat(),
+            "return_date__lte": end.isoformat(),
+            "limit": 100,
+            "expands": ["outcomes", "transactions"],
+        }
+        for item in self.iter_items("/returns", params):
+            yield self._return_record(item, captured_at)
 
     def list_shipments(self) -> Iterator[dict[str, Any]]:
         """Yield replenishment and customer shipments with item-level receiving data."""
@@ -122,6 +123,13 @@ class TakealotClient:
 
     def _sale_record(self, item: Mapping[str, Any]) -> SaleRecord:
         return _sale_record_from_api(item)
+
+    def _return_record(
+        self,
+        item: Mapping[str, Any],
+        captured_at: datetime,
+    ) -> ReturnRecord:
+        return _return_record_from_api(item, captured_at)
 
     def _request(self, method: str, path: str, params: Mapping[str, Any]) -> httpx.Response:
         if method != "GET":
@@ -203,4 +211,16 @@ def _sale_record_from_api(item: Mapping[str, Any]) -> SaleRecord:
         return SaleRecord.from_api(item)
     except (KeyError, TypeError, ValueError):
         error_message = "Invalid sale API item"
+    raise ApiResponseError(error_message)
+
+
+def _return_record_from_api(
+    item: Mapping[str, Any],
+    captured_at: datetime,
+) -> ReturnRecord:
+    """Convert a return item without retaining unsafe conversion context."""
+    try:
+        return ReturnRecord.from_api(item, captured_at)
+    except (KeyError, TypeError, ValueError):
+        error_message = "Invalid return API item"
     raise ApiResponseError(error_message)

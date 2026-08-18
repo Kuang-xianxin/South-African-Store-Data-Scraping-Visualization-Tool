@@ -3,6 +3,8 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 
 import {
+  competitorDetailPageHref,
+  competitorDetailPlidFromHash,
   ERP_MODULE_KEYS,
   modulePageFromHash,
   modulePageHref,
@@ -12,15 +14,31 @@ import {
 const appSource = readFileSync(new URL("../src/App.vue", import.meta.url), "utf8");
 
 test("every ERP module has a stable hash link that restores the same module", () => {
-  assert.equal(ERP_MODULE_KEYS.length, 9);
+  assert.equal(ERP_MODULE_KEYS.length, 10);
   for (const moduleKey of ERP_MODULE_KEYS) {
     const href = modulePageHref(moduleKey);
     assert.equal(modulePageFromHash(href), moduleKey);
   }
   assert.equal(modulePageFromHash("#module=unknown"), null);
   assert.equal(modulePageFromHash("#module=daily-report"), null);
+  assert.equal(modulePageFromHash("#module=platform-warehouse"), null);
   assert.equal(modulePageFromHash("#section=products"), null);
   assert.equal(modulePageFromHash(""), null);
+});
+
+test("competitor own-link detail hashes preserve the PLID for a new tab", () => {
+  const href = competitorDetailPageHref(" 12345678 ");
+  assert.equal(modulePageFromHash(href), "competitors");
+  assert.equal(competitorDetailPlidFromHash(href), "12345678");
+  assert.equal(competitorDetailPlidFromHash("#module=competitors"), null);
+  assert.equal(
+    competitorDetailPlidFromHash("#module=anomaly-products&detail_plid=123"),
+    null,
+  );
+  assert.equal(
+    competitorDetailPlidFromHash("#module=competitors&detail_plid=not-a-plid"),
+    null,
+  );
 });
 
 test("only an unmodified primary click stays inside the current SPA tab", () => {
@@ -59,4 +77,5 @@ test("the sidebar exposes real links while retaining guarded left-click navigati
   );
   assert.doesNotMatch(appSource, /<button\s+v-for="page in allPages"/);
   assert.doesNotMatch(appSource, /DailyReportPage|daily-report|运营日报/);
+  assert.doesNotMatch(appSource, /PlatformWarehousePage|platform-warehouse|约平台仓/);
 });

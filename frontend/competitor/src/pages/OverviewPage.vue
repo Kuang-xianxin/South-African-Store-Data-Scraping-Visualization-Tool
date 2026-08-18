@@ -563,7 +563,7 @@ function revenuePointTitle(point: MultiStoreRevenuePoint) {
     const status = point.data_status === "pending"
       ? `；${point.pending_reconciliation_store_count} 家待失败后核验，${point.unverified_source_store_count} 家来源未建档`
       : point.data_status === "revised"
-        ? `；已记录 ${point.revision_count} 条历史修订`
+        ? `；已记录 ${point.revision_count} 条日终基线后修订`
         : "；来源已核验";
     const coverage = point.missing_store_count
       ? `；已有 ${point.covered_store_count}/${point.store_count} 家合计，缺失 ${point.missing_store_count} 家且未按 0 补齐`
@@ -718,17 +718,17 @@ function trafficPointTitle(point: StoreTrafficPoint) {
           >
             <strong>周期末失败事实已保留，后续 Sales 批次已完成数值核验</strong>
             <span>
-              原失败记录没有改写；若金额或件数发生变化，修订前后值与来源批次均保存在下方审计记录中。
+              原失败记录没有改写；业务日结束后的正式基线若再次变化，前后值与来源批次均保存在下方审计记录中。
             </span>
           </div>
           <div
             v-if="storeData.sales_reconciliation.revision_count"
             class="sales-reconciliation-alert revised"
           >
-            <strong>已记录 {{ storeData.sales_reconciliation.revision_count }} 条销售额历史修订</strong>
+            <strong>已记录 {{ storeData.sales_reconciliation.revision_count }} 条日终后销售额历史修订</strong>
             <span>
               最近修订：{{ formatChinaDateTime(storeData.sales_reconciliation.latest_revision_at) }}。
-              蓝色折线/点表示该业务日曾被后续 Sales 数据纠偏。
+              蓝色折线/点只表示该业务日在日终正式基线建立后又被 Sales 数据纠偏。
             </span>
           </div>
           <div v-if="!storeData.sales_revenue_series.length" class="state-card slim">
@@ -894,7 +894,7 @@ function trafficPointTitle(point: StoreTrafficPoint) {
                     <div v-else-if="activeRevenueDot.point.data_status === 'revised'">
                       <dt>数据状态</dt>
                       <dd class="revised">
-                        已纠偏 · {{ activeRevenueDot.point.revision_count }} 条修订，
+                        日终后已纠偏 · {{ activeRevenueDot.point.revision_count }} 条修订，
                         {{ activeRevenueDot.point.revised_store_count }} 家涉及变化
                       </dd>
                     </div>
@@ -913,7 +913,7 @@ function trafficPointTitle(point: StoreTrafficPoint) {
             <div class="traffic-legend revenue-legend">
               <span><i></i>合并范围内店铺完整且来源已核验</span>
               <span><i class="reconciliation-pending"></i>周期末失败后待新批次核验</span>
-              <span><i class="revised"></i>后续 Sales 数据已纠偏并留审计</span>
+              <span><i class="revised"></i>日终正式基线后被 Sales 数据纠偏并留审计</span>
               <span><i class="missing"></i>店铺缺失，未展示部分合计</span>
               <span><i class="missing-bridge"></i>缺失区间虚线桥接，仅连接两端真实值</span>
             </div>
@@ -924,8 +924,8 @@ function trafficPointTitle(point: StoreTrafficPoint) {
           <div class="sales-audit-heading">
             <div>
               <p class="section-kicker">REVISION AUDIT</p>
-              <h4 id="sales-audit-title">销售额历史修订记录</h4>
-              <span>不可变记录保留更新前后金额、件数、数据源批次、请求范围和发现时间。</span>
+              <h4 id="sales-audit-title">销售额日终后历史修订记录</h4>
+              <span>业务日内正常累计和第一次日终基线不计纠偏；记录只保留基线建立后的再次变化。</span>
             </div>
             <button type="button" class="secondary-button" @click="toggleSalesAudit">
               {{ salesAuditOpen ? "收起记录" : "展开记录" }}
@@ -942,7 +942,7 @@ function trafficPointTitle(point: StoreTrafficPoint) {
                 <input v-model="salesAuditEnd" type="date" :min="salesAuditStart" required />
               </label>
               <button type="submit" class="primary-button" :disabled="salesAuditLoading">
-                {{ salesAuditLoading ? "查询中…" : "查询修订" }}
+                {{ salesAuditLoading ? "查询中…" : "查询日终后修订" }}
               </button>
             </form>
             <div v-if="salesAuditError" class="state-card error slim">{{ salesAuditError }}</div>
@@ -951,7 +951,7 @@ function trafficPointTitle(point: StoreTrafficPoint) {
               v-else-if="salesAuditData && !salesAuditData.items.length"
               class="state-card slim"
             >
-              所选日期没有数值变化记录；来源核验时间仍会随成功 Sales 批次更新。
+              所选日期没有日终基线后的数值修订；日内累计和来源核验时间仍会正常更新。
             </div>
             <template v-else-if="salesAuditData">
               <div class="table-scroll sales-audit-table-wrap">
@@ -1529,7 +1529,7 @@ function trafficPointTitle(point: StoreTrafficPoint) {
               <tr v-for="item in data.top_products" :key="item.offer_id">
                 <td>
                   <strong>{{ item.title || item.sku || item.offer_id }}</strong>
-                  <small>{{ item.sku || "无库存编码" }}</small>
+                  <small>平台 {{ item.sku || "无库存编码" }} · 公司 {{ item.company_sku || "未关联" }}</small>
                 </td>
                 <td>{{ number(item.ordered_units) }}</td>
                 <td>{{ currency(item.ordered_revenue) }}</td>

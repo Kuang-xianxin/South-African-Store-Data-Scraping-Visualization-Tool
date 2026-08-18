@@ -34,6 +34,7 @@ def test_help_lists_all_commands(capsys) -> None:
         "daily-report-capture",
         "daily-report-deadline",
         "dashboard",
+        "import-product-master",
         "migrate-to-mysql",
         "verify",
     ):

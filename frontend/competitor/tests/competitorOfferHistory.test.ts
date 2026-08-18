@@ -271,12 +271,12 @@ test("own-store traffic trend preserves gaps and title-change nodes", () => {
   );
 });
 
-test("traffic nodes align to the nearest offer observation without rewriting capture time", () => {
+test("traffic nodes align only to the exact Seller refresh timestamp", () => {
   const selected = offer({ 报价键: "offer:selected" });
   const firstOffer = snapshot(1, [selected]);
-  firstOffer.采集时间 = "2026-08-02T01:00:00Z";
+  firstOffer.采集时间 = "2026-08-02T01:00:00";
   const secondOffer = snapshot(2, [selected]);
-  secondOffer.采集时间 = "2026-08-03T01:00:00Z";
+  secondOffer.采集时间 = "2026-08-03T01:00:00";
   const offerTrend = buildCompetitorOfferTrend([firstOffer, secondOffer], selected);
   const trafficTrend = buildOwnStoreTrafficTrend({
     store_code: "store-01",
@@ -286,14 +286,14 @@ test("traffic nodes align to the nearest offer observation without rewriting cap
     sku: "SKU-1",
     range_start: "2026-08-02",
     range_end: "2026-08-03",
-    observed_count: 2,
-    traffic_count: 2,
+    observed_count: 3,
+    traffic_count: 3,
     missing_count: 0,
     metric_notice: "rolling traffic",
     points: [
       {
         date: "2026-08-02",
-        captured_at: "2026-08-02T08:00:00Z",
+        captured_at: "2026-08-02T01:00:00Z",
         page_views_30_days: 100,
         title: "Old title",
         title_changed: false,
@@ -302,11 +302,20 @@ test("traffic nodes align to the nearest offer observation without rewriting cap
       },
       {
         date: "2026-08-03",
-        captured_at: "2026-08-03T08:00:00Z",
+        captured_at: "2026-08-03T01:00:00Z",
         page_views_30_days: 120,
         title: "New title",
         title_changed: true,
         previous_title: "Old title",
+        data_status: "observed",
+      },
+      {
+        date: "2026-08-03",
+        captured_at: "2026-08-03T08:00:00Z",
+        page_views_30_days: 125,
+        title: "New title",
+        title_changed: false,
+        previous_title: null,
         data_status: "observed",
       },
     ],
@@ -321,7 +330,7 @@ test("traffic nodes align to the nearest offer observation without rewriting cap
   );
   assert.deepEqual(
     aligned.map((point) => point.capturedAtMs),
-    trafficTrend.map((point) => point.capturedAtMs),
+    trafficTrend.slice(0, 2).map((point) => point.capturedAtMs),
   );
 });
 

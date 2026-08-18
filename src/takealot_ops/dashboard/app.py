@@ -49,6 +49,7 @@ from takealot_ops.nft102_portal import (
     inspect_nft102_upload,
     persist_nft102_baseline,
 )
+from takealot_ops.product_search import matches_product_search
 from takealot_ops.reporting import generate_daily_reports
 from takealot_ops.scheduler import verify_database_integrity
 from takealot_ops.settings import DashboardSettings, SettingsError
@@ -105,11 +106,10 @@ def filter_as_of(frame: pd.DataFrame, as_of: date, date_column: str) -> pd.DataF
 def search_products(
     product_daily: pd.DataFrame, offer_current: pd.DataFrame, query: str
 ) -> pd.DataFrame:
-    """Search daily rows via current offer identity without assuming metric columns."""
+    """Fuzzy-search titles and substring-search current offer identifiers."""
     if product_daily.empty or "offer_id" not in product_daily.columns:
         return product_daily.copy()
-    normalized = query.strip().casefold()
-    if not normalized:
+    if not query.strip():
         return product_daily.copy()
     identity_columns = ("offer_id", "sku", "tsin_id", "barcode", "title")
     if offer_current.empty or "offer_id" not in offer_current.columns:
@@ -132,10 +132,17 @@ def search_products(
     merged = product_identity.merge(identity, on="offer_id", how="left", suffixes=("_metric", ""))
     if "sku_metric" in merged.columns:
         merged["sku"] = merged["sku"].combine_first(merged["sku_metric"])
-    matches = pd.Series(False, index=merged.index)
-    for column in identity_columns:
-        values = merged[column].fillna("").astype(str).str.casefold()
-        matches |= values.str.contains(normalized, regex=False, na=False)
+    merged = merged.fillna({column: "" for column in identity_columns})
+    matches = merged.apply(
+        lambda row: matches_product_search(
+            query,
+            product_names=(row.get("title"),),
+            other_values=tuple(
+                row.get(column) for column in identity_columns if column != "title"
+            ),
+        ),
+        axis=1,
+    )
     offer_ids = set(merged.loc[matches, "offer_id"].astype(str))
     return product_daily.loc[product_daily["offer_id"].astype(str).isin(offer_ids)].copy()
 
@@ -340,7 +347,10 @@ def _render_product(
     if dataset.product_daily.empty:
         _empty_state("暂无单品指标", "采集并计算指标后，可按库存编码、商品编号、条码或名称搜索。")
         return
-    query = st.text_input("搜索商品", placeholder="输入库存编码、商品编号、条码或商品名称")
+    query = st.text_input(
+        "搜索商品",
+        placeholder="商品名称支持模糊搜索，也可输入库存编码、商品编号或条码",
+    )
     matches = search_products(dataset.product_daily, dataset.offer_current, query)
     if matches.empty:
         st.info("没有找到匹配商品，请检查搜索词。")

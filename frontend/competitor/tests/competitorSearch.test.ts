@@ -48,6 +48,28 @@ test("filters own-store rows with missing competitor-only fields without throwin
   );
 });
 
+test("matches a company SKU on an own-store card", () => {
+  const item = ownStoreItem("11111111", "First product");
+  item.company_skus = ["COMPANY-BLUE-01"];
+  item.自有报价 = [
+    {
+      offer_id: "offer-1",
+      店铺: "店铺一",
+      SKU: "9900000000001",
+      company_sku: "COMPANY-BLUE-01",
+    } as CompetitorItem["自有报价"][number],
+  ];
+
+  assert.equal(matchesCompetitorSearch(item, "company-blue"), true);
+});
+
+test("matches unordered words and small typos without anagrams or fuzzy PLIDs", () => {
+  const item = ownStoreItem("12345678", "Wireless Bluetooth Speaker");
+  assert.equal(matchesCompetitorSearch(item, "speaker wirless"), true);
+  assert.equal(matchesCompetitorSearch(item, "rekaeps sseleriw"), false);
+  assert.equal(matchesCompetitorSearch(item, "12345679"), false);
+});
+
 test("normalizes null, undefined, and numeric values before matching", () => {
   assert.equal(
     matchesCompetitorSearchValues([undefined, null, 12345, "Seller Name"], "12345"),

@@ -14,9 +14,13 @@ from sqlalchemy.orm import Session
 
 from takealot_ops.storage.models import (
     Base,
+    CollectionRun,
+    DailyReportObservation,
+    DailyReportRun,
     ErpStore,
     ErpUser,
     OfferCurrent,
+    OfferSnapshot,
     SearchAutocompleteCache,
     SearchAutocompleteSnapshot,
     SearchRankingAnalysis,
@@ -88,11 +92,14 @@ def create_schema(engine: Engine) -> None:
     """Create the current schema and apply retained in-place upgrades."""
     Base.metadata.create_all(engine)
     _add_store_scope_columns_and_keys(engine)
+    _add_return_item_detail_columns(engine)
     _add_offer_created_at_columns(engine)
+    traffic_columns_added = _add_store_offer_observation_traffic_columns(engine)
     _add_erp_user_permissions_column(engine)
     _add_erp_user_store_access_column(engine)
     _ensure_default_erp_store(engine)
     _add_competitor_target_group_column(engine)
+    _add_competitor_snapshot_category_column(engine)
     _add_competitor_listing_operation_library_columns(engine)
     _add_competitor_variant_observation_columns(engine)
     _add_platform_warehouse_upstream_columns(engine)
@@ -100,6 +107,8 @@ def create_schema(engine: Engine) -> None:
         _add_sqlite_offer_stock_columns(engine)
     _seed_store_offer_baselines(engine)
     _seed_store_offer_observations(engine)
+    if traffic_columns_added:
+        backfill_store_offer_observation_traffic(engine)
     _seed_search_autocomplete_cache(engine)
 
 
@@ -471,6 +480,8 @@ def _seed_store_offer_observations(engine: Engine) -> None:
                             total_stock=baseline.total_stock,
                             takealot_available_stock=baseline.takealot_available_stock,
                             seller_available_stock=baseline.seller_available_stock,
+                            page_views_30_days=None,
+                            page_views_30_days_recorded=False,
                             captured_at=baseline.captured_at,
                         )
                     )
@@ -481,13 +492,16 @@ def _seed_store_offer_observations(engine: Engine) -> None:
                     captured_at = offer.captured_at
                     if captured_at.tzinfo is None:
                         captured_at = captured_at.replace(tzinfo=UTC)
-                    exists = session.scalar(
-                        select(StoreOfferObservation.id).where(
+                    existing = session.scalar(
+                        select(StoreOfferObservation).where(
                             StoreOfferObservation.captured_at == captured_at,
                             StoreOfferObservation.offer_id == offer.offer_id,
                         )
                     )
-                    if exists is not None:
+                    if existing is not None:
+                        if not existing.page_views_30_days_recorded:
+                            existing.page_views_30_days = offer.page_views_30_days
+                            existing.page_views_30_days_recorded = True
                         continue
                     session.add(
                         StoreOfferObservation(
@@ -503,6 +517,8 @@ def _seed_store_offer_observations(engine: Engine) -> None:
                             total_stock=offer.total_stock,
                             takealot_available_stock=offer.takealot_available_stock,
                             seller_available_stock=offer.seller_available_stock,
+                            page_views_30_days=offer.page_views_30_days,
+                            page_views_30_days_recorded=True,
                             captured_at=captured_at,
                         )
                     )
@@ -520,6 +536,201 @@ def _add_offer_created_at_columns(engine: Engine) -> None:
                 table = preparer.quote(table_name)
                 column = preparer.quote("created_at")
                 connection.exec_driver_sql(f"ALTER TABLE {table} ADD COLUMN {column} DATETIME NULL")
+
+
+def _add_return_item_detail_columns(engine: Engine) -> None:
+    """Upgrade the original reserved return table to the expanded API contract."""
+    table_name = "return_items"
+    with engine.begin() as connection:
+        schema = inspect(connection)
+        if not schema.has_table(table_name):
+            return
+        existing = {str(column["name"]) for column in schema.get_columns(table_name)}
+        preparer = connection.dialect.identifier_preparer
+        table = preparer.quote(table_name)
+        additions = {
+            "order_id": "VARCHAR(100) NULL",
+            "tsin_id": "VARCHAR(100) NULL",
+            "sku": "VARCHAR(255) NULL",
+            "return_reference_number": "VARCHAR(100) NULL",
+            "quantity": "INTEGER NULL",
+            "return_region": "VARCHAR(100) NULL",
+            "return_reason": "VARCHAR(100) NULL",
+            "customer_comment": "TEXT NULL",
+            "outcomes": "JSON NULL",
+            "transactions": "JSON NULL",
+            "captured_at": "DATETIME NULL",
+        }
+        for column_name, column_type in additions.items():
+            if column_name in existing:
+                continue
+            connection.exec_driver_sql(
+                f"ALTER TABLE {table} ADD COLUMN {preparer.quote(column_name)} "
+                f"{column_type}"
+            )
+
+        indexed_columns = {
+            tuple(index.get("column_names") or ())
+            for index in inspect(connection).get_indexes(table_name)
+        }
+        for column_name in ("offer_id", "return_date", "return_reason"):
+            if (column_name,) in indexed_columns:
+                continue
+            index = preparer.quote(f"ix_return_items_{column_name}")
+            column = preparer.quote(column_name)
+            connection.exec_driver_sql(f"CREATE INDEX {index} ON {table} ({column})")
+
+
+def _add_store_offer_observation_traffic_columns(engine: Engine) -> bool:
+    """Add exact per-refresh traffic retention to legacy observation rows."""
+    table_name = "store_offer_observations"
+    added = False
+    with engine.begin() as connection:
+        schema = inspect(connection)
+        if not schema.has_table(table_name):
+            return False
+        existing = {str(column["name"]) for column in schema.get_columns(table_name)}
+        preparer = connection.dialect.identifier_preparer
+        table = preparer.quote(table_name)
+        additions = {
+            "page_views_30_days": "INTEGER NULL",
+            "page_views_30_days_recorded": "BOOLEAN NOT NULL DEFAULT 0",
+        }
+        for column_name, column_type in additions.items():
+            if column_name in existing:
+                continue
+            connection.exec_driver_sql(
+                f"ALTER TABLE {table} ADD COLUMN {preparer.quote(column_name)} "
+                f"{column_type}"
+            )
+            added = True
+    return added
+
+
+def backfill_store_offer_observation_traffic(engine: Engine) -> dict[str, int]:
+    """Recover legacy traffic only from an exact retained Seller refresh source.
+
+    A successful daily-report run identifies its Seller Offers collection run in
+    ``counts.attempts``.  The immutable Seller observation timestamp is at most a
+    few seconds before that collection-run row is opened, so a unique timestamp
+    within five seconds is accepted.  Exact daily snapshot timestamps are a
+    second evidence source.  Unmatched legacy points remain explicitly missing.
+    """
+    stats = {
+        "daily_report_rows": 0,
+        "offer_snapshot_rows": 0,
+        "unmatched_rows": 0,
+    }
+    with Session(engine) as session:
+        store_codes = list(session.scalars(select(ErpStore.code).order_by(ErpStore.code)))
+    if not store_codes:
+        store_codes = ["current"]
+
+    for store_code in store_codes:
+        with store_scope(store_code), Session(engine) as session, session.begin():
+            observations = list(
+                session.scalars(
+                    select(StoreOfferObservation).order_by(
+                        StoreOfferObservation.captured_at,
+                        StoreOfferObservation.offer_id,
+                    )
+                )
+            )
+            if not observations:
+                continue
+            observations_by_time: dict[datetime, list[StoreOfferObservation]] = {}
+            for observation in observations:
+                observations_by_time.setdefault(
+                    _naive_utc_datetime(observation.captured_at),
+                    [],
+                ).append(observation)
+
+            runs = list(
+                session.scalars(
+                    select(DailyReportRun)
+                    .where(DailyReportRun.status == "success")
+                    .order_by(DailyReportRun.captured_at, DailyReportRun.run_id)
+                )
+            )
+            for run in runs:
+                offer_run_id = _successful_offer_run_id(run.counts)
+                if offer_run_id is None:
+                    continue
+                collection_run = session.get(CollectionRun, offer_run_id)
+                if (
+                    collection_run is None
+                    or collection_run.run_type != "offers"
+                    or collection_run.status != "success"
+                ):
+                    continue
+                collection_started_at = _naive_utc_datetime(collection_run.started_at)
+                candidate_times = [
+                    captured_at
+                    for captured_at in observations_by_time
+                    if abs((captured_at - collection_started_at).total_seconds()) <= 5
+                ]
+                if len(candidate_times) != 1:
+                    continue
+                report_by_offer = {
+                    row.offer_id: row
+                    for row in session.scalars(
+                        select(DailyReportObservation).where(
+                            DailyReportObservation.run_id == run.run_id
+                        )
+                    )
+                }
+                for observation in observations_by_time[candidate_times[0]]:
+                    if observation.page_views_30_days_recorded:
+                        continue
+                    report = report_by_offer.get(observation.offer_id)
+                    if report is None:
+                        continue
+                    observation.page_views_30_days = report.page_views_30_days
+                    observation.page_views_30_days_recorded = True
+                    stats["daily_report_rows"] += 1
+
+            snapshots_by_key = {
+                (_naive_utc_datetime(row.captured_at), row.offer_id): row
+                for row in session.scalars(select(OfferSnapshot))
+            }
+            for observation in observations:
+                if observation.page_views_30_days_recorded:
+                    continue
+                snapshot = snapshots_by_key.get(
+                    (
+                        _naive_utc_datetime(observation.captured_at),
+                        observation.offer_id,
+                    )
+                )
+                if snapshot is None:
+                    continue
+                observation.page_views_30_days = snapshot.page_views_30_days
+                observation.page_views_30_days_recorded = True
+                stats["offer_snapshot_rows"] += 1
+            stats["unmatched_rows"] += sum(
+                not observation.page_views_30_days_recorded
+                for observation in observations
+            )
+    return stats
+
+
+def _successful_offer_run_id(counts: dict[str, Any] | None) -> str | None:
+    attempts = counts.get("attempts") if isinstance(counts, dict) else None
+    if not isinstance(attempts, list):
+        return None
+    for attempt in reversed(attempts):
+        if not isinstance(attempt, dict) or attempt.get("status") != "success":
+            continue
+        run_id = str(attempt.get("offer_run_id") or "").strip()
+        if run_id:
+            return run_id
+    return None
+
+
+def _naive_utc_datetime(value: datetime) -> datetime:
+    if value.tzinfo is None or value.utcoffset() is None:
+        return value.replace(tzinfo=None)
+    return value.astimezone(UTC).replace(tzinfo=None)
 
 
 def _add_platform_warehouse_upstream_columns(engine: Engine) -> None:
@@ -690,6 +901,27 @@ def _add_competitor_target_group_column(engine: Engine) -> None:
             connection.exec_driver_sql(
                 f"CREATE INDEX {index_name} ON {table} ({group_column})"
             )
+
+
+def _add_competitor_snapshot_category_column(engine: Engine) -> None:
+    """Retain the public Takealot department/category breadcrumb path."""
+
+    with engine.begin() as connection:
+        table_name = "competitor_snapshots"
+        if not inspect(connection).has_table(table_name):
+            return
+        existing = {
+            str(column["name"])
+            for column in inspect(connection).get_columns(table_name)
+        }
+        if "category_path" in existing:
+            return
+        preparer = connection.dialect.identifier_preparer
+        table = preparer.quote(table_name)
+        column = preparer.quote("category_path")
+        connection.exec_driver_sql(
+            f"ALTER TABLE {table} ADD COLUMN {column} JSON NULL"
+        )
 
 
 def _add_competitor_listing_operation_library_columns(engine: Engine) -> None:

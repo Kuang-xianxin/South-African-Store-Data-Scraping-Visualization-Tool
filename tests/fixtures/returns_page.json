@@ -1,0 +1,19 @@
+{
+  "items": [
+    {
+      "seller_return_id": "SR-2026-0001",
+      "order_id": "ORD-2026-1001",
+      "offer_id": "100001",
+      "tsin_id": "TSIN-001",
+      "sku": "SKU-001",
+      "return_reference_number": "RRN-0001",
+      "quantity": 2,
+      "return_date": "2026-07-19",
+      "return_region": "CPT",
+      "return_reason": "defective_or_damaged",
+      "customer_comment": "One unit arrived damaged",
+      "outcomes": [{"outcome_id": "OUT-1", "status": "sellable_stock"}],
+      "transactions": [{"transaction_type": "refund", "amount_incl_vat": "-199.98"}]
+    }
+  ]
+}

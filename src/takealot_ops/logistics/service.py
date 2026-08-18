@@ -474,6 +474,12 @@ class LogisticsOverviewService:
                 "country": _text(warehouse.get("hrcountry")),
             },
             "channels": channels,
+            "inventory_detail_available": True,
+            "inventory_items": [
+                _stock_projection(row)
+                for row in sorted(stocks, key=lambda item: _text(item.get("sku")).casefold())
+                if _text(row.get("sku"))
+            ],
             "summary": {
                 "products": _page_total(results["products"], len(_records(results["products"]))),
                 "stock_records": len(stocks),
@@ -551,6 +557,8 @@ def _w8_unavailable(message: str) -> dict[str, Any]:
         "message": message,
         "warehouse": None,
         "channels": [],
+        "inventory_detail_available": False,
+        "inventory_items": [],
         "summary": {
             "products": 0,
             "stock_records": 0,
@@ -624,6 +632,22 @@ def _text(value: Any) -> str:
 
 def _sum_field(rows: Sequence[Mapping[str, Any]], field: str) -> int:
     return sum(_as_int(row.get(field)) or 0 for row in rows)
+
+
+def _stock_projection(row: Mapping[str, Any]) -> dict[str, Any]:
+    """Persist only the W8 fields needed for exact company-SKU inventory reads."""
+    return {
+        "company_sku": _text(row.get("sku")),
+        "w8_system_sku": _text(row.get("sysSku")) or None,
+        "product_name_cn": _text(row.get("skuCname")) or None,
+        "product_name_en": _text(row.get("skuEname")) or None,
+        "stock_total": _as_int(row.get("stockNum")),
+        "usable_stock": _as_int(row.get("usableStockNum")),
+        "locked_stock": _as_int(row.get("lockNum")),
+        "outbound_allocated": _as_int(row.get("outboundNum")),
+        "transit_stock": _as_int(row.get("transitNum")),
+        "defective_stock": _as_int(row.get("defectiveNum")),
+    }
 
 
 def _status_counts(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:

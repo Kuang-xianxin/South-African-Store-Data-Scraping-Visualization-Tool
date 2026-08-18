@@ -23,8 +23,9 @@ def run_dashboard_refresh(
     project_root: Path,
     *,
     store_code: str = "current",
+    all_stores: bool = False,
     runner: Runner = subprocess.run,
-    timeout_seconds: int = 600,
+    timeout_seconds: int | None = None,
 ) -> DashboardRefreshResult:
     """Run collection, metric rebuild, reports, integrity check, and backup."""
     root = project_root.resolve()
@@ -40,11 +41,17 @@ def run_dashboard_refresh(
         "--slot",
         "manual",
     )
-    command: Sequence[str] = (
-        (*base_command, "--store", store_code)
-        if store_code != "current"
-        else base_command
-    )
+    command: Sequence[str]
+    if all_stores:
+        command = (*base_command, "--all-stores")
+    elif store_code != "current":
+        command = (*base_command, "--store", store_code)
+    else:
+        command = base_command
+    if timeout_seconds is not None:
+        effective_timeout_seconds = timeout_seconds
+    else:
+        effective_timeout_seconds = 3_600 if all_stores else 600
     try:
         completed = runner(
             command,
@@ -53,13 +60,18 @@ def run_dashboard_refresh(
             text=True,
             encoding="utf-8",
             errors="replace",
-            timeout=timeout_seconds,
+            timeout=effective_timeout_seconds,
             check=False,
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
     except subprocess.TimeoutExpired:
         return DashboardRefreshResult(
-            False, "刷新超过10分钟仍未完成，请检查网络和本地日志。"
+            False,
+            (
+                "全部店铺刷新超过60分钟仍未完成，请检查网络和本地日志。"
+                if all_stores
+                else "刷新超过10分钟仍未完成，请检查网络和本地日志。"
+            ),
         )
     except OSError:
         return DashboardRefreshResult(False, "无法启动刷新任务，请检查本地运行环境。")
@@ -70,5 +82,10 @@ def run_dashboard_refresh(
         )
     return DashboardRefreshResult(
         True,
-        "数据刷新完成，本次手动数据已纳入当前10:00核对周期。",
+        (
+            "全部已配置店铺数据刷新完成，"
+            "各店本次手动数据已纳入当前10:00核对周期。"
+            if all_stores
+            else "数据刷新完成，本次手动数据已纳入当前10:00核对周期。"
+        ),
     )

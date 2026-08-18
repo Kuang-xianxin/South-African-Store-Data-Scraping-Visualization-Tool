@@ -123,6 +123,16 @@ class CompetitorVariant:
 
 
 @dataclass(frozen=True)
+class CompetitorCategoryBreadcrumb:
+    """One public Takealot department/category breadcrumb for a product."""
+
+    name: str
+    category_id: str | None = None
+    category_type: str | None = None
+    slug: str | None = None
+
+
+@dataclass(frozen=True)
 class CompetitorProduct:
     """Public product fields required by the MVP."""
 
@@ -140,6 +150,7 @@ class CompetitorProduct:
     rating: float
     offers: tuple[CompetitorOffer, ...]
     variants: tuple[CompetitorVariant, ...]
+    category_path: tuple[CompetitorCategoryBreadcrumb, ...] = ()
 
 
 @dataclass(frozen=True)

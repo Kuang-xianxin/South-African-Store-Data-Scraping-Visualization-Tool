@@ -52,6 +52,8 @@ class FixtureSaleClient(RecordingClient):
         self, path: str, params: Mapping[str, Any]
     ) -> Iterator[dict[str, Any]]:
         self.calls.append((path, dict(params)))
+        if path == "/returns":
+            return
         fixture = "offers_page_1.json" if path == "/offers" else "sales_page.json"
         payload = json.loads((FIXTURES / fixture).read_text(encoding="utf-8"))
         yield dict(payload["items"][0])
@@ -66,8 +68,21 @@ class SalesAfterOfferFailureClient(RecordingClient):
             payload = json.loads((FIXTURES / "offers_page_1.json").read_text(encoding="utf-8"))
             yield dict(payload["items"][0])
             raise RuntimeError("simulated offer pagination failure")
+        if path == "/returns":
+            return
         payload = json.loads((FIXTURES / "sales_page.json").read_text(encoding="utf-8"))
         yield dict(payload["items"][0])
+
+
+class ReturnFailureClient(RecordingClient):
+    def iter_items(
+        self, path: str, params: Mapping[str, Any]
+    ) -> Iterator[dict[str, Any]]:
+        self.calls.append((path, dict(params)))
+        if path == "/returns":
+            raise RuntimeError("simulated returns outage")
+        return
+        yield
 
 
 def _settings(tmp_path: Path) -> Settings:
@@ -134,6 +149,16 @@ def test_daily_run_reconciles_thirty_sast_days(tmp_path: Path, monkeypatch) -> N
             "limit": 100,
         },
     )
+    assert client.calls[2] == (
+        "/returns",
+        {
+            "return_date__gte": "2025-07-22",
+            "return_date__lte": "2026-07-21",
+            "limit": 100,
+            "expands": ["outcomes", "transactions"],
+        },
+    )
+    assert result.return_result is not None and result.return_result.succeeded
     assert result.status == "success"
     assert result.report_paths is not None
 
@@ -200,7 +225,7 @@ def test_offer_failure_still_reconciles_sales_without_marking_capture_success(
     assert result.offer_result is not None and not result.offer_result.succeeded
     assert result.sales_result is not None and result.sales_result.succeeded
     assert result.metric_rows > 0
-    assert [path for path, _ in client.calls] == ["/offers", "/sales"]
+    assert [path for path, _ in client.calls] == ["/offers", "/sales", "/returns"]
     engine = create_engine(settings.database_url)
     with Session(engine) as session:
         state = session.scalar(select(DailySalesMetricState))
@@ -210,6 +235,28 @@ def test_offer_failure_still_reconciles_sales_without_marking_capture_success(
     assert state.source_run_id == result.sales_result.run_id
     assert state.source_details["requested_start"] == "2026-06-21"
     assert state.source_details["requested_end"] == "2026-07-20"
+
+
+def test_returns_failure_is_visible_but_does_not_block_sales_report(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    client = ReturnFailureClient()
+    monkeypatch.setattr("takealot_ops.scheduler.TakealotClient", lambda _: client)
+    monkeypatch.setattr(
+        "takealot_ops.scheduler.generate_daily_reports",
+        lambda _dataset, _root, report_date: _fake_reports(tmp_path, report_date),
+    )
+
+    result = run_daily(
+        _settings(tmp_path),
+        FixedClock(datetime(2026, 7, 20, 8, tzinfo=UTC)),
+    )
+
+    assert result.status == "success"
+    assert result.offer_result is not None and result.offer_result.succeeded
+    assert result.sales_result is not None and result.sales_result.succeeded
+    assert result.return_result is not None and not result.return_result.succeeded
 
 
 def test_daily_run_checks_quality_across_the_full_refresh_window(

@@ -12,6 +12,14 @@ export interface CompetitorOfferTrendLayout {
   xAxisLabelY: number;
 }
 
+export const COMPETITOR_OFFER_TREND_HORIZONTAL_LAYOUT = {
+  axisLabelX: 158,
+  panelTextDividerX: 108,
+  panelTextX: 12,
+  plotLeft: 170,
+  plotRight: 936,
+} as const;
+
 export function buildCompetitorOfferTrendLayout(
   panelCount: CompetitorOfferTrendPanelCount,
 ): CompetitorOfferTrendLayout {

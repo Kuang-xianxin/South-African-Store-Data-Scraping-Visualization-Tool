@@ -92,6 +92,7 @@ def create_app(project_root: Path | None = None) -> FastAPI:
         if not variants.empty:
             variants = variants.loc[variants["plid"].astype(str) == plid]
         return {
+            "category_path": dataset.category_paths.get(plid, []),
             "history": _frame_records(history),
             "reviews": _frame_records(reviews),
             "variants": _frame_records(variants),

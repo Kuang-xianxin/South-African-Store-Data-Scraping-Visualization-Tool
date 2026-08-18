@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 from takealot_ops.erp.coordination import RefreshBusyError, RefreshCoordinator
+from takealot_ops.storage.store_context import store_scope
 
 
 def test_refresh_cooldown_is_global_and_survives_coordinator_restart(
@@ -75,5 +76,37 @@ def test_failed_refresh_does_not_start_cooldown(tmp_path: Path, monkeypatch) -> 
         role="operator",
     )
     assert status["cooldown_remaining_seconds"] == 0
+    assert status["can_refresh"] is True
+    coordinator.close()
+
+
+def test_refresh_state_is_shared_across_selected_store_scopes(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    database_path = tmp_path / "erp.db"
+    monkeypatch.setenv(
+        "TAKEALOT_DATABASE_URL",
+        f"sqlite:///{database_path.as_posix()}",
+    )
+    coordinator = RefreshCoordinator(tmp_path)
+
+    with store_scope("store-02"):
+        coordinator.begin(
+            username="kxx",
+            display_name="KXX Admin",
+            role="admin",
+        )
+        coordinator.finish(
+            username="kxx",
+            display_name="KXX Admin",
+            succeeded=True,
+            role="admin",
+        )
+
+    with store_scope("store-03"):
+        status = coordinator.status(role="admin")
+
+    assert status["last_success_by"] == "kxx"
     assert status["can_refresh"] is True
     coordinator.close()

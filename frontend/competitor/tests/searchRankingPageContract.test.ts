@@ -14,7 +14,7 @@ const statusTypeSource = typesSource.slice(
 );
 const summaryTypeSource = typesSource.slice(
   typesSource.indexOf("export interface SearchRankingAnalysisSummary"),
-  typesSource.indexOf("export interface SearchRankingProduct {"),
+  typesSource.indexOf("export interface SearchRankingProduct extends"),
 );
 const analysisTypeSource = typesSource.slice(
   typesSource.indexOf("export interface SearchRankingAnalysis extends"),
@@ -329,7 +329,10 @@ test("removes the reverse-search path from the operator contract", () => {
 });
 
 test("ordinary one-click analysis and manual facts are the only product-fact paths", () => {
-  assert.match(pageSource, /analyzeSearchRanking\(familyRepresentative\.offer_id\)/);
+  assert.match(
+    pageSource,
+    /analyzeSearchRanking\(\s*familyRepresentative\.offer_id,\s*familyRepresentative\.store_code,/,
+  );
   assert.match(pageSource, /人工确认商品事实/);
   assert.match(pageSource, /\{\{ factRecommendation\.reason \}\}/);
   assert.match(pageSource, /acknowledged_fact_accuracy: true/);

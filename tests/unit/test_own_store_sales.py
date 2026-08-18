@@ -13,6 +13,7 @@ from takealot_ops.storage.models import (
     OfferCurrent,
     OfferSnapshot,
     SaleItem,
+    SalesRevenueRevision,
 )
 from takealot_ops.storage.store_context import store_scope
 
@@ -276,6 +277,90 @@ def test_unfinished_china_day_is_partial_even_after_a_successful_sales_pull() ->
             "ordered_units": 4,
             "data_status": "partial",
             "revision_count": 0,
+        }
+    ]
+    engine.dispose()
+
+
+def test_series_counts_only_post_close_sales_revisions() -> None:
+    engine = _engine()
+    with store_scope("store-a"), Session(engine) as session, session.begin():
+        session.add_all(
+            [
+                OfferCurrent(
+                    offer_id="offer-revised",
+                    productline_id="revision-plid",
+                    sku="SKU-REVISION",
+                    created_at=datetime(2026, 8, 2, 18, tzinfo=UTC),
+                    captured_at=datetime(2026, 8, 5, 1, tzinfo=UTC),
+                ),
+                SaleItem(
+                    order_item_id="order-item-revised",
+                    order_date=datetime(2026, 8, 2, 18, tzinfo=UTC),
+                    sales_day=date(2026, 8, 2),
+                    offer_id="offer-revised",
+                    quantity=1,
+                    raw_payload={},
+                ),
+                _state(date(2026, 8, 2)),
+                _state(date(2026, 8, 3)),
+                SalesRevenueRevision(
+                    metric_date=date(2026, 8, 2),
+                    change_type="corrected",
+                    before_ordered_units=0,
+                    after_ordered_units=1,
+                    before_ordered_revenue=0,
+                    after_ordered_revenue=100,
+                    revenue_delta=100,
+                    units_delta=1,
+                    before_source={
+                        "kind": "takealot_sales_api",
+                        "collected_at": "2026-08-02T10:00:00+00:00",
+                    },
+                    after_source={
+                        "kind": "takealot_sales_api",
+                        "collected_at": "2026-08-03T02:00:00+00:00",
+                    },
+                    source_run_id="provisional-finalization",
+                    detected_at=datetime(2026, 8, 3, 2, tzinfo=UTC),
+                ),
+                SalesRevenueRevision(
+                    metric_date=date(2026, 8, 3),
+                    change_type="corrected",
+                    before_ordered_units=1,
+                    after_ordered_units=2,
+                    before_ordered_revenue=100,
+                    after_ordered_revenue=200,
+                    revenue_delta=100,
+                    units_delta=1,
+                    before_source={
+                        "kind": "takealot_sales_api",
+                        "collected_at": "2026-08-04T02:00:00+00:00",
+                    },
+                    after_source={
+                        "kind": "takealot_sales_api",
+                        "collected_at": "2026-08-05T02:00:00+00:00",
+                    },
+                    source_run_id="true-history-revision",
+                    detected_at=datetime(2026, 8, 5, 2, tzinfo=UTC),
+                ),
+            ]
+        )
+
+    with Session(engine) as session:
+        payload = build_own_store_sales_series(
+            session,
+            plid="revision-plid",
+            store_codes={"store-a"},
+            through=date(2026, 8, 3),
+        )
+
+    assert payload[0]["points"] == [
+        {
+            "date": "2026-08-03",
+            "ordered_units": 1,
+            "data_status": "verified",
+            "revision_count": 1,
         }
     ]
     engine.dispose()

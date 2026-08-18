@@ -3,9 +3,14 @@ import { computed, onBeforeUnmount, ref, watch } from "vue";
 
 import { fetchQuadrants } from "../api";
 import { PRODUCT_IMAGE_SIZE, productThumbnailUrl } from "../productImages";
-import type { QuadrantItem, QuadrantPayload } from "../types";
+import { matchesProductSearch } from "../productSearch";
+import type { OwnStoreScope, QuadrantItem, QuadrantPayload } from "../types";
 
-const props = defineProps<{ asOf: string }>();
+const props = defineProps<{
+  asOf: string;
+  storeScope?: OwnStoreScope;
+  multiStoreLabel?: string;
+}>();
 const data = ref<QuadrantPayload | null>(null);
 const loading = ref(true);
 const copiedOfferId = ref("");
@@ -18,16 +23,20 @@ const productSort = ref<"views_desc" | "orders_desc" | "stock_desc" | "name_asc"
   "views_desc",
 );
 let feedbackTimer: ReturnType<typeof setTimeout> | undefined;
+let loadRequestRevision = 0;
 
 const rankTicks = [0, 25, 50, 75, 100];
 const gridTicks = rankTicks.filter((tick) => tick > 0 && tick < 100);
 const allItems = computed(() => data.value?.items ?? []);
 const filteredItems = computed(() => {
-  const query = skuQuery.value.trim().toLocaleLowerCase();
-  if (!query) return allItems.value;
-  return allItems.value.filter((item) =>
-    String(item.sku ?? "").toLocaleLowerCase().includes(query),
-  );
+  if (!skuQuery.value.trim()) return allItems.value;
+  return allItems.value.filter((item) => matchesProductSearch(
+    {
+      productNames: [item.title, item.company_product_name],
+      otherValues: [item.sku, item.company_sku, item.store_name, item.store_code],
+    },
+    skuQuery.value,
+  ));
 });
 const sortedItems = computed(() => {
   const items = [...filteredItems.value];
@@ -85,14 +94,27 @@ const hoveredImageUrl = computed(() => {
   return hoveredItem.value ? imageUrl(hoveredItem.value) : "";
 });
 
-watch(() => props.asOf, load, { immediate: true });
+watch([() => props.asOf, () => props.storeScope], load, { immediate: true });
 
 async function load() {
+  const requestRevision = ++loadRequestRevision;
+  const requestedAsOf = props.asOf;
+  const requestedStoreScope = props.storeScope ?? "current";
   loading.value = true;
   try {
-    data.value = await fetchQuadrants(props.asOf, 50);
+    const nextData = await fetchQuadrants(
+      requestedAsOf,
+      50,
+      requestedStoreScope,
+    );
+    if (
+      requestRevision !== loadRequestRevision
+      || requestedAsOf !== props.asOf
+      || requestedStoreScope !== (props.storeScope ?? "current")
+    ) return;
+    data.value = nextData;
   } finally {
-    loading.value = false;
+    if (requestRevision === loadRequestRevision) loading.value = false;
   }
 }
 
@@ -112,6 +134,10 @@ function number(value: number | null | undefined) {
 
 function productName(item: QuadrantItem) {
   return item.title || item.sku || item.offer_id;
+}
+
+function itemKey(item: QuadrantItem) {
+  return item.store_scope_key || `${item.store_code || "current"}:${item.offer_id}`;
 }
 
 function compareNullableDesc(
@@ -175,7 +201,7 @@ async function copyPlatformSku(item: QuadrantItem) {
   }
   try {
     await writeClipboard(sku);
-    copiedOfferId.value = item.offer_id;
+    copiedOfferId.value = itemKey(item);
     showCopyFeedback(`已复制平台 SKU：${sku}`, "success");
   } catch {
     copiedOfferId.value = "";
@@ -265,11 +291,11 @@ onBeforeUnmount(() => {
           </template>
           <button
             v-for="item in plottableItems"
-            :key="item.offer_id"
+            :key="itemKey(item)"
             class="matrix-dot coordinate"
             :class="[
               {
-                copied: copiedOfferId === item.offer_id,
+                copied: copiedOfferId === itemKey(item),
                 'missing-sku': !item.sku,
               },
             ]"
@@ -278,7 +304,7 @@ onBeforeUnmount(() => {
               bottom: position(item.ordered_units_rank),
             }"
             :aria-label="`复制平台 SKU ${item.sku || '缺失'}：${item.title || item.offer_id}`"
-            :aria-describedby="hoveredItem?.offer_id === item.offer_id ? 'quadrant-tooltip' : undefined"
+            :aria-describedby="hoveredItem && itemKey(hoveredItem) === itemKey(item) ? 'quadrant-tooltip' : undefined"
             @mouseenter="hoveredItem = item"
             @mouseleave="hoveredItem = null"
             @focus="hoveredItem = item"
@@ -338,9 +364,17 @@ onBeforeUnmount(() => {
               </div>
               <div class="tooltip-product-copy">
                 <strong>{{ hoveredItem.title || hoveredItem.sku || hoveredItem.offer_id }}</strong>
+                <div v-if="props.storeScope !== 'current'" class="tooltip-sku">
+                  <span>所属店铺</span>
+                  <b>{{ hoveredItem.store_name || hoveredItem.store_code || "—" }}</b>
+                </div>
                 <div class="tooltip-sku">
                   <span>平台 SKU</span>
                   <b>{{ hoveredItem.sku || "缺失" }}</b>
+                </div>
+                <div class="tooltip-sku">
+                  <span>公司 SKU</span>
+                  <b>{{ hoveredItem.company_sku || "未关联" }}</b>
                 </div>
               </div>
             </div>
@@ -378,7 +412,7 @@ onBeforeUnmount(() => {
           </span>
         </div>
         <p class="method-note">
-          图中只表达两个维度的店铺内相对位置，不再划分四象限或使用分位边界。
+          图中只表达两个维度在当前店铺范围内的相对位置，不再划分四象限或使用分位边界。
           缺少任一坐标的数据不会按0处理，仍完整保留在下方商品卡片；悬停可查看完整经营信息，点击小点直接复制平台 SKU。
         </p>
         <p
@@ -404,12 +438,12 @@ onBeforeUnmount(() => {
               完整展示，无需左右滑动
             </span>
             <label class="compact-field coordinate-search-field">
-              <span>搜索平台 SKU</span>
+              <span>搜索商品名称 / 平台 / 公司 SKU</span>
               <input
                 v-model="skuQuery"
                 type="search"
-                placeholder="输入完整或部分 SKU"
-                aria-label="搜索平台 SKU"
+                placeholder="商品名称支持模糊搜索，也可输入完整或部分平台 / 公司 SKU"
+                aria-label="搜索商品名称、平台或公司 SKU"
                 autocomplete="off"
               />
             </label>
@@ -427,7 +461,7 @@ onBeforeUnmount(() => {
         <div v-if="sortedItems.length" class="coordinate-product-grid">
           <article
             v-for="item in sortedItems"
-            :key="item.offer_id"
+            :key="itemKey(item)"
             v-memo="[item, imageFailed(item)]"
             class="coordinate-product-card"
           >
@@ -449,8 +483,14 @@ onBeforeUnmount(() => {
               </div>
               <div class="coordinate-product-card-title">
                 <strong>{{ productName(item) }}</strong>
+                <template v-if="props.storeScope !== 'current'">
+                  <span>所属店铺</span>
+                  <b>{{ item.store_name || item.store_code || "—" }}</b>
+                </template>
                 <span>平台 SKU</span>
                 <b class="mono-value">{{ item.sku || "—" }}</b>
+                <span>公司 SKU</span>
+                <b class="mono-value">{{ item.company_sku || "未关联" }}</b>
               </div>
             </div>
             <dl class="coordinate-product-metrics">
@@ -482,7 +522,7 @@ onBeforeUnmount(() => {
           </article>
         </div>
         <div v-else class="state-card coordinate-empty-state">
-          未找到匹配“{{ skuQuery.trim() }}”的平台 SKU
+          未找到匹配“{{ skuQuery.trim() }}”的平台或公司 SKU
         </div>
       </section>
     </template>

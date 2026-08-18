@@ -16,9 +16,11 @@ from takealot_ops.storage.models import (
     OfferCurrent,
     OfferSnapshot,
     SaleItem,
+    SalesRevenueRevision,
     StoreOfferBaseline,
     StoreOfferObservation,
 )
+from takealot_ops.storage.repository import is_closed_day_sales_revision
 from takealot_ops.storage.store_context import normalize_store_code, store_scope
 
 
@@ -197,6 +199,18 @@ def _store_sales_series(
         if required_source_dates
         else {}
     )
+    revision_counts: dict[date, int] = {}
+    if required_source_dates:
+        for revision in session.scalars(
+            select(SalesRevenueRevision).where(
+                SalesRevenueRevision.metric_date.in_(required_source_dates)
+            )
+        ):
+            if not is_closed_day_sales_revision(revision):
+                continue
+            revision_counts[revision.metric_date] = (
+                revision_counts.get(revision.metric_date, 0) + 1
+            )
     points: list[dict[str, Any]] = []
     covered_dates: list[date] = []
     partial_dates: list[date] = []
@@ -238,9 +252,8 @@ def _store_sales_series(
                 "ordered_units": ordered_units,
                 "data_status": data_status,
                 "revision_count": sum(
-                    int(state.revision_count or 0)
-                    for state in source_states
-                    if state is not None
+                    revision_counts.get(source_date, 0)
+                    for source_date in _sast_dates_for_china_day(metric_date)
                 ),
             }
         )

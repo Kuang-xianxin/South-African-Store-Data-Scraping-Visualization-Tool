@@ -102,6 +102,9 @@ class CompetitorDataset:
     history: pd.DataFrame
     reviews: pd.DataFrame
     variants: pd.DataFrame
+    category_paths: dict[str, list[dict[str, str | None]]] = field(
+        default_factory=dict
+    )
     store_current: pd.DataFrame = field(default_factory=pd.DataFrame)
     store_history: pd.DataFrame = field(default_factory=pd.DataFrame)
     own_follower_events: list[dict[str, object]] = field(default_factory=list)
@@ -1013,6 +1016,13 @@ def load_competitor_dataset(
     active_plids = {target.plid for target in targets} - all_store_plids
     active_snapshots = [row for row in snapshots if row.plid in active_plids]
     store_snapshots = [row for row in snapshots if row.plid in selected_store_plids]
+    category_paths: dict[str, list[dict[str, str | None]]] = {}
+    for snapshot in snapshots:
+        if snapshot.plid in category_paths:
+            continue
+        category_path = _snapshot_category_path(snapshot)
+        if category_path:
+            category_paths[snapshot.plid] = category_path
     snapshot_dates = [
         *(_competitor_display_date(row.collected_at) for row in active_snapshots),
         *(_competitor_display_date(row.collected_at) for row in store_snapshots),
@@ -1235,6 +1245,7 @@ def load_competitor_dataset(
         history=history,
         reviews=review_frame,
         variants=variant_frame,
+        category_paths=category_paths,
         store_current=store_current,
         store_history=store_history,
         own_follower_events=_own_follower_event_rows(
@@ -1335,6 +1346,33 @@ def _stock_text(row: CompetitorSnapshot) -> str:
     elif row.stock_quantity is not None:
         stock_text = str(row.stock_quantity) if row.stock_exact else f"至少{row.stock_quantity}"
     return stock_text
+
+
+def _snapshot_category_path(
+    row: CompetitorSnapshot,
+) -> list[dict[str, str | None]]:
+    """Return only persisted public breadcrumb evidence in its original order."""
+
+    raw_path: object = row.category_path
+    if not isinstance(raw_path, list):
+        return []
+    result: list[dict[str, str | None]] = []
+    for raw_item_value in raw_path[:12]:
+        raw_item: object = raw_item_value
+        if not isinstance(raw_item, Mapping):
+            continue
+        name = " ".join(str(raw_item.get("name") or "").split())[:200]
+        if not name:
+            continue
+        result.append(
+            {
+                "name": name,
+                "id": str(raw_item.get("id") or "").strip()[:100] or None,
+                "type": str(raw_item.get("type") or "").strip()[:50] or None,
+                "slug": str(raw_item.get("slug") or "").strip()[:255] or None,
+            }
+        )
+    return result
 
 
 def _interval_price_signal(

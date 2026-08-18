@@ -174,5 +174,7 @@ test("personal watchlist exposes the full competitor and own-store filter set", 
   assert.match(pageSource, /v-model="personalWatchlistSignalFilter"/);
   assert.match(pageSource, /v-model="personalWatchlistSortDirection"/);
   assert.match(pageSource, /v-model\.number="personalWatchlistPageSize"/);
+  assert.match(pageSource, /const personalWatchlistPageSize = ref\(21\)/);
+  assert.match(pageSource, /const personalWatchlistPageSizeOptions = \[21, 51, 99\] as const/);
   assert.match(pageSource, /当前个人池分区显示/);
 });

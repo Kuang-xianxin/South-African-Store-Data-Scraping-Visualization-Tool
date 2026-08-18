@@ -389,6 +389,13 @@ class StoreOfferObservation(StoreScopedMixin, Base):
     total_stock: Mapped[int | None] = mapped_column(Integer)
     takealot_available_stock: Mapped[int | None] = mapped_column(Integer)
     seller_available_stock: Mapped[int | None] = mapped_column(Integer)
+    page_views_30_days: Mapped[int | None] = mapped_column(Integer)
+    page_views_30_days_recorded: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+        server_default="0",
+    )
     captured_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
@@ -418,15 +425,29 @@ class SaleItem(StoreScopedMixin, Base):
 
 
 class ReturnItem(StoreScopedMixin, Base):
-    """A seller return item reserved for return collection."""
+    """Latest expanded seller-return state keyed by Seller Return ID."""
 
     __tablename__ = "return_items"
 
     seller_return_id: Mapped[str] = mapped_column(String(100), primary_key=True)
     order_item_id: Mapped[str | None] = mapped_column(String(100))
-    offer_id: Mapped[str | None] = mapped_column(String(100))
-    return_date: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    order_id: Mapped[str | None] = mapped_column(String(100))
+    offer_id: Mapped[str | None] = mapped_column(String(100), index=True)
+    tsin_id: Mapped[str | None] = mapped_column(String(100))
+    sku: Mapped[str | None] = mapped_column(String(255))
+    return_reference_number: Mapped[str | None] = mapped_column(String(100))
+    quantity: Mapped[int | None] = mapped_column(Integer)
+    return_date: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        index=True,
+    )
     return_status: Mapped[str | None] = mapped_column(String(100))
+    return_region: Mapped[str | None] = mapped_column(String(100))
+    return_reason: Mapped[str | None] = mapped_column(String(100), index=True)
+    customer_comment: Mapped[str | None] = mapped_column(Text)
+    outcomes: Mapped[list[dict[str, Any]] | None] = mapped_column(JSON)
+    transactions: Mapped[list[dict[str, Any]] | None] = mapped_column(JSON)
+    captured_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     raw_payload: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
 
 
@@ -706,6 +727,7 @@ class CompetitorSnapshot(Base):
     url: Mapped[str] = mapped_column(Text, nullable=False)
     title: Mapped[str] = mapped_column(Text, nullable=False)
     image_url: Mapped[str | None] = mapped_column(Text)
+    category_path: Mapped[list[dict[str, Any]] | None] = mapped_column(JSON)
     sku: Mapped[str | None] = mapped_column(String(100))
     seller_id: Mapped[str | None] = mapped_column(String(100))
     seller_name: Mapped[str | None] = mapped_column(String(255))
@@ -1192,7 +1214,7 @@ class PlatformWarehouseShipment(StoreScopedMixin, Base):
 
 
 class ErpRefreshState(StoreScopedMixin, Base):
-    """Persistent per-store cooldown state for the ERP full-refresh action."""
+    """Persistent coordination state for the ERP full-refresh action."""
 
     __tablename__ = "erp_refresh_state"
 
@@ -1348,3 +1370,162 @@ class DailyReportDeadlineSnapshot(StoreScopedMixin, Base):
     unresolved_count: Mapped[int] = mapped_column(Integer, nullable=False)
     details: Mapped[list[dict[str, Any]] | None] = mapped_column(JSON)
     resolved_at: Mapped[datetime | None] = mapped_column(DateTime)
+
+
+class ProductMasterImportBatch(Base):
+    """One immutable, content-addressed product-master workbook import."""
+
+    __tablename__ = "product_master_import_batches"
+    __table_args__ = (
+        UniqueConstraint(
+            "source_sha256",
+            "sheet_name",
+            "effective_date",
+            name="uq_pm_batch_source_sheet_date",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    source_file_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    source_sha256: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    source_modified_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    sheet_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    header_row_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    effective_date: Mapped[date] = mapped_column(Date, nullable=False, index=True)
+    imported_by: Mapped[str] = mapped_column(String(100), nullable=False)
+    imported_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, index=True)
+    status: Mapped[str] = mapped_column(String(30), nullable=False)
+    source_row_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    normalized_row_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    product_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    mapping_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    cost_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    warning_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    summary: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+
+
+class CompanyProduct(Base):
+    """Cross-store company product identity keyed by the internal SKU."""
+
+    __tablename__ = "company_products"
+    __table_args__ = (
+        UniqueConstraint(
+            "normalized_company_sku",
+            name="uq_company_products_normalized_sku",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    company_sku: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    normalized_company_sku: Mapped[str] = mapped_column(String(255), nullable=False)
+    product_name: Mapped[str] = mapped_column(Text, nullable=False)
+    first_source_batch_id: Mapped[int] = mapped_column(
+        ForeignKey("product_master_import_batches.id"),
+        nullable=False,
+    )
+    last_source_batch_id: Mapped[int] = mapped_column(
+        ForeignKey("product_master_import_batches.id"),
+        nullable=False,
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+
+
+class PlatformSkuMapping(Base):
+    """Current mapping from one Takealot platform SKU to a company product."""
+
+    __tablename__ = "platform_sku_mappings"
+    __table_args__ = (
+        UniqueConstraint(
+            "normalized_platform_sku",
+            name="uq_platform_sku_mappings_normalized",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    platform_sku: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    normalized_platform_sku: Mapped[str] = mapped_column(String(255), nullable=False)
+    company_product_id: Mapped[int] = mapped_column(
+        ForeignKey("company_products.id"),
+        nullable=False,
+        index=True,
+    )
+    resolved_store_code: Mapped[str | None] = mapped_column(String(64), index=True)
+    resolved_offer_id: Mapped[str | None] = mapped_column(String(100), index=True)
+    resolved_productline_id: Mapped[str | None] = mapped_column(String(100), index=True)
+    first_source_batch_id: Mapped[int] = mapped_column(
+        ForeignKey("product_master_import_batches.id"),
+        nullable=False,
+    )
+    last_source_batch_id: Mapped[int] = mapped_column(
+        ForeignKey("product_master_import_batches.id"),
+        nullable=False,
+    )
+    last_source_row_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+
+
+class CompanyProductCost(Base):
+    """Append-only RMB unit-cost change for one company product."""
+
+    __tablename__ = "company_product_costs"
+    __table_args__ = (
+        UniqueConstraint(
+            "company_product_id",
+            "source_batch_id",
+            name="uq_company_product_cost_batch",
+        ),
+        CheckConstraint("cost_rmb > 0", name="ck_company_product_cost_positive"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    company_product_id: Mapped[int] = mapped_column(
+        ForeignKey("company_products.id"),
+        nullable=False,
+        index=True,
+    )
+    effective_date: Mapped[date] = mapped_column(Date, nullable=False, index=True)
+    cost_rmb: Mapped[Decimal] = mapped_column(Numeric(14, 4), nullable=False)
+    source_batch_id: Mapped[int] = mapped_column(
+        ForeignKey("product_master_import_batches.id"),
+        nullable=False,
+        index=True,
+    )
+    source_row_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    recorded_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, index=True)
+
+
+class ProductMasterImportRow(Base):
+    """Normalized row-level audit retained for every imported platform SKU."""
+
+    __tablename__ = "product_master_import_rows"
+    __table_args__ = (
+        UniqueConstraint(
+            "batch_id",
+            "normalized_platform_sku",
+            name="uq_pm_import_row_batch_platform",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    batch_id: Mapped[int] = mapped_column(
+        ForeignKey("product_master_import_batches.id"),
+        nullable=False,
+        index=True,
+    )
+    source_row_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    source_store: Mapped[str | None] = mapped_column(String(255))
+    platform_sku: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    normalized_platform_sku: Mapped[str] = mapped_column(String(255), nullable=False)
+    company_sku: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    normalized_company_sku: Mapped[str] = mapped_column(String(255), nullable=False)
+    product_name: Mapped[str] = mapped_column(Text, nullable=False)
+    cost_rmb: Mapped[Decimal | None] = mapped_column(Numeric(14, 4))
+    matched_store_codes: Mapped[list[str] | None] = mapped_column(JSON)
+    previous_company_sku: Mapped[str | None] = mapped_column(String(255))
+    product_action: Mapped[str] = mapped_column(String(30), nullable=False)
+    mapping_action: Mapped[str] = mapped_column(String(30), nullable=False)
+    cost_action: Mapped[str] = mapped_column(String(30), nullable=False)
+    warnings: Mapped[list[str] | None] = mapped_column(JSON)
+    recorded_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)

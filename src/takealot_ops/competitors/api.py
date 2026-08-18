@@ -20,6 +20,7 @@ from playwright.async_api import (
 )
 
 from takealot_ops.competitors.domain import (
+    CompetitorCategoryBreadcrumb,
     CompetitorOffer,
     CompetitorProduct,
     CompetitorReviewRecord,
@@ -341,6 +342,7 @@ class CompetitorPublicClient:
             rating=_number(reviews.get("star_rating") or core.get("star_rating")),
             offers=tuple(compact_offers),
             variants=variants,
+            category_path=_category_breadcrumbs(detail),
         )
 
     async def _fetch_variant_details(
@@ -903,6 +905,51 @@ def _product_image_url(detail: Mapping[str, Any]) -> str | None:
     if not isinstance(images, list) or not images:
         return None
     return str(images[0]).replace("{size}", "zoom")
+
+
+def _category_breadcrumbs(
+    detail: Mapping[str, Any],
+) -> tuple[CompetitorCategoryBreadcrumb, ...]:
+    """Preserve the bounded public department/category path without guessing."""
+
+    breadcrumbs = _mapping_list(_mapping(detail.get("breadcrumbs")).get("items"))
+    result: list[CompetitorCategoryBreadcrumb] = []
+    seen: set[tuple[str, str | None, str | None]] = set()
+    for item in breadcrumbs[:12]:
+        name = " ".join(str(item.get("name") or "").split())[:200]
+        if not name:
+            continue
+        raw_id = item.get("id")
+        category_id = (
+            str(raw_id).strip()[:100]
+            if isinstance(raw_id, (str, int, float)) and str(raw_id).strip()
+            else None
+        )
+        raw_type = item.get("type")
+        category_type = (
+            str(raw_type).strip()[:50]
+            if isinstance(raw_type, (str, int, float)) and str(raw_type).strip()
+            else None
+        )
+        raw_slug = item.get("slug")
+        slug = (
+            str(raw_slug).strip()[:255]
+            if isinstance(raw_slug, (str, int, float)) and str(raw_slug).strip()
+            else None
+        )
+        identity = (name.casefold(), category_id, category_type)
+        if identity in seen:
+            continue
+        seen.add(identity)
+        result.append(
+            CompetitorCategoryBreadcrumb(
+                name=name,
+                category_id=category_id,
+                category_type=category_type,
+                slug=slug,
+            )
+        )
+    return tuple(result)
 
 
 def _variant_key(url: str) -> str:

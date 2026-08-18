@@ -43,9 +43,9 @@ const storeDisplayName = ref("");
 
 const roleDescriptions: Record<UserRole, string> = {
   viewer: "查看店铺、竞品和已有报表，不执行采集、刷新或人工处理。",
-  operator: "承担日常运营工作，可采集、刷新并使用已开放的经营模块。",
+  operator: "承担日常运营工作，可采集并使用已开放的经营模块；全部店铺刷新仅限 kxx。",
   selection: "可查看和采集竞品雷达，不执行店铺数据刷新。",
-  admin: "拥有全部业务能力，并可创建账号、套用模板和调整每个账号的独立权限。",
+  admin: "拥有系统管理能力；全部店铺刷新仍仅限 kxx 账号。",
 };
 
 const templateCards = (Object.keys(templateLabels) as UserRole[]).map((key) => ({

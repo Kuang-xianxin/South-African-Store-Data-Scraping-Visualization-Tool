@@ -4,6 +4,7 @@ import type {
   OwnStoreTrafficPoint,
   OwnStoreTrafficSeries,
 } from "./types";
+import { parseUtcDateTime } from "./time.ts";
 
 export interface CompetitorOfferHistoryPoint {
   snapshot: CompetitorItem;
@@ -116,7 +117,7 @@ export function buildCompetitorOfferTrend(
 ): CompetitorOfferTrendPoint[] {
   return buildCompetitorOfferHistory(history, selectedOffer)
     .map((point) => {
-      const capturedAtMs = Date.parse(point.snapshot.采集时间);
+      const capturedAtMs = parseUtcDateTime(point.snapshot.采集时间);
       return {
         ...point,
         capturedAtMs: Number.isFinite(capturedAtMs) ? capturedAtMs : point.snapshot.快照ID,
@@ -137,7 +138,7 @@ export function buildOwnStoreTrafficTrend(
   if (!series) return [];
   return series.points
     .map((point, sourceIndex) => {
-      const capturedAtMs = Date.parse(
+      const capturedAtMs = parseUtcDateTime(
         point.captured_at ?? `${point.date}T12:00:00+08:00`,
       );
       return {
@@ -156,27 +157,18 @@ export function alignOwnStoreTrafficTrendToOfferTrend(
   trafficTrend: OwnStoreTrafficTrendPoint[],
   offerTrend: CompetitorOfferTrendPoint[],
 ): AlignedOwnStoreTrafficTrendPoint[] {
-  return trafficTrend.map((point) => {
-    if (!offerTrend.length || !Number.isFinite(point.capturedAtMs)) {
-      return {
-        ...point,
-        alignedCapturedAtMs: point.capturedAtMs,
-        alignedOfferIndex: null,
-      };
-    }
-    const alignedOfferIndex = offerTrend.reduce(
-      (nearestIndex, offerPoint, index) =>
-        Math.abs(offerPoint.capturedAtMs - point.capturedAtMs)
-          < Math.abs(offerTrend[nearestIndex]!.capturedAtMs - point.capturedAtMs)
-          ? index
-          : nearestIndex,
-      0,
-    );
-    return {
-      ...point,
-      alignedCapturedAtMs: offerTrend[alignedOfferIndex]!.capturedAtMs,
-      alignedOfferIndex,
-    };
+  const offerIndexByCapturedAt = new Map(
+    offerTrend.map((point, index) => [point.capturedAtMs, index]),
+  );
+  return trafficTrend.flatMap((point) => {
+    const alignedOfferIndex = offerIndexByCapturedAt.get(point.capturedAtMs);
+    return alignedOfferIndex === undefined
+      ? []
+      : [{
+          ...point,
+          alignedCapturedAtMs: point.capturedAtMs,
+          alignedOfferIndex,
+        }];
   });
 }
 

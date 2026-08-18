@@ -40,6 +40,36 @@ def test_refresh_runs_complete_daily_workflow_with_project_python(tmp_path: Path
     assert captured["kwargs"]["timeout"] == 600
 
 
+def test_refresh_all_stores_uses_cli_all_store_target_and_longer_timeout(
+    tmp_path: Path,
+) -> None:
+    project_root = _project_with_python(tmp_path)
+    captured: dict[str, Any] = {}
+
+    def runner(command: Sequence[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        captured["command"] = list(command)
+        captured["kwargs"] = kwargs
+        return subprocess.CompletedProcess(command, 0, "完成", "")
+
+    result = run_dashboard_refresh(project_root, all_stores=True, runner=runner)
+
+    assert result.succeeded is True
+    assert result.message == (
+        "全部已配置店铺数据刷新完成，"
+        "各店本次手动数据已纳入当前10:00核对周期。"
+    )
+    assert captured["command"] == [
+        str(project_root / ".venv" / "Scripts" / "python.exe"),
+        "-m",
+        "takealot_ops.cli",
+        "daily-report-run",
+        "--slot",
+        "manual",
+        "--all-stores",
+    ]
+    assert captured["kwargs"]["timeout"] == 3_600
+
+
 def test_refresh_failure_never_exposes_subprocess_output(tmp_path: Path) -> None:
     project_root = _project_with_python(tmp_path)
 

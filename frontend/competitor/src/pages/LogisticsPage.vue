@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from "vue";
+import { computed, ref, watch } from "vue";
 
 import {
   confirmLogisticsLink,
@@ -7,12 +7,18 @@ import {
   revokeLogisticsLink,
 } from "../api";
 import { formatChinaDateTime } from "../time";
-import type { LogisticsOverviewPayload } from "../types";
+import type {
+  LogisticsConfirmedLink,
+  LogisticsOverviewPayload,
+  OwnStoreScope,
+} from "../types";
 
 defineOptions({ name: "LogisticsPage" });
 const props = defineProps<{
   asOf?: string;
   canManage?: boolean;
+  storeScope?: OwnStoreScope;
+  multiStoreLabel?: string;
   onPermissionDenied?: () => void;
 }>();
 void props.asOf;
@@ -22,9 +28,11 @@ const refreshing = ref(false);
 const error = ref("");
 const actionMessage = ref("");
 const savingKey = ref("");
-const revokingLinkId = ref<number | null>(null);
+const revokingLinkKey = ref("");
 const revokeNote = ref("");
 const payload = ref<LogisticsOverviewPayload | null>(null);
+const multiStore = computed(() => (props.storeScope ?? "current") !== "current");
+let loadRequestRevision = 0;
 
 const w8Metrics = computed(() => {
   const summary = payload.value?.w8.summary;
@@ -65,19 +73,36 @@ const candidateGroups = computed(() => {
   ].filter((group) => group.items.length > 0);
 });
 
-onMounted(() => void load(false));
+watch(() => props.storeScope, () => void load(false), { immediate: true });
 
 async function load(force: boolean) {
+  if (force && multiStore.value) {
+    actionMessage.value = "全部店铺查看只读本地快照；请切换到明确单店后再手动同步。";
+    return;
+  }
+  const requestRevision = ++loadRequestRevision;
+  const requestedStoreScope = props.storeScope ?? "current";
   if (force) refreshing.value = true;
   else loading.value = true;
   error.value = "";
   try {
-    payload.value = await fetchLogisticsOverview(force);
+    const nextPayload = await fetchLogisticsOverview(
+      force,
+      requestedStoreScope,
+    );
+    if (
+      requestRevision !== loadRequestRevision
+      || requestedStoreScope !== (props.storeScope ?? "current")
+    ) return;
+    payload.value = nextPayload;
   } catch (reason) {
+    if (requestRevision !== loadRequestRevision) return;
     error.value = reason instanceof Error ? reason.message : "物流数据读取失败";
   } finally {
-    loading.value = false;
-    refreshing.value = false;
+    if (requestRevision === loadRequestRevision) {
+      loading.value = false;
+      refreshing.value = false;
+    }
   }
 }
 
@@ -88,10 +113,14 @@ async function confirmCandidate(
     props.onPermissionDenied?.();
     return;
   }
-  savingKey.value = `candidate-${candidate.w8_order_no}-${candidate.takealot_shipment_id}`;
+  savingKey.value = candidateKey(candidate);
   actionMessage.value = "";
   try {
-    await confirmLogisticsLink(candidate.w8_order_no, candidate.takealot_shipment_id);
+    await confirmLogisticsLink(
+      candidate.w8_order_no,
+      candidate.takealot_shipment_id,
+      candidate.store_code,
+    );
     actionMessage.value = "候选关系已由人工确认并永久保存。";
     await load(false);
   } catch (reason) {
@@ -101,29 +130,33 @@ async function confirmCandidate(
   }
 }
 
-function beginRevoke(linkId: number) {
+function beginRevoke(link: LogisticsConfirmedLink) {
   if (!props.canManage) {
     props.onPermissionDenied?.();
     return;
   }
-  revokingLinkId.value = linkId;
+  revokingLinkKey.value = linkKey(link);
   revokeNote.value = "";
 }
 
 function cancelRevoke() {
-  revokingLinkId.value = null;
+  revokingLinkKey.value = "";
   revokeNote.value = "";
 }
 
-async function submitRevoke(linkId: number) {
+async function submitRevoke(link: LogisticsConfirmedLink) {
   if (!revokeNote.value.trim()) {
     actionMessage.value = "请填写撤销原因。";
     return;
   }
-  savingKey.value = `link-${linkId}`;
+  savingKey.value = linkKey(link);
   actionMessage.value = "";
   try {
-    await revokeLogisticsLink(linkId, revokeNote.value.trim());
+    await revokeLogisticsLink(
+      link.id,
+      revokeNote.value.trim(),
+      link.store_code,
+    );
     actionMessage.value = "关联已撤销，审计记录仍保留。";
     cancelRevoke();
     await load(false);
@@ -132,6 +165,16 @@ async function submitRevoke(linkId: number) {
   } finally {
     savingKey.value = "";
   }
+}
+
+function candidateKey(
+  candidate: LogisticsOverviewPayload["matching"]["high_confidence_candidates"][number],
+) {
+  return `candidate-${candidate.store_code || "current"}-${candidate.w8_order_no}-${candidate.takealot_shipment_id}`;
+}
+
+function linkKey(link: LogisticsConfirmedLink) {
+  return `link-${link.store_code || "current"}-${link.id}`;
 }
 
 function number(value: number | null | undefined) {
@@ -180,8 +223,8 @@ function providerStatus(
         <h2>长睿仓配与 Takealot 货件总览</h2>
         <span>打开页面只读本地快照；随店铺定时采集同步，也可人工读取两边接口。</span>
       </div>
-      <button type="button" :disabled="loading || refreshing" @click="load(true)">
-        {{ refreshing ? "正在手动同步…" : "手动同步两边接口" }}
+      <button type="button" :disabled="loading || refreshing || multiStore" @click="load(true)">
+        {{ multiStore ? "全部店铺仅查看快照" : refreshing ? "正在手动同步…" : "手动同步两边接口" }}
       </button>
     </header>
 
@@ -293,12 +336,12 @@ function providerStatus(
             <div class="candidate-grid">
               <article
                 v-for="candidate in group.items"
-                :key="`${group.key}-${candidate.w8_order_no}-${candidate.takealot_shipment_id}`"
+                :key="`${group.key}-${candidateKey(candidate)}`"
                 :class="['candidate-card', group.key]"
               >
                 <div class="candidate-card-heading">
                   <span>{{ group.label }}</span>
-                  <strong>{{ candidate.date_gap_days }} 天</strong>
+                  <strong>{{ multiStore ? `${candidate.store_name || candidate.store_code || '—'} · ` : "" }}{{ candidate.date_gap_days }} 天</strong>
                 </div>
                 <div class="candidate-route">
                   <div>
@@ -335,7 +378,7 @@ function providerStatus(
                   @click="confirmCandidate(candidate)"
                 >
                   {{
-                    savingKey === `candidate-${candidate.w8_order_no}-${candidate.takealot_shipment_id}`
+                    savingKey === candidateKey(candidate)
                       ? "正在确认…"
                       : props.canManage
                         ? "人工核对后确认关联"
@@ -359,9 +402,9 @@ function providerStatus(
 
         <div v-if="payload.matching.confirmed_links.length" class="confirmed-links">
           <h4>已确认关联</h4>
-          <article v-for="link in payload.matching.confirmed_links" :key="link.id">
+          <article v-for="link in payload.matching.confirmed_links" :key="linkKey(link)">
             <div>
-              <strong>{{ link.w8_order_no }} ↔ Shipment #{{ link.takealot_shipment_id }}</strong>
+              <strong>{{ multiStore ? `${link.store_name || link.store_code || "—"} · ` : "" }}{{ link.w8_order_no }} ↔ Shipment #{{ link.takealot_shipment_id }}</strong>
               <span>
                 {{ confidenceLabel(link.confidence) }} · PO {{ text(link.takealot_purchase_order_number) }} ·
                 {{ link.sku_lines }} 个 SKU · 长睿 {{ number(link.w8_quantity) }} / Takealot
@@ -371,16 +414,16 @@ function providerStatus(
                 {{ link.confirmed_by }} 于 {{ formatChinaDateTime(link.confirmed_at, "暂无") }}（北京时间）确认
               </small>
             </div>
-            <button type="button" :disabled="Boolean(savingKey)" @click="beginRevoke(link.id)">
+            <button type="button" :disabled="Boolean(savingKey)" @click="beginRevoke(link)">
               撤销关联
             </button>
-            <form v-if="revokingLinkId === link.id" @submit.prevent="submitRevoke(link.id)">
+            <form v-if="revokingLinkKey === linkKey(link)" @submit.prevent="submitRevoke(link)">
               <label>
                 <span>撤销原因</span>
                 <input v-model="revokeNote" maxlength="500" placeholder="说明为什么这笔关系不成立" />
               </label>
-              <button type="submit" :disabled="savingKey === `link-${link.id}`">
-                {{ savingKey === `link-${link.id}` ? "正在撤销…" : "确认撤销" }}
+              <button type="submit" :disabled="savingKey === linkKey(link)">
+                {{ savingKey === linkKey(link) ? "正在撤销…" : "确认撤销" }}
               </button>
               <button type="button" @click="cancelRevoke">取消</button>
             </form>
@@ -477,8 +520,8 @@ function providerStatus(
           <table>
             <thead><tr><th>Shipment / PO</th><th>状态</th><th>目的仓</th><th>发送</th><th>实收</th><th>破损</th><th>要求到仓</th><th>Tracking Info</th></tr></thead>
             <tbody>
-              <tr v-for="row in payload.takealot.recent_shipments" :key="String(row.shipment_id)">
-                <td><strong>#{{ text(row.shipment_id) }}</strong><small>{{ text(row.purchase_order_number) }}</small></td>
+              <tr v-for="row in payload.takealot.recent_shipments" :key="row.store_scope_key || `${row.store_code || 'current'}:${row.shipment_id || row.reference}`">
+                <td><strong>#{{ text(row.shipment_id) }}</strong><small>{{ text(row.purchase_order_number) }}</small><small v-if="multiStore">{{ row.store_name || row.store_code || "—" }}</small></td>
                 <td><span class="status-chip platform">{{ shipmentState(row) }}</span></td>
                 <td>{{ text(row.destination_region) }}</td>
                 <td>{{ number(row.quantity_sending) }}</td>

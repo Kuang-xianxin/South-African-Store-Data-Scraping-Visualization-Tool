@@ -86,13 +86,14 @@ import {
   matchesCompetitorSellerFilter,
 } from "../competitorSellerFilter";
 import {
+  COMPETITOR_OFFER_TREND_HORIZONTAL_LAYOUT,
   buildCompetitorOfferTrendLayout,
   type CompetitorOfferTrendPanelCount,
 } from "../competitorTrendLayout";
 import {
   competitorSearchTerm,
+  matchesCompetitorProductSearchValues,
   matchesCompetitorSearch,
-  matchesCompetitorSearchValues,
 } from "../competitorSearch";
 import {
   OWN_OFFER_LATEST_STATUS_OPTIONS,
@@ -102,6 +103,7 @@ import {
   type OwnOfferStockFilter,
 } from "../ownOfferLatestStatus";
 import { PRODUCT_IMAGE_SIZE, productThumbnailUrl } from "../productImages";
+import { modulePageHref } from "../moduleNavigation";
 import {
   buildPersonalWatchlistWorkspaceCards,
   filterPersonalWatchlistWorkspaceCards,
@@ -153,12 +155,15 @@ import type {
   CompetitorStoreTargetPayload,
   CompetitorVariantItem,
   OwnFollowerHistoryItem,
+  OwnStoreProfitabilityPayload,
   OwnStoreCompetitorOverview,
   OwnStoreScope,
   PersonalWatchlistLibrary,
   PersonalWatchlistLibrarySharePermission,
   PersonalWatchlistSharedItem,
   PersonalWatchlistShareUser,
+  ReturnCollectionStoreStatus,
+  ReturnsPayload,
 } from "../types";
 import { formatChinaDateTime } from "../time";
 
@@ -173,7 +178,10 @@ const props = defineProps<{
   accessibleConnectedStoreCount?: number;
   operatingConnectedStoreCount?: number;
   ownStoreScope?: OwnStoreScope;
+  requestedDetailPlid?: string;
+  requestedDetailRevision?: number;
   onPermissionDenied?: () => void;
+  detailOnly?: boolean;
 }>();
 
 interface CollectionQueueItem {
@@ -215,6 +223,11 @@ interface OfferTrendPanelPoint {
   titleChanged: boolean;
   title: string | null;
   previousTitle: string | null;
+}
+
+interface RequestedOwnStoreDetailBundle {
+  overview: OwnStoreCompetitorOverview;
+  detail: CompetitorDetail;
 }
 
 interface OfferTrendTitleChangeMarker {
@@ -291,8 +304,8 @@ const personalWatchlistBusyPlid = ref("");
 const personalWatchlistError = ref("");
 const personalWatchlistNotice = ref("");
 const personalWatchlistPage = ref(1);
-const personalWatchlistPageSize = ref(20);
-const personalWatchlistPageSizeOptions = [20, 50, 100] as const;
+const personalWatchlistPageSize = ref(21);
+const personalWatchlistPageSizeOptions = [21, 51, 99] as const;
 const personalWatchlistHighlightPlid = ref("");
 const personalWatchlistLibraries = ref<PersonalWatchlistLibrary[]>([]);
 const personalWatchlistDefaultConfigured = ref(false);
@@ -444,18 +457,31 @@ const selectedPlid = ref("");
 const selectedOfferKey = ref("");
 const offerSort = ref<CompetitorOfferSort>("net_outflow_desc");
 const hoveredOfferTrendIndex = ref<number | null>(null);
-const detail = ref<CompetitorDetail>({
+const detail = shallowRef<CompetitorDetail>({
+  category_path: [],
   history: [],
   reviews: [],
   variants: [],
   own_store_sales: [],
   own_store_traffic: [],
+  own_store_returns: emptyOwnStoreReturns(),
+  own_store_profitability: emptyOwnStoreProfitability(),
 });
 const detailModalOpen = ref(false);
 const detailLoading = ref(false);
 const detailError = ref("");
 const competitorDetailCache = new Map<string, CompetitorDetail>();
 const competitorDetailCacheLimit = 24;
+const requestedOwnStoreDetailCache = new Map<string, {
+  bundle: RequestedOwnStoreDetailBundle;
+  cachedAt: number;
+}>();
+const requestedOwnStoreDetailRequests = new Map<
+  string,
+  Promise<RequestedOwnStoreDetailBundle>
+>();
+const requestedOwnStoreDetailCacheLimit = 12;
+const requestedOwnStoreDetailCacheTtlMs = 15_000;
 const loading = ref(true);
 const ownStoreScopeLoading = ref(false);
 const ownStoreOverviewCache = new Map<string, OwnStoreCompetitorOverview>();
@@ -542,6 +568,8 @@ const reviewEndDate = ref("");
 const reviewSort = ref<
   "date_desc" | "date_asc" | "rating_desc" | "rating_asc"
 >("date_desc");
+const reviewPage = ref(1);
+const reviewPageSize = 20;
 const competitorQuery = ref("");
 const competitorSellerQuery = ref("");
 const competitorStockFilter = ref<OwnOfferStockFilter>("全部");
@@ -612,11 +640,28 @@ const selectedOwnSalesStoreCode = computed(() =>
     ? selectedOffer.value.卖家ID
     : null,
 );
+const showOwnProfitabilityPanel = computed(() =>
+  selected.value?.来源 === "own_store"
+  && selectedOffer.value?.报价来源 === "seller_api",
+);
+const selectedOwnProfitability = computed(() => {
+  if (!showOwnProfitabilityPanel.value || !selectedOffer.value) return null;
+  return (detail.value.own_store_profitability?.items ?? []).find(
+    (item) => item.offer_key === selectedOffer.value?.报价键,
+  ) ?? null;
+});
 const selectedOfferLink = computed(
   () => selectedOffer.value?.链接 || selected.value?.链接 || "#",
 );
 const selectedHeroImage = computed(
   () => selectedOffer.value?.图片 || selected.value?.图片 || null,
+);
+const selectedCategoryPath = computed(() => detail.value.category_path ?? []);
+const selectedCategoryPathText = computed(() =>
+  selectedCategoryPath.value.map((item) => item.name).join(" › "),
+);
+const selectedLeafCategory = computed(() =>
+  selectedCategoryPath.value[selectedCategoryPath.value.length - 1] ?? null,
 );
 const selectedSellerGroups = computed(() =>
   groupCompetitorOffersBySeller(selectedComparisonOffers.value, offerSort.value),
@@ -666,8 +711,8 @@ const selectedOfferIntervalReplenishmentUnits = computed(() =>
   offerIntervalReplenishmentUnits(detail.value.history, selectedOffer.value),
 );
 const offerTrendChartWidth = 960;
-const offerTrendPlotLeft = 86;
-const offerTrendPlotRight = 936;
+const offerTrendPlotLeft = COMPETITOR_OFFER_TREND_HORIZONTAL_LAYOUT.plotLeft;
+const offerTrendPlotRight = COMPETITOR_OFFER_TREND_HORIZONTAL_LAYOUT.plotRight;
 const offerTrendPlotWidth = offerTrendPlotRight - offerTrendPlotLeft;
 const offerTrendPanelCount = computed<CompetitorOfferTrendPanelCount>(
   () => showOwnTrafficPanel.value ? 4 : 3,
@@ -751,7 +796,7 @@ const offerTrendPanels = computed<OfferTrendPanel[]>(() => {
     definitions.push({
       key: "traffic",
       label: "近30天浏览量",
-      note: "按最近报价节点对齐",
+      note: "与 Seller 刷新同时间",
       color: "#2874a6",
       entries: selectedOwnTrafficChartTrend.value.map((point) => ({
         index: point.sourceIndex,
@@ -867,21 +912,11 @@ const activeOfferTrendPoint = computed(() => {
   return index === null ? null : selectedOfferTrend.value[index] ?? null;
 });
 const activeOwnTrafficPoint = computed<AlignedOwnStoreTrafficTrendPoint | null>(() => {
-  const observed = selectedOwnTrafficChartTrend.value.filter(
-    (point) => point.data_status === "observed",
-  );
-  if (!observed.length) return null;
   const offerIndex = activeOfferTrendIndex.value;
-  if (offerIndex === null) return observed.at(-1) ?? null;
-  return observed.reduce((nearest, point) => {
-    const nearestDistance = nearest.alignedOfferIndex === null
-      ? Number.POSITIVE_INFINITY
-      : Math.abs(nearest.alignedOfferIndex - offerIndex);
-    const pointDistance = point.alignedOfferIndex === null
-      ? Number.POSITIVE_INFINITY
-      : Math.abs(point.alignedOfferIndex - offerIndex);
-    return pointDistance < nearestDistance ? point : nearest;
-  });
+  if (offerIndex === null) return null;
+  return selectedOwnTrafficChartTrend.value.find(
+    (point) => point.alignedOfferIndex === offerIndex,
+  ) ?? null;
 });
 const activeOwnTrafficIndex = computed(
   () => activeOwnTrafficPoint.value?.sourceIndex ?? null,
@@ -1064,10 +1099,10 @@ const filteredTargetGroups = computed(() => {
   if (!query) return targetGroups.value;
   return targetGroups.value.filter((group) =>
     group.members.some((target) =>
-      matchesCompetitorSearchValues(
+      matchesCompetitorProductSearchValues(
+        [target.title],
         [
           target.plid,
-          target.title,
           target.url,
           ...targetOffers(target).flatMap((offer) => [
             offer.offer_id,
@@ -1417,6 +1452,28 @@ const filteredReviews = computed(() => {
   });
   return [...result].sort(compareReviews);
 });
+const reviewPageCount = computed(() =>
+  Math.max(1, Math.ceil(filteredReviews.value.length / reviewPageSize)),
+);
+const visibleReviews = computed(() => {
+  const start = (reviewPage.value - 1) * reviewPageSize;
+  return filteredReviews.value.slice(start, start + reviewPageSize);
+});
+const visibleReviewStart = computed(() =>
+  filteredReviews.value.length ? (reviewPage.value - 1) * reviewPageSize + 1 : 0,
+);
+const visibleReviewEnd = computed(() =>
+  Math.min(reviewPage.value * reviewPageSize, filteredReviews.value.length),
+);
+watch(
+  [selectedPlid, reviewFilter, reviewStartDate, reviewEndDate, reviewSort],
+  () => {
+    reviewPage.value = 1;
+  },
+);
+watch(reviewPageCount, (pageCount) => {
+  if (reviewPage.value > pageCount) reviewPage.value = pageCount;
+});
 const sharedBatchProgressIsAuthoritative = computed(
   () =>
     sharedBatchStatus.value.active
@@ -1659,6 +1716,10 @@ function isAbortError(error: unknown): boolean {
 
 onMounted(async () => {
   window.addEventListener("keydown", handleWindowKeydown);
+  if (props.detailOnly) {
+    loading.value = false;
+    return;
+  }
   let checkpoint: CollectionCheckpoint | null = null;
   if (props.isAdmin) {
     window.addEventListener("beforeunload", closeCollectionClientChannel);
@@ -1778,6 +1839,7 @@ function competitorDetailCacheKey(
   start: string,
   end: string,
   scope: OwnStoreScope,
+  capturedAt = selected.value?.采集时间 ?? "",
 ): string {
   return [
     plid,
@@ -1785,7 +1847,8 @@ function competitorDetailCacheKey(
     end,
     scope,
     scope === "current" ? props.currentStoreName ?? "" : "",
-    selected.value?.采集时间 ?? "",
+    capturedAt,
+    Math.floor(Date.now() / (60 * 60 * 1_000)),
   ].join("\u001f");
 }
 
@@ -1822,11 +1885,14 @@ watch(
     const requestId = ++detailRequestId;
     if (!plid) {
       detail.value = {
+        category_path: [],
         history: [],
         reviews: [],
         variants: [],
         own_store_sales: [],
         own_store_traffic: [],
+        own_store_returns: emptyOwnStoreReturns(),
+        own_store_profitability: emptyOwnStoreProfitability(),
       };
       detailLoading.value = false;
       detailError.value = "";
@@ -1864,6 +1930,7 @@ watch(
 );
 
 watch([ownStoreScope, () => props.currentStoreCode ?? ""], () => {
+  if (props.detailOnly) return;
   storeCompetitorPage.value = 1;
   selectedPlid.value = "";
   void loadOwnStoreScope();
@@ -2113,6 +2180,134 @@ function openProductModal(
   clearPersonalWatchlistFeedback();
   detailModalOpen.value = true;
 }
+
+let handledRequestedDetailRevision = 0;
+let requestedDetailRequestId = 0;
+
+function requestedOwnStoreDetailCacheKey(
+  plid: string,
+  scope: OwnStoreScope,
+  storeCode: string,
+): string {
+  return [scope, scope === "current" ? storeCode : "", plid].join("\u001f");
+}
+
+async function loadRequestedOwnStoreDetail(
+  plid: string,
+  scope: OwnStoreScope,
+  storeCode: string,
+): Promise<RequestedOwnStoreDetailBundle> {
+  const key = requestedOwnStoreDetailCacheKey(plid, scope, storeCode);
+  const cached = requestedOwnStoreDetailCache.get(key);
+  if (cached && Date.now() - cached.cachedAt <= requestedOwnStoreDetailCacheTtlMs) {
+    requestedOwnStoreDetailCache.delete(key);
+    requestedOwnStoreDetailCache.set(key, cached);
+    return cached.bundle;
+  }
+  if (cached) requestedOwnStoreDetailCache.delete(key);
+
+  const existingRequest = requestedOwnStoreDetailRequests.get(key);
+  if (existingRequest) return existingRequest;
+
+  const request = Promise.all([
+    fetchOwnStoreCompetitors(undefined, undefined, scope, undefined, plid),
+    fetchCompetitorDetail(plid, undefined, undefined, scope),
+  ]).then(([overview, detail]) => ({ overview, detail }));
+  requestedOwnStoreDetailRequests.set(key, request);
+  try {
+    const bundle = await request;
+    requestedOwnStoreDetailCache.set(key, { bundle, cachedAt: Date.now() });
+    while (requestedOwnStoreDetailCache.size > requestedOwnStoreDetailCacheLimit) {
+      const oldestKey = requestedOwnStoreDetailCache.keys().next().value;
+      if (oldestKey === undefined) break;
+      requestedOwnStoreDetailCache.delete(oldestKey);
+    }
+    return bundle;
+  } finally {
+    if (requestedOwnStoreDetailRequests.get(key) === request) {
+      requestedOwnStoreDetailRequests.delete(key);
+    }
+  }
+}
+
+function prefetchRequestedOwnStoreDetail(plid: string): void {
+  if (!props.detailOnly || !plid) return;
+  const scope = ownStoreScope.value;
+  const storeCode = props.currentStoreCode ?? "";
+  void loadRequestedOwnStoreDetail(plid, scope, storeCode).catch(() => undefined);
+}
+
+defineExpose({ prefetchRequestedOwnStoreDetail });
+
+async function openRequestedOwnStoreDetail(
+  revision: number,
+  plid: string,
+): Promise<void> {
+  const requestId = ++requestedDetailRequestId;
+  const requestScope = ownStoreScope.value;
+  const requestStoreCode = props.currentStoreCode ?? "";
+  pageError.value = "";
+  try {
+    const { overview, detail: prefetchedDetail } =
+      await loadRequestedOwnStoreDetail(plid, requestScope, requestStoreCode);
+    if (
+      requestId !== requestedDetailRequestId
+      || !ownStoreScopeStillCurrent(requestScope, requestStoreCode)
+      || revision <= handledRequestedDetailRevision
+    ) {
+      return;
+    }
+    const ownItem = overview.store_items.find((item) => item.plid === plid);
+    if (!ownItem) {
+      pageError.value = `未找到 PLID${plid} 的账号可见自有链接详情`;
+      handledRequestedDetailRevision = revision;
+      return;
+    }
+    applyOwnStoreOverview(overview);
+    appliedStartDate.value = overview.date_range.selected_start ?? "";
+    appliedEndDate.value = overview.date_range.selected_end ?? "";
+    rangeStartDate.value = appliedStartDate.value;
+    rangeEndDate.value = appliedEndDate.value;
+    competitorSourceView.value = "own_store";
+    const detailCacheKey = competitorDetailCacheKey(
+      plid,
+      appliedStartDate.value,
+      appliedEndDate.value,
+      requestScope,
+      ownItem.采集时间 ?? "",
+    );
+    detail.value = prefetchedDetail;
+    cacheCompetitorDetail(detailCacheKey, prefetchedDetail);
+    detailLoading.value = false;
+    detailError.value = "";
+    openProductModal(ownItem);
+    handledRequestedDetailRevision = revision;
+  } catch (error) {
+    if (requestId !== requestedDetailRequestId || isAbortError(error)) return;
+    pageError.value = error instanceof Error ? error.message : "读取自有链接详情失败";
+  }
+}
+
+watch(
+  [
+    () => props.requestedDetailRevision ?? 0,
+    () => props.requestedDetailPlid ?? "",
+    ownStoreScope,
+    () => props.currentStoreCode ?? "",
+  ],
+  ([revision, plid]) => {
+    if (
+      !props.detailOnly
+      || !revision
+      || revision <= handledRequestedDetailRevision
+      || !plid
+    ) {
+      return;
+    }
+    void openRequestedOwnStoreDetail(revision, plid);
+  },
+  { immediate: true },
+);
 
 function closeProductModal() {
   detailModalOpen.value = false;
@@ -4912,6 +5107,92 @@ async function stopCollection() {
   }
 }
 
+function emptyOwnStoreReturns(): ReturnsPayload {
+  return {
+    range_start: "",
+    range_end: "",
+    date_basis: "Africa/Johannesburg",
+    data_status: "uncollected",
+    store_statuses: [],
+    offer_returned_30_days: {
+      units: null,
+      covered_offer_count: 0,
+      offer_count: 0,
+      covered_store_count: 0,
+      store_count: 0,
+      captured_at: null,
+      metric: "quantity_returned_30_days",
+      window: "rolling_30_days",
+    },
+    summary: {
+      return_count: 0,
+      return_units: 0,
+      affected_product_count: 0,
+      quality_related_units: 0,
+      sellable_stock_units: 0,
+      removal_order_units: 0,
+      transaction_total_incl_vat: 0,
+    },
+    filters: { reasons: [], outcomes: [] },
+    items: [],
+    total: 0,
+    page: 1,
+    page_size: 20,
+    message: "退货明细尚未加载。",
+    source_notice: "未采集状态不能解释为零退货。",
+  };
+}
+
+function emptyOwnStoreProfitability(): OwnStoreProfitabilityPayload {
+  return {
+    items: [],
+    store_codes: [],
+    fee_window: {
+      start: "",
+      end: "",
+      days: 30,
+      date_basis: "Africa/Johannesburg",
+    },
+    exchange_rate: {
+      base_currency: "CNY",
+      quote_currency: "ZAR",
+      rate: null,
+      rate_date: null,
+      fetched_at: null,
+      source: "Frankfurter 机构参考汇率",
+      status: "not_required",
+      message: "成本与利润尚未加载。",
+    },
+    message: "成本与利润尚未加载。",
+  };
+}
+
+function returnDataStatusLabel(
+  status: ReturnsPayload["data_status"] | ReturnCollectionStoreStatus["data_status"],
+): string {
+  return {
+    collected: "明细已采集",
+    partial: "明细仅部分覆盖",
+    stale: "沿用最近成功明细",
+    failed: "明细采集失败",
+    uncollected: "明细尚未采集",
+    unavailable: "明细暂不可读",
+  }[status];
+}
+
+function returnOutcomeText(item: ReturnsPayload["items"][number]): string {
+  return item.outcome_labels.length ? item.outcome_labels.join("、") : "待平台处理";
+}
+
+function returnTransactionText(item: ReturnsPayload["items"][number]): string {
+  const types = item.transactions
+    .map((transaction) => String(transaction.transaction_type ?? "").trim())
+    .filter(Boolean);
+  if (!types.length && item.transaction_total_incl_vat === 0) return "无展开交易";
+  const prefix = types.length ? `${[...new Set(types)].join("、")} · ` : "";
+  return `${prefix}${formatCurrency(item.transaction_total_incl_vat)}`;
+}
+
 function formatCurrency(value: number | null) {
   return value === null
     ? "—"
@@ -4920,6 +5201,30 @@ function formatCurrency(value: number | null) {
         currency: "ZAR",
         maximumFractionDigits: 2,
       }).format(value);
+}
+
+function formatRmb(value: number | null | undefined) {
+  return value === null || value === undefined
+    ? "—"
+    : new Intl.NumberFormat("zh-CN", {
+        style: "currency",
+        currency: "CNY",
+        maximumFractionDigits: 2,
+      }).format(value);
+}
+
+function formatProfitPercentage(value: number | null | undefined) {
+  return value === null || value === undefined
+    ? "—"
+    : `${value.toLocaleString("zh-CN", { maximumFractionDigits: 2 })}%`;
+}
+
+function profitAmountClass(value: number | null | undefined) {
+  return {
+    positive: value !== null && value !== undefined && value > 0,
+    negative: value !== null && value !== undefined && value < 0,
+    neutral: value === 0,
+  };
 }
 
 function formatSignedCurrency(value: number | null) {
@@ -5144,6 +5449,7 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
     class="competitor-module"
     :class="{ 'admin-priority-layout': props.isAdmin }"
   >
+    <template v-if="!props.detailOnly">
     <header class="hero">
       <div>
         <p class="eyebrow">TAKEALOT MARKET INTELLIGENCE</p>
@@ -5725,7 +6031,7 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
             <input
               v-model="personalWatchlistQuery"
               type="search"
-              placeholder="商品名称、PLID、完整链接或卖家"
+              placeholder="商品名称支持模糊搜索，也可输入 PLID、平台 SKU、公司 SKU、完整链接或卖家"
             />
           </label>
           <label
@@ -5928,6 +6234,9 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
                     ? ownStoreVariantCount(card.competitor)
                     : card.competitor.跟卖报价.length
                 }} 个变体 / 报价
+              </p>
+              <p v-if="card.competitor?.来源 === 'own_store'">
+                公司 SKU {{ card.competitor.company_skus?.length ? card.competitor.company_skus.join("、") : "未关联" }}
               </p>
               <p v-else-if="personalWatchlistOverviewHydrating">
                 正在优先恢复个人池内已采集的商品、图片、价格和库存，不需要等待整页竞品完成计算。
@@ -6136,7 +6445,7 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
                     <input
                       v-model="targetQuery"
                       type="search"
-                      placeholder="商品名称、PLID 或完整链接"
+                      placeholder="商品名称支持模糊搜索，也可输入 PLID 或完整链接"
                     />
                   </label>
                   <label class="target-page-size-field">
@@ -7559,7 +7868,7 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
             <input
               v-model="competitorQuery"
               type="search"
-              placeholder="商品名称、PLID、完整链接或卖家"
+              placeholder="商品名称支持模糊搜索，也可输入 PLID、平台 SKU、公司 SKU、完整链接或卖家"
             />
           </label>
           <label
@@ -7879,6 +8188,9 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
                       {{ followerSellerCount(item) }} 个跟卖卖家 ·
                       {{ ownStoreVariantCount(item) }} 个自有变体
                     </p>
+                    <p class="own-store-company-skus">
+                      公司 SKU {{ item.company_skus?.length ? item.company_skus.join("、") : "未关联" }}
+                    </p>
                     <div class="own-offer-latest-statuses">
                       <span>最新 Offer 状态</span>
                       <strong
@@ -8123,6 +8435,7 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
         </section>
       </div>
     </section>
+    </template>
 
     <Teleport to="body">
       <div
@@ -8162,11 +8475,30 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
                   {{ selectedOffer ? (selectedOffer.卖家 || "未知卖家") : (selected.当前卖家 || "未知卖家") }}
                   <template v-if="selectedOffer">
                     · SKU {{ selectedOffer.SKU || "未返回" }}
+                    · 公司 SKU {{ selectedOffer.company_sku || "未关联" }}
                   </template>
                 </span>
                 <small v-if="selectedOffer?.offer_id" class="offer-id-secondary">
                   Offer ID {{ selectedOffer.offer_id }}
                 </small>
+                <div
+                  class="competitor-category-path"
+                  :class="{ 'is-missing': !detailLoading && !selectedCategoryPath.length }"
+                  aria-label="商品具体类目"
+                >
+                  <small>商品具体类目</small>
+                  <span v-if="detailLoading">正在读取本地类目记录…</span>
+                  <span v-else-if="detailError">类目暂无法读取</span>
+                  <template v-else-if="selectedCategoryPath.length">
+                    <span>{{ selectedCategoryPathText }}</span>
+                    <em v-if="selectedLeafCategory?.id">
+                      末级类目 ID {{ selectedLeafCategory.id }}
+                    </em>
+                  </template>
+                  <span v-else>
+                    本地历史快照暂无具体类目；成功完成一次公开商品采集后自动补齐。
+                  </span>
+                </div>
                 <div
                   v-if="selected.来源 === 'own_store' && selectedOffer?.报价来源 === 'seller_api'"
                   class="competitor-modal-current-offer-status"
@@ -8284,6 +8616,316 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
             </div>
 
             <div class="competitor-modal-content">
+              <section
+                v-if="showOwnProfitabilityPanel"
+                class="panel own-profitability-panel"
+                aria-label="当前自有 Offer 成本与人民币利润"
+              >
+                <div class="own-profitability-heading">
+                  <div>
+                    <p class="section-kicker">COST &amp; PROFIT</p>
+                    <h2>成本与利润（人民币）</h2>
+                  </div>
+                  <span v-if="selectedOwnProfitability">
+                    {{ selectedOwnProfitability.store_name }}
+                    · SKU {{ selectedOwnProfitability.sku || "未返回" }}
+                    · 公司 SKU {{ selectedOwnProfitability.company_sku || "未关联" }}
+                  </span>
+                  <span v-else>
+                    {{ detail.own_store_profitability?.message || "当前 Offer 暂无利润数据" }}
+                  </span>
+                </div>
+
+                <template v-if="selectedOwnProfitability">
+                  <div class="own-profitability-grid">
+                    <article class="own-profitability-card cost-card">
+                      <small>人民币单件成本</small>
+                      <strong>{{ formatRmb(selectedOwnProfitability.cost_rmb) }}</strong>
+                      <span v-if="selectedOwnProfitability.cost_zar !== null">
+                        兰特参考值 ≈ {{ formatCurrency(selectedOwnProfitability.cost_zar) }}
+                      </span>
+                      <span v-else>{{ selectedOwnProfitability.message }}</span>
+                      <em v-if="selectedOwnProfitability.cost_effective_date">
+                        成本生效 {{ selectedOwnProfitability.cost_effective_date }}
+                      </em>
+                    </article>
+
+                    <article
+                      v-if="selectedOwnProfitability.scenarios.current_gross"
+                      class="own-profitability-card"
+                    >
+                      <small>当前售价毛利润</small>
+                      <strong
+                        :class="profitAmountClass(
+                          selectedOwnProfitability.scenarios.current_gross.profit_rmb,
+                        )"
+                      >
+                        {{ formatRmb(selectedOwnProfitability.scenarios.current_gross.profit_rmb) }}
+                      </strong>
+                      <span>
+                        销售利润率
+                        {{ formatProfitPercentage(
+                          selectedOwnProfitability.scenarios.current_gross.profit_margin_percentage,
+                        ) }}
+                        · 成本加价率
+                        {{ formatProfitPercentage(
+                          selectedOwnProfitability.scenarios.current_gross.cost_markup_percentage,
+                        ) }}
+                      </span>
+                      <em>
+                        当前售价折合
+                        {{ formatRmb(selectedOwnProfitability.scenarios.current_gross.price_rmb) }}
+                        · 未扣平台及履约费用
+                      </em>
+                    </article>
+
+                  </div>
+
+                  <div class="own-profitability-evidence">
+                    <p>
+                      <strong>汇率证据</strong>
+                      <template v-if="detail.own_store_profitability.exchange_rate.rate !== null">
+                        1 CNY = {{ detail.own_store_profitability.exchange_rate.rate }} ZAR
+                        · 汇率日期 {{ detail.own_store_profitability.exchange_rate.rate_date }}
+                        · {{ detail.own_store_profitability.exchange_rate.source }}
+                        <template
+                          v-if="detail.own_store_profitability.exchange_rate.fetched_at"
+                        >
+                          · 获取于
+                          {{ formatChinaDateTime(
+                            detail.own_store_profitability.exchange_rate.fetched_at,
+                          ) }}
+                        </template>
+                        <template
+                          v-if="detail.own_store_profitability.exchange_rate.status === 'stale'"
+                        >
+                          · 缓存参考值
+                        </template>
+                      </template>
+                      <template v-else>
+                        {{ detail.own_store_profitability.exchange_rate.message }}
+                      </template>
+                    </p>
+                    <p class="own-profitability-formula">
+                      当前售价毛利润 = 售价（ZAR）÷ CNY/ZAR 汇率 − 人民币成本；
+                      未扣平台及履约费用，也未计未进入主档成本的头程、税费、广告或退货损失等；
+                      销售利润率以折合人民币售价为分母，所有利润金额均为人民币。
+                    </p>
+                  </div>
+                </template>
+
+                <div v-else class="empty-state slim">
+                  当前选中的 Seller API Offer 尚未匹配到本地成本与汇率证据；
+                  切换变体或店铺后会按 Offer ID 重新匹配。
+                </div>
+              </section>
+
+              <section
+                v-if="selected.来源 === 'own_store'"
+                class="panel company-inventory-panel"
+                aria-label="公司 SKU 海外仓和平台仓库存"
+              >
+                <div class="company-inventory-heading">
+                  <div>
+                    <p class="section-kicker">COMPANY SKU INVENTORY</p>
+                    <h2>公司 SKU 全部库存</h2>
+                  </div>
+                  <span>{{ detail.company_inventory?.message || "正在等待本地库存快照" }}</span>
+                </div>
+                <div
+                  v-if="detail.company_inventory?.items.length"
+                  class="company-inventory-list"
+                >
+                  <article
+                    v-for="inventory in detail.company_inventory.items"
+                    :key="inventory.company_sku"
+                    class="company-inventory-card"
+                  >
+                    <header>
+                      <div>
+                        <span>公司 SKU</span>
+                        <strong>{{ inventory.company_sku }}</strong>
+                        <small>{{ inventory.company_product_name }}</small>
+                      </div>
+                      <small>
+                        对应平台 SKU {{ inventory.mapped_platform_skus.join("、") }}
+                      </small>
+                    </header>
+                    <div class="company-inventory-columns">
+                      <section>
+                        <div class="company-inventory-subheading">
+                          <strong>海外仓 · 长睿 W8（共享一次）</strong>
+                          <small v-if="inventory.overseas_warehouse.snapshot_at">
+                            {{ formatChinaDateTime(inventory.overseas_warehouse.snapshot_at) }}
+                          </small>
+                        </div>
+                        <div v-if="inventory.overseas_warehouse.available" class="inventory-stage-grid">
+                          <div><span>现存</span><strong>{{ inventory.overseas_warehouse.stages.stock_total?.value ?? 0 }}</strong></div>
+                          <div><span>可用</span><strong>{{ inventory.overseas_warehouse.stages.usable_stock?.value ?? 0 }}</strong></div>
+                          <div><span>锁定</span><strong>{{ inventory.overseas_warehouse.stages.locked_stock?.value ?? 0 }}</strong></div>
+                          <div><span>已分配</span><strong>{{ inventory.overseas_warehouse.stages.outbound_allocated?.value ?? 0 }}</strong></div>
+                          <div><span>在途</span><strong>{{ inventory.overseas_warehouse.stages.transit_stock?.value ?? 0 }}</strong></div>
+                          <div><span>不良</span><strong>{{ inventory.overseas_warehouse.stages.defective_stock?.value ?? 0 }}</strong></div>
+                        </div>
+                        <p v-else class="inventory-unavailable">
+                          {{ inventory.overseas_warehouse.message }}
+                        </p>
+                        <p v-if="inventory.overseas_warehouse.available" class="method-note">
+                          {{ inventory.overseas_warehouse.message }}
+                        </p>
+                      </section>
+                      <section>
+                        <div class="company-inventory-subheading">
+                          <strong>Takealot 平台仓 · 授权店铺</strong>
+                          <small v-if="inventory.platform_warehouse.latest_captured_at">
+                            {{ formatChinaDateTime(inventory.platform_warehouse.latest_captured_at) }}
+                          </small>
+                        </div>
+                        <div class="inventory-stage-grid platform-stages">
+                          <div><span>可售</span><strong>{{ inventory.platform_warehouse.stages.available.coverage ? inventory.platform_warehouse.stages.available.value : "—" }}</strong></div>
+                          <div><span>在途</span><strong>{{ inventory.platform_warehouse.stages.on_way.coverage ? inventory.platform_warehouse.stages.on_way.value : "—" }}</strong></div>
+                          <div><span>收货中</span><strong>{{ inventory.platform_warehouse.stages.in_receiving.coverage ? inventory.platform_warehouse.stages.in_receiving.value : "—" }}</strong></div>
+                        </div>
+                        <div v-if="inventory.platform_warehouse.offers.length" class="platform-inventory-offers">
+                          <div
+                            v-for="offer in inventory.platform_warehouse.offers"
+                            :key="`${offer.store_code}:${offer.offer_id}`"
+                          >
+                            <strong>{{ offer.store_name }}</strong>
+                            <span>{{ offer.platform_sku }}</span>
+                            <small>
+                              可售 {{ offer.platform_available_stock ?? "—" }} ·
+                              在途 {{ offer.platform_stock_on_way ?? "—" }} ·
+                              收货中 {{ offer.platform_stock_in_receiving ?? "—" }}
+                            </small>
+                          </div>
+                        </div>
+                        <p v-else class="inventory-unavailable">授权店铺中暂无对应平台 Offer。</p>
+                      </section>
+                    </div>
+                    <p class="method-note">
+                      各字段是不同库存阶段，可能相互包含；页面不把海外仓与平台仓阶段强行相加。
+                    </p>
+                  </article>
+                </div>
+                <div v-else class="empty-state slim">
+                  {{ detail.company_inventory?.message || "该链接的平台 SKU 尚未关联公司 SKU。" }}
+                </div>
+              </section>
+
+              <section
+                v-if="selected.来源 === 'own_store'"
+                class="panel own-return-panel"
+                aria-label="该自有商品退货情况"
+              >
+                <div class="own-return-heading">
+                  <div>
+                    <p class="section-kicker">SELLER RETURNS</p>
+                    <h2>退货情况</h2>
+                    <span>
+                      {{ detail.own_store_returns.range_start || "—" }} 至
+                      {{ detail.own_store_returns.range_end || "—" }} · 南非业务日
+                    </span>
+                  </div>
+                  <div class="own-return-heading-actions">
+                    <strong
+                      class="own-return-status"
+                      :class="`status-${detail.own_store_returns.data_status}`"
+                    >
+                      {{ returnDataStatusLabel(detail.own_store_returns.data_status) }}
+                    </strong>
+                    <a :href="modulePageHref('returns')">进入退货管理</a>
+                  </div>
+                </div>
+
+                <div class="own-return-metric-grid">
+                  <article>
+                    <small>Offers 滚动30天退货件数</small>
+                    <strong>{{ detail.own_store_returns.offer_returned_30_days.units ?? "—" }}</strong>
+                    <span>独立滚动指标，不用于代替下方明细</span>
+                  </article>
+                  <article>
+                    <small>选定区间退货件数</small>
+                    <strong>{{ detail.own_store_returns.summary.return_units }}</strong>
+                    <span>{{ detail.own_store_returns.summary.return_count }} 条明细</span>
+                  </article>
+                  <article>
+                    <small>质量 / 错发相关</small>
+                    <strong>{{ detail.own_store_returns.summary.quality_related_units }}</strong>
+                    <span>缺陷、损坏或与下单不符</span>
+                  </article>
+                  <article>
+                    <small>处理结果</small>
+                    <strong>
+                      {{ detail.own_store_returns.summary.sellable_stock_units }} 可售 ·
+                      {{ detail.own_store_returns.summary.removal_order_units }} 移除
+                    </strong>
+                    <span>仅按 /returns 已展开 outcome 汇总</span>
+                  </article>
+                </div>
+
+                <div
+                  v-if="detail.own_store_returns.store_statuses.length"
+                  class="own-return-store-statuses"
+                >
+                  <span
+                    v-for="status in detail.own_store_returns.store_statuses"
+                    :key="status.store_code"
+                    :class="`status-${status.data_status}`"
+                  >
+                    <strong>{{ status.store_name }}</strong>
+                    {{ returnDataStatusLabel(status.data_status) }}
+                    <small v-if="status.last_success_at">
+                      · {{ formatChinaDateTime(status.last_success_at) }}
+                    </small>
+                  </span>
+                </div>
+
+                <div v-if="detail.own_store_returns.items.length" class="own-return-table-wrap">
+                  <table class="own-return-table">
+                    <thead>
+                      <tr>
+                        <th>退货日期</th>
+                        <th>店铺 / SKU</th>
+                        <th>数量与原因</th>
+                        <th>处理结果</th>
+                        <th>客户备注</th>
+                        <th>交易展开</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <tr
+                        v-for="item in detail.own_store_returns.items"
+                        :key="item.store_scope_key"
+                      >
+                        <td>
+                          <strong>{{ item.return_date || "—" }}</strong>
+                          <small>{{ item.return_reference_number || item.seller_return_id }}</small>
+                        </td>
+                        <td>
+                          <strong>{{ item.store_name }}</strong>
+                          <span>{{ item.company_sku || item.sku || item.offer_id || "—" }}</span>
+                        </td>
+                        <td>
+                          <strong>{{ item.quantity }} 件</strong>
+                          <span>{{ item.return_reason_label }}</span>
+                        </td>
+                        <td>{{ returnOutcomeText(item) }}</td>
+                        <td class="own-return-comment">{{ item.customer_comment || "未提供" }}</td>
+                        <td>{{ returnTransactionText(item) }}</td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+                <div v-else class="empty-state slim own-return-empty">
+                  <strong>{{ detail.own_store_returns.message }}</strong>
+                  <span>{{ detail.own_store_returns.source_notice }}</span>
+                </div>
+                <p v-if="detail.own_store_returns.items.length" class="method-note">
+                  {{ detail.own_store_returns.message }} {{ detail.own_store_returns.source_notice }}
+                </p>
+              </section>
+
               <section class="panel competitor-offer-workbench" aria-label="卖家报价连续对比台">
                 <div class="competitor-offer-workbench-heading">
                   <div>
@@ -8394,6 +9036,9 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
                           <small>
                             {{ offer.报价来源 === "seller_api" ? "自有 Seller API" : "公开跟卖" }}
                             · SKU {{ offer.SKU || "未返回" }}
+                            <template v-if="offer.报价来源 === 'seller_api'">
+                              · 公司 SKU {{ offer.company_sku || "未关联" }}
+                            </template>
                           </small>
                         </span>
                         <span>
@@ -8467,10 +9112,13 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
                             ? "—"
                             : activeOwnTrafficPoint.page_views_30_days.toLocaleString("zh-CN") }}
                         </strong>
-                        <span v-if="activeOwnTrafficPoint?.captured_at">
-                          流量快照 {{ formatChinaDateTime(activeOwnTrafficPoint.captured_at) }}
+                        <span v-if="activeOwnTrafficPoint?.data_status === 'observed' && activeOwnTrafficPoint.captured_at">
+                          流量记录 {{ formatChinaDateTime(activeOwnTrafficPoint.captured_at) }}
                         </span>
-                        <span v-else>当前范围没有可用流量快照</span>
+                        <span v-else-if="activeOwnTrafficPoint?.captured_at">
+                          该次 Seller 刷新的历史流量无法证实
+                        </span>
+                        <span v-else>当前范围没有同次 Seller 流量记录</span>
                         <span
                           v-if="activeOwnTrafficPoint?.title_changed"
                           class="offer-trend-title-change-detail"
@@ -8519,10 +9167,26 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
                             :y2="panel.top - offerTrendLayout.dividerOffset"
                             vector-effect="non-scaling-stroke"
                           />
-                          <text class="offer-trend-panel-label" x="8" :y="panel.top + 12">
+                          <line
+                            class="offer-trend-panel-text-divider"
+                            :x1="COMPETITOR_OFFER_TREND_HORIZONTAL_LAYOUT.panelTextDividerX"
+                            :x2="COMPETITOR_OFFER_TREND_HORIZONTAL_LAYOUT.panelTextDividerX"
+                            :y1="panel.top - 2"
+                            :y2="panel.bottom + 2"
+                            vector-effect="non-scaling-stroke"
+                          />
+                          <text
+                            class="offer-trend-panel-label"
+                            :x="COMPETITOR_OFFER_TREND_HORIZONTAL_LAYOUT.panelTextX"
+                            :y="panel.top + 12"
+                          >
                             {{ panel.label }}
                           </text>
-                          <text class="offer-trend-panel-note" x="8" :y="panel.top + 29">
+                          <text
+                            class="offer-trend-panel-note"
+                            :x="COMPETITOR_OFFER_TREND_HORIZONTAL_LAYOUT.panelTextX"
+                            :y="panel.top + 29"
+                          >
                             {{ panel.note }}
                           </text>
                           <g v-for="tick in panel.ticks" :key="`${panel.key}:${tick.y}`">
@@ -8535,7 +9199,7 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
                             />
                             <text
                               class="offer-trend-axis-label"
-                              :x="offerTrendPlotLeft - 8"
+                              :x="COMPETITOR_OFFER_TREND_HORIZONTAL_LAYOUT.axisLabelX"
                               :y="tick.y + 4"
                             >{{ tick.label }}</text>
                           </g>
@@ -8626,9 +9290,9 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
                         >{{ tick.label }}</text>
                       </svg>
                       <p>
-                        图表共用同一北京时间横轴和绘图区边界；图表上方固定显示当前时间点的报价及最近真实流量快照。
+                        图表共用同一北京时间横轴和绘图区边界；图表上方固定显示当前 Seller 刷新点的报价、库存、评论和同次流量记录。
                         <template v-if="showOwnTrafficPanel">
-                          近30天浏览量是 Seller Offer 滚动快照，不是当天流量或访客数；流量节点会吸附到时间最近的上方报价观察节点以便纵向比较，固定详情仍显示真实流量快照时间；粗边节点表示商品名称发生变更。
+                          近30天浏览量是 Seller Offer 滚动值，不是当天流量或访客数；只展示时间戳完全相同的 Seller 刷新记录，历史无法证实的点保持缺口；粗边节点表示商品名称发生变更。
                         </template>
                         鼠标横向移动或键盘左右方向键可切换时间点。虚线只连接缺失区间两端的真实值，不代表中间数值或补零。
                       </p>
@@ -9011,7 +9675,8 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
                     <h2>公开评论（同一 PLID 商品共用）</h2>
                   </div>
                   <span class="review-result-count">
-                    显示 {{ filteredReviews.length }} / {{ detail.reviews.length }} 条
+                    当前 {{ visibleReviewStart }}–{{ visibleReviewEnd }} / {{ filteredReviews.length }} 条
+                    · 全部 {{ detail.reviews.length }} 条
                   </span>
                 </div>
                 <p class="method-note">
@@ -9070,7 +9735,7 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
                 </div>
                 <div v-else class="review-list">
                   <article
-                    v-for="(review, reviewIndex) in filteredReviews"
+                    v-for="(review, reviewIndex) in visibleReviews"
                     :key="`${review.评论日期}-${review.标题}-${review.评论人}-${reviewIndex}`"
                   >
                     <span class="review-score" :class="reviewTone(review.星级)">
@@ -9086,6 +9751,29 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
                     </div>
                   </article>
                 </div>
+                <nav
+                  v-if="reviewPageCount > 1"
+                  class="compact-pagination detail-review-pagination"
+                  aria-label="商品评论分页"
+                >
+                  <button
+                    type="button"
+                    class="quiet-button"
+                    :disabled="reviewPage <= 1"
+                    @click="reviewPage -= 1"
+                  >
+                    上一页
+                  </button>
+                  <span>第 {{ reviewPage }} / {{ reviewPageCount }} 页</span>
+                  <button
+                    type="button"
+                    class="quiet-button"
+                    :disabled="reviewPage >= reviewPageCount"
+                    @click="reviewPage += 1"
+                  >
+                    下一页
+                  </button>
+                </nav>
               </section>
             </div>
 
@@ -9100,7 +9788,7 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
       </div>
     </Teleport>
 
-    <footer class="module-footer">
+    <footer v-if="!props.detailOnly" class="module-footer">
       价格和库存按每个卖家报价分开展示；同一 PLID 的商品评论共用。所有观察信号均需结合连续快照判断。
     </footer>
   </div>
