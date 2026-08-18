@@ -114,9 +114,14 @@ function statusInventoryLabel(item: AnomalyProductItem): string {
   const parts = [
     item.available_stock > 0 ? `现货 ${number(item.available_stock)}` : "",
     item.receiving_stock > 0 ? `收货中 ${number(item.receiving_stock)}` : "",
-    item.on_way_stock > 0 ? `在途 ${number(item.on_way_stock)}` : "",
   ].filter(Boolean);
-  return parts.join(" · ") || "库存明细待补充";
+  return parts.join(" · ") || "到仓库存明细待补充";
+}
+
+function onWayInventoryLabel(item: AnomalyProductItem): string {
+  return item.on_way_stock > 0
+    ? ` · 在途 ${number(item.on_way_stock)}（不计入）`
+    : "";
 }
 
 function emptyMessage(): string {
@@ -135,7 +140,7 @@ function emptyMessage(): string {
         <p class="section-kicker">EXCEPTION PRODUCT RADAR</p>
         <h2>异常商品</h2>
         <p class="hero-copy">
-          各类异常独立展示，不把禁售库存混入滞销；零销量只采用已核验完成的南非业务日。
+          各类异常独立展示；零销量只采用已核验完成的南非业务日，不可售库存只统计已经到平台仓的商品。
         </p>
       </div>
       <div class="evidence-card">
@@ -179,7 +184,7 @@ function emptyMessage(): string {
         <template v-else>
           <span>当前规则</span>
           <strong>{{ ANOMALY_VIEW_LABELS[activeView] }}</strong>
-          <small>库存包含现货、收货中和在途，状态之间互不合并</small>
+          <small>只统计现货和平台收货中，在途不计入异常库存</small>
         </template>
       </div>
       <label class="anomaly-search">
@@ -253,9 +258,11 @@ function emptyMessage(): string {
           <small>上次动销 {{ item.last_sale_on || "现有完整历史内未见销量" }}</small>
         </div>
         <div v-else class="primary-signal disabled">
-          <span>仍占用库存</span>
+          <span>已到平台仓</span>
           <strong>{{ number(item.inventory_units) }} 件</strong>
-          <small>{{ statusInventoryLabel(item) }}</small>
+          <small>
+            {{ statusInventoryLabel(item) }}{{ onWayInventoryLabel(item) }}
+          </small>
         </div>
 
         <dl class="card-metrics">
