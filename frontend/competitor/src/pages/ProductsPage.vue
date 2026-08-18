@@ -7,12 +7,23 @@ import {
   productThumbnailUrl,
   type ProductImageSize,
 } from "../productImages";
-import type { ProductDetailPayload, ProductItem, ProductsPayload } from "../types";
+import { matchesProductSearch } from "../productSearch";
+import { formatChinaDateTime } from "../time";
+import type {
+  OwnStoreScope,
+  ProductDetailPayload,
+  ProductItem,
+  ProductsPayload,
+} from "../types";
 
-const props = defineProps<{ asOf: string }>();
+const props = defineProps<{
+  asOf: string;
+  storeScope?: OwnStoreScope;
+  multiStoreLabel?: string;
+}>();
 const payload = ref<ProductsPayload | null>(null);
 const detail = ref<ProductDetailPayload | null>(null);
-const selectedId = ref("");
+const selectedKey = ref("");
 const query = ref("");
 const loading = ref(true);
 const detailLoading = ref(false);
@@ -21,18 +32,29 @@ const detailError = ref("");
 const detailModalOpen = ref(false);
 const failedImageUrls = ref<Set<string>>(new Set());
 let returnFocusElement: HTMLElement | null = null;
+let productsRequestRevision = 0;
+let detailRequestRevision = 0;
 
 const filtered = computed(() => {
-  const needle = query.value.trim().toLowerCase();
-  if (!needle) return payload.value?.items ?? [];
-  return (payload.value?.items ?? []).filter((item) =>
-    [item.offer_id, item.sku, item.tsin_id, item.barcode, item.title]
-      .filter(Boolean)
-      .some((value) => String(value).toLowerCase().includes(needle)),
-  );
+  if (!query.value.trim()) return payload.value?.items ?? [];
+  return (payload.value?.items ?? []).filter((item) => matchesProductSearch(
+    {
+      productNames: [item.title, item.company_product_name],
+      otherValues: [
+        item.offer_id,
+        item.sku,
+        item.company_sku,
+        item.store_name,
+        item.store_code,
+        item.tsin_id,
+        item.barcode,
+      ],
+    },
+    query.value,
+  ));
 });
 const selected = computed(
-  () => payload.value?.items.find((item) => item.offer_id === selectedId.value) ?? null,
+  () => payload.value?.items.find((item) => itemKey(item) === selectedKey.value) ?? null,
 );
 const selectedImageUrl = computed(() =>
   imageUrl(selected.value, PRODUCT_IMAGE_SIZE.detail),
@@ -49,7 +71,11 @@ const salesAxis = computed(() => {
   return { maximum, ticks };
 });
 
-watch(() => props.asOf, loadProducts, { immediate: true });
+watch(
+  [() => props.asOf, () => props.storeScope],
+  loadProducts,
+  { immediate: true },
+);
 watch(detailModalOpen, (open) => {
   document.body.style.overflow = open ? "hidden" : "";
 });
@@ -59,56 +85,91 @@ onMounted(() => {
 });
 
 onBeforeUnmount(() => {
+  productsRequestRevision += 1;
+  detailRequestRevision += 1;
   window.removeEventListener("keydown", handleWindowKeydown);
   document.body.style.overflow = "";
 });
 
 async function loadProducts() {
+  const requestRevision = ++productsRequestRevision;
+  const requestedAsOf = props.asOf;
+  const requestedStoreScope = props.storeScope ?? "current";
+  detailRequestRevision += 1;
+  detailLoading.value = false;
   loading.value = true;
   error.value = "";
   try {
-    payload.value = await fetchProducts(props.asOf);
+    const nextPayload = await fetchProducts(requestedAsOf, requestedStoreScope);
     if (
-      selectedId.value &&
-      !payload.value.items.some((item) => item.offer_id === selectedId.value)
+      requestRevision !== productsRequestRevision
+      || requestedAsOf !== props.asOf
+      || requestedStoreScope !== (props.storeScope ?? "current")
+    ) return;
+    payload.value = nextPayload;
+    if (
+      selectedKey.value &&
+      !payload.value.items.some((item) => itemKey(item) === selectedKey.value)
     ) {
       closeProductDetail();
-      selectedId.value = "";
+      selectedKey.value = "";
     }
   } catch (reason) {
+    if (requestRevision !== productsRequestRevision) return;
     error.value = reason instanceof Error ? reason.message : "商品数据读取失败";
   } finally {
-    loading.value = false;
+    if (requestRevision === productsRequestRevision) loading.value = false;
   }
 }
 
 async function loadDetail() {
-  if (!selectedId.value) {
+  if (!selected.value) {
     detail.value = null;
     return;
   }
+  const requestRevision = ++detailRequestRevision;
+  const requestedKey = selectedKey.value;
+  const requestedAsOf = props.asOf;
+  const requestedStoreCode = selected.value.store_code;
   detailLoading.value = true;
   detailError.value = "";
   try {
-    detail.value = await fetchProductDetail(selectedId.value, props.asOf);
+    const nextDetail = await fetchProductDetail(
+      selected.value.offer_id,
+      requestedAsOf,
+      requestedStoreCode,
+    );
+    if (
+      requestRevision !== detailRequestRevision
+      || selectedKey.value !== requestedKey
+      || props.asOf !== requestedAsOf
+    ) return;
+    detail.value = nextDetail;
   } catch (reason) {
+    if (requestRevision !== detailRequestRevision) return;
     detail.value = null;
     detailError.value = reason instanceof Error ? reason.message : "商品详情读取失败";
   } finally {
-    detailLoading.value = false;
+    if (requestRevision === detailRequestRevision) detailLoading.value = false;
   }
 }
 
 function openProductDetail(item: ProductItem, event?: Event) {
   returnFocusElement =
     event?.currentTarget instanceof HTMLElement ? event.currentTarget : null;
-  selectedId.value = item.offer_id;
+  selectedKey.value = itemKey(item);
   detail.value = null;
   detailModalOpen.value = true;
   void loadDetail();
 }
 
+function itemKey(item: ProductItem) {
+  return item.store_scope_key || `${item.store_code || "current"}:${item.offer_id}`;
+}
+
 function closeProductDetail() {
+  detailRequestRevision += 1;
+  detailLoading.value = false;
   detailModalOpen.value = false;
   const target = returnFocusElement;
   returnFocusElement = null;
@@ -153,6 +214,19 @@ function currency(value: unknown) {
     : "—";
 }
 
+function rmbCost(value: unknown) {
+  return typeof value === "number"
+    ? `¥${new Intl.NumberFormat("zh-CN", {
+        minimumFractionDigits: 2,
+        maximumFractionDigits: 4,
+      }).format(value)}`
+    : "—";
+}
+
+function exchangeRate(value: unknown) {
+  return typeof value === "number" ? value.toFixed(4) : "—";
+}
+
 function percent(value: unknown) {
   return typeof value === "number" ? `${value.toFixed(2)}%` : "—";
 }
@@ -173,7 +247,9 @@ function salesBarHeight(value: number | null) {
         <p class="section-kicker">PRODUCT COMMAND CENTER</p>
         <h2>店铺商品明细表</h2>
       </div>
-      <p>点击商品查看每日销售件数快照。</p>
+      <p>
+        {{ props.storeScope === "current" ? "点击商品查看每日销售件数快照。" : `${props.multiStoreLabel || "全部店铺"}合并查看；每条记录保留所属店铺。` }}
+      </p>
     </div>
     <div class="product-workspace">
       <section class="product-list erp-panel">
@@ -181,7 +257,7 @@ function salesBarHeight(value: number | null) {
           <input
             v-model="query"
             type="search"
-            placeholder="搜索编码、条码或商品名称"
+            placeholder="商品名称支持模糊搜索，也可输入平台 SKU、公司 SKU 或条码"
           />
           <span>{{ filtered.length }} 个商品</span>
         </div>
@@ -190,9 +266,9 @@ function salesBarHeight(value: number | null) {
         <div v-else class="product-scroll">
           <button
             v-for="item in filtered"
-            :key="item.offer_id"
-            v-memo="[item, failedImageUrls.has(String(item.image_url ?? '').trim()), selectedId === item.offer_id]"
-            :class="{ active: selectedId === item.offer_id }"
+            :key="itemKey(item)"
+            v-memo="[item, failedImageUrls.has(String(item.image_url ?? '').trim()), selectedKey === itemKey(item)]"
+            :class="{ active: selectedKey === itemKey(item) }"
             type="button"
             aria-haspopup="dialog"
             :aria-label="`查看 ${item.title || item.sku || item.offer_id} 的商品详情`"
@@ -214,7 +290,9 @@ function salesBarHeight(value: number | null) {
             </span>
             <span class="product-list-copy">
               <strong>{{ item.title || item.sku || item.offer_id }}</strong>
-              <span>{{ item.sku || "无库存编码" }} · {{ item.status_label || "状态未知" }}</span>
+              <span v-if="props.storeScope !== 'current'">店铺 {{ item.store_name || item.store_code || "—" }}</span>
+              <span>平台 {{ item.sku || "无库存编码" }} · {{ item.status_label || "状态未知" }}</span>
+              <span>公司 SKU {{ item.company_sku || "未关联" }}</span>
               <small>
                 下单 {{ number(item.ordered_units) }} · 浏览
                 {{ number(item.page_views_30_days) }}
@@ -247,7 +325,8 @@ function salesBarHeight(value: number | null) {
                 {{ selected.title || selected.sku || selected.offer_id }}
               </h2>
               <span>
-                SKU {{ selected.sku || "—" }} · 商品编号 {{ selected.offer_id }} ·
+                <template v-if="props.storeScope !== 'current'">店铺 {{ selected.store_name || selected.store_code || "—" }} · </template>
+                平台 SKU {{ selected.sku || "—" }} · 公司 SKU {{ selected.company_sku || "未关联" }} · 商品编号 {{ selected.offer_id }} ·
                 平台商品编号 {{ selected.tsin_id || "—" }}
               </span>
             </div>
@@ -282,6 +361,8 @@ function salesBarHeight(value: number | null) {
                 <h3>{{ selected.title || selected.sku || selected.offer_id }}</h3>
                 <dl>
                   <div><dt>平台 SKU</dt><dd>{{ selected.sku || "缺失" }}</dd></div>
+                  <div><dt>公司 SKU</dt><dd>{{ selected.company_sku || "未关联" }}</dd></div>
+                  <div v-if="props.storeScope !== 'current'"><dt>所属店铺</dt><dd>{{ selected.store_name || selected.store_code || "—" }}</dd></div>
                   <div><dt>商品编号</dt><dd>{{ selected.offer_id }}</dd></div>
                   <div><dt>平台商品编号</dt><dd>{{ selected.tsin_id || "—" }}</dd></div>
                   <div><dt>条码</dt><dd>{{ selected.barcode || "—" }}</dd></div>
@@ -301,6 +382,28 @@ function salesBarHeight(value: number | null) {
                 <article>
                   <span>当前售价</span>
                   <strong>{{ currency(selected.selling_price) }}</strong>
+                </article>
+                <article
+                  class="product-cost-kpi"
+                  :class="{ stale: detail?.cost_conversion.status === 'stale' }"
+                >
+                  <span>单件成本（兰特）</span>
+                  <strong>{{ currency(detail?.cost_conversion.cost_zar) }}</strong>
+                  <small v-if="typeof detail?.cost_conversion.cost_rmb === 'number'">
+                    {{ rmbCost(detail?.cost_conversion.cost_rmb) }} ×
+                    {{ exchangeRate(detail?.cost_conversion.rate) }}
+                  </small>
+                  <small v-if="detail?.cost_conversion.rate_date">
+                    1人民币={{ exchangeRate(detail.cost_conversion.rate) }}兰特 ·
+                    汇率日 {{ detail.cost_conversion.rate_date }}
+                  </small>
+                  <small v-if="detail?.cost_conversion.fetched_at">
+                    {{ detail.cost_conversion.source }} ·
+                    北京时间 {{ formatChinaDateTime(detail.cost_conversion.fetched_at) }} 获取
+                  </small>
+                  <small v-if="detail?.cost_conversion.message">
+                    {{ detail.cost_conversion.message }}
+                  </small>
                 </article>
                 <article>
                   <span>最新日下单</span>

@@ -123,6 +123,9 @@ def test_logistics_overview_aggregates_both_read_only_apis(
                 {
                     "records": [
                         {
+                            "sku": "INT-1",
+                            "sysSku": "SYS0000001",
+                            "skuCname": "测试产品",
                             "stockNum": 12,
                             "usableStockNum": 8,
                             "lockNum": 4,
@@ -229,6 +232,21 @@ def test_logistics_overview_aggregates_both_read_only_apis(
         "outbound_orders": 1,
         "returned_records": 1,
     }
+    assert payload["w8"]["inventory_detail_available"] is True
+    assert payload["w8"]["inventory_items"] == [
+        {
+            "company_sku": "INT-1",
+            "w8_system_sku": "SYS0000001",
+            "product_name_cn": "测试产品",
+            "product_name_en": None,
+            "stock_total": 12,
+            "usable_stock": 8,
+            "locked_stock": 4,
+            "outbound_allocated": 2,
+            "transit_stock": 3,
+            "defective_stock": 1,
+        }
+    ]
     assert "total=2" in payload["w8"]["warnings"][0]
     assert payload["takealot"]["summary"]["quantity_received"] == 11
     assert payload["takealot"]["summary"]["quantity_damaged"] == 1

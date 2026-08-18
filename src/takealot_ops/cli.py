@@ -28,7 +28,7 @@ from takealot_ops.binlog_archive import (
     maintain_binlog_archive,
     run_continuous_binlog_archive,
 )
-from takealot_ops.collectors import collect_offers, collect_sales
+from takealot_ops.collectors import collect_offers, collect_returns, collect_sales
 from takealot_ops.competitors.auto_tracking import run_automatic_follower_tracking
 from takealot_ops.competitors.scheduled import register_scheduled_trigger
 from takealot_ops.competitors.service import CompetitorCollector, parse_competitor_urls
@@ -55,6 +55,7 @@ from takealot_ops.platform_warehouse.credentials import (
     WindowsPortalCredentialStore,
     masked_email,
 )
+from takealot_ops.product_master import ProductMasterImportService
 from takealot_ops.quality import verify_quality
 from takealot_ops.reporting import generate_daily_reports
 from takealot_ops.scheduler import (
@@ -101,7 +102,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     commands = parser.add_subparsers(dest="command", required=True)
 
-    collect = commands.add_parser("collect", help="采集 Offer 和近七个 SAST 自然日销售")
+    collect = commands.add_parser(
+        "collect",
+        help="采集 Offer 和近七个 SAST 自然日 Sales/Returns",
+    )
     collect.add_argument("--start", type=_parse_date, help="销售开始日期 YYYY-MM-DD")
     collect.add_argument("--end", type=_parse_date, help="销售结束日期 YYYY-MM-DD")
     _add_store_target_arguments(collect)
@@ -241,6 +245,34 @@ def build_parser() -> argparse.ArgumentParser:
         help="相邻词根采集间隔，默认2秒",
     )
 
+    product_master = commands.add_parser(
+        "import-product-master",
+        help="预检或导入平台SKU、公司SKU、产品名称和RMB单件成本",
+    )
+    product_master.add_argument("workbook", type=Path, help="下载后的 .xlsx 文件路径")
+    product_master.add_argument(
+        "--effective-date",
+        type=_parse_date,
+        required=True,
+        help="本批映射/成本生效日期 YYYY-MM-DD",
+    )
+    product_master.add_argument("--sheet", help="工作表名称；只有一个匹配表时可省略")
+    product_master.add_argument(
+        "--apply",
+        action="store_true",
+        help="正式写入；默认只预检，不写产品、映射和成本数据",
+    )
+    product_master.add_argument(
+        "--allow-reassignments",
+        action="store_true",
+        help="显式允许把已有平台SKU改绑到另一公司SKU",
+    )
+    product_master.add_argument(
+        "--imported-by",
+        default=getpass.getuser(),
+        help="审计中的导入人；默认当前Windows账号",
+    )
+
     verify = commands.add_parser("verify", help="检查数据库完整性和数据质量")
     verify.add_argument("--date", type=_parse_date, help="检查日期 YYYY-MM-DD")
     _add_store_target_arguments(verify)
@@ -354,6 +386,16 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.inputs,
                 delay_seconds=args.delay_seconds,
             )
+        elif args.command == "import-product-master":
+            exit_code = _import_product_master_command(
+                project_root,
+                args.workbook,
+                effective_date=args.effective_date,
+                sheet_name=args.sheet,
+                apply=args.apply,
+                imported_by=args.imported_by,
+                allow_reassignments=args.allow_reassignments,
+            )
         elif args.command == "verify":
             exit_code = _run_store_targets(
                 project_root,
@@ -463,9 +505,14 @@ def _collect_command(project_root: Path, start: date | None, end: date | None) -
             if not sales.succeeded:
                 print("Sales 采集失败；未发布不完整分页结果。", file=sys.stderr)
                 return EXIT_COLLECTION
+            returns = collect_returns(client, repository, start_date, end_date)
+            if not returns.succeeded:
+                print("Returns 采集失败；保留最近一次完整退货明细。", file=sys.stderr)
+                return EXIT_COLLECTION
         print(
             f"采集完成：Offer {offers.counts['records']} 条，"
-            f"Sales {sales.counts['records']} 条，日期 {start_date} 至 {end_date}。"
+            f"Sales {sales.counts['records']} 条，"
+            f"Returns {returns.counts['records']} 条，日期 {start_date} 至 {end_date}。"
         )
         return 0
     finally:
@@ -719,6 +766,9 @@ def _run_protected_daily_report_collection(
             ),
             "sales_run_id": (
                 result.sales_result.run_id if result.sales_result is not None else None
+            ),
+            "return_run_id": (
+                result.return_result.run_id if result.return_result is not None else None
             ),
         }
         attempts.append(attempt)
@@ -1057,6 +1107,48 @@ def _migrate_to_mysql_command(
     )
     for table_name, count in sorted(report.table_counts.items()):
         print(f"{table_name}：{count}")
+    return 0
+
+
+def _import_product_master_command(
+    project_root: Path,
+    workbook: Path,
+    *,
+    effective_date: date,
+    sheet_name: str | None,
+    apply: bool,
+    imported_by: str,
+    allow_reassignments: bool,
+) -> int:
+    settings = DashboardSettings.from_env(project_root)
+    source = workbook if workbook.is_absolute() else project_root / workbook
+    engine = create_engine_for_settings(settings)
+    try:
+        create_schema(engine)
+        service = ProductMasterImportService(engine)
+        if apply:
+            report = service.import_workbook(
+                source,
+                effective_date=effective_date,
+                sheet_name=sheet_name,
+                imported_by=imported_by,
+                allow_reassignments=allow_reassignments,
+            )
+        else:
+            report = service.preview(
+                source,
+                effective_date=effective_date,
+                sheet_name=sheet_name,
+            )
+    finally:
+        engine.dispose()
+    print(json.dumps(report.as_dict(), ensure_ascii=False, indent=2))
+    if report.mode == "preview":
+        print("仅完成预检；确认结果后追加 --apply 才会写入产品、映射和成本数据。")
+    elif report.mode == "already_imported":
+        print(f"相同文件、工作表和生效日期已导入，复用批次 {report.batch_id}。")
+    else:
+        print(f"产品主档导入完成，批次 {report.batch_id}。")
     return 0
 
 

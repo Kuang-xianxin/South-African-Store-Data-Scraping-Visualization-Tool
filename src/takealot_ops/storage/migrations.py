@@ -92,6 +92,7 @@ def create_schema(engine: Engine) -> None:
     """Create the current schema and apply retained in-place upgrades."""
     Base.metadata.create_all(engine)
     _add_store_scope_columns_and_keys(engine)
+    _add_return_item_detail_columns(engine)
     _add_offer_created_at_columns(engine)
     traffic_columns_added = _add_store_offer_observation_traffic_columns(engine)
     _add_erp_user_permissions_column(engine)
@@ -535,6 +536,49 @@ def _add_offer_created_at_columns(engine: Engine) -> None:
                 table = preparer.quote(table_name)
                 column = preparer.quote("created_at")
                 connection.exec_driver_sql(f"ALTER TABLE {table} ADD COLUMN {column} DATETIME NULL")
+
+
+def _add_return_item_detail_columns(engine: Engine) -> None:
+    """Upgrade the original reserved return table to the expanded API contract."""
+    table_name = "return_items"
+    with engine.begin() as connection:
+        schema = inspect(connection)
+        if not schema.has_table(table_name):
+            return
+        existing = {str(column["name"]) for column in schema.get_columns(table_name)}
+        preparer = connection.dialect.identifier_preparer
+        table = preparer.quote(table_name)
+        additions = {
+            "order_id": "VARCHAR(100) NULL",
+            "tsin_id": "VARCHAR(100) NULL",
+            "sku": "VARCHAR(255) NULL",
+            "return_reference_number": "VARCHAR(100) NULL",
+            "quantity": "INTEGER NULL",
+            "return_region": "VARCHAR(100) NULL",
+            "return_reason": "VARCHAR(100) NULL",
+            "customer_comment": "TEXT NULL",
+            "outcomes": "JSON NULL",
+            "transactions": "JSON NULL",
+            "captured_at": "DATETIME NULL",
+        }
+        for column_name, column_type in additions.items():
+            if column_name in existing:
+                continue
+            connection.exec_driver_sql(
+                f"ALTER TABLE {table} ADD COLUMN {preparer.quote(column_name)} "
+                f"{column_type}"
+            )
+
+        indexed_columns = {
+            tuple(index.get("column_names") or ())
+            for index in inspect(connection).get_indexes(table_name)
+        }
+        for column_name in ("offer_id", "return_date", "return_reason"):
+            if (column_name,) in indexed_columns:
+                continue
+            index = preparer.quote(f"ix_return_items_{column_name}")
+            column = preparer.quote(column_name)
+            connection.exec_driver_sql(f"CREATE INDEX {index} ON {table} ({column})")
 
 
 def _add_store_offer_observation_traffic_columns(engine: Engine) -> bool:

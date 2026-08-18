@@ -65,6 +65,8 @@ const payload: AnomalyProductPayload = {
     slow_moving_requires_status: "buyable",
     slow_moving_requires_available_stock: true,
     slow_moving_day_basis: "verified_zero_sales_and_positive_stock_days",
+    stock_status_requires_available_stock: true,
+    stock_status_excluded_inventory: ["receiving", "on_way"],
   },
   summary: {
     sudden_sales_stop: 1,
@@ -102,20 +104,25 @@ test("all anomaly views remain separate", () => {
   );
 });
 
-test("slow-moving selector filters by actual no-sales days", () => {
+test("slow-moving selector includes items exactly on the selected threshold", () => {
   assert.deepEqual(itemsForAnomalyView(payload, "slow_moving", 7), [slow20, slow7]);
   assert.deepEqual(itemsForAnomalyView(payload, "slow_moving", 15), [slow20]);
+  assert.deepEqual(itemsForAnomalyView(payload, "slow_moving", 20), [slow20]);
   assert.deepEqual(itemsForAnomalyView(payload, "slow_moving", 30), []);
+  assert.equal(countForAnomalyView(payload, "slow_moving", 7), 2);
   assert.equal(countForAnomalyView(payload, "slow_moving", 20), 1);
 });
 
-test("slow-moving copy starts the count from stocked days", () => {
+test("slow-moving copy states an inclusive threshold and stocked-day basis", () => {
   const pageSource = readFileSync(
     new URL("../src/pages/AnomalyProductsPage.vue", import.meta.url),
     "utf8",
   );
 
-  assert.match(pageSource, /从连续有库存的完整日开始累计/);
+  assert.match(pageSource, /\{\{ days \}\} 天及以上未动销/);
+  assert.match(pageSource, /实际连续未动销天数达到或超过所选天数/);
+  assert.match(pageSource, /连续 \$\{slowDays\.value\} 天及以上未动销/);
+  assert.doesNotMatch(pageSource, /有库存 \{\{ days \}\} 天没动销/);
   assert.match(pageSource, /库存归零后，重新有货时重新起算/);
   assert.match(pageSource, /滞销起算 \{\{ item\.slow_moving_started_on/);
 });
@@ -136,7 +143,7 @@ test("cards open the existing full own-link detail modal in the anomaly page", (
   assert.match(pageSource, /<button[\s\S]*class="anomaly-card"/);
   assert.match(pageSource, /在当前页面查看 \$\{item\.title\} 的自有链接详情/);
   assert.match(pageSource, /<CompetitorsPage[\s\S]*detail-only/);
-  assert.match(pageSource, /own-store-scope="current"/);
+  assert.match(pageSource, /:own-store-scope="props\.storeScope \?\? 'current'"/);
   assert.match(pageSource, /:requested-detail-plid="detailRequest\.plid"/);
   assert.doesNotMatch(pageSource, /competitorDetailPageHref/);
   assert.doesNotMatch(pageSource, /open-own-link-detail/);
@@ -146,10 +153,23 @@ test("cards open the existing full own-link detail modal in the anomaly page", (
   assert.match(appSource, /requestedDetailPlid: competitorDetailRequest\.value\.plid/);
   assert.match(competitorSource, /detailOnly\?: boolean/);
   assert.match(competitorSource, /if \(props\.detailOnly\)/);
-  assert.match(competitorSource, /loadOwnStoreScope\(\)/);
-  assert.match(competitorSource, /loadPersonalWatchlist\(\)\.catch/);
+  assert.match(competitorSource, /async function openRequestedOwnStoreDetail/);
+  assert.match(
+    competitorSource,
+    /fetchOwnStoreCompetitors\(undefined, undefined, scope, undefined, plid\)/,
+  );
+  assert.match(pageSource, /ref="detailHost"/);
+  assert.match(pageSource, /@pointerenter="scheduleOwnLinkDetailPrefetch\(item\)"/);
+  assert.match(competitorSource, /defineExpose\(\{ prefetchRequestedOwnStoreDetail \}\)/);
+  assert.doesNotMatch(
+    competitorSource.slice(
+      competitorSource.indexOf("if (props.detailOnly)"),
+      competitorSource.indexOf("let checkpoint"),
+    ),
+    /loadOwnStoreScope|loadPersonalWatchlist/,
+  );
   assert.match(competitorSource, /<template v-if="!props\.detailOnly">/);
-  assert.match(competitorSource, /const ownItem = ownItems\.find/);
+  assert.match(competitorSource, /const ownItem = overview\.store_items\.find/);
   assert.match(competitorSource, /openProductModal\(ownItem\)/);
   assert.match(
     competitorSource,
@@ -161,16 +181,31 @@ test("cards open the existing full own-link detail modal in the anomaly page", (
   );
 });
 
-test("stock-status cards state that on-way units do not count", () => {
+test("stock-status cards count only sellable units", () => {
   const pageSource = readFileSync(
     new URL("../src/pages/AnomalyProductsPage.vue", import.meta.url),
     "utf8",
   );
 
-  assert.match(pageSource, /在途不计入异常库存/);
+  assert.match(pageSource, /只统计可售库存/);
+  assert.match(pageSource, /收货中和在途均展示，但都不计入异常/);
+  assert.match(pageSource, /收货中 .*（不计入）/);
   assert.match(pageSource, /在途 .*（不计入）/);
-  assert.doesNotMatch(
-    pageSource,
-    /item\.on_way_stock > 0 \? `在途 .*` : "",\s*\]\.filter/,
+  assert.match(pageSource, /当前可售库存/);
+  assert.match(pageSource, /<strong>\{\{ number\(item\.inventory_units\) \}\} 件<\/strong>/);
+});
+
+test("large anomaly groups render only one bounded card page", () => {
+  const pageSource = readFileSync(
+    new URL("../src/pages/AnomalyProductsPage.vue", import.meta.url),
+    "utf8",
   );
+
+  assert.match(pageSource, /const payload = shallowRef<AnomalyProductPayload \| null>/);
+  assert.match(pageSource, /const anomalyPageSize = 30/);
+  assert.match(pageSource, /filteredItems\.value\.slice\(start, start \+ anomalyPageSize\)/);
+  assert.match(pageSource, /v-for="item in visibleItems"/);
+  assert.match(pageSource, /class="anomaly-pagination"/);
+  assert.match(pageSource, /const integerFormatter = new Intl\.NumberFormat/);
+  assert.match(pageSource, /content-visibility: auto/);
 });

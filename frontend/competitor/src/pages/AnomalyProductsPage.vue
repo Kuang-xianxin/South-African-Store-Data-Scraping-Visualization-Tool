@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, watch } from "vue";
+import { computed, onBeforeUnmount, ref, shallowRef, watch } from "vue";
 
 import {
   ANOMALY_PRODUCT_VIEWS,
@@ -10,18 +10,29 @@ import {
 } from "../anomalyProducts";
 import { fetchAnomalyProducts } from "../api";
 import { PRODUCT_IMAGE_SIZE, productThumbnailUrl } from "../productImages";
-import type { AnomalyProductItem, AnomalyProductPayload } from "../types";
+import { matchesProductSearch } from "../productSearch";
+import type {
+  AnomalyProductItem,
+  AnomalyProductPayload,
+  OwnStoreScope,
+} from "../types";
 import CompetitorsPage from "./CompetitorsPage.vue";
+
+interface CompetitorDetailPrefetchHost {
+  prefetchRequestedOwnStoreDetail: (plid: string) => void;
+}
 
 const props = defineProps<{
   asOf: string;
   canViewCompetitors?: boolean;
   currentStoreCode?: string;
   currentStoreName?: string;
+  storeScope?: OwnStoreScope;
+  multiStoreLabel?: string;
   onPermissionDenied?: () => void;
 }>();
 
-const payload = ref<AnomalyProductPayload | null>(null);
+const payload = shallowRef<AnomalyProductPayload | null>(null);
 const activeView = ref<AnomalyProductView>("sudden_sales_stop");
 const slowDays = ref(7);
 const query = ref("");
@@ -29,6 +40,17 @@ const loading = ref(true);
 const error = ref("");
 const failedImages = ref(new Set<string>());
 const detailRequest = ref({ plid: "", revision: 0 });
+const detailHost = ref<CompetitorDetailPrefetchHost | null>(null);
+const anomalyPage = ref(1);
+const anomalyPageSize = 30;
+const integerFormatter = new Intl.NumberFormat("zh-CN");
+const currencyFormatter = new Intl.NumberFormat("en-ZA", {
+  style: "currency",
+  currency: "ZAR",
+  maximumFractionDigits: 2,
+});
+let loadRequestRevision = 0;
+let detailPrefetchTimer: ReturnType<typeof setTimeout> | undefined;
 
 const slowDayOptions = computed(
   () => payload.value?.rules.slow_day_options ?? [4, 7, 10, 15, 20, 30],
@@ -37,30 +59,75 @@ const viewItems = computed(() =>
   itemsForAnomalyView(payload.value, activeView.value, slowDays.value),
 );
 const filteredItems = computed(() => {
-  const needle = query.value.trim().toLowerCase();
-  if (!needle) return viewItems.value;
-  return viewItems.value.filter((item) =>
-    [item.title, item.sku, item.offer_id, item.plid, item.tsin_id]
-      .filter(Boolean)
-      .some((value) => String(value).toLowerCase().includes(needle)),
-  );
+  if (!query.value.trim()) return viewItems.value;
+  return viewItems.value.filter((item) => matchesProductSearch(
+    {
+      productNames: [item.title, item.company_product_name],
+      otherValues: [
+        item.sku,
+        item.company_sku,
+        item.offer_id,
+        item.plid,
+        item.tsin_id,
+        item.store_name,
+        item.store_code,
+      ],
+    },
+    query.value,
+  ));
+});
+const anomalyPageCount = computed(() =>
+  Math.max(1, Math.ceil(filteredItems.value.length / anomalyPageSize)),
+);
+const visibleItems = computed(() => {
+  const start = (anomalyPage.value - 1) * anomalyPageSize;
+  return filteredItems.value.slice(start, start + anomalyPageSize);
+});
+const visibleItemStart = computed(() =>
+  filteredItems.value.length ? (anomalyPage.value - 1) * anomalyPageSize + 1 : 0,
+);
+const visibleItemEnd = computed(() =>
+  Math.min(anomalyPage.value * anomalyPageSize, filteredItems.value.length),
+);
+
+watch(
+  [() => props.asOf, () => props.storeScope],
+  loadAnomalies,
+  { immediate: true },
+);
+watch([activeView, slowDays, query], () => {
+  anomalyPage.value = 1;
+});
+watch(anomalyPageCount, (pageCount) => {
+  if (anomalyPage.value > pageCount) anomalyPage.value = pageCount;
 });
 
-watch(() => props.asOf, loadAnomalies, { immediate: true });
-
 async function loadAnomalies(): Promise<void> {
+  const requestRevision = ++loadRequestRevision;
+  const requestedAsOf = props.asOf;
+  const requestedStoreScope = props.storeScope ?? "current";
   loading.value = true;
   error.value = "";
   try {
-    payload.value = await fetchAnomalyProducts(props.asOf);
+    const nextPayload = await fetchAnomalyProducts(
+      requestedAsOf,
+      requestedStoreScope,
+    );
+    if (
+      requestRevision !== loadRequestRevision
+      || requestedAsOf !== props.asOf
+      || requestedStoreScope !== (props.storeScope ?? "current")
+    ) return;
+    payload.value = nextPayload;
     if (!slowDayOptions.value.includes(slowDays.value)) {
       slowDays.value = slowDayOptions.value[0] ?? 4;
     }
   } catch (reason) {
+    if (requestRevision !== loadRequestRevision) return;
     payload.value = null;
     error.value = reason instanceof Error ? reason.message : "异常商品读取失败";
   } finally {
-    loading.value = false;
+    if (requestRevision === loadRequestRevision) loading.value = false;
   }
 }
 
@@ -79,6 +146,27 @@ function openOwnLinkDetail(item: AnomalyProductItem): void {
   };
 }
 
+function scheduleOwnLinkDetailPrefetch(item: AnomalyProductItem): void {
+  cancelOwnLinkDetailPrefetch();
+  detailPrefetchTimer = setTimeout(() => {
+    detailPrefetchTimer = undefined;
+    detailHost.value?.prefetchRequestedOwnStoreDetail(item.plid);
+  }, 140);
+}
+
+function prefetchOwnLinkDetail(item: AnomalyProductItem): void {
+  cancelOwnLinkDetailPrefetch();
+  detailHost.value?.prefetchRequestedOwnStoreDetail(item.plid);
+}
+
+function cancelOwnLinkDetailPrefetch(): void {
+  if (detailPrefetchTimer === undefined) return;
+  clearTimeout(detailPrefetchTimer);
+  detailPrefetchTimer = undefined;
+}
+
+onBeforeUnmount(cancelOwnLinkDetailPrefetch);
+
 function imageUrl(item: AnomalyProductItem): string {
   const source = item.image_url?.trim() ?? "";
   if (!source || failedImages.value.has(source)) return "";
@@ -92,19 +180,15 @@ function markImageUnavailable(item: AnomalyProductItem): void {
 }
 
 function number(value: number | null | undefined): string {
-  return typeof value === "number"
-    ? new Intl.NumberFormat("zh-CN").format(value)
-    : "—";
+  return typeof value === "number" ? integerFormatter.format(value) : "—";
+}
+
+function itemKey(item: AnomalyProductItem): string {
+  return item.store_scope_key || `${item.store_code || "current"}:${item.offer_id}`;
 }
 
 function currency(value: number | null): string {
-  return typeof value === "number"
-    ? new Intl.NumberFormat("en-ZA", {
-        style: "currency",
-        currency: "ZAR",
-        maximumFractionDigits: 2,
-      }).format(value)
-    : "—";
+  return typeof value === "number" ? currencyFormatter.format(value) : "—";
 }
 
 function percent(value: number | null): string {
@@ -118,22 +202,19 @@ function noSalesLabel(item: AnomalyProductItem): string {
 
 function statusInventoryLabel(item: AnomalyProductItem): string {
   const parts = [
-    item.available_stock > 0 ? `现货 ${number(item.available_stock)}` : "",
-    item.receiving_stock > 0 ? `收货中 ${number(item.receiving_stock)}` : "",
+    `可售 ${number(item.available_stock)}`,
+    item.receiving_stock > 0
+      ? `收货中 ${number(item.receiving_stock)}（不计入）`
+      : "",
+    item.on_way_stock > 0 ? `在途 ${number(item.on_way_stock)}（不计入）` : "",
   ].filter(Boolean);
-  return parts.join(" · ") || "到仓库存明细待补充";
-}
-
-function onWayInventoryLabel(item: AnomalyProductItem): string {
-  return item.on_way_stock > 0
-    ? ` · 在途 ${number(item.on_way_stock)}（不计入）`
-    : "";
+  return parts.join(" · ");
 }
 
 function emptyMessage(): string {
   if (query.value.trim()) return "当前类型下没有匹配搜索条件的商品。";
   if (activeView.value === "slow_moving") {
-    return `当前没有有库存且连续 ${slowDays.value} 天未动销的可售商品。`;
+    return `当前没有有库存且连续 ${slowDays.value} 天及以上未动销的可售商品。`;
   }
   return `当前没有“${ANOMALY_VIEW_LABELS[activeView.value]}”商品。`;
 }
@@ -146,7 +227,7 @@ function emptyMessage(): string {
         <p class="section-kicker">EXCEPTION PRODUCT RADAR</p>
         <h2>异常商品</h2>
         <p class="hero-copy">
-          各类异常独立展示；零销量只采用已核验完成的南非业务日，不可售库存只统计已经到平台仓的商品。
+          各类异常独立展示；零销量只采用已核验完成的南非业务日，不可售异常只认当前可售库存。
         </p>
       </div>
       <div class="evidence-card">
@@ -179,18 +260,18 @@ function emptyMessage(): string {
           </strong>
         </template>
         <template v-else-if="activeView === 'slow_moving'">
-          <label for="slow-days">滞销选择器</label>
+          <label for="slow-days">滞销门槛</label>
           <select id="slow-days" v-model.number="slowDays">
             <option v-for="days in slowDayOptions" :key="days" :value="days">
-              有库存 {{ days }} 天没动销
+              {{ days }} 天及以上未动销
             </option>
           </select>
-          <small>从连续有库存的完整日开始累计；库存归零后，重新有货时重新起算</small>
+          <small>实际连续未动销天数达到或超过所选天数；库存归零后，重新有货时重新起算</small>
         </template>
         <template v-else>
           <span>当前规则</span>
           <strong>{{ ANOMALY_VIEW_LABELS[activeView] }}</strong>
-          <small>只统计现货和平台收货中，在途不计入异常库存</small>
+          <small>只统计可售库存；收货中和在途均展示，但都不计入异常</small>
         </template>
       </div>
       <label class="anomaly-search">
@@ -198,7 +279,7 @@ function emptyMessage(): string {
         <input
           v-model="query"
           type="search"
-          placeholder="搜索商品名、SKU、Offer ID 或 PLID"
+          placeholder="商品名称支持模糊搜索，也可输入平台 SKU、公司 SKU、Offer ID 或 PLID"
         />
         <strong>{{ filteredItems.length }} 个商品</strong>
       </label>
@@ -210,14 +291,20 @@ function emptyMessage(): string {
       <span>{{ error }}</span>
       <button type="button" @click="loadAnomalies">重新读取</button>
     </div>
-    <section v-else-if="filteredItems.length" class="anomaly-grid">
-      <button
-        v-for="item in filteredItems"
-        :key="`${activeView}-${item.offer_id}`"
+    <template v-else-if="filteredItems.length">
+      <section class="anomaly-grid">
+        <button
+        v-for="item in visibleItems"
+        :key="`${activeView}-${itemKey(item)}`"
+        v-memo="[item, failedImages.size]"
         type="button"
         class="anomaly-card"
         aria-haspopup="dialog"
         :aria-label="`在当前页面查看 ${item.title} 的自有链接详情`"
+        @pointerenter="scheduleOwnLinkDetailPrefetch(item)"
+        @pointerleave="cancelOwnLinkDetailPrefetch"
+        @focus="prefetchOwnLinkDetail(item)"
+        @blur="cancelOwnLinkDetailPrefetch"
         @click="openOwnLinkDetail(item)"
       >
         <div class="card-topline">
@@ -244,8 +331,9 @@ function emptyMessage(): string {
           </div>
           <div class="identity-copy">
             <h3>{{ item.title }}</h3>
-            <p>{{ item.sku || "无 SKU" }} · Offer {{ item.offer_id }}</p>
-            <small>PLID {{ item.plid }}</small>
+            <p v-if="props.storeScope !== 'current'">店铺 {{ item.store_name || item.store_code || "—" }}</p>
+            <p>平台 {{ item.sku || "无 SKU" }} · 公司 {{ item.company_sku || "未关联" }}</p>
+            <small>Offer {{ item.offer_id }} · PLID {{ item.plid }}</small>
           </div>
         </div>
 
@@ -266,11 +354,9 @@ function emptyMessage(): string {
           </small>
         </div>
         <div v-else class="primary-signal disabled">
-          <span>已到平台仓</span>
+          <span>当前可售库存</span>
           <strong>{{ number(item.inventory_units) }} 件</strong>
-          <small>
-            {{ statusInventoryLabel(item) }}{{ onWayInventoryLabel(item) }}
-          </small>
+          <small>{{ statusInventoryLabel(item) }}</small>
         </div>
 
         <dl class="card-metrics">
@@ -279,7 +365,7 @@ function emptyMessage(): string {
             <dd>{{ currency(item.selling_price) }}</dd>
           </div>
           <div>
-            <dt>现货</dt>
+            <dt>可售</dt>
             <dd>{{ number(item.available_stock) }}</dd>
           </div>
           <div>
@@ -296,8 +382,33 @@ function emptyMessage(): string {
           <span>数据截至 {{ item.data_through || "暂无" }}</span>
           <strong>查看完整商品详情</strong>
         </div>
-      </button>
-    </section>
+        </button>
+      </section>
+      <nav
+        v-if="filteredItems.length > anomalyPageSize"
+        class="anomaly-pagination"
+        aria-label="异常商品分页"
+      >
+        <button
+          type="button"
+          :disabled="anomalyPage <= 1"
+          @click="anomalyPage -= 1"
+        >
+          上一页
+        </button>
+        <span>
+          第 {{ anomalyPage }} / {{ anomalyPageCount }} 页 ·
+          当前 {{ visibleItemStart }}–{{ visibleItemEnd }} / {{ filteredItems.length }} 个商品
+        </span>
+        <button
+          type="button"
+          :disabled="anomalyPage >= anomalyPageCount"
+          @click="anomalyPage += 1"
+        >
+          下一页
+        </button>
+      </nav>
+    </template>
     <div v-else class="anomaly-state empty">
       <strong>{{ emptyMessage() }}</strong>
       <span>切换上方异常类型或调整搜索条件继续查看。</span>
@@ -305,13 +416,14 @@ function emptyMessage(): string {
 
     <CompetitorsPage
       v-if="props.canViewCompetitors"
+      ref="detailHost"
       detail-only
       :can-operate="false"
       :can-control-collection="false"
       :is-admin="false"
       :current-store-code="props.currentStoreCode"
-      :current-store-name="props.currentStoreName"
-      own-store-scope="current"
+      :current-store-name="props.storeScope === 'current' ? props.currentStoreName : props.multiStoreLabel"
+      :own-store-scope="props.storeScope ?? 'current'"
       :requested-detail-plid="detailRequest.plid"
       :requested-detail-revision="detailRequest.revision"
       :on-permission-denied="props.onPermissionDenied"
@@ -528,7 +640,39 @@ function emptyMessage(): string {
   text-decoration: none;
   appearance: none;
   cursor: pointer;
+  content-visibility: auto;
+  contain-intrinsic-size: auto 350px;
   transition: border-color 180ms ease, box-shadow 180ms ease, transform 180ms ease;
+}
+
+.anomaly-pagination {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  padding: 12px 16px;
+  border: 1px solid #dce4dd;
+  border-radius: 14px;
+  color: #65776e;
+  background: rgb(255 255 255 / 82%);
+  font-size: 12px;
+  font-weight: 750;
+}
+
+.anomaly-pagination button {
+  min-width: 74px;
+  padding: 8px 12px;
+  border: 1px solid #cbd7cf;
+  border-radius: 10px;
+  color: #315245;
+  background: #f7faf7;
+  font: inherit;
+  cursor: pointer;
+}
+
+.anomaly-pagination button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
 }
 
 .anomaly-card:hover,
@@ -822,6 +966,10 @@ function emptyMessage(): string {
   .card-footer {
     align-items: flex-start;
     flex-direction: column;
+  }
+
+  .anomaly-pagination {
+    flex-wrap: wrap;
   }
 }
 </style>

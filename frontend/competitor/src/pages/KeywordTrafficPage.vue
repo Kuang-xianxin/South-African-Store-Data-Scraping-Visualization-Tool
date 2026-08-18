@@ -13,21 +13,26 @@ import {
   type FloatingChartTooltipPosition,
 } from "../floatingChartTooltip";
 import { PRODUCT_IMAGE_SIZE, productThumbnailUrl } from "../productImages";
+import { matchesProductSearch } from "../productSearch";
 import type {
   KeywordTrafficDetailPayload,
   KeywordTrafficEvent,
   KeywordTrafficHistoryPoint,
   KeywordTrafficListPayload,
   KeywordTrafficProductSummary,
+  OwnStoreScope,
 } from "../types";
 
 const props = defineProps<{
   asOf: string;
+  storeScope?: OwnStoreScope;
+  multiStoreLabel?: string;
 }>();
 
 const listPayload = ref<KeywordTrafficListPayload | null>(null);
 const detail = ref<KeywordTrafficDetailPayload | null>(null);
 const selectedOfferId = ref("");
+const selectedStoreCode = ref("");
 const selectedEventId = ref<number | null>(null);
 const search = ref("");
 const productFilter = ref<"all" | "changed" | "untracked">("all");
@@ -39,20 +44,36 @@ const loadError = ref("");
 const failedImageUrls = ref(new Set<string>());
 const activePointIndex = ref<number | null>(null);
 const chartTooltipPosition = ref<FloatingChartTooltipPosition | null>(null);
+let productsRequestRevision = 0;
+let detailRequestRevision = 0;
 
 const products = computed(() => listPayload.value?.items ?? []);
 const filteredProducts = computed(() => {
-  const needle = search.value.trim().toLocaleLowerCase();
   return products.value.filter((item) => {
     if (productFilter.value === "changed" && item.keyword_change_count === 0) return false;
     if (productFilter.value === "untracked" && item.keyword_event_count > 0) return false;
-    if (!needle) return true;
-    return [item.title, item.sku, item.offer_id, ...item.current_keywords]
-      .some((value) => String(value ?? "").toLocaleLowerCase().includes(needle));
+    return matchesProductSearch(
+      {
+        productNames: [item.title, item.company_product_name],
+        otherValues: [
+          item.sku,
+          item.company_sku,
+          item.offer_id,
+          item.store_name,
+          item.store_code,
+          ...item.current_keywords,
+        ],
+      },
+      search.value,
+    );
   });
 });
 const selectedSummary = computed(() =>
-  products.value.find((item) => item.offer_id === selectedOfferId.value) ?? null,
+  products.value.find(
+    (item) =>
+      item.offer_id === selectedOfferId.value
+      && String(item.store_code ?? "") === selectedStoreCode.value,
+  ) ?? null,
 );
 const selectedEvent = computed(() => {
   const events = detail.value?.events ?? [];
@@ -189,52 +210,80 @@ const activePoint = computed(() => {
 });
 
 onMounted(() => void loadProducts());
-watch(() => props.asOf, () => void loadProducts(selectedOfferId.value));
+watch(
+  [() => props.asOf, () => props.storeScope],
+  () => void loadProducts(selectedSummary.value ? productKey(selectedSummary.value) : ""),
+);
 watch([historyDays, comparisonDays], () => {
-  if (selectedOfferId.value) void loadDetail(selectedOfferId.value);
+  if (selectedSummary.value) void loadDetail(selectedSummary.value);
 });
 
-async function loadProducts(preferredOfferId = "") {
+async function loadProducts(preferredKey = "") {
+  const requestRevision = ++productsRequestRevision;
+  const requestedAsOf = props.asOf;
+  const requestedStoreScope = props.storeScope ?? "current";
+  detailRequestRevision += 1;
+  loadingDetail.value = false;
   loadingProducts.value = true;
   loadError.value = "";
   try {
-    const payload = await fetchKeywordTrafficProducts(props.asOf);
+    const payload = await fetchKeywordTrafficProducts(
+      requestedAsOf,
+      requestedStoreScope,
+    );
+    if (
+      requestRevision !== productsRequestRevision
+      || requestedAsOf !== props.asOf
+      || requestedStoreScope !== (props.storeScope ?? "current")
+    ) return;
     listPayload.value = payload;
-    const preferred = payload.items.find((item) => item.offer_id === preferredOfferId);
+    const preferred = payload.items.find((item) => productKey(item) === preferredKey);
     const next = preferred
       ?? payload.items.find((item) => item.keyword_change_count > 0)
       ?? payload.items.find((item) => item.keyword_event_count > 0)
       ?? payload.items[0];
-    if (next) await selectProduct(next.offer_id);
+    if (next) await selectProduct(next);
     else {
       selectedOfferId.value = "";
+      selectedStoreCode.value = "";
       detail.value = null;
     }
   } catch (error) {
+    if (requestRevision !== productsRequestRevision) return;
     loadError.value = errorMessage(error, "关键词流量商品列表加载失败");
   } finally {
-    loadingProducts.value = false;
+    if (requestRevision === productsRequestRevision) loadingProducts.value = false;
   }
 }
 
-async function selectProduct(offerId: string) {
-  selectedOfferId.value = offerId;
+async function selectProduct(product: KeywordTrafficProductSummary) {
+  selectedOfferId.value = product.offer_id;
+  selectedStoreCode.value = String(product.store_code ?? "");
   activePointIndex.value = null;
   chartTooltipPosition.value = null;
-  await loadDetail(offerId);
+  await loadDetail(product);
 }
 
-async function loadDetail(offerId: string) {
+async function loadDetail(product: KeywordTrafficProductSummary) {
+  const requestKey = productKey(product);
+  const requestRevision = ++detailRequestRevision;
+  const requestedAsOf = props.asOf;
   loadingDetail.value = true;
   loadError.value = "";
   try {
     const payload = await fetchKeywordTrafficDetail(
-      offerId,
-      props.asOf,
+      product.offer_id,
+      requestedAsOf,
       historyDays.value,
       comparisonDays.value,
+      product.store_code,
     );
-    if (selectedOfferId.value !== offerId) return;
+    if (
+      requestRevision !== detailRequestRevision
+      || requestedAsOf !== props.asOf
+      || !selectedSummary.value
+      || productKey(selectedSummary.value) !== requestKey
+    ) return;
     detail.value = payload;
     const existing = payload.events.find((event) => event.id === selectedEventId.value);
     selectedEventId.value = (
@@ -243,10 +292,16 @@ async function loadDetail(offerId: string) {
       ?? payload.events.at(-1)
     )?.id ?? null;
   } catch (error) {
+    if (requestRevision !== detailRequestRevision) return;
     loadError.value = errorMessage(error, "商品关键词流量详情加载失败");
   } finally {
-    loadingDetail.value = false;
+    if (requestRevision === detailRequestRevision) loadingDetail.value = false;
   }
+}
+
+function productKey(product: KeywordTrafficProductSummary) {
+  return product.store_scope_key
+    || `${product.store_code || "current"}:${product.offer_id}`;
 }
 
 function chartX(index: number, count: number) {
@@ -419,8 +474,8 @@ function errorMessage(error: unknown, fallback: string) {
           <span v-if="loadingProducts" class="loading-dot">读取中</span>
         </div>
         <label class="product-search">
-          <span>搜索商品 / SKU / 关键词</span>
-          <input v-model="search" type="search" placeholder="输入部分内容即可" />
+          <span>搜索商品 / 平台 SKU / 公司 SKU / 关键词</span>
+          <input v-model="search" type="search" placeholder="商品名称支持模糊搜索，其他字段可输入部分内容" />
         </label>
         <div class="filter-tabs" aria-label="商品筛选">
           <button :class="{ active: productFilter === 'all' }" @click="productFilter = 'all'">全部</button>
@@ -430,11 +485,11 @@ function errorMessage(error: unknown, fallback: string) {
         <div class="product-list">
           <button
             v-for="item in filteredProducts"
-            :key="item.offer_id"
+            :key="productKey(item)"
             type="button"
             class="product-row"
-            :class="{ active: selectedOfferId === item.offer_id }"
-            @click="selectProduct(item.offer_id)"
+            :class="{ active: selectedSummary && productKey(selectedSummary) === productKey(item) }"
+            @click="selectProduct(item)"
           >
             <span class="product-thumb">
               <img
@@ -451,7 +506,8 @@ function errorMessage(error: unknown, fallback: string) {
             </span>
             <span class="product-copy">
               <strong>{{ item.title || "未命名商品" }}</strong>
-              <small>{{ item.sku || item.offer_id }}</small>
+              <small v-if="props.storeScope !== 'current'">店铺 {{ item.store_name || item.store_code || "—" }}</small>
+              <small>平台 {{ item.sku || item.offer_id }} · 公司 {{ item.company_sku || "未关联" }}</small>
               <em v-if="item.keyword_change_count" class="changed-badge">
                 {{ item.keyword_change_count }} 次变更
               </em>
@@ -492,7 +548,8 @@ function errorMessage(error: unknown, fallback: string) {
             <div class="focus-copy">
               <p>当前监测商品</p>
               <h3>{{ detail.product.title || "未命名商品" }}</h3>
-              <span>SKU {{ detail.product.sku || "缺失" }} · Offer {{ detail.product.offer_id }}</span>
+              <span v-if="props.storeScope !== 'current'">店铺 {{ detail.product.store_name || detail.product.store_code || "—" }}</span>
+              <span>平台 SKU {{ detail.product.sku || "缺失" }} · 公司 SKU {{ detail.product.company_sku || "未关联" }} · Offer {{ detail.product.offer_id }}</span>
             </div>
             <div class="focus-actions">
               <label>

@@ -15,7 +15,10 @@ import {
   sortCompetitorItems,
   type CompetitorListSortDirection,
 } from "./competitorListSort.ts";
-import { matchesCompetitorSearch, matchesCompetitorSearchValues } from "./competitorSearch.ts";
+import {
+  matchesCompetitorProductSearchValues,
+  matchesCompetitorSearch,
+} from "./competitorSearch.ts";
 import { matchesCompetitorSellerFilter } from "./competitorSellerFilter.ts";
 
 export interface PersonalWatchlistWorkspaceCard {
@@ -165,8 +168,9 @@ export function filterPersonalWatchlistWorkspaceCards(
     const item = card.competitor;
     if (item) {
       if (!matchesCompetitorSearch(item, filters.query)) return false;
-    } else if (!matchesCompetitorSearchValues(
-      [card.plid, card.target?.title, card.target?.url],
+    } else if (!matchesCompetitorProductSearchValues(
+      [card.target?.title],
+      [card.plid, card.target?.url],
       filters.query,
     )) {
       return false;

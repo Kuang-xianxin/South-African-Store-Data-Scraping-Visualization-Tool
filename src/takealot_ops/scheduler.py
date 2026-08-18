@@ -20,7 +20,12 @@ from sqlalchemy.engine import make_url
 from sqlalchemy.orm import Session
 
 from takealot_ops.api.client import TakealotClient
-from takealot_ops.collectors import CollectionResult, collect_offers, collect_sales
+from takealot_ops.collectors import (
+    CollectionResult,
+    collect_offers,
+    collect_returns,
+    collect_sales,
+)
 from takealot_ops.domain import sast_date
 from takealot_ops.metrics.service import MetricService
 from takealot_ops.quality import QualityResult, verify_quality
@@ -66,6 +71,7 @@ class BackupVerificationResult:
 
 
 LOCAL_BACKUP_RETENTION = LocalBackupRetention()
+RETURN_LOOKBACK_DAYS = 365
 _BINLOG_COORDINATES_PATTERN = re.compile(
     rb"-- CHANGE (?:MASTER|REPLICATION SOURCE) TO .*?"
     rb"(?:MASTER|SOURCE)_LOG_FILE='([^']+)'.*?"
@@ -80,6 +86,7 @@ class DailyRunResult:
     end_date: date
     offer_result: CollectionResult | None = None
     sales_result: CollectionResult | None = None
+    return_result: CollectionResult | None = None
     metric_rows: int = 0
     quality: QualityResult | None = None
     report_paths: ReportPaths | None = None
@@ -127,6 +134,15 @@ def run_daily(
             # the Offer capture fails (and the formal daily-report run must remain
             # failed), still try the Sales endpoint and publish auditable corrections.
             sales_result = collect_sales(client, repository, start_date, end_date)
+            # Return detail is an additive operations dataset. Refresh one rolling
+            # year on every run so changed outcomes/transactions are reconciled,
+            # while a Returns outage does not suppress the authoritative sales report.
+            return_result = collect_returns(
+                client,
+                repository,
+                end_date - timedelta(days=RETURN_LOOKBACK_DAYS - 1),
+                end_date,
+            )
             if not sales_result.succeeded:
                 return DailyRunResult(
                     "collection_failed",
@@ -134,6 +150,7 @@ def run_daily(
                     end_date,
                     offer_result=offer_result,
                     sales_result=sales_result,
+                    return_result=return_result,
                     error=sales_result.error,
                 )
             sales_verified_at = clock.now()
@@ -168,6 +185,7 @@ def run_daily(
                     end_date,
                     offer_result=offer_result,
                     sales_result=sales_result,
+                    return_result=return_result,
                     error=_safe_error("processing", exc),
                 )
 
@@ -178,6 +196,7 @@ def run_daily(
                     end_date,
                     offer_result=offer_result,
                     sales_result=sales_result,
+                    return_result=return_result,
                     metric_rows=metric_rows,
                     error=offer_result.error,
                 )
@@ -192,6 +211,7 @@ def run_daily(
                     end_date,
                     offer_result=offer_result,
                     sales_result=sales_result,
+                    return_result=return_result,
                     metric_rows=metric_rows,
                     error=_safe_error("processing", exc),
                 )
@@ -207,6 +227,7 @@ def run_daily(
                     end_date,
                     offer_result=offer_result,
                     sales_result=sales_result,
+                    return_result=return_result,
                     metric_rows=metric_rows,
                     quality=quality,
                     error=_safe_error("export", exc),
@@ -221,6 +242,7 @@ def run_daily(
                 end_date,
                 offer_result=offer_result,
                 sales_result=sales_result,
+                return_result=return_result,
                 metric_rows=metric_rows,
                 quality=quality,
                 report_paths=reports,
@@ -235,6 +257,7 @@ def run_daily(
                 end_date,
                 offer_result=offer_result,
                 sales_result=sales_result,
+                return_result=return_result,
                 metric_rows=metric_rows,
                 quality=quality,
                 report_paths=reports,
@@ -247,6 +270,7 @@ def run_daily(
             end_date,
             offer_result=offer_result,
             sales_result=sales_result,
+            return_result=return_result,
             metric_rows=metric_rows,
             quality=quality,
             report_paths=reports,

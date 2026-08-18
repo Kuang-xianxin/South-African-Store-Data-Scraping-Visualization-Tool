@@ -144,6 +144,17 @@ def test_product_search_matches_all_identity_fields_and_title_case_insensitively
         assert set(result["offer_id"]) == {expected_offer_id}
 
 
+def test_product_search_fuzzes_titles_but_not_identifiers() -> None:
+    product_daily = _product_rows()
+    offers = _offer_rows()
+
+    fuzzy_title = search_products(product_daily, offers, "lantern solra")
+    mistyped_identifier = search_products(product_daily, offers, "offre-a")
+
+    assert set(fuzzy_title["offer_id"]) == {"offer-a"}
+    assert mistyped_identifier.empty
+
+
 def test_product_search_handles_empty_and_partial_identity_frames() -> None:
     assert search_products(pd.DataFrame(), pd.DataFrame(), "anything").empty
     result = search_products(

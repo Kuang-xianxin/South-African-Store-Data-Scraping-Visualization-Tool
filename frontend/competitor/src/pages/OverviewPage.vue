@@ -1529,7 +1529,7 @@ function trafficPointTitle(point: StoreTrafficPoint) {
               <tr v-for="item in data.top_products" :key="item.offer_id">
                 <td>
                   <strong>{{ item.title || item.sku || item.offer_id }}</strong>
-                  <small>{{ item.sku || "无库存编码" }}</small>
+                  <small>平台 {{ item.sku || "无库存编码" }} · 公司 {{ item.company_sku || "未关联" }}</small>
                 </td>
                 <td>{{ number(item.ordered_units) }}</td>
                 <td>{{ currency(item.ordered_revenue) }}</td>

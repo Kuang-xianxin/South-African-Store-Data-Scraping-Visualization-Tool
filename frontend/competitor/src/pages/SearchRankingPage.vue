@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, onUnmounted, ref } from "vue";
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from "vue";
 
 import {
   analyzeSearchRanking,
@@ -17,6 +17,7 @@ import {
   startSearchRankingBatch,
 } from "../api";
 import { PRODUCT_IMAGE_SIZE, productThumbnailUrl } from "../productImages";
+import { matchesProductSearch } from "../productSearch";
 import { groupSearchRankingProducts } from "../searchRankingFamilies";
 import {
   rootExpansionCheckIsPhrase,
@@ -24,6 +25,7 @@ import {
 } from "../searchRankingRootExpansion";
 import { formatChinaDateTime } from "../time";
 import type {
+  OwnStoreScope,
   SearchRankingDetailPayload,
   SearchRankingBatchPreviewPayload,
   SearchRankingBatchStatusValue,
@@ -42,12 +44,15 @@ import type {
 
 const props = defineProps<{
   canOperate: boolean;
+  storeScope?: OwnStoreScope;
+  multiStoreLabel?: string;
   onPermissionDenied?: (message: string) => void;
 }>();
 
 const listPayload = ref<SearchRankingListPayload | null>(null);
 const detail = ref<SearchRankingDetailPayload | null>(null);
 const selectedOfferId = ref("");
+const selectedStoreCode = ref("");
 const search = ref("");
 const identityDifferenceFilter = ref<"all" | "high" | "moderate" | "aligned" | "manual" | "unanalysed">("all");
 const titleScoreFilter = ref<"all" | "85_plus" | "70_84" | "55_69" | "below_55" | "insufficient" | "unscored">("all");
@@ -78,17 +83,27 @@ const rankingDetailElement = ref<HTMLElement | null>(null);
 const rankingDetailMinimumHeight = ref(0);
 let batchPollTimer: ReturnType<typeof setTimeout> | null = null;
 let detailRequestSequence = 0;
+let productListRequestSequence = 0;
 
 const products = computed(() => listPayload.value?.items ?? []);
 const productFamilies = computed(() => groupSearchRankingProducts(products.value));
 const eligibility = computed(() => listPayload.value?.eligibility ?? null);
 const filteredProductFamilies = computed(() => {
-  const needle = search.value.trim().toLocaleLowerCase();
   return productFamilies.value.filter((family) => {
-    const textMatches = !needle || family.variants.some((item) =>
-      [item.title, item.sku, item.offer_id, item.productline_id]
-        .some((value) => String(value ?? "").toLocaleLowerCase().includes(needle)),
-    );
+    const textMatches = family.variants.some((item) => matchesProductSearch(
+      {
+        productNames: [item.title, item.company_product_name],
+        otherValues: [
+          item.sku,
+          item.company_sku,
+          item.offer_id,
+          item.productline_id,
+          item.store_name,
+          item.store_code,
+        ],
+      },
+      search.value,
+    ));
     if (!textMatches) return false;
     const latest = family.latest_analysis;
     const differenceMatches = identityDifferenceFilter.value === "all"
@@ -109,7 +124,11 @@ const filteredProductFamilies = computed(() => {
 });
 const selectedProduct = computed(() => detail.value?.product ?? null);
 const selectedFamily = computed(() => productFamilies.value.find((family) =>
-  family.variants.some((item) => item.offer_id === selectedOfferId.value),
+  family.variants.some(
+    (item) =>
+      item.offer_id === selectedOfferId.value
+      && String(item.store_code ?? "") === selectedStoreCode.value,
+  ),
 ) ?? null);
 const analysis = computed(() => detail.value?.analysis ?? null);
 const batchPreview = computed(() => batchPreviewPayload.value?.preview ?? null);
@@ -309,30 +328,54 @@ onMounted(() => {
   void loadBatchPreview();
 });
 
+watch(() => props.storeScope, () => {
+  void loadProducts();
+});
+
 onUnmounted(() => {
   if (batchPollTimer) clearTimeout(batchPollTimer);
 });
 
 async function loadProducts(preferredOfferId = "") {
+  const requestSequence = ++productListRequestSequence;
+  const requestedStoreScope = props.storeScope ?? "current";
+  detailRequestSequence += 1;
+  loadingDetail.value = false;
   loadingList.value = true;
   error.value = "";
   try {
-    const payload = await fetchSearchRankingProducts();
+    const payload = await fetchSearchRankingProducts(requestedStoreScope);
+    if (
+      requestSequence !== productListRequestSequence
+      || requestedStoreScope !== (props.storeScope ?? "current")
+    ) return;
     listPayload.value = payload;
     const preferredFamily = productFamilies.value.find((family) =>
-      family.variants.some((item) => item.offer_id === preferredOfferId),
+      family.variants.some(
+        (item) =>
+          item.offer_id === preferredOfferId
+          && (
+            !selectedStoreCode.value
+            || String(item.store_code ?? "") === selectedStoreCode.value
+          ),
+      ),
     );
     const nextFamily = preferredFamily
       ?? productFamilies.value.find((family) => family.latest_analysis?.status === "completed")
       ?? productFamilies.value.find((family) => family.representative.analyzable)
       ?? productFamilies.value[0];
     const next = nextFamily?.representative;
-    if (next) await selectProduct(next.offer_id);
-    else detail.value = null;
+    if (next) await selectProduct(next);
+    else {
+      selectedOfferId.value = "";
+      selectedStoreCode.value = "";
+      detail.value = null;
+    }
   } catch (caught) {
+    if (requestSequence !== productListRequestSequence) return;
     error.value = errorMessage(caught, "搜索定位商品列表加载失败");
   } finally {
-    loadingList.value = false;
+    if (requestSequence === productListRequestSequence) loadingList.value = false;
   }
 }
 
@@ -456,7 +499,16 @@ function syncDecisionParameterChoices(profile: SearchRankingDecisionParameterPro
   );
 }
 
-async function selectProduct(offerId: string) {
+async function selectProduct(
+  productOrOfferId: SearchRankingProduct | string,
+  requestedStoreCode = selectedStoreCode.value,
+) {
+  const offerId = typeof productOrOfferId === "string"
+    ? productOrOfferId
+    : productOrOfferId.offer_id;
+  const storeCode = typeof productOrOfferId === "string"
+    ? requestedStoreCode
+    : String(productOrOfferId.store_code ?? "");
   const requestSequence = ++detailRequestSequence;
   rankingDetailMinimumHeight.value = Math.max(
     rankingDetailMinimumHeight.value,
@@ -465,11 +517,15 @@ async function selectProduct(offerId: string) {
   factConfirmationOpen.value = false;
   factRevocationTarget.value = null;
   selectedOfferId.value = offerId;
+  selectedStoreCode.value = storeCode;
   loadingDetail.value = true;
   error.value = "";
   try {
-    const payload = await fetchSearchRankingDetail(offerId);
-    if (selectedOfferId.value === offerId) {
+    const payload = await fetchSearchRankingDetail(offerId, storeCode);
+    if (
+      selectedOfferId.value === offerId
+      && selectedStoreCode.value === storeCode
+    ) {
       detail.value = payload;
       syncDecisionParameterChoices(payload.decision_parameter_profile);
     }
@@ -491,6 +547,7 @@ async function runAnalysis() {
   if (!product) return;
   const familyRepresentative = selectedFamily.value?.representative ?? product;
   const selectedBeforeAnalysis = product.offer_id;
+  const selectedBeforeStoreCode = String(product.store_code ?? selectedStoreCode.value);
   if (!props.canOperate) {
     props.onPermissionDenied?.("当前账号可以查看搜索定位，但不能调用模型或采集排名");
     return;
@@ -502,16 +559,19 @@ async function runAnalysis() {
   analyzing.value = true;
   error.value = "";
   try {
-    const analyzedDetail = await analyzeSearchRanking(familyRepresentative.offer_id);
+    const analyzedDetail = await analyzeSearchRanking(
+      familyRepresentative.offer_id,
+      familyRepresentative.store_code,
+    );
     detail.value = selectedBeforeAnalysis === familyRepresentative.offer_id
       ? analyzedDetail
-      : await fetchSearchRankingDetail(selectedBeforeAnalysis);
+      : await fetchSearchRankingDetail(selectedBeforeAnalysis, selectedBeforeStoreCode);
     syncDecisionParameterChoices(detail.value.decision_parameter_profile);
-    await refreshListSummary(selectedBeforeAnalysis);
+    await refreshListSummary(selectedBeforeAnalysis, selectedBeforeStoreCode);
     await loadRootExpansionLibrary();
   } catch (caught) {
     error.value = errorMessage(caught, "识别或排名采集失败");
-    await selectProduct(selectedBeforeAnalysis);
+    await selectProduct(selectedBeforeAnalysis, selectedBeforeStoreCode);
   } finally {
     analyzing.value = false;
   }
@@ -545,11 +605,15 @@ async function saveDecisionParameterConfirmation() {
   decisionParameterSaving.value = true;
   error.value = "";
   try {
-    detail.value = await confirmSearchRankingDecisionParameters(product.offer_id, choices);
+    detail.value = await confirmSearchRankingDecisionParameters(
+      product.offer_id,
+      choices,
+      product.store_code,
+    );
     syncDecisionParameterChoices(detail.value.decision_parameter_profile);
   } catch (caught) {
     error.value = errorMessage(caught, "决策参数确认保存失败");
-    await selectProduct(product.offer_id);
+    await selectProduct(product.offer_id, String(product.store_code ?? ""));
   } finally {
     decisionParameterSaving.value = false;
   }
@@ -560,6 +624,7 @@ async function loadRootExpansionLibrary() {
   try {
     rootExpansionLibrary.value = await fetchSearchRankingRootExpansionLibrary(
       rootExpansionLibrarySearch.value,
+      selectedStoreCode.value,
     );
   } catch (caught) {
     error.value = errorMessage(caught, "平台根词扩展库加载失败");
@@ -630,16 +695,19 @@ async function confirmProductFacts() {
       confirmed: true,
       acknowledged_fact_accuracy: true,
       acknowledged_ranking_revalidation: true,
-    });
+    }, product.store_code);
     syncDecisionParameterChoices(detail.value.decision_parameter_profile);
     factConfirmationOpen.value = false;
     factDrafts.value = [];
-    await refreshListSummary(product.offer_id);
+    await refreshListSummary(product.offer_id, String(product.store_code ?? ""));
     await loadRootExpansionLibrary();
   } catch (caught) {
     factModalError.value = errorMessage(caught, "商品事实保存或后续定位失败");
     try {
-      const refreshed = await fetchSearchRankingDetail(product.offer_id);
+      const refreshed = await fetchSearchRankingDetail(
+        product.offer_id,
+        product.store_code,
+      );
       detail.value = refreshed;
       syncDecisionParameterChoices(refreshed.decision_parameter_profile);
     } catch {
@@ -675,6 +743,7 @@ async function confirmFactRevocation() {
       product.offer_id,
       fact.id,
       reason,
+      product.store_code,
     );
     factRevocationTarget.value = null;
     factRevocationReason.value = "";
@@ -722,6 +791,13 @@ function variantParametersFor(offerId: string) {
   return selectedFamily.value?.variant_parameters_by_offer[offerId] ?? [];
 }
 
+function familyCompanySkuLabel(variants: SearchRankingProduct[]) {
+  const values = [...new Set(
+    variants.map((item) => String(item.company_sku ?? "").trim()).filter(Boolean),
+  )];
+  return values.length ? values.join("、") : "未关联";
+}
+
 function variantParameterSummary(values: string[]) {
   if (!values.length) return "无标题差异参数";
   const visible = values.slice(0, 4);
@@ -738,10 +814,11 @@ function batchVariantParameterSummary(target: {
   ]);
 }
 
-async function refreshListSummary(offerId: string) {
+async function refreshListSummary(offerId: string, storeCode = selectedStoreCode.value) {
   try {
-    listPayload.value = await fetchSearchRankingProducts();
+    listPayload.value = await fetchSearchRankingProducts(props.storeScope ?? "current");
     selectedOfferId.value = offerId;
+    selectedStoreCode.value = storeCode;
   } catch {
     // The saved detail remains usable even if the lightweight list refresh fails.
   }
@@ -1299,7 +1376,7 @@ function errorMessage(caught: unknown, fallback: string) {
           <div><p>OWN BUYABLE PRODUCT FAMILIES</p><h3>自有在售商品族</h3></div>
           <span>{{ filteredProductFamilies.length }} 族 / {{ products.length }} Offer</span>
         </div>
-        <input v-model="search" type="search" placeholder="搜索标题、SKU、PLID" />
+        <input v-model="search" type="search" placeholder="商品名称支持模糊搜索，也可输入平台 SKU、公司 SKU 或 PLID" />
         <div class="rail-filters">
           <label>
             <span>交叉验证</span>
@@ -1335,7 +1412,7 @@ function errorMessage(caught: unknown, fallback: string) {
             :key="family.key"
             class="product-row"
             :class="{ active: selectedFamily?.key === family.key }"
-            @click="selectProduct(family.representative.offer_id)"
+            @click="selectProduct(family.representative)"
           >
             <img
               v-if="imageUrl(family.representative)"
@@ -1350,7 +1427,9 @@ function errorMessage(caught: unknown, fallback: string) {
               <small v-if="family.variant_parameter_values.length" class="family-parameter-summary">
                 变体参数 {{ variantParameterSummary(family.variant_parameter_values) }}
               </small>
-              <small>合计可售 {{ family.total_available_stock }} · 代表 SKU {{ family.representative.sku || family.representative.offer_id }}</small>
+              <small>合计可售 {{ family.total_available_stock }} · 代表平台 SKU {{ family.representative.sku || family.representative.offer_id }}</small>
+              <small v-if="props.storeScope !== 'current'">店铺 {{ family.representative.store_name || family.representative.store_code || "—" }}</small>
+              <small>公司 SKU {{ familyCompanySkuLabel(family.variants) }}</small>
               <em :class="family.latest_analysis?.status ?? 'untracked'">
                 {{
                   family.latest_analysis?.status === "completed"
@@ -1394,6 +1473,8 @@ function errorMessage(caught: unknown, fallback: string) {
                 {{ selectedFamily?.representative.sku || selectedFamily?.representative.offer_id || selectedProduct.offer_id }}
               </p>
               <h2>{{ selectedProduct.title || "未命名商品" }}</h2>
+              <p v-if="props.storeScope !== 'current'">店铺 {{ selectedProduct.store_name || selectedProduct.store_code || "—" }}</p>
+              <p>公司 SKU {{ selectedProduct.company_sku || "未关联" }}</p>
               <span class="selected-variant-parameter">
                 当前 Offer 变体参数：
                 <b>{{ variantParameterSummary(variantParametersFor(selectedProduct.offer_id).map((item) => item.value)) }}</b>
@@ -1411,10 +1492,10 @@ function errorMessage(caught: unknown, fallback: string) {
                   :key="variant.offer_id"
                   type="button"
                   :class="{ active: variant.offer_id === selectedProduct.offer_id }"
-                  @click="selectProduct(variant.offer_id)"
+                  @click="selectProduct(variant)"
                 >
                   <strong>{{ variant.title || "未命名变体" }}</strong>
-                  <span>{{ variant.sku || variant.offer_id }} · 可售 {{ variant.available_stock }}</span>
+                  <span>平台 {{ variant.sku || variant.offer_id }} · 公司 {{ variant.company_sku || "未关联" }} · 可售 {{ variant.available_stock }}</span>
                   <em>
                     变体参数：{{ variantParameterSummary(variantParametersFor(variant.offer_id).map((item) => item.value)) }}
                   </em>

@@ -7,7 +7,7 @@ import type { SearchRankingProduct } from "../src/types.ts";
 function product(
   offerId: string,
   productlineId: string | null,
-  options: { analysedAt?: string; stock?: number; title?: string } = {},
+  options: { analysedAt?: string; stock?: number; title?: string; storeCode?: string } = {},
 ): SearchRankingProduct {
   return {
     offer_id: offerId,
@@ -23,6 +23,8 @@ function product(
     snapshot_age_hours: 1,
     ownership_source: "authenticated_store_seller_offers",
     analyzable: true,
+    store_code: options.storeCode,
+    store_name: options.storeCode ? `Store ${options.storeCode}` : undefined,
     latest_analysis: options.analysedAt
       ? {
           id: Number(offerId.replace(/\D/g, "")) || 1,
@@ -84,6 +86,19 @@ test("keeps offers without a PLID as separate families", () => {
   ]);
 
   assert.equal(families.length, 2);
+});
+
+test("keeps the same PLID in different stores as separate operator families", () => {
+  const families = groupSearchRankingProducts([
+    product("offer-1", "PLID-1", { storeCode: "current" }),
+    product("offer-2", "PLID-1", { storeCode: "store-02" }),
+  ]);
+
+  assert.equal(families.length, 2);
+  assert.deepEqual(
+    families.map((family) => family.representative.store_code).sort(),
+    ["current", "store-02"],
+  );
 });
 
 test("keeps Double King and King XL as per-offer parameters on one shared family", () => {

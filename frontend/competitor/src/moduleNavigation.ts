@@ -5,8 +5,8 @@ export const ERP_MODULE_KEYS = [
   "search-ranking",
   "quadrants",
   "anomaly-products",
+  "returns",
   "logistics",
-  "platform-warehouse",
   "competitors",
   "users",
 ] as const;

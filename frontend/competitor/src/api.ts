@@ -29,13 +29,12 @@ import type {
   ProductDetailPayload,
   ProductsPayload,
   QuadrantPayload,
+  ReturnsPayload,
   SalesRevenueRevisionPayload,
   StoreOverviewPayload,
   SummaryPayload,
   OwnStoreScope,
   OwnStoreCompetitorOverview,
-  PlatformWarehouseDraft,
-  PlatformWarehousePayload,
 } from "./types";
 import type {
   SearchRootExpansionLibraryPayload,
@@ -115,7 +114,9 @@ async function request<T>(url: string, init?: RequestInit & { signal?: AbortSign
   if (!["GET", "HEAD", "OPTIONS"].includes(method) && csrfToken) {
     headers.set("X-CSRF-Token", csrfToken);
   }
-  headers.set("X-Store-Code", getActiveStoreCode());
+  if (!headers.has("X-Store-Code")) {
+    headers.set("X-Store-Code", getActiveStoreCode());
+  }
   let response: Response;
   try {
     response = await fetch(url, {
@@ -290,11 +291,13 @@ export function fetchOwnStoreCompetitors(
   endDate?: string,
   ownStoreScope: OwnStoreScope = "current",
   signal?: AbortSignal,
+  plid?: string,
 ): Promise<OwnStoreCompetitorOverview> {
   const query = new URLSearchParams();
   if (startDate) query.set("start_date", startDate);
   if (endDate) query.set("end_date", endDate);
   query.set("own_store_scope", ownStoreScope);
+  if (plid) query.set("plid", plid);
   return request<OwnStoreCompetitorOverview>(
     `/api/competitors/own-store?${query.toString()}`,
     { signal },
@@ -596,13 +599,40 @@ export async function fetchCompetitorDetail(
   startDate?: string,
   endDate?: string,
   ownStoreScope: OwnStoreScope = "current",
+  signal?: AbortSignal,
 ): Promise<CompetitorDetail> {
   const query = new URLSearchParams();
   if (startDate) query.set("start_date", startDate);
   if (endDate) query.set("end_date", endDate);
   query.set("own_store_scope", ownStoreScope);
   const suffix = query.size ? `?${query.toString()}` : "";
-  return request<CompetitorDetail>(`/api/competitors/${plid}${suffix}`);
+  return request<CompetitorDetail>(`/api/competitors/${plid}${suffix}`, { signal });
+}
+
+export function fetchReturns(
+  startDate: string,
+  endDate: string,
+  storeScope: OwnStoreScope,
+  filters: {
+    query?: string;
+    reason?: string;
+    outcome?: string;
+    page?: number;
+    pageSize?: number;
+  } = {},
+  signal?: AbortSignal,
+): Promise<ReturnsPayload> {
+  const params = new URLSearchParams({
+    start_date: startDate,
+    end_date: endDate,
+    store_scope: storeScope,
+    page: String(filters.page ?? 1),
+    page_size: String(filters.pageSize ?? 50),
+  });
+  if (filters.query?.trim()) params.set("query", filters.query.trim());
+  if (filters.reason) params.set("reason", filters.reason);
+  if (filters.outcome) params.set("outcome", filters.outcome);
+  return request<ReturnsPayload>(`/api/erp/returns?${params.toString()}`, { signal });
 }
 
 export interface CompetitorCollectionContext {
@@ -867,41 +897,62 @@ export async function fetchSalesRevenueRevisions(options: {
   );
 }
 
-export async function fetchProducts(asOf: string): Promise<ProductsPayload> {
-  return request<ProductsPayload>(`/api/erp/products?${query(asOf)}`);
+function scopedQuery(asOf: string, storeScope: OwnStoreScope): string {
+  const params = new URLSearchParams(query(asOf));
+  params.set("store_scope", storeScope);
+  return params.toString();
+}
+
+function storeHeaders(storeCode?: string | null): HeadersInit | undefined {
+  const normalized = String(storeCode ?? "").trim();
+  return normalized ? { "X-Store-Code": normalized } : undefined;
+}
+
+export async function fetchProducts(
+  asOf: string,
+  storeScope: OwnStoreScope = "current",
+): Promise<ProductsPayload> {
+  return request<ProductsPayload>(
+    `/api/erp/products?${scopedQuery(asOf, storeScope)}`,
+  );
 }
 
 export async function fetchAnomalyProducts(
   asOf: string,
+  storeScope: OwnStoreScope = "current",
 ): Promise<AnomalyProductPayload> {
   return request<AnomalyProductPayload>(
-    `/api/erp/anomaly-products?${query(asOf)}`,
+    `/api/erp/anomaly-products?${scopedQuery(asOf, storeScope)}`,
   );
 }
 
 export async function fetchProductDetail(
   offerId: string,
   asOf: string,
+  storeCode?: string | null,
 ): Promise<ProductDetailPayload> {
   return request<ProductDetailPayload>(
     `/api/erp/products/${encodeURIComponent(offerId)}?${query(asOf)}`,
+    { headers: storeHeaders(storeCode) },
   );
 }
 
 export async function fetchQuadrants(
   asOf: string,
   percentile: number,
+  storeScope: OwnStoreScope = "current",
 ): Promise<QuadrantPayload> {
   return request<QuadrantPayload>(
-    `/api/erp/quadrants?${query(asOf)}&percentile=${percentile}`,
+    `/api/erp/quadrants?${scopedQuery(asOf, storeScope)}&percentile=${percentile}`,
   );
 }
 
 export function fetchKeywordTrafficProducts(
   asOf: string,
+  storeScope: OwnStoreScope = "current",
 ): Promise<KeywordTrafficListPayload> {
   return request<KeywordTrafficListPayload>(
-    `/api/erp/keyword-traffic?${query(asOf)}`,
+    `/api/erp/keyword-traffic?${scopedQuery(asOf, storeScope)}`,
   );
 }
 
@@ -910,25 +961,33 @@ export function fetchKeywordTrafficDetail(
   asOf: string,
   historyDays: number,
   comparisonDays: number,
+  storeCode?: string | null,
 ): Promise<KeywordTrafficDetailPayload> {
   return request<KeywordTrafficDetailPayload>(
     `/api/erp/keyword-traffic/${encodeURIComponent(offerId)}`
       + `?${query(asOf)}&history_days=${historyDays}&comparison_days=${comparisonDays}`,
+    { headers: storeHeaders(storeCode) },
   );
 }
 
-export function fetchSearchRankingProducts(): Promise<SearchRankingListPayload> {
-  return request<SearchRankingListPayload>("/api/erp/search-ranking");
+export function fetchSearchRankingProducts(
+  storeScope: OwnStoreScope = "current",
+): Promise<SearchRankingListPayload> {
+  return request<SearchRankingListPayload>(
+    `/api/erp/search-ranking?store_scope=${encodeURIComponent(storeScope)}`,
+  );
 }
 
 export function fetchSearchRankingRootExpansionLibrary(
   search = "",
+  storeCode?: string | null,
 ): Promise<SearchRootExpansionLibraryPayload> {
   const params = new URLSearchParams();
   if (search.trim()) params.set("search", search.trim());
   params.set("limit", "100");
   return request<SearchRootExpansionLibraryPayload>(
     `/api/erp/search-ranking/root-expansion-library?${params.toString()}`,
+    { headers: storeHeaders(storeCode) },
   );
 }
 
@@ -981,18 +1040,21 @@ export function restartSearchRankingBatch(
 
 export function fetchSearchRankingDetail(
   offerId: string,
+  storeCode?: string | null,
 ): Promise<SearchRankingDetailPayload> {
   return request<SearchRankingDetailPayload>(
     `/api/erp/search-ranking/${encodeURIComponent(offerId)}`,
+    { headers: storeHeaders(storeCode) },
   );
 }
 
 export function analyzeSearchRanking(
   offerId: string,
+  storeCode?: string | null,
 ): Promise<SearchRankingDetailPayload> {
   return request<SearchRankingDetailPayload>(
     `/api/erp/search-ranking/${encodeURIComponent(offerId)}/analyze`,
-    { method: "POST" },
+    { method: "POST", headers: storeHeaders(storeCode) },
   );
 }
 
@@ -1002,12 +1064,16 @@ export function confirmSearchRankingDecisionParameters(
     parameter_key: string;
     is_decision_parameter: boolean;
   }>,
+  storeCode?: string | null,
 ): Promise<SearchRankingDetailPayload> {
   return request<SearchRankingDetailPayload>(
     `/api/erp/search-ranking/${encodeURIComponent(offerId)}/decision-parameters/confirm`,
     {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: {
+        "Content-Type": "application/json",
+        ...storeHeaders(storeCode),
+      },
       body: JSON.stringify({
         choices,
         confirmed_current_title: true,
@@ -1032,12 +1098,16 @@ export function confirmSearchRankingProductFacts(
     acknowledged_fact_accuracy: true;
     acknowledged_ranking_revalidation: true;
   },
+  storeCode?: string | null,
 ): Promise<SearchRankingDetailPayload> {
   return request<SearchRankingDetailPayload>(
     `/api/erp/search-ranking/${encodeURIComponent(offerId)}/product-facts/confirm`,
     {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: {
+        "Content-Type": "application/json",
+        ...storeHeaders(storeCode),
+      },
       body: JSON.stringify(payload),
     },
   );
@@ -1047,12 +1117,16 @@ export function revokeSearchRankingProductFact(
   offerId: string,
   factId: number,
   reason: string,
+  storeCode?: string | null,
 ): Promise<SearchRankingDetailPayload> {
   return request<SearchRankingDetailPayload>(
     `/api/erp/search-ranking/${encodeURIComponent(offerId)}/product-facts/${factId}/revoke`,
     {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: {
+        "Content-Type": "application/json",
+        ...storeHeaders(storeCode),
+      },
       body: JSON.stringify({ reason }),
     },
   );
@@ -1060,18 +1134,24 @@ export function revokeSearchRankingProductFact(
 
 export async function fetchLogisticsOverview(
   refresh = false,
+  storeScope: OwnStoreScope = "current",
 ): Promise<LogisticsOverviewPayload> {
-  const suffix = refresh ? "?refresh=true" : "";
-  return request<LogisticsOverviewPayload>(`/api/erp/logistics${suffix}`);
+  const params = new URLSearchParams({ store_scope: storeScope });
+  if (refresh) params.set("refresh", "true");
+  return request<LogisticsOverviewPayload>(`/api/erp/logistics?${params.toString()}`);
 }
 
 export function confirmLogisticsLink(
   w8OrderNo: string,
   takealotShipmentId: number,
+  storeCode?: string | null,
 ): Promise<{ link: LogisticsOverviewPayload["matching"]["confirmed_links"][number] }> {
   return request("/api/erp/logistics/links", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: {
+      "Content-Type": "application/json",
+      ...storeHeaders(storeCode),
+    },
     body: JSON.stringify({
       w8_order_no: w8OrderNo,
       takealot_shipment_id: takealotShipmentId,
@@ -1082,124 +1162,14 @@ export function confirmLogisticsLink(
 export function revokeLogisticsLink(
   linkId: number,
   note: string,
+  storeCode?: string | null,
 ): Promise<{ link: LogisticsOverviewPayload["matching"]["confirmed_links"][number] }> {
   return request(`/api/erp/logistics/links/${linkId}/revoke`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ note }),
-  });
-}
-
-export function fetchPlatformWarehouse(): Promise<PlatformWarehousePayload> {
-  return request<PlatformWarehousePayload>("/api/erp/platform-warehouse");
-}
-
-export interface PlatformWarehouseDirectCreateResult {
-  state: "created" | "need_2fa";
-  draft: PlatformWarehouseDraft;
-  portal: PlatformWarehousePayload["portal"];
-  otp_destination?: string | null;
-}
-
-export function createPlatformWarehouseDirect(input: {
-  client_request_id: string;
-  lines: Array<{
-    offer_id: string;
-    cpt_quantity: number;
-    jhb_quantity: number;
-    dbn_quantity: number;
-  }>;
-  note?: string;
-}): Promise<PlatformWarehouseDirectCreateResult> {
-  return request("/api/erp/platform-warehouse/create-direct", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(input),
-  });
-}
-
-export function verifyPlatformWarehouseOtpAndCreate(
-  draftId: number,
-  otp: string,
-): Promise<PlatformWarehouseDirectCreateResult> {
-  return request(`/api/erp/platform-warehouse/drafts/${draftId}/verify-otp-and-create`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ otp }),
-  });
-}
-
-export function logoutPlatformWarehousePortal(): Promise<{
-  portal: PlatformWarehousePayload["portal"];
-}> {
-  return request("/api/erp/platform-warehouse/portal/logout", { method: "POST" });
-}
-
-export type PlatformWarehouseUpstreamAction = "confirm_po" | "confirm_shipped" | "archive";
-
-export function preparePlatformWarehouseAction(
-  shipmentId: number,
-  action: PlatformWarehouseUpstreamAction,
-): Promise<{
-  action: PlatformWarehouseUpstreamAction;
-  shipment_id: number;
-  approval_token: string;
-  expires_at: string;
-  preview: Record<string, unknown> | null;
-}> {
-  return request(`/api/erp/platform-warehouse/shipments/${shipmentId}/prepare-action`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ action }),
-  });
-}
-
-export function executePlatformWarehouseAction(
-  shipmentId: number,
-  input: {
-    action: PlatformWarehouseUpstreamAction;
-    approval_token: string;
-    confirmation_text: string;
-    tracking_reference?: string;
-    my_soh_decrease_warehouse_id?: number;
-  },
-): Promise<{ draft: PlatformWarehouseDraft }> {
-  return request(`/api/erp/platform-warehouse/shipments/${shipmentId}/execute-action`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(input),
-  });
-}
-
-export function confirmPlatformWarehousePo(
-  draftId: number,
-  input: { po_number: string; platform_shipment_id?: number; note?: string },
-): Promise<{ draft: PlatformWarehouseDraft }> {
-  return request(`/api/erp/platform-warehouse/drafts/${draftId}/confirm-po`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(input),
-  });
-}
-
-export function confirmPlatformWarehouseShipped(
-  draftId: number,
-  input: { tracking_reference: string; note?: string },
-): Promise<{ draft: PlatformWarehouseDraft }> {
-  return request(`/api/erp/platform-warehouse/drafts/${draftId}/confirm-shipped`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(input),
-  });
-}
-
-export function archivePlatformWarehouseDraft(
-  draftId: number,
-  note: string,
-): Promise<{ draft: PlatformWarehouseDraft }> {
-  return request(`/api/erp/platform-warehouse/drafts/${draftId}/archive`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: {
+      "Content-Type": "application/json",
+      ...storeHeaders(storeCode),
+    },
     body: JSON.stringify({ note }),
   });
 }

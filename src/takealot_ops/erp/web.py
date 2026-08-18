@@ -81,6 +81,14 @@ from takealot_ops.competitors.scheduled import (
 )
 from takealot_ops.dashboard.refresh import run_dashboard_refresh
 from takealot_ops.domain import sast_date
+from takealot_ops.exchange_rates import (
+    CnyZarRateService,
+    product_cost_conversion_payload,
+)
+from takealot_ops.profitability import (
+    empty_own_store_profitability,
+    load_own_store_profitability as load_own_store_profitability_payload,
+)
 from takealot_ops.erp.auth import (
     SESSION_COOKIE,
     SESSION_LIFETIME,
@@ -92,8 +100,8 @@ from takealot_ops.erp.auth import (
     UserIdentity,
 )
 from takealot_ops.erp.anomaly_products import (
-    build_anomaly_product_payload,
-    verified_sales_metric_dates,
+    AnomalyProductPayloadCache,
+    load_cached_anomaly_product_payload,
 )
 from takealot_ops.erp.coordination import RefreshBusyError, RefreshCoordinator
 from takealot_ops.erp.daily_report import (
@@ -148,6 +156,14 @@ from takealot_ops.erp.product_images import (
     ProductImageUnavailableError,
     ProductThumbnailCache,
 )
+from takealot_ops.erp.returns import (
+    filter_return_rows,
+    load_offer_returned_30_day_counter,
+    load_return_collection_status,
+    load_store_return_rows,
+    return_filter_options,
+    summarize_return_rows,
+)
 from takealot_ops.erp.service import (
     build_product_detail_payload,
     build_products_payload,
@@ -161,6 +177,7 @@ from takealot_ops.erp.service import (
 )
 from takealot_ops.logistics import LogisticsLinkError, LogisticsOverviewService
 from takealot_ops.logistics.snapshots import load_provider_snapshot
+from takealot_ops.metrics.service import DashboardDataset
 from takealot_ops.platform_warehouse import (
     PlatformWarehouseConflictError,
     PlatformWarehouseInputError,
@@ -169,6 +186,10 @@ from takealot_ops.platform_warehouse import (
     PortalAuthenticationError,
     PortalDisabledError,
     PortalError,
+)
+from takealot_ops.product_master import (
+    enrich_product_master_records,
+    load_company_inventory_for_plid,
 )
 from takealot_ops.nft102_portal import (
     generate_nft102_from_baseline,
@@ -205,6 +226,7 @@ from takealot_ops.storage.models import (
     DailyProductMetric,
     DailyReportRun,
     DailySalesMetricState,
+    ErpStore,
     ErpUser,
     ErpUserStore,
     OfferCurrent,
@@ -1420,6 +1442,8 @@ def create_app(project_root: Path | None = None) -> FastAPI:
     listing_preview_registry = CompetitorListingPreviewRegistry()
     refresh_coordinator = RefreshCoordinator(root)
     product_thumbnails = ProductThumbnailCache(root)
+    cny_zar_rates = CnyZarRateService()
+    anomaly_product_cache = AnomalyProductPayloadCache()
     logistics_overview = LogisticsOverviewService(root)
     platform_warehouse = PlatformWarehouseService(root)
     search_ranking = SearchRankingService(root)
@@ -1444,6 +1468,7 @@ def create_app(project_root: Path | None = None) -> FastAPI:
             await competitor_public_client.close()
             refresh_coordinator.close()
             product_thumbnails.close()
+            cny_zar_rates.close()
             auth.close()
 
     app = FastAPI(
@@ -1456,6 +1481,8 @@ def create_app(project_root: Path | None = None) -> FastAPI:
     app.add_middleware(GZipMiddleware, minimum_size=1024, compresslevel=5)
     app.state.auth_manager = auth
     app.state.product_thumbnail_cache = product_thumbnails
+    app.state.cny_zar_rate_service = cny_zar_rates
+    app.state.anomaly_product_cache = anomaly_product_cache
     app.state.search_ranking_service = search_ranking
     app.state.search_ranking_batch_controller = search_ranking_batch
 
@@ -1853,6 +1880,12 @@ def create_app(project_root: Path | None = None) -> FastAPI:
                 ).get(store.code, [])
             except SQLAlchemyError:
                 payload["operators"] = []
+            with Session(engine) as session:
+                payload["top_products"] = enrich_product_master_records(
+                    session,
+                    payload.get("top_products", []),
+                    as_of_date=as_of,
+                )
         finally:
             engine.dispose()
         return payload
@@ -2043,37 +2076,207 @@ def create_app(project_root: Path | None = None) -> FastAPI:
         }
 
     @app.get("/api/erp/products")
-    def products(as_of: date = Query(default_factory=date.today)) -> dict[str, Any]:
+    def products(
+        request: Request,
+        as_of: date = Query(default_factory=date.today),
+        selected_store_scope: Literal["current", "all", "operating"] = Query(
+            default="current",
+            alias="store_scope",
+        ),
+    ) -> dict[str, Any]:
         settings = DashboardSettings.from_env(root)
-        return build_products_payload(load_erp_dataset(settings, as_of), as_of)
+        stores = _read_store_identities_for_request(request, selected_store_scope)
+        items: list[dict[str, Any]] = []
+        metric_dates: dict[str, str | None] = {}
+        for store in stores:
+            with store_scope(store.code):
+                payload = build_products_payload(
+                    load_erp_dataset(settings, as_of),
+                    as_of,
+                )
+            metric_dates[store.code] = payload.get("latest_metric_date")
+            items.extend(_tag_store_records(payload.get("items", []), store))
+        items = _product_master_records(root, items, as_of_date=as_of)
+        items.sort(
+            key=lambda item: (
+                -float(item.get("ordered_units") or 0),
+                -float(item.get("page_views_30_days") or 0),
+                str(item.get("store_name") or "").casefold(),
+                str(item.get("title") or "").casefold(),
+            )
+        )
+        latest_dates = [value for value in metric_dates.values() if value]
+        return {
+            "latest_metric_date": max(latest_dates) if latest_dates else None,
+            "store_scope": selected_store_scope,
+            "store_count": len(stores),
+            "store_metric_dates": metric_dates,
+            "items": items,
+        }
 
     @app.get("/api/erp/products/{offer_id}")
     def product_detail(
         offer_id: str,
+        request: Request,
         as_of: date = Query(default_factory=date.today),
     ) -> dict[str, Any]:
         settings = DashboardSettings.from_env(root)
-        return build_product_detail_payload(
+        payload = build_product_detail_payload(
             load_erp_dataset(settings, as_of),
             as_of,
             offer_id,
         )
+        identity = payload.get("identity")
+        enriched = _product_master_records(
+            root,
+            [identity] if isinstance(identity, Mapping) else [],
+            as_of_date=as_of,
+        )
+        store = request.state.erp_store
+        payload["identity"] = (
+            _tag_store_record(enriched[0], store) if enriched else {}
+        )
+        enriched_identity = payload["identity"]
+        payload["cost_conversion"] = product_cost_conversion_payload(
+            enriched_identity.get("cost_rmb")
+            if isinstance(enriched_identity, Mapping)
+            else None,
+            request.app.state.cny_zar_rate_service,
+        )
+        payload["history"] = _tag_store_records(payload.get("history", []), store)
+        return payload
+
+    @app.get("/api/erp/returns")
+    def seller_returns(
+        request: Request,
+        start_date: date | None = Query(default=None),
+        end_date: date | None = Query(default=None),
+        selected_store_scope: Literal["current", "all", "operating"] = Query(
+            default="current",
+            alias="store_scope",
+        ),
+        query: str | None = Query(default=None, max_length=200),
+        reason: str | None = Query(default=None, max_length=100),
+        outcome: str | None = Query(default=None, max_length=100),
+        page: int = Query(default=1, ge=1),
+        page_size: int = Query(default=50, ge=1, le=100),
+    ) -> dict[str, Any]:
+        """Return authorized, filterable seller-return detail across store scopes."""
+        selected_end = end_date or datetime.now(ZoneInfo("Africa/Johannesburg")).date()
+        selected_start = start_date or selected_end - timedelta(days=29)
+        if selected_start > selected_end:
+            raise HTTPException(status_code=422, detail="开始日期不能晚于结束日期")
+        stores = _read_store_identities_for_request(request, selected_store_scope)
+        settings = DashboardSettings.from_env(root)
+        engine = create_read_only_erp_engine(settings.database_url)
+        all_rows: list[dict[str, Any]] = []
+        statuses: list[dict[str, Any]] = []
+        counters: list[dict[str, Any]] = []
+        try:
+            for store in stores:
+                with store_scope(store.code), Session(engine) as session:
+                    store_rows = enrich_product_master_records(
+                        session,
+                        load_store_return_rows(
+                            session,
+                            start_date=selected_start,
+                            end_date=selected_end,
+                        ),
+                        as_of_date=selected_end,
+                    )
+                    status = load_return_collection_status(
+                        session,
+                        start_date=selected_start,
+                        end_date=selected_end,
+                    )
+                    counter = load_offer_returned_30_day_counter(session)
+                all_rows.extend(
+                    _tag_store_records(
+                        store_rows,
+                        store,
+                        identity_fields=("seller_return_id",),
+                    )
+                )
+                statuses.append({**status, "store_code": store.code, "store_name": store.display_name})
+                counters.append({**counter, "store_code": store.code, "store_name": store.display_name})
+        finally:
+            engine.dispose()
+
+        options = return_filter_options(all_rows)
+        filtered = filter_return_rows(
+            all_rows,
+            query=query,
+            reason=reason,
+            outcome=outcome,
+        )
+        offset = (page - 1) * page_size
+        return {
+            "range_start": selected_start.isoformat(),
+            "range_end": selected_end.isoformat(),
+            "date_basis": "Africa/Johannesburg",
+            "store_scope": selected_store_scope,
+            "store_count": len(stores),
+            "data_status": _combined_return_data_status(statuses),
+            "store_statuses": statuses,
+            "offer_returned_30_days": _aggregate_offer_return_counter(counters),
+            "summary": summarize_return_rows(filtered),
+            "filters": options,
+            "items": filtered[offset : offset + page_size],
+            "total": len(filtered),
+            "page": page,
+            "page_size": page_size,
+            "source_notice": (
+                "退货原因、客户备注、处理结果与交易来自 Seller API /returns；"
+                "Offer 的 quantity_returned_30_days 是独立滚动30天计数，不替代退货明细。"
+            ),
+        }
 
     @app.get("/api/erp/keyword-traffic")
     def keyword_traffic_products(
+        request: Request,
         as_of: date = Query(default_factory=date.today),
+        selected_store_scope: Literal["current", "all", "operating"] = Query(
+            default="current",
+            alias="store_scope",
+        ),
     ) -> dict[str, Any]:
         settings = DashboardSettings.from_env(root)
+        stores = _read_store_identities_for_request(request, selected_store_scope)
         engine = create_read_only_erp_engine(settings.database_url)
         try:
-            with Session(engine) as session:
-                return build_keyword_product_list(session, as_of=as_of)
+            items: list[dict[str, Any]] = []
+            summary = {
+                "product_count": 0,
+                "with_traffic_count": 0,
+                "archived_product_count": 0,
+                "keyword_change_count": 0,
+            }
+            for store in stores:
+                with store_scope(store.code), Session(engine) as session:
+                    payload = build_keyword_product_list(session, as_of=as_of)
+                    store_items = enrich_product_master_records(
+                        session,
+                        payload.get("items", []),
+                        as_of_date=as_of,
+                    )
+                items.extend(_tag_store_records(store_items, store))
+                payload_summary = payload.get("summary", {})
+                for key in summary:
+                    summary[key] += int(payload_summary.get(key) or 0)
+            return {
+                "as_of": as_of.isoformat(),
+                "store_scope": selected_store_scope,
+                "store_count": len(stores),
+                "items": items,
+                "summary": summary,
+            }
         finally:
             engine.dispose()
 
     @app.get("/api/erp/keyword-traffic/{offer_id}")
     def keyword_traffic_product_detail(
         offer_id: str,
+        request: Request,
         as_of: date = Query(default_factory=date.today),
         history_days: int = Query(90, ge=30, le=365),
         comparison_days: int = Query(7, ge=3, le=30),
@@ -2089,6 +2292,18 @@ def create_app(project_root: Path | None = None) -> FastAPI:
                     history_days=history_days,
                     comparison_days=comparison_days,
                 )
+                if payload is not None:
+                    product = payload.get("product")
+                    enriched = enrich_product_master_records(
+                        session,
+                        [product] if isinstance(product, Mapping) else [],
+                        as_of_date=as_of,
+                    )
+                    payload["product"] = (
+                        _tag_store_record(enriched[0], request.state.erp_store)
+                        if enriched
+                        else {}
+                    )
         finally:
             engine.dispose()
         if payload is None:
@@ -2096,9 +2311,61 @@ def create_app(project_root: Path | None = None) -> FastAPI:
         return payload
 
     @app.get("/api/erp/search-ranking")
-    def search_ranking_products(request: Request) -> dict[str, Any]:
+    def search_ranking_products(
+        request: Request,
+        selected_store_scope: Literal["current", "all", "operating"] = Query(
+            default="current",
+            alias="store_scope",
+        ),
+    ) -> dict[str, Any]:
         service: SearchRankingService = request.app.state.search_ranking_service
-        return service.list_payload()
+        stores = _read_store_identities_for_request(request, selected_store_scope)
+        status: Mapping[str, Any] | None = None
+        items: list[dict[str, Any]] = []
+        excluded_reasons: defaultdict[str, int] = defaultdict(int)
+        eligibility: dict[str, Any] = {
+            "source": "authenticated_store_seller_offers",
+            "rule": "current_offer_and_buyable_and_positive_available_stock_and_fresh",
+            "current_offer_count": 0,
+            "eligible_count": 0,
+            "excluded_count": 0,
+            "excluded_reasons": excluded_reasons,
+            "latest_capture_at": None,
+            "max_age_hours": 0,
+        }
+        for store in stores:
+            with store_scope(store.code):
+                payload = service.list_payload()
+            if status is None:
+                status = payload.get("status", {})
+            store_eligibility = payload.get("eligibility", {})
+            for key in ("current_offer_count", "eligible_count", "excluded_count"):
+                eligibility[key] += int(store_eligibility.get(key) or 0)
+            eligibility["max_age_hours"] = max(
+                float(eligibility["max_age_hours"] or 0),
+                float(store_eligibility.get("max_age_hours") or 0),
+            )
+            captured_at = store_eligibility.get("latest_capture_at")
+            if captured_at and (
+                eligibility["latest_capture_at"] is None
+                or str(captured_at) > str(eligibility["latest_capture_at"])
+            ):
+                eligibility["latest_capture_at"] = captured_at
+            for reason, count in dict(
+                store_eligibility.get("excluded_reasons") or {}
+            ).items():
+                excluded_reasons[str(reason)] += int(count or 0)
+            items.extend(_tag_store_records(payload.get("items", []), store))
+        if status is None:
+            status = service.list_payload().get("status", {})
+        eligibility["excluded_reasons"] = dict(excluded_reasons)
+        return {
+            "status": status,
+            "eligibility": eligibility,
+            "store_scope": selected_store_scope,
+            "store_count": len(stores),
+            "items": _product_master_records(root, items),
+        }
 
     @app.get("/api/erp/search-ranking/root-expansion-library")
     def search_ranking_root_expansion_library(
@@ -2214,7 +2481,11 @@ def create_app(project_root: Path | None = None) -> FastAPI:
         payload = service.detail_payload(offer_id)
         if payload is None:
             raise HTTPException(status_code=404, detail="没有找到对应的店铺商品")
-        return payload
+        return _decorate_search_ranking_detail(
+            root,
+            payload,
+            request.state.erp_store,
+        )
 
     @app.post("/api/erp/search-ranking/{offer_id}/analyze")
     async def analyze_search_ranking(
@@ -2229,7 +2500,12 @@ def create_app(project_root: Path | None = None) -> FastAPI:
         service: SearchRankingService = request.app.state.search_ranking_service
         try:
             async with search_ranking_lock:
-                return await service.analyze_offer(offer_id)
+                payload = await service.analyze_offer(offer_id)
+                return _decorate_search_ranking_detail(
+                    root,
+                    payload,
+                    request.state.erp_store,
+                )
         except SearchRankingInputError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         except SearchRankingConfigurationError as exc:
@@ -2266,9 +2542,14 @@ def create_app(project_root: Path | None = None) -> FastAPI:
         )
         try:
             async with search_ranking_lock:
-                return await service.confirm_product_facts(
+                result = await service.confirm_product_facts(
                     offer_id,
                     confirmation,
+                )
+                return _decorate_search_ranking_detail(
+                    root,
+                    result,
+                    request.state.erp_store,
                 )
         except SearchRankingInputError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -2292,7 +2573,7 @@ def create_app(project_root: Path | None = None) -> FastAPI:
         user = request.state.erp_user
         try:
             async with search_ranking_lock:
-                return service.confirm_decision_parameters(
+                result = service.confirm_decision_parameters(
                     offer_id,
                     DecisionParameterConfirmation(
                         actor_username=user.username,
@@ -2305,6 +2586,11 @@ def create_app(project_root: Path | None = None) -> FastAPI:
                             for item in payload.choices
                         ),
                     ),
+                )
+                return _decorate_search_ranking_detail(
+                    root,
+                    result,
+                    request.state.erp_store,
                 )
         except SearchRankingInputError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -2319,7 +2605,7 @@ def create_app(project_root: Path | None = None) -> FastAPI:
         service: SearchRankingService = request.app.state.search_ranking_service
         user = request.state.erp_user
         try:
-            return service.revoke_product_fact(
+            result = service.revoke_product_fact(
                 offer_id,
                 fact_id,
                 ProductFactRevocation(
@@ -2328,22 +2614,48 @@ def create_app(project_root: Path | None = None) -> FastAPI:
                     reason=payload.reason,
                 ),
             )
+            return _decorate_search_ranking_detail(
+                root,
+                result,
+                request.state.erp_store,
+            )
         except SearchRankingInputError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     @app.get("/api/erp/quadrants")
     def quadrants(
+        request: Request,
         as_of: date = Query(default_factory=date.today),
         percentile: int = Query(50),
+        selected_store_scope: Literal["current", "all", "operating"] = Query(
+            default="current",
+            alias="store_scope",
+        ),
     ) -> dict[str, Any]:
         if percentile not in {25, 50, 75}:
             raise HTTPException(status_code=422, detail="分位数只能是25、50或75")
         settings = DashboardSettings.from_env(root)
-        return build_quadrant_payload(
-            load_erp_dataset(settings, as_of),
-            as_of,
-            percentile,
+        stores = _read_store_identities_for_request(request, selected_store_scope)
+        dataset, offer_scope = _combined_store_dataset(settings, as_of, stores)
+        payload = build_quadrant_payload(dataset, as_of, percentile)
+        scoped_items: list[dict[str, Any]] = []
+        for item in payload.get("items", []):
+            record = dict(item)
+            synthetic_offer_id = str(record.get("offer_id") or "")
+            identity = offer_scope.get(synthetic_offer_id)
+            if identity is not None:
+                store, original_offer_id = identity
+                record["offer_id"] = original_offer_id
+                record = _tag_store_record(record, store)
+            scoped_items.append(record)
+        payload["items"] = _product_master_records(
+            root,
+            scoped_items,
+            as_of_date=as_of,
         )
+        payload["store_scope"] = selected_store_scope
+        payload["store_count"] = len(stores)
+        return payload
 
     @app.get("/api/erp/product-thumbnail")
     def product_thumbnail(
@@ -2375,38 +2687,70 @@ def create_app(project_root: Path | None = None) -> FastAPI:
 
     @app.get("/api/erp/anomaly-products")
     def anomaly_products(
+        request: Request,
         as_of: date = Query(default_factory=date.today),
+        selected_store_scope: Literal["current", "all", "operating"] = Query(
+            default="current",
+            alias="store_scope",
+        ),
     ) -> dict[str, Any]:
         """Return the new separated anomaly workspace from local evidence only."""
 
         settings = DashboardSettings.from_env(root)
+        stores = _read_store_identities_for_request(request, selected_store_scope)
         completed_through = min(
             as_of,
             sast_date(datetime.now(UTC)) - timedelta(days=1),
         )
         engine = create_read_only_erp_engine(settings.database_url)
+        store_payloads: list[tuple[StoreIdentity, dict[str, Any]]] = []
         try:
-            with Session(engine) as session:
-                states = list(
-                    session.scalars(
-                        select(DailySalesMetricState).where(
-                            DailySalesMetricState.metric_date <= completed_through
-                        )
+            for store in stores:
+                with store_scope(store.code), Session(engine) as session:
+                    store_payload = load_cached_anomaly_product_payload(
+                        session,
+                        cache=anomaly_product_cache,
+                        store_code=store.code,
+                        requested_as_of=as_of,
+                        completed_through=completed_through,
+                    )
+                store_payloads.append(
+                    (
+                        store,
+                        store_payload,
                     )
                 )
         finally:
             engine.dispose()
-        return build_anomaly_product_payload(
-            load_erp_dataset(settings, as_of),
+        return _aggregate_anomaly_payloads(
+            root,
+            store_payloads,
             requested_as_of=as_of,
             completed_through=completed_through,
-            verified_dates=verified_sales_metric_dates(states),
+            selected_store_scope=selected_store_scope,
         )
 
     @app.get("/api/erp/logistics")
-    def logistics(refresh: bool = Query(False)) -> dict[str, Any]:
+    def logistics(
+        request: Request,
+        refresh: bool = Query(False),
+        selected_store_scope: Literal["current", "all", "operating"] = Query(
+            default="current",
+            alias="store_scope",
+        ),
+    ) -> dict[str, Any]:
         """Return a cached, sanitized, read-only W8 and Takealot shipment overview."""
-        return logistics_overview.load(force=refresh)
+        stores = _read_store_identities_for_request(request, selected_store_scope)
+        if refresh and selected_store_scope != "current":
+            raise HTTPException(
+                status_code=422,
+                detail="全部店铺查看只读取各店本地快照；请切换到明确单店后再手动同步",
+            )
+        payloads: list[tuple[StoreIdentity, dict[str, Any]]] = []
+        for store in stores:
+            with store_scope(store.code):
+                payloads.append((store, logistics_overview.load(force=refresh)))
+        return _aggregate_logistics_payloads(payloads, selected_store_scope)
 
     @app.post("/api/erp/logistics/links")
     def confirm_logistics_link(
@@ -2446,9 +2790,28 @@ def create_app(project_root: Path | None = None) -> FastAPI:
         return {"link": link}
 
     @app.get("/api/erp/platform-warehouse")
-    def platform_warehouse_overview() -> dict[str, Any]:
+    def platform_warehouse_overview(
+        request: Request,
+        selected_store_scope: Literal["current", "all", "operating"] = Query(
+            default="current",
+            alias="store_scope",
+        ),
+    ) -> dict[str, Any]:
         """Return guarded drafts plus the latest read-only Takealot shipment snapshot."""
-        return platform_warehouse.load()
+        stores = _read_store_identities_for_request(request, selected_store_scope)
+        payloads: list[tuple[StoreIdentity, dict[str, Any]]] = []
+        for store in stores:
+            with store_scope(store.code):
+                payload = platform_warehouse.load()
+            payload["offers"] = _product_master_records(
+                root,
+                payload.get("offers", []),
+            )
+            payloads.append((store, payload))
+        return _aggregate_platform_warehouse_payloads(
+            payloads,
+            selected_store_scope,
+        )
 
     @app.get("/api/erp/platform-warehouse/portal/status")
     def platform_warehouse_portal_status(request: Request) -> dict[str, Any]:
@@ -3094,7 +3457,10 @@ def create_app(project_root: Path | None = None) -> FastAPI:
         )
         return {
             "items": frame_records(dataset.current),
-            "store_items": frame_records(dataset.store_current),
+            "store_items": _product_master_competitor_store_records(
+                root,
+                frame_records(dataset.store_current),
+            ),
             "own_follower_events": dataset.own_follower_events,
             "date_range": dataset.date_range_payload(),
         }
@@ -3104,6 +3470,7 @@ def create_app(project_root: Path | None = None) -> FastAPI:
         request: Request,
         start_date: date | None = Query(default=None),
         end_date: date | None = Query(default=None),
+        plid: str | None = Query(default=None, min_length=1, max_length=30),
         own_store_scope: Literal["current", "all", "operating"] = Query(
             default="current"
         ),
@@ -3114,11 +3481,15 @@ def create_app(project_root: Path | None = None) -> FastAPI:
             start_date=start_date,
             end_date=end_date,
             own_store_codes=_own_store_codes_for_request(request, own_store_scope),
+            plids={plid} if plid else None,
             include_detail_frames=False,
             own_store_only=True,
         )
         return {
-            "store_items": frame_records(dataset.store_current),
+            "store_items": _product_master_competitor_store_records(
+                root,
+                frame_records(dataset.store_current),
+            ),
             "date_range": dataset.date_range_payload(),
         }
 
@@ -3318,7 +3689,10 @@ def create_app(project_root: Path | None = None) -> FastAPI:
         )
         return {
             "items": frame_records(dataset.current),
-            "store_items": frame_records(dataset.store_current),
+            "store_items": _product_master_competitor_store_records(
+                root,
+                frame_records(dataset.store_current),
+            ),
             "own_follower_events": [],
             "date_range": dataset.date_range_payload(),
         }
@@ -4617,8 +4991,12 @@ def create_app(project_root: Path | None = None) -> FastAPI:
         start_date: date | None = Query(default=None),
         end_date: date | None = Query(default=None),
         own_store_scope: Literal["current", "all", "operating"] = Query(default="current"),
-    ) -> dict[str, list[dict[str, Any]]]:
+    ) -> dict[str, Any]:
         own_store_codes = _own_store_codes_for_request(request, own_store_scope)
+        inventory_store_codes = _own_store_codes_for_request(request, "all")
+        profit_fee_window_end = (
+            datetime.now(ZoneInfo("Africa/Johannesburg")).date() - timedelta(days=1)
+        )
         dataset = _load_competitor_dataset(
             root,
             start_date=start_date,
@@ -4667,6 +5045,21 @@ def create_app(project_root: Path | None = None) -> FastAPI:
             if store_item is not None
             else []
         )
+        own_store_returns = (
+            _load_own_store_returns(
+                root,
+                plid=plid,
+                own_store_codes=own_store_codes,
+                start_date=start_date,
+                end_date=end_date,
+            )
+            if store_item is not None
+            else _empty_return_payload(
+                start_date=start_date,
+                end_date=end_date,
+                message="该链接不是当前授权范围内的自有链接。",
+            )
+        )
         return {
             "category_path": dataset.category_paths.get(plid, []),
             "history": frame_records(history),
@@ -4674,6 +5067,39 @@ def create_app(project_root: Path | None = None) -> FastAPI:
             "variants": frame_records(variants),
             "own_store_sales": own_store_sales,
             "own_store_traffic": own_store_traffic,
+            "own_store_returns": own_store_returns,
+            "own_store_profitability": (
+                _load_own_store_profitability(
+                    root,
+                    plid=plid,
+                    own_store_codes=own_store_codes,
+                    rate_service=request.app.state.cny_zar_rate_service,
+                    cost_as_of=datetime.now(ZoneInfo("Asia/Shanghai")).date(),
+                    fee_window_end=profit_fee_window_end,
+                )
+                if store_item is not None
+                else empty_own_store_profitability(
+                    store_codes=own_store_codes,
+                    fee_window_end=profit_fee_window_end,
+                    message="该链接不是当前授权范围内的自有链接。",
+                )
+            ),
+            "company_inventory": (
+                _load_company_inventory(
+                    root,
+                    plid=plid,
+                    own_store_codes=inventory_store_codes,
+                )
+                if store_item is not None
+                else {
+                    "items": [],
+                    "company_sku_count": 0,
+                    "store_codes": sorted(inventory_store_codes),
+                    "w8_shared_once": True,
+                    "stage_totals_are_additive": False,
+                    "message": "该链接不是当前授权范围内的自有链接。",
+                }
+            ),
         }
 
     async def run_competitor_collection(
@@ -6442,6 +6868,7 @@ def _required_permission(path: str, method: str) -> str | tuple[str, ...] | None
         (
             "/api/erp/summary",
             "/api/erp/products",
+            "/api/erp/returns",
             "/api/erp/quadrants",
             "/api/erp/anomaly-products",
             "/api/erp/risks",
@@ -6465,6 +6892,7 @@ def _requires_connected_store_access(path: str) -> bool:
             (
                 "/api/erp/summary",
                 "/api/erp/products",
+                "/api/erp/returns",
                 "/api/erp/keyword-traffic",
                 "/api/erp/search-ranking",
                 "/api/erp/quadrants",
@@ -6581,6 +7009,339 @@ def _load_competitor_dataset(
         engine.dispose()
 
 
+def _product_master_records(
+    project_root: Path,
+    records: Sequence[Mapping[str, Any]],
+    *,
+    sku_field: str = "sku",
+    as_of_date: date | None = None,
+) -> list[dict[str, Any]]:
+    """Attach global company identity using only the local read-only database."""
+    copied = [dict(record) for record in records]
+    if not copied:
+        return copied
+    settings = DashboardSettings.from_env(project_root)
+    engine = create_read_only_erp_engine(settings.database_url)
+    try:
+        with Session(engine) as session:
+            return enrich_product_master_records(
+                session,
+                copied,
+                sku_field=sku_field,
+                as_of_date=as_of_date,
+            )
+    except SQLAlchemyError:
+        for record in copied:
+            record.update(
+                {
+                    "company_sku": None,
+                    "company_product_name": None,
+                    "cost_rmb": None,
+                    "cost_effective_date": None,
+                }
+            )
+        return copied
+    finally:
+        engine.dispose()
+
+
+def _product_master_competitor_store_records(
+    project_root: Path,
+    records: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    """Enrich only the own-store identities nested in private-link cards."""
+    copied = [dict(record) for record in records]
+    nested_locations: list[tuple[int, str, int]] = []
+    nested_records: list[dict[str, Any]] = []
+    for item_index, item in enumerate(copied):
+        for field in ("自有报价", "对比报价"):
+            offers = item.get(field)
+            if not isinstance(offers, list):
+                continue
+            item[field] = [dict(offer) for offer in offers if isinstance(offer, Mapping)]
+            for offer_index, offer in enumerate(item[field]):
+                if field == "对比报价" and offer.get("报价来源") != "seller_api":
+                    continue
+                nested_locations.append((item_index, field, offer_index))
+                nested_records.append(offer)
+    enriched = _product_master_records(
+        project_root,
+        nested_records,
+        sku_field="SKU",
+    )
+    for (item_index, field, offer_index), offer in zip(
+        nested_locations,
+        enriched,
+        strict=True,
+    ):
+        copied[item_index][field][offer_index] = offer
+    for item in copied:
+        own_offers = item.get("自有报价")
+        own_offers = own_offers if isinstance(own_offers, list) else []
+        company_skus = sorted(
+            {
+                str(offer.get("company_sku") or "").strip()
+                for offer in own_offers
+                if isinstance(offer, Mapping)
+                and str(offer.get("company_sku") or "").strip()
+            },
+            key=str.casefold,
+        )
+        item["company_skus"] = company_skus
+        item["company_sku"] = company_skus[0] if len(company_skus) == 1 else None
+    return copied
+
+
+def _load_own_store_returns(
+    project_root: Path,
+    *,
+    plid: str,
+    own_store_codes: set[str],
+    start_date: date | None,
+    end_date: date | None,
+) -> dict[str, Any]:
+    """Load one own PLID's detailed returns without widening store authorization."""
+    selected_end = end_date or datetime.now(ZoneInfo("Africa/Johannesburg")).date()
+    selected_start = start_date or selected_end - timedelta(days=29)
+    if not own_store_codes:
+        return _empty_return_payload(
+            start_date=selected_start,
+            end_date=selected_end,
+            message="当前账号没有可读取的店铺范围。",
+        )
+    settings = DashboardSettings.from_env(project_root)
+    path = sqlite_database_path(settings.database_url)
+    if path is not None and not path.exists():
+        return _empty_return_payload(
+            start_date=selected_start,
+            end_date=selected_end,
+            message="本地退货数据库尚未建立。",
+        )
+    engine = create_read_only_erp_engine(settings.database_url)
+    try:
+        with Session(engine) as session:
+            store_names = {
+                store.code: store.display_name
+                for store in session.scalars(
+                    select(ErpStore).where(ErpStore.code.in_(own_store_codes))
+                )
+            }
+        rows: list[dict[str, Any]] = []
+        statuses: list[dict[str, Any]] = []
+        counters: list[dict[str, Any]] = []
+        for store_code in sorted(own_store_codes):
+            store_name = store_names.get(store_code, store_code)
+            with store_scope(store_code), Session(engine) as session:
+                store_rows = enrich_product_master_records(
+                    session,
+                    load_store_return_rows(
+                        session,
+                        start_date=selected_start,
+                        end_date=selected_end,
+                        plid=plid,
+                    ),
+                    as_of_date=selected_end,
+                )
+                status = load_return_collection_status(
+                    session,
+                    start_date=selected_start,
+                    end_date=selected_end,
+                )
+                counter = load_offer_returned_30_day_counter(session, plid=plid)
+            for source in store_rows:
+                item = dict(source)
+                item["store_code"] = store_code
+                item["store_name"] = store_name
+                item["store_scope_key"] = f"{store_code}:{item.get('seller_return_id')}"
+                rows.append(item)
+            statuses.append(
+                {**status, "store_code": store_code, "store_name": store_name}
+            )
+            counters.append(
+                {**counter, "store_code": store_code, "store_name": store_name}
+            )
+        filtered = filter_return_rows(rows)
+        return {
+            "range_start": selected_start.isoformat(),
+            "range_end": selected_end.isoformat(),
+            "date_basis": "Africa/Johannesburg",
+            "data_status": _combined_return_data_status(statuses),
+            "store_statuses": statuses,
+            "offer_returned_30_days": _aggregate_offer_return_counter(counters),
+            "summary": summarize_return_rows(filtered),
+            "filters": return_filter_options(filtered),
+            "items": filtered[:20],
+            "total": len(filtered),
+            "page": 1,
+            "page_size": 20,
+            "message": (
+                "详情卡展示当前选择区间的最近20条；全部记录可在退货管理模块筛选查看。"
+                if filtered
+                else "当前选择区间没有已采集到的该商品退货明细。"
+            ),
+            "source_notice": (
+                "明细来自 Seller API /returns；滚动30天计数来自 Offers，两个口径分开展示。"
+            ),
+        }
+    except SQLAlchemyError:
+        return _empty_return_payload(
+            start_date=selected_start,
+            end_date=selected_end,
+            message="退货明细暂时不可读，请查看采集状态。",
+            data_status="unavailable",
+        )
+    finally:
+        engine.dispose()
+
+
+def _combined_return_data_status(statuses: Sequence[Mapping[str, Any]]) -> str:
+    values = {str(status.get("data_status") or "uncollected") for status in statuses}
+    if not values or values == {"uncollected"}:
+        return "uncollected"
+    if values == {"collected"}:
+        return "collected"
+    if values == {"failed"}:
+        return "failed"
+    if values == {"unavailable"}:
+        return "unavailable"
+    return "partial"
+
+
+def _aggregate_offer_return_counter(
+    counters: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    known_units = [
+        int(counter["units"])
+        for counter in counters
+        if counter.get("units") is not None
+    ]
+    captures = [
+        str(counter.get("captured_at"))
+        for counter in counters
+        if counter.get("captured_at")
+    ]
+    return {
+        "units": sum(known_units) if known_units else None,
+        "covered_offer_count": sum(
+            int(counter.get("covered_offer_count") or 0) for counter in counters
+        ),
+        "offer_count": sum(int(counter.get("offer_count") or 0) for counter in counters),
+        "covered_store_count": len(known_units),
+        "store_count": len(counters),
+        "captured_at": max(captures) if captures else None,
+        "metric": "quantity_returned_30_days",
+        "window": "rolling_30_days",
+    }
+
+
+def _empty_return_payload(
+    *,
+    start_date: date | None,
+    end_date: date | None,
+    message: str,
+    data_status: str = "uncollected",
+) -> dict[str, Any]:
+    selected_end = end_date or datetime.now(ZoneInfo("Africa/Johannesburg")).date()
+    selected_start = start_date or selected_end - timedelta(days=29)
+    return {
+        "range_start": selected_start.isoformat(),
+        "range_end": selected_end.isoformat(),
+        "date_basis": "Africa/Johannesburg",
+        "data_status": data_status,
+        "store_statuses": [],
+        "offer_returned_30_days": {
+            "units": None,
+            "covered_offer_count": 0,
+            "offer_count": 0,
+            "covered_store_count": 0,
+            "store_count": 0,
+            "captured_at": None,
+            "metric": "quantity_returned_30_days",
+            "window": "rolling_30_days",
+        },
+        "summary": summarize_return_rows([]),
+        "filters": return_filter_options([]),
+        "items": [],
+        "total": 0,
+        "page": 1,
+        "page_size": 20,
+        "message": message,
+        "source_notice": (
+            "明细来自 Seller API /returns；未采集状态不能解释为零退货。"
+        ),
+    }
+
+
+def _load_company_inventory(
+    project_root: Path,
+    *,
+    plid: str,
+    own_store_codes: set[str],
+) -> dict[str, Any]:
+    settings = DashboardSettings.from_env(project_root)
+    engine = create_read_only_erp_engine(settings.database_url)
+    try:
+        return load_company_inventory_for_plid(
+            engine,
+            plid=plid,
+            store_codes=own_store_codes,
+        )
+    except SQLAlchemyError:
+        return {
+            "items": [],
+            "company_sku_count": 0,
+            "store_codes": sorted(own_store_codes),
+            "w8_shared_once": True,
+            "stage_totals_are_additive": False,
+            "message": "公司 SKU 库存快照暂时不可读。",
+        }
+    finally:
+        engine.dispose()
+
+
+def _load_own_store_profitability(
+    project_root: Path,
+    *,
+    plid: str,
+    own_store_codes: set[str],
+    rate_service: CnyZarRateService,
+    cost_as_of: date,
+    fee_window_end: date,
+) -> dict[str, Any]:
+    if not own_store_codes:
+        return empty_own_store_profitability(
+            store_codes=set(),
+            fee_window_end=fee_window_end,
+            message="当前账号没有可用于利润计算的已授权店铺。",
+        )
+    settings = DashboardSettings.from_env(project_root)
+    path = sqlite_database_path(settings.database_url)
+    if path is not None and not path.exists():
+        return empty_own_store_profitability(
+            store_codes=own_store_codes,
+            fee_window_end=fee_window_end,
+            message="本地业务数据库尚不存在，暂不能读取自有 Offer 成本与利润。",
+        )
+    engine = create_read_only_erp_engine(settings.database_url)
+    try:
+        return load_own_store_profitability_payload(
+            engine,
+            plid=plid,
+            store_codes=own_store_codes,
+            rate_service=rate_service,
+            cost_as_of=cost_as_of,
+            fee_window_end=fee_window_end,
+        )
+    except SQLAlchemyError:
+        return empty_own_store_profitability(
+            store_codes=own_store_codes,
+            fee_window_end=fee_window_end,
+            message="自有 Offer 的本地成本或 Seller Sales 费用数据暂时不可读。",
+        )
+    finally:
+        engine.dispose()
+
+
 def _load_own_store_sales(
     project_root: Path,
     *,
@@ -6633,6 +7394,480 @@ def _load_own_store_traffic(
             )
     finally:
         engine.dispose()
+
+
+def _read_store_identities_for_request(
+    request: Request,
+    selected_store_scope: Literal["current", "all", "operating"],
+) -> tuple[StoreIdentity, ...]:
+    """Resolve one explicit read scope without widening account authorization."""
+    if selected_store_scope != "current":
+        return _multi_store_identities_for_request(request, selected_store_scope)
+    selected_store = getattr(request.state, "erp_store", None)
+    if (
+        selected_store is None
+        or not selected_store.active
+        or not selected_store.data_connected
+    ):
+        return ()
+    return (selected_store,)
+
+
+def _tag_store_record(
+    record: Mapping[str, Any],
+    store: StoreIdentity,
+    *,
+    identity_fields: Sequence[str] = ("offer_id",),
+) -> dict[str, Any]:
+    tagged = dict(record)
+    tagged["store_code"] = store.code
+    tagged["store_name"] = store.display_name
+    identity = next(
+        (
+            str(tagged.get(field))
+            for field in identity_fields
+            if tagged.get(field) not in (None, "")
+        ),
+        "record",
+    )
+    tagged["store_scope_key"] = f"{store.code}:{identity}"
+    return tagged
+
+
+def _tag_store_records(
+    records: Sequence[Mapping[str, Any]],
+    store: StoreIdentity,
+    *,
+    identity_fields: Sequence[str] = ("offer_id",),
+) -> list[dict[str, Any]]:
+    return [
+        _tag_store_record(record, store, identity_fields=identity_fields)
+        for record in records
+    ]
+
+
+def _decorate_search_ranking_detail(
+    project_root: Path,
+    payload: Mapping[str, Any],
+    store: StoreIdentity,
+) -> dict[str, Any]:
+    decorated = dict(payload)
+    product = decorated.get("product")
+    enriched = _product_master_records(
+        project_root,
+        [product] if isinstance(product, Mapping) else [],
+    )
+    decorated["product"] = (
+        _tag_store_record(enriched[0], store) if enriched else {}
+    )
+    family = decorated.get("variant_family")
+    if isinstance(family, Mapping):
+        decorated_family = dict(family)
+        variants = _product_master_records(
+            project_root,
+            list(decorated_family.get("variants") or []),
+        )
+        decorated_family["variants"] = _tag_store_records(variants, store)
+        decorated["variant_family"] = decorated_family
+    return decorated
+
+
+def _combined_store_dataset(
+    settings: DashboardSettings,
+    as_of: date,
+    stores: Sequence[StoreIdentity],
+) -> tuple[DashboardDataset, dict[str, tuple[StoreIdentity, str]]]:
+    """Combine authorized store frames with collision-proof internal Offer IDs."""
+    scoped_datasets: list[DashboardDataset] = []
+    offer_scope: dict[str, tuple[StoreIdentity, str]] = {}
+    frame_fields = (
+        "store_daily",
+        "product_daily",
+        "offer_current",
+        "anomalies",
+        "quality_events",
+        "offer_history",
+    )
+    for store in stores:
+        with store_scope(store.code):
+            dataset = load_erp_dataset(settings, as_of)
+        replacements: dict[str, pd.DataFrame] = {}
+        for field_name in frame_fields:
+            frame = getattr(dataset, field_name).copy()
+            if "offer_id" in frame.columns:
+                scoped_offer_ids: list[Any] = []
+                for raw_offer_id in frame["offer_id"].tolist():
+                    if raw_offer_id is None or pd.isna(raw_offer_id):
+                        scoped_offer_ids.append(raw_offer_id)
+                        continue
+                    original_offer_id = str(raw_offer_id)
+                    scoped_offer_id = f"{store.code}\x1f{original_offer_id}"
+                    offer_scope[scoped_offer_id] = (store, original_offer_id)
+                    scoped_offer_ids.append(scoped_offer_id)
+                frame["offer_id"] = scoped_offer_ids
+            replacements[field_name] = frame
+        scoped_datasets.append(replace(dataset, **replacements))
+    if not scoped_datasets:
+        empty = pd.DataFrame()
+        return (
+            DashboardDataset(
+                store_daily=empty.copy(),
+                product_daily=empty.copy(),
+                offer_current=empty.copy(),
+                anomalies=empty.copy(),
+                quality_events=empty.copy(),
+                offer_history=empty.copy(),
+            ),
+            offer_scope,
+        )
+    combined_frames = {
+        field_name: pd.concat(
+            [getattr(dataset, field_name) for dataset in scoped_datasets],
+            ignore_index=True,
+            sort=False,
+        )
+        for field_name in frame_fields
+    }
+    return replace(scoped_datasets[0], **combined_frames), offer_scope
+
+
+def _aggregate_anomaly_payloads(
+    project_root: Path,
+    store_payloads: Sequence[tuple[StoreIdentity, Mapping[str, Any]]],
+    *,
+    requested_as_of: date,
+    completed_through: date,
+    selected_store_scope: Literal["current", "all", "operating"],
+) -> dict[str, Any]:
+    first_payload = store_payloads[0][1] if store_payloads else {}
+    sudden: list[dict[str, Any]] = []
+    slow: list[dict[str, Any]] = []
+    stock_groups: dict[str, list[dict[str, Any]]] = {
+        "not_buyable": [],
+        "disabled_by_takealot": [],
+        "disabled_by_seller": [],
+    }
+    store_data_through: dict[str, str | None] = {}
+    for store, payload in store_payloads:
+        store_data_through[store.code] = payload.get("data_through")
+        sudden.extend(_tag_store_records(payload.get("sudden_sales_stop", []), store))
+        slow.extend(_tag_store_records(payload.get("slow_moving", []), store))
+        raw_groups = payload.get("stock_status_anomalies", {})
+        for key in stock_groups:
+            stock_groups[key].extend(
+                _tag_store_records(raw_groups.get(key, []), store)
+            )
+    sudden = _product_master_records(project_root, sudden, as_of_date=requested_as_of)
+    slow = _product_master_records(project_root, slow, as_of_date=requested_as_of)
+    for key, records in stock_groups.items():
+        stock_groups[key] = _product_master_records(
+            project_root,
+            records,
+            as_of_date=requested_as_of,
+        )
+    rules = dict(first_payload.get("rules") or {})
+    slow_options = [int(value) for value in rules.get("slow_day_options", [])]
+    valid_data_dates = [value for value in store_data_through.values() if value]
+    return {
+        "requested_as_of": requested_as_of.isoformat(),
+        "completed_through": completed_through.isoformat(),
+        "data_through": min(valid_data_dates) if valid_data_dates else None,
+        "store_data_through": store_data_through,
+        "store_scope": selected_store_scope,
+        "store_count": len(store_payloads),
+        "date_basis": first_payload.get("date_basis", "Africa/Johannesburg"),
+        "sales_zero_evidence": first_payload.get(
+            "sales_zero_evidence",
+            "verified_complete_business_days_only",
+        ),
+        "rules": rules,
+        "summary": {
+            "sudden_sales_stop": len(sudden),
+            "not_buyable_with_stock": len(stock_groups["not_buyable"]),
+            "disabled_by_takealot_with_stock": len(
+                stock_groups["disabled_by_takealot"]
+            ),
+            "disabled_by_seller_with_stock": len(
+                stock_groups["disabled_by_seller"]
+            ),
+            "slow_moving_by_days": {
+                str(days): sum(
+                    int(item.get("no_sales_days") or 0) >= days for item in slow
+                )
+                for days in slow_options
+            },
+        },
+        "sudden_sales_stop": sudden,
+        "stock_status_anomalies": stock_groups,
+        "slow_moving": slow,
+    }
+
+
+def _latest_text(values: Sequence[Any]) -> str | None:
+    normalized = [str(value) for value in values if value not in (None, "")]
+    return max(normalized) if normalized else None
+
+
+def _aggregate_logistics_payloads(
+    store_payloads: Sequence[tuple[StoreIdentity, Mapping[str, Any]]],
+    selected_store_scope: Literal["current", "all", "operating"],
+) -> dict[str, Any]:
+    if not store_payloads:
+        return {
+            "generated_at": datetime.now(UTC).isoformat(),
+            "cache_ttl_seconds": 0,
+            "cache_age_seconds": 0,
+            "automatic_page_refresh": False,
+            "store_scope": selected_store_scope,
+            "store_count": 0,
+            "w8": {},
+            "takealot": {},
+            "matching": {},
+            "boundaries": [],
+        }
+    first_payload = store_payloads[0][1]
+    w8_candidates = [dict(payload.get("w8") or {}) for _, payload in store_payloads]
+    w8 = max(
+        w8_candidates,
+        key=lambda item: (
+            str(item.get("data_source") or "unavailable") != "unavailable",
+            str(item.get("synced_at") or ""),
+        ),
+    )
+    takealot_payloads = [dict(payload.get("takealot") or {}) for _, payload in store_payloads]
+    takealot_summary: defaultdict[str, int] = defaultdict(int)
+    recent_shipments: list[dict[str, Any]] = []
+    takealot_warnings: list[str] = []
+    candidate_fields: dict[str, list[dict[str, Any]]] = {
+        "high_confidence_candidates": [],
+        "medium_confidence_candidates": [],
+        "low_confidence_candidates": [],
+        "confirmed_links": [],
+        "split_batch_groups": [],
+        "items": [],
+    }
+    matching_warnings: list[str] = []
+    boundaries: list[str] = []
+    for store, payload in store_payloads:
+        takealot = dict(payload.get("takealot") or {})
+        for key, value in dict(takealot.get("summary") or {}).items():
+            takealot_summary[str(key)] += int(value or 0)
+        recent_shipments.extend(
+            _tag_store_records(
+                takealot.get("recent_shipments", []),
+                store,
+                identity_fields=("shipment_id", "reference"),
+            )
+        )
+        takealot_warnings.extend(
+            f"{store.display_name}：{warning}"
+            for warning in takealot.get("warnings", [])
+        )
+        matching = dict(payload.get("matching") or {})
+        for field_name in candidate_fields:
+            identity_fields: Sequence[str]
+            if field_name == "confirmed_links":
+                identity_fields = ("id", "takealot_shipment_id")
+            elif field_name == "split_batch_groups":
+                identity_fields = ("w8_order_no",)
+            else:
+                identity_fields = ("takealot_shipment_id", "w8_order_no")
+            candidate_fields[field_name].extend(
+                _tag_store_records(
+                    matching.get(field_name, []),
+                    store,
+                    identity_fields=identity_fields,
+                )
+            )
+        matching_warnings.extend(
+            f"{store.display_name}：{warning}"
+            for warning in matching.get("warnings", [])
+        )
+        boundaries.extend(str(value) for value in payload.get("boundaries", []))
+    recent_shipments.sort(
+        key=lambda item: str(item.get("created_at") or item.get("due_date") or ""),
+        reverse=True,
+    )
+    connected_count = sum(bool(item.get("connected")) for item in takealot_payloads)
+    live_count = sum(bool(item.get("live_connected")) for item in takealot_payloads)
+    sources = {str(item.get("data_source") or "unavailable") for item in takealot_payloads}
+    takealot_source = (
+        "live_api"
+        if sources == {"live_api"}
+        else "local_database"
+        if sources - {"unavailable"}
+        else "unavailable"
+    )
+    takealot = {
+        "connected": connected_count > 0,
+        "live_connected": live_count == len(store_payloads),
+        "data_source": takealot_source,
+        "synced_at": _latest_text([item.get("synced_at") for item in takealot_payloads]),
+        "snapshot_saved": all(bool(item.get("snapshot_saved")) for item in takealot_payloads),
+        "refresh_attempted": any(
+            bool(item.get("refresh_attempted")) for item in takealot_payloads
+        ),
+        "message": (
+            f"已合并 {len(store_payloads)} 个授权店铺的本地 Takealot 货件快照"
+            if selected_store_scope != "current"
+            else takealot_payloads[0].get("message")
+        ),
+        "summary": dict(takealot_summary),
+        "recent_shipments": recent_shipments,
+        "warnings": takealot_warnings,
+    }
+    direct_items = candidate_fields["items"]
+    confirmed_links = candidate_fields["confirmed_links"]
+    matched_w8 = {
+        str(item.get("w8_order_no") or "")
+        for item in [*direct_items, *confirmed_links]
+        if item.get("w8_order_no")
+    }
+    matched_shipments = {
+        (str(item.get("store_code") or ""), str(item.get("takealot_shipment_id") or ""))
+        for item in [*direct_items, *confirmed_links]
+        if item.get("takealot_shipment_id") not in (None, "")
+    }
+    total_w8_inbound = int(dict(w8.get("summary") or {}).get("inbound_orders") or 0)
+    matching = {
+        "method": (
+            "按店铺分别执行明确编号、分级候选与人工确认规则；W8 共享数据只展示一次。"
+            if selected_store_scope != "current"
+            else str(dict(first_payload.get("matching") or {}).get("method") or "")
+        ),
+        "direct_match_count": len(direct_items),
+        "matched_w8_inbound": len(matched_w8),
+        "matched_takealot_shipments": len(matched_shipments),
+        "unmatched_w8_inbound": max(0, total_w8_inbound - len(matched_w8)),
+        "unmatched_takealot_shipments": max(
+            0,
+            int(takealot_summary.get("shipments", 0)) - len(matched_shipments),
+        ),
+        "confirmed_link_count": len(confirmed_links),
+        "confirmed_links": confirmed_links,
+        "high_confidence_candidate_count": len(
+            candidate_fields["high_confidence_candidates"]
+        ),
+        "high_confidence_candidates": candidate_fields["high_confidence_candidates"],
+        "medium_confidence_candidate_count": len(
+            candidate_fields["medium_confidence_candidates"]
+        ),
+        "medium_confidence_candidates": candidate_fields["medium_confidence_candidates"],
+        "low_confidence_candidate_count": len(
+            candidate_fields["low_confidence_candidates"]
+        ),
+        "low_confidence_candidates": candidate_fields["low_confidence_candidates"],
+        "split_batch_group_count": len(candidate_fields["split_batch_groups"]),
+        "split_batch_groups": candidate_fields["split_batch_groups"],
+        "warnings": matching_warnings,
+        "items": direct_items,
+    }
+    unique_boundaries = list(dict.fromkeys(boundaries))
+    if selected_store_scope != "current":
+        unique_boundaries.insert(
+            0,
+            "全部店铺只读各店最近成功快照；W8 共享仓只展示一次，Takealot 货件按店铺保留身份。",
+        )
+    return {
+        "generated_at": _latest_text(
+            [payload.get("generated_at") for _, payload in store_payloads]
+        )
+        or datetime.now(UTC).isoformat(),
+        "cache_ttl_seconds": max(
+            int(payload.get("cache_ttl_seconds") or 0) for _, payload in store_payloads
+        ),
+        "cache_age_seconds": max(
+            float(payload.get("cache_age_seconds") or 0) for _, payload in store_payloads
+        ),
+        "automatic_page_refresh": False,
+        "store_scope": selected_store_scope,
+        "store_count": len(store_payloads),
+        "w8": w8,
+        "takealot": takealot,
+        "matching": matching,
+        "boundaries": unique_boundaries,
+    }
+
+
+def _aggregate_platform_warehouse_payloads(
+    store_payloads: Sequence[tuple[StoreIdentity, Mapping[str, Any]]],
+    selected_store_scope: Literal["current", "all", "operating"],
+) -> dict[str, Any]:
+    if not store_payloads:
+        return {
+            "generated_at": datetime.now(UTC).isoformat(),
+            "store_scope": selected_store_scope,
+            "store_count": 0,
+            "offers": [],
+            "drafts": [],
+            "platform_shipments": [],
+            "platform_snapshot_synced_at": None,
+        }
+    first_payload = store_payloads[0][1]
+    offers: list[dict[str, Any]] = []
+    drafts: list[dict[str, Any]] = []
+    shipments: list[dict[str, Any]] = []
+    for store, payload in store_payloads:
+        offers.extend(_tag_store_records(payload.get("offers", []), store))
+        drafts.extend(
+            _tag_store_records(
+                payload.get("drafts", []),
+                store,
+                identity_fields=("id", "draft_number"),
+            )
+        )
+        shipments.extend(
+            _tag_store_records(
+                payload.get("platform_shipments", []),
+                store,
+                identity_fields=("shipment_id", "reference"),
+            )
+        )
+    capability = dict(first_payload.get("capability") or {})
+    portal = dict(first_payload.get("portal") or {})
+    if selected_store_scope != "current":
+        capability.update(
+            {
+                "write_mode": "disabled_by_default",
+                "official_shipment_write_supported": False,
+                "message": (
+                    f"当前合并查看 {len(store_payloads)} 个授权店铺，仅展示本地商品、草稿与平台货件快照；"
+                    "创建、验证码和 Shipment 状态操作必须先切换到明确单店。"
+                ),
+            }
+        )
+        portal.update(
+            {
+                "enabled": False,
+                "authenticated": False,
+                "requires_otp": False,
+                "otp_destination": None,
+                "expires_at": None,
+                "identity": None,
+                "credential_configured": False,
+                "credential_email": None,
+                "credential_error": None,
+            }
+        )
+    return {
+        "generated_at": _latest_text(
+            [payload.get("generated_at") for _, payload in store_payloads]
+        )
+        or datetime.now(UTC).isoformat(),
+        "store_scope": selected_store_scope,
+        "store_count": len(store_payloads),
+        "capability": capability,
+        "portal": portal,
+        "offers": offers,
+        "drafts": drafts,
+        "platform_shipments": shipments,
+        "platform_snapshot_synced_at": _latest_text(
+            [
+                payload.get("platform_snapshot_synced_at")
+                for _, payload in store_payloads
+            ]
+        ),
+    }
 
 
 def _own_store_codes_for_request(

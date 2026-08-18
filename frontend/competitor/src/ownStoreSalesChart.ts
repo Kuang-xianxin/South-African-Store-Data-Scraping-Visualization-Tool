@@ -35,6 +35,38 @@ export interface OwnStoreSalesChartGeometry {
   yMaximum: number;
 }
 
+export interface OwnStoreSalesDateBounds {
+  start: string;
+  end: string;
+}
+
+export function getOwnStoreSalesDateBounds(
+  source: OwnStoreSalesPoint[],
+): OwnStoreSalesDateBounds | null {
+  if (!source.length) return null;
+  const dates = source
+    .map((point) => point.date)
+    .filter(Boolean)
+    .sort((left, right) => left.localeCompare(right));
+  if (!dates.length) return null;
+  return {
+    start: dates[0] ?? "",
+    end: dates[dates.length - 1] ?? "",
+  };
+}
+
+export function filterOwnStoreSalesPoints(
+  source: OwnStoreSalesPoint[],
+  startDate: string,
+  endDate: string,
+): OwnStoreSalesPoint[] {
+  const lowerBound = startDate <= endDate ? startDate : endDate;
+  const upperBound = startDate <= endDate ? endDate : startDate;
+  return source.filter(
+    (point) => point.date >= lowerBound && point.date <= upperBound,
+  );
+}
+
 export function buildOwnStoreSalesChart(
   source: OwnStoreSalesPoint[],
 ): OwnStoreSalesChartGeometry {

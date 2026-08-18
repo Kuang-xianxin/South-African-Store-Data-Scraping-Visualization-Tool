@@ -4,6 +4,8 @@ import { computed, ref, watch } from "vue";
 import {
   OWN_STORE_SALES_CHART,
   buildOwnStoreSalesChart,
+  filterOwnStoreSalesPoints,
+  getOwnStoreSalesDateBounds,
   nearestOwnStoreSalesPointIndex,
 } from "../ownStoreSalesChart";
 import type { OwnStoreSalesSeries } from "../types";
@@ -15,6 +17,9 @@ const props = defineProps<{
 
 const selectedStoreCode = ref("");
 const activeIndex = ref(0);
+const rangeStart = ref("");
+const rangeEnd = ref("");
+const rangeStoreCode = ref("");
 
 const seriesSignature = computed(() =>
   props.series
@@ -45,11 +50,51 @@ const selectedSeries = computed(
     props.series[0] ??
     null,
 );
+const availableRange = computed(() =>
+  getOwnStoreSalesDateBounds(selectedSeries.value?.points ?? []),
+);
+const availableStart = computed(() => availableRange.value?.start ?? "");
+const availableEnd = computed(() => availableRange.value?.end ?? "");
+
+watch(
+  [selectedStoreCode, availableStart, availableEnd],
+  ([storeCode, start, end]) => {
+    if (!start || !end) {
+      rangeStart.value = "";
+      rangeEnd.value = "";
+      rangeStoreCode.value = storeCode;
+      return;
+    }
+    if (rangeStoreCode.value !== storeCode) {
+      rangeStoreCode.value = storeCode;
+      rangeStart.value = start;
+      rangeEnd.value = end;
+      return;
+    }
+    rangeStart.value = clampDate(rangeStart.value || start, start, end);
+    rangeEnd.value = clampDate(rangeEnd.value || end, start, end);
+    if (rangeStart.value > rangeEnd.value) {
+      rangeStart.value = start;
+      rangeEnd.value = end;
+    }
+  },
+  { immediate: true },
+);
+
+const filteredPoints = computed(() => {
+  const points = selectedSeries.value?.points ?? [];
+  if (!rangeStart.value || !rangeEnd.value) return points;
+  return filterOwnStoreSalesPoints(
+    points,
+    rangeStart.value,
+    rangeEnd.value,
+  );
+});
 const geometry = computed(() =>
-  buildOwnStoreSalesChart(selectedSeries.value?.points ?? []),
+  buildOwnStoreSalesChart(filteredPoints.value),
 );
 const activePoint = computed(
-  () => selectedSeries.value?.points[activeIndex.value] ?? null,
+  () => filteredPoints.value[activeIndex.value] ?? null,
 );
 const activeChartPoint = computed(
   () => geometry.value.points[activeIndex.value] ?? null,
@@ -65,18 +110,36 @@ const visiblePoints = computed(() => {
       point.index === activeIndex.value,
   );
 });
+const isFullRange = computed(
+  () =>
+    rangeStart.value === availableStart.value &&
+    rangeEnd.value === availableEnd.value,
+);
+const rangeSummary = computed(() => {
+  const points = filteredPoints.value;
+  return {
+    totalDays: points.length,
+    coveredDays: points.filter((point) => point.data_status === "verified").length,
+    partialDays: points.filter((point) => point.data_status === "partial").length,
+    missingDays: points.filter((point) => point.data_status === "missing").length,
+    orderedUnits: points.reduce(
+      (total, point) => total + (point.ordered_units ?? 0),
+      0,
+    ),
+  };
+});
 
 watch(
-  selectedSeries,
-  (series) => {
-    if (!series?.points.length) {
+  filteredPoints,
+  (points) => {
+    if (!points.length) {
       activeIndex.value = 0;
       return;
     }
-    const lastVerified = series.points.findLastIndex(
+    const lastVerified = points.findLastIndex(
       (point) => point.ordered_units !== null,
     );
-    activeIndex.value = lastVerified >= 0 ? lastVerified : series.points.length - 1;
+    activeIndex.value = lastVerified >= 0 ? lastVerified : points.length - 1;
   },
   { immediate: true },
 );
@@ -87,14 +150,52 @@ function handlePointer(event: PointerEvent) {
   activeIndex.value = nearestOwnStoreSalesPointIndex(
     event.clientX - bounds.left,
     bounds.width,
-    selectedSeries.value?.points.length ?? 0,
+    filteredPoints.value.length,
   );
 }
 
 function stepPoint(delta: number) {
-  const count = selectedSeries.value?.points.length ?? 0;
+  const count = filteredPoints.value.length;
   if (!count) return;
   activeIndex.value = Math.max(0, Math.min(count - 1, activeIndex.value + delta));
+}
+
+function updateRangeStart(event: Event) {
+  const value = (event.target as HTMLInputElement).value;
+  if (!availableRange.value) return;
+  rangeStart.value = clampDate(
+    value || availableRange.value.start,
+    availableRange.value.start,
+    availableRange.value.end,
+  );
+  if (!rangeEnd.value || rangeStart.value > rangeEnd.value) {
+    rangeEnd.value = rangeStart.value;
+  }
+}
+
+function updateRangeEnd(event: Event) {
+  const value = (event.target as HTMLInputElement).value;
+  if (!availableRange.value) return;
+  rangeEnd.value = clampDate(
+    value || availableRange.value.end,
+    availableRange.value.start,
+    availableRange.value.end,
+  );
+  if (!rangeStart.value || rangeEnd.value < rangeStart.value) {
+    rangeStart.value = rangeEnd.value;
+  }
+}
+
+function resetDateRange() {
+  if (!availableRange.value) return;
+  rangeStart.value = availableRange.value.start;
+  rangeEnd.value = availableRange.value.end;
+}
+
+function clampDate(value: string, minimum: string, maximum: string): string {
+  if (value < minimum) return minimum;
+  if (value > maximum) return maximum;
+  return value;
 }
 
 function number(value: number | null): string {
@@ -151,11 +252,61 @@ function number(value: number | null): string {
         </div>
       </div>
 
+      <div v-if="availableRange" class="own-sales-range">
+        <div class="own-sales-range-controls">
+          <strong>显示区间（北京时间）</strong>
+          <label>
+            <span>开始日期</span>
+            <input
+              type="date"
+              :value="rangeStart"
+              :min="availableStart"
+              :max="rangeEnd || availableEnd"
+              required
+              @input="updateRangeStart"
+            />
+          </label>
+          <span class="own-sales-range-separator" aria-hidden="true">至</span>
+          <label>
+            <span>结束日期</span>
+            <input
+              type="date"
+              :value="rangeEnd"
+              :min="rangeStart || availableStart"
+              :max="availableEnd"
+              required
+              @input="updateRangeEnd"
+            />
+          </label>
+          <button type="button" :disabled="isFullRange" @click="resetDateRange">
+            全部日期
+          </button>
+        </div>
+        <p class="own-sales-range-status" aria-live="polite">
+          <span>折线显示 {{ rangeStart }} 至 {{ rangeEnd }}</span>
+          <span>{{ rangeSummary.totalDays }} 个自然日</span>
+          <span>完整 {{ rangeSummary.coveredDays }} 天</span>
+          <span v-if="rangeSummary.partialDays" class="partial">
+            截至采集 {{ rangeSummary.partialDays }} 天
+          </span>
+          <span v-if="rangeSummary.missingDays" class="missing">
+            缺失 {{ rangeSummary.missingDays }} 天
+          </span>
+          <span>已覆盖下单 {{ number(rangeSummary.orderedUnits) }} 件</span>
+        </p>
+        <p
+          v-if="rangeSummary.partialDays || rangeSummary.missingDays"
+          class="own-sales-range-note"
+        >
+          区间件数只汇总已有 Seller Sales 值；截至采集或缺失日期不代表完整自然日销量。
+        </p>
+      </div>
+
       <div
-        v-if="selectedSeries.points.length"
+        v-if="filteredPoints.length"
         class="own-sales-chart"
         tabindex="0"
-        aria-label="自有商品日销量折线图，使用左右方向键切换国内日期"
+        :aria-label="`自有商品日销量折线图，当前显示 ${rangeStart} 至 ${rangeEnd}，使用左右方向键切换国内日期`"
         @keydown.left.prevent="stepPoint(-1)"
         @keydown.right.prevent="stepPoint(1)"
       >
@@ -263,7 +414,11 @@ function number(value: number | null): string {
         </p>
       </div>
       <div v-else class="own-sales-empty">
-        已识别自有 Offer，但当前还没有可绘制的上架日范围。
+        {{
+          selectedSeries.points.length
+            ? "所选日期区间没有可绘制的销量数据。"
+            : "已识别自有 Offer，但当前还没有可绘制的上架日范围。"
+        }}
       </div>
     </template>
   </section>
@@ -339,6 +494,100 @@ function number(value: number | null): string {
 
 .own-sales-summary {
   margin-bottom: 10px;
+}
+
+.own-sales-range {
+  margin-bottom: 10px;
+  padding: 10px 12px;
+  border: 1px solid rgba(31, 103, 80, 0.16);
+  border-radius: 10px;
+  background: rgba(248, 252, 250, 0.92);
+}
+
+.own-sales-range-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 8px;
+}
+
+.own-sales-range-controls > strong {
+  align-self: center;
+  margin-right: 4px;
+  color: #173b30;
+  font-size: 0.78rem;
+}
+
+.own-sales-range-controls label {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.own-sales-range-controls label span {
+  color: #627a71;
+  font-size: 0.68rem;
+}
+
+.own-sales-range-controls input,
+.own-sales-range-controls button {
+  min-height: 34px;
+  border: 1px solid rgba(27, 96, 74, 0.25);
+  border-radius: 8px;
+  font: inherit;
+}
+
+.own-sales-range-controls input {
+  min-width: 142px;
+  padding: 6px 8px;
+  background: #fff;
+  color: #173b30;
+}
+
+.own-sales-range-controls button {
+  padding: 6px 12px;
+  background: #e8f4ef;
+  color: #1c684f;
+  cursor: pointer;
+  font-size: 0.76rem;
+  font-weight: 700;
+}
+
+.own-sales-range-controls button:disabled {
+  cursor: default;
+  opacity: 0.5;
+}
+
+.own-sales-range-separator {
+  align-self: center;
+  color: #789087;
+  font-size: 0.72rem;
+}
+
+.own-sales-range-status,
+.own-sales-range-note {
+  margin: 8px 0 0;
+  color: #60736c;
+  font-size: 0.7rem;
+  line-height: 1.5;
+}
+
+.own-sales-range-status {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 3px 12px;
+}
+
+.own-sales-range-status span:not(:last-child)::after {
+  margin-left: 12px;
+  color: rgba(47, 92, 77, 0.35);
+  content: "·";
+}
+
+.own-sales-range-status .partial,
+.own-sales-range-status .missing,
+.own-sales-range-note {
+  color: #9a582d;
 }
 
 .own-sales-summary > div,
@@ -475,6 +724,26 @@ function number(value: number | null): string {
 
   .own-sales-readout > div:last-child {
     grid-column: 1 / -1;
+  }
+
+  .own-sales-range-controls {
+    align-items: stretch;
+  }
+
+  .own-sales-range-controls > strong {
+    flex-basis: 100%;
+  }
+
+  .own-sales-range-controls label {
+    flex: 1 1 140px;
+  }
+
+  .own-sales-range-controls input {
+    width: 100%;
+  }
+
+  .own-sales-range-separator {
+    display: none;
   }
 }
 </style>

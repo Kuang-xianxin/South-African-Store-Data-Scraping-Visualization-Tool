@@ -25,9 +25,14 @@ test("top store selector offers the account operating-store merge", () => {
   assert.match(appSource, /operatingConnectedStoreCount > 0/);
   assert.match(appSource, /operatingConnectedStoreCount > 1 \? "店合并" : "店"/);
   assert.match(appSource, /const scope: OwnStoreScope = value === operatingStoresSelectorValue\s+\? "operating"/);
+  assert.doesNotMatch(
+    appSource,
+    /\['overview', 'competitors'\]\.includes\(currentPage\).*operatingConnectedStoreCount/,
+  );
+  assert.match(appSource, /v-if="showAllStoresOption"/);
 });
 
-test("modules with a visible multi-store range default to the widest account scope", () => {
+test("all modules share one widest account scope without resetting on navigation", () => {
   assert.equal(defaultMultiStoreScope(6, 0), "all");
   assert.equal(defaultMultiStoreScope(6, 4), "all");
   assert.equal(defaultMultiStoreScope(6, 6), "operating");
@@ -45,12 +50,14 @@ test("modules with a visible multi-store range default to the widest account sco
   );
   assert.match(
     acceptSessionSource,
-    /applyDefaultStoreScopeForPage\(currentPage\.value\)/,
+    /applyDefaultStoreScope\(\)/,
   );
-  assert.match(
+  assert.doesNotMatch(
     switchPageSource,
-    /applyDefaultStoreScopeForPage\(page\)\s*;\s*currentPage\.value = page/,
+    /applyDefaultStoreScope/,
   );
+  assert.match(switchPageSource, /currentPage\.value = page/);
+  assert.equal((appSource.match(/const selectedStoreScope = ref<OwnStoreScope>/g) ?? []).length, 1);
 });
 
 test("all-store visibility keeps an independent multi-select operating assignment", () => {
@@ -73,6 +80,13 @@ test("multi-store APIs carry an explicit operating scope", () => {
   assert.match(typesSource, /OwnStoreScope = "current" \| "all" \| "operating"/);
   assert.match(apiSource, /store_scope: storeScope/);
   assert.match(apiSource, /params\.set\("store_scope", options\.storeScope\)/);
+  assert.match(apiSource, /\/api\/erp\/products\?\$\{scopedQuery\(asOf, storeScope\)\}/);
+  assert.match(apiSource, /\/api\/erp\/anomaly-products\?\$\{scopedQuery\(asOf, storeScope\)\}/);
+  assert.match(apiSource, /\/api\/erp\/quadrants\?\$\{scopedQuery\(asOf, storeScope\)\}/);
+  assert.match(apiSource, /\/api\/erp\/keyword-traffic\?\$\{scopedQuery\(asOf, storeScope\)\}/);
+  assert.match(apiSource, /\/api\/erp\/search-ranking\?store_scope=/);
+  assert.match(apiSource, /\/api\/erp\/logistics\?\$\{params\.toString\(\)\}/);
+  assert.match(apiSource, /if \(!headers\.has\("X-Store-Code"\)\)/);
 });
 
 test("store responsibility follows explicit assignments for every account role", () => {

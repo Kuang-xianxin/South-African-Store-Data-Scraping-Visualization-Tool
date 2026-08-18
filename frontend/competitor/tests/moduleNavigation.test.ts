@@ -21,6 +21,7 @@ test("every ERP module has a stable hash link that restores the same module", ()
   }
   assert.equal(modulePageFromHash("#module=unknown"), null);
   assert.equal(modulePageFromHash("#module=daily-report"), null);
+  assert.equal(modulePageFromHash("#module=platform-warehouse"), null);
   assert.equal(modulePageFromHash("#section=products"), null);
   assert.equal(modulePageFromHash(""), null);
 });
@@ -76,4 +77,5 @@ test("the sidebar exposes real links while retaining guarded left-click navigati
   );
   assert.doesNotMatch(appSource, /<button\s+v-for="page in allPages"/);
   assert.doesNotMatch(appSource, /DailyReportPage|daily-report|运营日报/);
+  assert.doesNotMatch(appSource, /PlatformWarehousePage|platform-warehouse|约平台仓/);
 });

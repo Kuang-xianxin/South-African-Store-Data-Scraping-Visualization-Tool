@@ -9,10 +9,21 @@ from typing import Any
 from sqlalchemy import Engine, create_engine, select
 from sqlalchemy.orm import Session
 
-from takealot_ops.collectors import CollectionResult, collect_offers, collect_sales
+from takealot_ops.collectors import (
+    CollectionResult,
+    collect_offers,
+    collect_returns,
+    collect_sales,
+)
 from takealot_ops.domain import OfferRecord
 from takealot_ops.storage.migrations import create_schema
-from takealot_ops.storage.models import CollectionRun, OfferCurrent, OfferSnapshot, SaleItem
+from takealot_ops.storage.models import (
+    CollectionRun,
+    OfferCurrent,
+    OfferSnapshot,
+    ReturnItem,
+    SaleItem,
+)
 from takealot_ops.storage.repository import Repository
 
 
@@ -231,6 +242,65 @@ def test_collect_sales_converts_all_items_before_atomic_mutation() -> None:
     assert sales == []
     assert run is not None
     assert run.status == "failed"
+    assert "top-secret-token" not in (run.error or "")
+
+
+def test_collect_returns_expands_details_and_preserves_raw_payload() -> None:
+    engine = _engine()
+    raw_item = _items("returns_page.json")[0]
+    client = FakeClient([raw_item])
+    start = date(2026, 7, 1)
+    end = date(2026, 7, 20)
+    with Session(engine) as session:
+        result = collect_returns(client, Repository(session), start, end)
+
+    with Session(engine) as session:
+        item = session.get(ReturnItem, "SR-2026-0001")
+        run = session.get(CollectionRun, result.run_id)
+
+    assert result.succeeded
+    assert client.calls == [
+        (
+            "/returns",
+            {
+                "return_date__gte": "2026-07-01",
+                "return_date__lte": "2026-07-20",
+                "limit": 100,
+                "expands": ["outcomes", "transactions"],
+            },
+        )
+    ]
+    assert item is not None
+    assert item.quantity == 2
+    assert item.return_reason == "defective_or_damaged"
+    assert item.return_status == "sellable_stock"
+    assert item.outcomes == raw_item["outcomes"]
+    assert item.transactions == raw_item["transactions"]
+    assert item.raw_payload == raw_item
+    assert run is not None and run.status == "success"
+    assert run.counts["requested_start_ordinal"] == start.toordinal()
+    assert run.counts["requested_end_ordinal"] == end.toordinal()
+
+
+def test_collect_returns_converts_all_items_before_atomic_mutation() -> None:
+    engine = _engine()
+    valid = _items("returns_page.json")[0]
+    invalid = dict(valid, seller_return_id="SR-secret", quantity="top-secret-token")
+    with Session(engine) as session:
+        result = collect_returns(
+            FakeClient([valid, invalid]),
+            Repository(session),
+            date(2026, 7, 1),
+            date(2026, 7, 20),
+        )
+
+    with Session(engine) as session:
+        rows = session.scalars(select(ReturnItem)).all()
+        run = session.get(CollectionRun, result.run_id)
+
+    assert not result.succeeded
+    assert rows == []
+    assert run is not None and run.status == "failed"
     assert "top-secret-token" not in (run.error or "")
 
 

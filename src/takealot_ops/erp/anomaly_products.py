@@ -3,15 +3,26 @@
 from __future__ import annotations
 
 import math
+from collections import OrderedDict
 from collections.abc import Iterable, Mapping
+from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
+from decimal import Decimal
+from threading import Lock
 from typing import Any, TypeGuard, cast
 
 import pandas as pd
+from sqlalchemy import func, select
+from sqlalchemy.orm import Session
 
 from takealot_ops.dashboard.labels import OFFER_STATUS_LABELS
 from takealot_ops.metrics.service import DashboardDataset
-from takealot_ops.storage.models import DailySalesMetricState
+from takealot_ops.storage.models import (
+    CollectionRun,
+    DailyProductMetric,
+    DailySalesMetricState,
+    OfferSnapshot,
+)
 
 
 SLOW_DAY_OPTIONS = (4, 7, 10, 15, 20, 30)
@@ -24,6 +35,131 @@ STOCK_STATUS_TYPES = (
     "disabled_by_takealot",
     "disabled_by_seller",
 )
+_ANOMALY_PRODUCT_DAILY_COLUMNS = (
+    "metric_date",
+    "offer_id",
+    "ordered_units",
+)
+_ANOMALY_OFFER_CURRENT_COLUMNS = (
+    "offer_id",
+    "tsin_id",
+    "sku",
+    "title",
+    "selling_price",
+    "status",
+    "image_url",
+    "productline_id",
+    "conversion_percentage_30_days",
+    "page_views_30_days",
+    "total_stock",
+    "takealot_available_stock",
+    "seller_available_stock",
+    "takealot_stock_in_receiving",
+    "takealot_stock_on_way",
+)
+_ANOMALY_OFFER_HISTORY_COLUMNS = (
+    "snapshot_date",
+    "offer_id",
+    "total_stock",
+    "takealot_available_stock",
+    "seller_available_stock",
+)
+
+
+@dataclass(frozen=True)
+class AnomalyProductDataRevision:
+    """Cheap source-table fingerprint used to invalidate cached projections."""
+
+    offer_scope_date: date | None
+    latest_offer_run_at: datetime | None
+    offer_run_count: int
+    latest_offer_capture_at: datetime | None
+    offer_snapshot_count: int
+    latest_metric_state_at: datetime | None
+    metric_state_count: int
+    product_metric_count: int
+
+
+class AnomalyProductPayloadCache:
+    """Small process-local LRU keyed by store, date, and durable data revision."""
+
+    def __init__(self, *, max_entries: int = 64) -> None:
+        if max_entries < 1:
+            raise ValueError("max_entries must be positive")
+        self._max_entries = max_entries
+        self._entries: OrderedDict[tuple[object, ...], dict[str, Any]] = OrderedDict()
+        self._lock = Lock()
+        self._hits = 0
+        self._misses = 0
+
+    def get(self, key: tuple[object, ...]) -> dict[str, Any] | None:
+        with self._lock:
+            payload = self._entries.pop(key, None)
+            if payload is None:
+                self._misses += 1
+                return None
+            self._entries[key] = payload
+            self._hits += 1
+            return payload
+
+    def put(self, key: tuple[object, ...], payload: dict[str, Any]) -> None:
+        with self._lock:
+            self._entries.pop(key, None)
+            self._entries[key] = payload
+            while len(self._entries) > self._max_entries:
+                self._entries.popitem(last=False)
+
+    def clear(self) -> None:
+        with self._lock:
+            self._entries.clear()
+
+    def stats(self) -> dict[str, int]:
+        with self._lock:
+            return {
+                "entries": len(self._entries),
+                "hits": self._hits,
+                "misses": self._misses,
+            }
+
+
+def load_cached_anomaly_product_payload(
+    session: Session,
+    *,
+    cache: AnomalyProductPayloadCache,
+    store_code: str,
+    requested_as_of: date,
+    completed_through: date,
+) -> dict[str, Any]:
+    """Load the narrow anomaly projection, reusing it until source data changes."""
+
+    revision = _anomaly_product_data_revision(
+        session,
+        requested_as_of=requested_as_of,
+        completed_through=completed_through,
+    )
+    cache_key = (
+        store_code,
+        requested_as_of,
+        completed_through,
+        revision,
+    )
+    cached = cache.get(cache_key)
+    if cached is not None:
+        return cached
+
+    dataset, states = _load_anomaly_product_dataset(
+        session,
+        offer_scope_date=revision.offer_scope_date,
+        completed_through=completed_through,
+    )
+    payload = build_anomaly_product_payload(
+        dataset,
+        requested_as_of=requested_as_of,
+        completed_through=completed_through,
+        verified_dates=verified_sales_metric_dates(states),
+    )
+    cache.put(cache_key, payload)
+    return payload
 
 
 def verified_sales_metric_dates(
@@ -39,6 +175,162 @@ def verified_sales_metric_dates(
             continue
         result.add(state.metric_date)
     return result
+
+
+def _anomaly_product_data_revision(
+    session: Session,
+    *,
+    requested_as_of: date,
+    completed_through: date,
+) -> AnomalyProductDataRevision:
+    offer_run = session.execute(
+        select(
+            func.max(CollectionRun.scope_date),
+            func.max(CollectionRun.finished_at),
+            func.count(CollectionRun.run_id),
+        ).where(
+            CollectionRun.run_type == "offers",
+            CollectionRun.status == "success",
+            CollectionRun.scope_date.is_not(None),
+            CollectionRun.scope_date <= requested_as_of,
+        )
+    ).one()
+    offer_scope_date = offer_run[0]
+    offer_snapshot = session.execute(
+        select(
+            func.max(OfferSnapshot.captured_at),
+            func.count(OfferSnapshot.id),
+        ).where(OfferSnapshot.snapshot_date <= completed_through)
+    ).one()
+    metric_state = session.execute(
+        select(
+            func.max(DailySalesMetricState.updated_at),
+            func.count(DailySalesMetricState.id),
+        ).where(DailySalesMetricState.metric_date <= completed_through)
+    ).one()
+    product_metric_count = int(
+        session.scalar(
+            select(func.count(DailyProductMetric.id)).where(
+                DailyProductMetric.metric_date <= completed_through
+            )
+        )
+        or 0
+    )
+    return AnomalyProductDataRevision(
+        offer_scope_date=offer_scope_date if isinstance(offer_scope_date, date) else None,
+        latest_offer_run_at=(
+            offer_run[1] if isinstance(offer_run[1], datetime) else None
+        ),
+        offer_run_count=int(offer_run[2] or 0),
+        latest_offer_capture_at=(
+            offer_snapshot[0]
+            if isinstance(offer_snapshot[0], datetime)
+            else None
+        ),
+        offer_snapshot_count=int(offer_snapshot[1] or 0),
+        latest_metric_state_at=(
+            metric_state[0] if isinstance(metric_state[0], datetime) else None
+        ),
+        metric_state_count=int(metric_state[1] or 0),
+        product_metric_count=product_metric_count,
+    )
+
+
+def _load_anomaly_product_dataset(
+    session: Session,
+    *,
+    offer_scope_date: date | None,
+    completed_through: date,
+) -> tuple[DashboardDataset, list[DailySalesMetricState]]:
+    product_daily = _query_frame(
+        session,
+        select(
+            DailyProductMetric.metric_date,
+            DailyProductMetric.offer_id,
+            DailyProductMetric.ordered_units,
+        )
+        .where(DailyProductMetric.metric_date <= completed_through)
+        .order_by(DailyProductMetric.metric_date, DailyProductMetric.offer_id),
+        _ANOMALY_PRODUCT_DAILY_COLUMNS,
+    )
+    if offer_scope_date is None:
+        offer_current = pd.DataFrame(columns=_ANOMALY_OFFER_CURRENT_COLUMNS)
+    else:
+        offer_current = _query_frame(
+            session,
+            select(
+                OfferSnapshot.offer_id,
+                OfferSnapshot.tsin_id,
+                OfferSnapshot.sku,
+                OfferSnapshot.title,
+                OfferSnapshot.selling_price,
+                OfferSnapshot.status,
+                OfferSnapshot.image_url,
+                OfferSnapshot.productline_id,
+                OfferSnapshot.conversion_percentage_30_days,
+                OfferSnapshot.page_views_30_days,
+                OfferSnapshot.total_stock,
+                OfferSnapshot.takealot_available_stock,
+                OfferSnapshot.seller_available_stock,
+                OfferSnapshot.takealot_stock_in_receiving,
+                OfferSnapshot.takealot_stock_on_way,
+            )
+            .where(OfferSnapshot.snapshot_date == offer_scope_date)
+            .order_by(OfferSnapshot.offer_id),
+            _ANOMALY_OFFER_CURRENT_COLUMNS,
+        )
+    offer_history = _query_frame(
+        session,
+        select(
+            OfferSnapshot.snapshot_date,
+            OfferSnapshot.offer_id,
+            OfferSnapshot.total_stock,
+            OfferSnapshot.takealot_available_stock,
+            OfferSnapshot.seller_available_stock,
+        )
+        .where(OfferSnapshot.snapshot_date <= completed_through)
+        .order_by(OfferSnapshot.snapshot_date, OfferSnapshot.offer_id),
+        _ANOMALY_OFFER_HISTORY_COLUMNS,
+    )
+    states = list(
+        session.scalars(
+            select(DailySalesMetricState)
+            .where(DailySalesMetricState.metric_date <= completed_through)
+            .order_by(DailySalesMetricState.metric_date)
+        )
+    )
+    empty = pd.DataFrame()
+    return (
+        DashboardDataset(
+            store_daily=empty.copy(),
+            product_daily=product_daily,
+            offer_current=offer_current,
+            anomalies=empty.copy(),
+            quality_events=empty.copy(),
+            offer_history=offer_history,
+        ),
+        states,
+    )
+
+
+def _query_frame(
+    session: Session,
+    statement: Any,
+    columns: tuple[str, ...],
+) -> pd.DataFrame:
+    rows = session.execute(statement).mappings().all()
+    values = [
+        {
+            column: (
+                float(value)
+                if isinstance((value := row.get(column)), Decimal)
+                else value
+            )
+            for column in columns
+        }
+        for row in rows
+    ]
+    return pd.DataFrame(values, columns=columns)
 
 
 def build_anomaly_product_payload(
@@ -93,11 +385,11 @@ def build_anomaly_product_payload(
         )
 
         status = item["offer_status"]
-        if status in stock_status_anomalies and item["inventory_units"] > 0:
+        if status in stock_status_anomalies and item["available_stock"] > 0:
             stock_item = dict(item)
             stock_item["anomaly_type"] = f"{status}_with_stock"
             stock_item["anomaly_label"] = (
-                f"{item['offer_status_label']}但平台仓仍有库存"
+                f"{item['offer_status_label']}但仍有可售库存"
             )
             stock_status_anomalies[status].append(stock_item)
 
@@ -164,6 +456,8 @@ def build_anomaly_product_payload(
             "slow_moving_requires_status": "buyable",
             "slow_moving_requires_available_stock": True,
             "slow_moving_day_basis": "verified_zero_sales_and_positive_stock_days",
+            "stock_status_requires_available_stock": True,
+            "stock_status_excluded_inventory": ["receiving", "on_way"],
         },
         "summary": {
             "sudden_sales_stop": len(sudden_sales_stop),
@@ -416,9 +710,9 @@ def _base_item(
         "seller_available_stock": seller_available,
         "receiving_stock": receiving,
         "on_way_stock": on_way,
-        # Stock that is still on the way has not reached the platform warehouse
-        # and must not make a non-buyable offer look like landed inventory.
-        "inventory_units": available_stock + receiving,
+        # Only immediately sellable units make a non-buyable status anomalous.
+        # Receiving and on-way units remain visible context but never count.
+        "inventory_units": available_stock,
         "data_through": data_through.isoformat() if data_through else None,
         "latest_ordered_units": latest_units,
         "no_sales_days": int(zero_streak.get("days") or 0),

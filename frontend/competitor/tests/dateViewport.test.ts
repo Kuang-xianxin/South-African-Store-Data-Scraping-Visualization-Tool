@@ -75,7 +75,7 @@ test("manual viewport keeps an ordered past range", () => {
 test("the global selector and overview data requests use the same range", () => {
   assert.match(
     appSource,
-    /\['search-ranking', 'logistics', 'competitors', 'users'\]\.includes\(currentPage\)/,
+    /\['search-ranking', 'logistics', 'anomaly-products', 'competitors', 'users'\]\.includes\(currentPage\)/,
   );
   assert.match(appSource, /<span>数据范围<\/span>/);
   assert.match(appSource, /<span>开始日期<\/span>/);
@@ -86,6 +86,17 @@ test("the global selector and overview data requests use the same range", () => 
   assert.match(appSource, /@change="updateDataViewportBoundary\('end', \$event\)"/);
   assert.match(appSource, /rangeStart: dataRangeStart\.value/);
   assert.match(appSource, /const common = \{\s+asOf: asOf\.value,\s+\}/);
+  assert.match(appSource, /const anomalyAsOf = ref\(initialDataViewport\.endDate\)/);
+  assert.match(appSource, /currentPage === 'anomaly-products'/);
+  assert.match(appSource, /aria-label="异常商品数据日期"/);
+  assert.match(appSource, /<span>数据日期<\/span>/);
+  assert.match(appSource, /<span>选择日期<\/span>/);
+  assert.match(appSource, /:value="anomalyAsOf"/);
+  assert.match(appSource, /@change="updateAnomalyAsOf"/);
+  assert.match(
+    appSource,
+    /if \(key === "anomaly-products"\) \{[\s\S]*?asOf: anomalyAsOf\.value/,
+  );
   assert.doesNotMatch(appSource, /<span>数据截止日期<\/span>/);
   assert.match(overviewSource, /fetchStoreOverview\(\s*props\.rangeStart,\s*props\.rangeEnd/);
   assert.match(overviewSource, /fetchSummaryRange\(props\.rangeStart, props\.rangeEnd\)/);

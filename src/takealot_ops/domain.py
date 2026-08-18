@@ -151,6 +151,56 @@ class SaleRecord:
         return sast_date(self.order_date)
 
 
+@dataclass(frozen=True)
+class ReturnRecord:
+    """One seller return with the documented outcome and transaction expansions."""
+
+    seller_return_id: str
+    order_id: str | None
+    offer_id: str | None
+    tsin_id: str | None
+    sku: str | None
+    return_reference_number: str | None
+    quantity: int
+    return_date: date
+    return_region: str | None
+    return_reason: str | None
+    customer_comment: str | None
+    outcomes: tuple[dict[str, Any], ...]
+    transactions: tuple[dict[str, Any], ...]
+    captured_at: datetime
+
+    def __post_init__(self) -> None:
+        """Reject naive collection timestamps regardless of construction path."""
+        _require_aware_datetime(self.captured_at, "captured_at")
+
+    @classmethod
+    def from_api(
+        cls,
+        payload: Mapping[str, Any],
+        captured_at: datetime,
+    ) -> ReturnRecord:
+        """Convert one expanded Takealot Returns API payload into a typed record."""
+        return cls(
+            seller_return_id=str(payload["seller_return_id"]),
+            order_id=_optional_string(payload.get("order_id")),
+            offer_id=_optional_string(payload.get("offer_id")),
+            tsin_id=_optional_string(payload.get("tsin_id")),
+            sku=_optional_string(payload.get("sku")),
+            return_reference_number=_optional_string(
+                payload.get("return_reference_number")
+            ),
+            quantity=int(payload["quantity"]),
+            return_date=_parse_date(payload["return_date"], "return_date"),
+            return_region=_optional_string(payload.get("return_region")),
+            return_reason=_optional_string(payload.get("return_reason")),
+            customer_comment=_optional_string(payload.get("customer_comment")),
+            outcomes=_object_tuple(payload.get("outcomes"), "outcomes"),
+            transactions=_object_tuple(payload.get("transactions"), "transactions"),
+            captured_at=_require_aware_datetime(captured_at, "captured_at"),
+        )
+
+
 def _optional_string(value: Any) -> str | None:
     if value is None:
         return None
@@ -167,6 +217,20 @@ def _optional_int(value: Any) -> int | None:
     if value is None or value == "":
         return None
     return int(value)
+
+
+def _object_tuple(value: Any, field_name: str) -> tuple[dict[str, Any], ...]:
+    """Copy an optional API array of JSON objects without coercing its values."""
+    if value is None:
+        return ()
+    if not isinstance(value, list):
+        raise TypeError(f"{field_name} must be a list")
+    copied: list[dict[str, Any]] = []
+    for item in value:
+        if not isinstance(item, Mapping):
+            raise TypeError(f"{field_name} entries must be objects")
+        copied.append(dict(item))
+    return tuple(copied)
 
 
 def _sum_stock_field(value: Any, field_name: str) -> int | None:
@@ -189,6 +253,19 @@ def _optional_datetime(value: Any, field_name: str = "updated_at") -> datetime |
     if value is None or value == "":
         return None
     return _parse_datetime(value, field_name)
+
+
+def _parse_date(value: Any, field_name: str) -> date:
+    if isinstance(value, datetime):
+        if value.tzinfo is not None and value.utcoffset() is not None:
+            return sast_date(value)
+        return value.date()
+    if isinstance(value, date):
+        return value
+    try:
+        return date.fromisoformat(str(value).strip()[:10])
+    except ValueError as exc:
+        raise ValueError(f"{field_name} must be an ISO calendar date") from exc
 
 
 def _parse_datetime(value: Any, field_name: str) -> datetime:

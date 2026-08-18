@@ -14,7 +14,7 @@ from zoneinfo import ZoneInfo
 from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
-from takealot_ops.domain import OfferRecord, SaleRecord
+from takealot_ops.domain import OfferRecord, ReturnRecord, SaleRecord
 from takealot_ops.storage.models import (
     AnomalyEvent,
     CollectionRun,
@@ -23,6 +23,7 @@ from takealot_ops.storage.models import (
     DataQualityEvent,
     OfferCurrent,
     OfferSnapshot,
+    ReturnItem,
     SaleItem,
     SalesRevenueRevision,
     StoreOfferBaseline,
@@ -141,6 +142,19 @@ class Repository:
             return
         _set_values(existing, values)
 
+    def upsert_return(
+        self,
+        record: ReturnRecord,
+        raw_payload: Mapping[str, Any],
+    ) -> None:
+        """Stage the latest expanded state for one Seller Return ID."""
+        values = _return_values(record, raw_payload)
+        existing = self._session.get(ReturnItem, record.seller_return_id)
+        if existing is None:
+            self._session.add(ReturnItem(**values))
+            return
+        _set_values(existing, values)
+
     def finish_run(
         self, run_id: str, status: str, counts: Mapping[str, int], error: str | None
     ) -> None:
@@ -160,6 +174,21 @@ class Repository:
                 select(SaleItem)
                 .where(SaleItem.sales_day >= start, SaleItem.sales_day <= end)
                 .order_by(SaleItem.sales_day, SaleItem.order_item_id)
+            )
+        )
+
+    def list_returns(self, start: date, end: date) -> list[ReturnItem]:
+        """Return seller returns in an inclusive SAST calendar-date range."""
+        range_start = datetime.combine(start, time.min, tzinfo=SAST_TIMEZONE)
+        range_end = datetime.combine(end + timedelta(days=1), time.min, tzinfo=SAST_TIMEZONE)
+        return list(
+            self._session.scalars(
+                select(ReturnItem)
+                .where(
+                    ReturnItem.return_date >= range_start,
+                    ReturnItem.return_date < range_end,
+                )
+                .order_by(ReturnItem.return_date, ReturnItem.seller_return_id)
             )
         )
 
@@ -225,6 +254,7 @@ class Repository:
             sales_source=sales_source,
             observed_at=observed_at,
         )
+
         self._session.execute(
             delete(DailyProductMetric).where(
                 DailyProductMetric.metric_date >= start,
@@ -648,6 +678,44 @@ def _daily_sales_totals(
             Decimal(total["revenue"]) if total["has_revenue"] else None,
         )
         for metric_date, total in totals.items()
+    }
+
+
+def _return_values(
+    record: ReturnRecord,
+    raw_payload: Mapping[str, Any],
+) -> dict[str, Any]:
+    outcome_statuses = [
+        str(outcome.get("status") or "").strip()
+        for outcome in record.outcomes
+        if str(outcome.get("status") or "").strip()
+    ]
+    return {
+        "seller_return_id": record.seller_return_id,
+        "order_item_id": (
+            str(raw_payload.get("order_item_id"))
+            if raw_payload.get("order_item_id") not in (None, "")
+            else None
+        ),
+        "order_id": record.order_id,
+        "offer_id": record.offer_id,
+        "tsin_id": record.tsin_id,
+        "sku": record.sku,
+        "return_reference_number": record.return_reference_number,
+        "quantity": record.quantity,
+        "return_date": datetime.combine(
+            record.return_date,
+            time.min,
+            tzinfo=SAST_TIMEZONE,
+        ),
+        "return_status": ",".join(dict.fromkeys(outcome_statuses)) or None,
+        "return_region": record.return_region,
+        "return_reason": record.return_reason,
+        "customer_comment": record.customer_comment,
+        "outcomes": [dict(item) for item in record.outcomes],
+        "transactions": [dict(item) for item in record.transactions],
+        "captured_at": record.captured_at.astimezone(UTC),
+        "raw_payload": dict(raw_payload),
     }
 
 
