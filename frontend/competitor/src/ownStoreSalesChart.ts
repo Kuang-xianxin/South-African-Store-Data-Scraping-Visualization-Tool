@@ -17,6 +17,10 @@ export interface OwnStoreSalesChartPoint {
   revisionCount: number;
   x: number;
   y: number | null;
+  barX: number;
+  barY: number | null;
+  barWidth: number;
+  barHeight: number | null;
 }
 
 export interface OwnStoreSalesChartTick {
@@ -29,7 +33,6 @@ export interface OwnStoreSalesChartTick {
 
 export interface OwnStoreSalesChartGeometry {
   points: OwnStoreSalesChartPoint[];
-  segments: string[];
   yTicks: OwnStoreSalesChartTick[];
   xTicks: OwnStoreSalesChartTick[];
   yMaximum: number;
@@ -77,9 +80,17 @@ export function buildOwnStoreSalesChart(
       0,
     ),
   );
-  const divisor = Math.max(1, source.length - 1);
+  const slotWidth = (plotRight - plotLeft) / Math.max(1, source.length);
+  const barWidth = round(Math.max(1.25, Math.min(18, slotWidth * 0.72)));
   const points = source.map((point, index) => {
-    const x = plotLeft + ((plotRight - plotLeft) * index) / divisor;
+    const x = plotLeft + slotWidth * (index + 0.5);
+    const y =
+      point.ordered_units === null
+        ? null
+        : plotBottom -
+          ((plotBottom - plotTop) * point.ordered_units) / yMaximum;
+    const barHeight =
+      y === null ? null : round(Math.max(2, plotBottom - y));
     return {
       index,
       date: point.date,
@@ -87,33 +98,13 @@ export function buildOwnStoreSalesChart(
       status: point.data_status,
       revisionCount: point.revision_count,
       x,
-      y:
-        point.ordered_units === null
-          ? null
-          : plotBottom -
-            ((plotBottom - plotTop) * point.ordered_units) / yMaximum,
+      y,
+      barX: round(x - barWidth / 2),
+      barY: barHeight === null ? null : round(plotBottom - barHeight),
+      barWidth,
+      barHeight,
     };
   });
-
-  const segments: string[] = [];
-  let current: OwnStoreSalesChartPoint[] = [];
-  const flush = () => {
-    if (!current.length) return;
-    segments.push(
-      current
-        .map((point, index) => `${index === 0 ? "M" : "L"} ${round(point.x)} ${round(point.y ?? 0)}`)
-        .join(" "),
-    );
-    current = [];
-  };
-  for (const point of points) {
-    if (point.y === null) {
-      flush();
-    } else {
-      current.push(point);
-    }
-  }
-  flush();
 
   const yValues = [yMaximum, yMaximum / 2, 0];
   const yTicks = yValues.map((value) => ({
@@ -132,7 +123,7 @@ export function buildOwnStoreSalesChart(
           ? ("end" as const)
           : ("middle" as const),
   }));
-  return { points, segments, yTicks, xTicks, yMaximum };
+  return { points, yTicks, xTicks, yMaximum };
 }
 
 export function nearestOwnStoreSalesPointIndex(
@@ -147,7 +138,7 @@ export function nearestOwnStoreSalesPointIndex(
     0,
     Math.min(1, (viewBoxX - plotLeft) / (plotRight - plotLeft)),
   );
-  return Math.round(ratio * (pointCount - 1));
+  return Math.min(pointCount - 1, Math.floor(ratio * pointCount));
 }
 
 function niceSalesMaximum(maximum: number): number {

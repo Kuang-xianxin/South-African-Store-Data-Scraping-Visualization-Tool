@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 
 import {
@@ -36,16 +37,22 @@ const points: OwnStoreSalesPoint[] = [
   },
 ];
 
-test("sales geometry plots verified zero and breaks the line across missing dates", () => {
+test("sales geometry renders independent bars, keeps verified zero visible, and omits missing dates", () => {
   const chart = buildOwnStoreSalesChart(points);
 
   assert.equal(chart.yMaximum, 5);
   assert.equal(chart.points[1]?.y, 208);
+  assert.deepEqual(
+    chart.points.map((point) => [point.barX, point.barY, point.barWidth, point.barHeight]),
+    [
+      [159.25, 136, 18, 72],
+      [379.75, 206, 18, 2],
+      [600.25, null, 18, null],
+      [820.75, 28, 18, 180],
+    ],
+  );
   assert.equal(chart.points[2]?.y, null);
-  assert.deepEqual(chart.segments, [
-    "M 58 136 L 352 208",
-    "M 940 28",
-  ]);
+  assert.equal("segments" in chart, false);
   assert.deepEqual(
     chart.xTicks.map((tick) => tick.label),
     ["08/02", "08/03", "08/05"],
@@ -70,6 +77,20 @@ test("chart geometry preserves a successful but unfinished Beijing day as partia
 
   assert.equal(chart.points[0]?.status, "partial");
   assert.equal(chart.points[0]?.units, 4);
+});
+
+test("sales component uses bars and contains no line-chart rendering contract", () => {
+  const component = readFileSync(
+    new URL("../src/components/OwnStoreSalesChart.vue", import.meta.url),
+    "utf8",
+  );
+
+  assert.match(component, /class="own-sales-bar"/);
+  assert.match(component, /条形图显示/);
+  assert.doesNotMatch(
+    component,
+    /geometry\.segments|own-sales-line|own-sales-point|折线显示|折线图/,
+  );
 });
 
 test("date range filtering is inclusive and preserves missing-day evidence", () => {

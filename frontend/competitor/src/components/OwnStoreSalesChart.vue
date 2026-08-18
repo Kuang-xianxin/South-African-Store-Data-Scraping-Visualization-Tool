@@ -99,17 +99,9 @@ const activePoint = computed(
 const activeChartPoint = computed(
   () => geometry.value.points[activeIndex.value] ?? null,
 );
-const visiblePoints = computed(() => {
-  const points = geometry.value.points.filter((point) => point.y !== null);
-  if (points.length <= 180) return points;
-  return points.filter(
-    (point) =>
-      (point.units ?? 0) > 0 ||
-      point.index === 0 ||
-      point.index === geometry.value.points.length - 1 ||
-      point.index === activeIndex.value,
-  );
-});
+const visibleBars = computed(() =>
+  geometry.value.points.filter((point) => point.barHeight !== null),
+);
 const isFullRange = computed(
   () =>
     rangeStart.value === availableStart.value &&
@@ -226,7 +218,7 @@ function number(value: number | null): string {
     </header>
 
     <div v-if="!selectedSeries" class="own-sales-empty">
-      当前账号可见店铺没有该 PLID 的自有 Offer，未生成销量曲线。
+      当前账号可见店铺没有该 PLID 的自有 Offer，未生成销量条形图。
     </div>
     <template v-else>
       <div class="own-sales-summary">
@@ -283,7 +275,7 @@ function number(value: number | null): string {
           </button>
         </div>
         <p class="own-sales-range-status" aria-live="polite">
-          <span>折线显示 {{ rangeStart }} 至 {{ rangeEnd }}</span>
+          <span>条形图显示 {{ rangeStart }} 至 {{ rangeEnd }}</span>
           <span>{{ rangeSummary.totalDays }} 个自然日</span>
           <span>完整 {{ rangeSummary.coveredDays }} 天</span>
           <span v-if="rangeSummary.partialDays" class="partial">
@@ -306,7 +298,7 @@ function number(value: number | null): string {
         v-if="filteredPoints.length"
         class="own-sales-chart"
         tabindex="0"
-        :aria-label="`自有商品日销量折线图，当前显示 ${rangeStart} 至 ${rangeEnd}，使用左右方向键切换国内日期`"
+        :aria-label="`自有商品日销量条形图，当前显示 ${rangeStart} 至 ${rangeEnd}，使用左右方向键切换国内日期`"
         @keydown.left.prevent="stepPoint(-1)"
         @keydown.right.prevent="stepPoint(1)"
       >
@@ -345,7 +337,7 @@ function number(value: number | null): string {
         <svg
           :viewBox="`0 0 ${OWN_STORE_SALES_CHART.width} ${OWN_STORE_SALES_CHART.height}`"
           role="img"
-          aria-label="按北京时间自然日归属的实际下单件数折线图"
+          aria-label="按北京时间自然日归属的实际下单件数条形图"
           @pointermove="handlePointer"
         >
           <rect
@@ -373,21 +365,20 @@ function number(value: number | null): string {
             >{{ tick.label }}</text>
           </g>
           <text class="own-sales-axis-title" x="8" y="24">件</text>
-          <path
-            v-for="(segment, index) in geometry.segments"
-            :key="`segment:${index}`"
-            class="own-sales-line"
-            :d="segment"
-            vector-effect="non-scaling-stroke"
-          />
-          <circle
-            v-for="point in visiblePoints"
-            :key="`point:${point.index}`"
-            class="own-sales-point"
-            :class="{ active: point.index === activeIndex, partial: point.status === 'partial' }"
-            :cx="point.x"
-            :cy="point.y ?? 0"
-            :r="point.index === activeIndex ? 5.5 : 3"
+          <rect
+            v-for="point in visibleBars"
+            :key="`bar:${point.index}`"
+            class="own-sales-bar"
+            :class="{
+              active: point.index === activeIndex,
+              partial: point.status === 'partial',
+              zero: point.units === 0,
+            }"
+            :x="point.barX"
+            :y="point.barY ?? OWN_STORE_SALES_CHART.plotBottom"
+            :width="point.barWidth"
+            :height="point.barHeight ?? 0"
+            rx="1.5"
             vector-effect="non-scaling-stroke"
           />
           <line
@@ -410,7 +401,7 @@ function number(value: number | null): string {
           >{{ tick.label }}</text>
         </svg>
         <p>
-          订单按北京时间重新归入国内自然日；完整的 0 件只在该国内日结束后，跨到的 Seller Sales 源日期均已成功复核时显示。今天等未结束日期标为“截至采集”；缺失日期会断线，不按 0 补齐，也不使用库存下降反推销量。
+          订单按北京时间重新归入国内自然日；完整的 0 件只在该国内日结束后，跨到的 Seller Sales 源日期均已成功复核时以基线细柱显示。今天等未结束日期标为“截至采集”；缺失日期不绘制条形柱，不按 0 补齐，也不使用库存下降反推销量。
         </p>
       </div>
       <div v-else class="own-sales-empty">
@@ -666,26 +657,26 @@ function number(value: number | null): string {
   font-weight: 800;
 }
 
-.own-sales-line {
-  fill: none;
-  stroke: #1d7257;
-  stroke-linecap: round;
-  stroke-linejoin: round;
-  stroke-width: 2.6;
-}
-
-.own-sales-point {
+.own-sales-bar {
   fill: #1d7257;
-  stroke: #f8fffb;
-  stroke-width: 1.6;
+  stroke: rgba(16, 77, 58, 0.58);
+  stroke-width: 0.8;
 }
 
-.own-sales-point.active {
-  fill: #b65432;
+.own-sales-bar.zero {
+  fill: rgba(29, 114, 87, 0.58);
+  stroke: none;
 }
 
-.own-sales-point.partial {
+.own-sales-bar.partial {
   fill: #c7842d;
+  stroke: rgba(130, 77, 18, 0.62);
+}
+
+.own-sales-bar.active {
+  fill: #b65432;
+  stroke: #73311f;
+  stroke-width: 1.6;
 }
 
 .own-sales-cursor {

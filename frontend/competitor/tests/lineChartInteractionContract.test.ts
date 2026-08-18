@@ -91,7 +91,7 @@ test("competitor three-panel line chart keeps a fixed detail panel with pointer 
   assert.match(sharedStyles, /\.offer-trend-line\.missing-bridge/);
 });
 
-test("own-store official sales sits below comments and preserves zero versus missing evidence", () => {
+test("own-store official sales bars sit below comments and preserve zero versus missing evidence", () => {
   assert.match(competitorsSource, /<OwnStoreSalesChart/);
   assert.ok(
     competitorsSource.indexOf("图表上方固定显示当前 Seller 刷新点") <
@@ -102,7 +102,9 @@ test("own-store official sales sits below comments and preserves zero versus mis
   assert.match(ownStoreSalesSource, /@keydown\.left\.prevent="stepPoint\(-1\)"/);
   assert.match(ownStoreSalesSource, /完整的 0 件只在该国内日结束后/);
   assert.match(ownStoreSalesSource, /今天等未结束日期标为“截至采集”/);
-  assert.match(ownStoreSalesSource, /缺失日期会断线，不按 0 补齐/);
+  assert.match(ownStoreSalesSource, /缺失日期不绘制条形柱，不按 0 补齐/);
+  assert.match(ownStoreSalesSource, /class="own-sales-bar"/);
+  assert.doesNotMatch(ownStoreSalesSource, /class="own-sales-line"/);
   assert.doesNotMatch(ownStoreSalesSource, /overflow-x\s*:\s*(?:auto|scroll)/);
 });
 
