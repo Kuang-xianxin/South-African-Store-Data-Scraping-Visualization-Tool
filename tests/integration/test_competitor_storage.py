@@ -104,6 +104,8 @@ def test_competitor_observation_persists_snapshot_and_deduplicated_reviews(
                 seller_name="Seller One",
                 price=6597.0,
                 stock_status="In stock",
+                is_buybox=True,
+                is_add_to_cart_available=True,
             ),
         ),
         variants=(
@@ -247,6 +249,8 @@ def test_competitor_signals_recompute_from_oldest_and_latest_in_date_range(
                 seller_name="Range Seller",
                 price=199.0,
                 stock_status="In stock",
+                is_buybox=True,
+                is_add_to_cart_available=True,
                 plid="12345678",
                 url="https://www.takealot.com/example/PLID12345678",
                 offer_id="offer-down",
@@ -257,7 +261,7 @@ def test_competitor_signals_recompute_from_oldest_and_latest_in_date_range(
                 seller_id="seller-other",
                 seller_name="Other Seller",
                 price=180.0,
-                stock_status="In stock",
+                stock_status="Out of stock",
                 plid="12345678",
                 url="https://www.takealot.com/example/PLID12345678",
                 offer_id="offer-up",
@@ -280,18 +284,29 @@ def test_competitor_signals_recompute_from_oldest_and_latest_in_date_range(
         ),
     )
     observations = (
-        (datetime(2026, 7, 22, 8, tzinfo=UTC), 10, 10, 220.0, 180.0),
-        (datetime(2026, 7, 23, 8, tzinfo=UTC), 8, 11, 210.0, 190.0),
-        (datetime(2026, 7, 24, 8, tzinfo=UTC), 4, 13, 200.0, 210.0),
+        (datetime(2026, 7, 22, 8, tzinfo=UTC), 10, 10, 220.0, 180.0, "Out of stock"),
+        (datetime(2026, 7, 23, 8, tzinfo=UTC), 8, 11, 210.0, 190.0, "Out of stock"),
+        (datetime(2026, 7, 24, 8, tzinfo=UTC), 4, 13, 200.0, 210.0, "In stock"),
     )
-    for collected_at, quantity, review_count, price, other_price in observations:
+    for (
+        collected_at,
+        quantity,
+        review_count,
+        price,
+        other_price,
+        other_stock_status,
+    ) in observations:
         product = replace(
             base_product,
             review_count=review_count,
             price=price,
             offers=(
                 replace(base_product.offers[0], price=price),
-                replace(base_product.offers[1], price=other_price),
+                replace(
+                    base_product.offers[1],
+                    price=other_price,
+                    stock_status=other_stock_status,
+                ),
             ),
             variants=(replace(base_product.variants[0], price=price),),
         )
@@ -346,9 +361,21 @@ def test_competitor_signals_recompute_from_oldest_and_latest_in_date_range(
     all_offers = {offer["offer_id"]: offer for offer in all_signal["跟卖报价"]}
     assert all_offers["offer-down"]["价格变化"] == -20.0
     assert all_offers["offer-down"]["价格信号"] == "降价"
+    assert all_offers["offer-down"]["库存数量"] == 4
+    assert all_offers["offer-down"]["区间起始库存数量"] == 10
+    assert all_offers["offer-down"]["库存数量变化"] == -6
+    assert all_offers["offer-down"]["库存信号"] == "库存减少"
+    assert bool(all_offers["offer-down"]["库存精确"])
     assert all_offers["offer-up"]["区间起始价格"] == 180.0
     assert all_offers["offer-up"]["价格变化"] == 30.0
     assert all_offers["offer-up"]["价格信号"] == "涨价"
+    assert all_offers["offer-up"]["库存状态"] == "有货"
+    assert all_offers["offer-up"]["区间起始库存状态"] == "没货"
+    assert all_offers["offer-up"]["库存数量"] is None
+    assert all_offers["offer-up"]["区间起始库存数量"] is None
+    assert all_offers["offer-up"]["库存信号"] == "恢复有货"
+    assert not bool(all_offers["offer-up"]["库存精确"])
+    assert "不补 0" in str(all_offers["offer-up"]["库存说明"])
     assert bool(all_signal["库存可比"])
     assert all_range.available_start_date == date(2026, 7, 22)
     assert all_range.available_end_date == date(2026, 7, 24)
@@ -366,7 +393,9 @@ def test_competitor_signals_recompute_from_oldest_and_latest_in_date_range(
     assert recent_signal["价格信号"] == "降价"
     recent_offers = {offer["offer_id"]: offer for offer in recent_signal["跟卖报价"]}
     assert recent_offers["offer-down"]["价格变化"] == -10.0
+    assert recent_offers["offer-down"]["库存数量变化"] == -4
     assert recent_offers["offer-up"]["价格变化"] == 20.0
+    assert recent_offers["offer-up"]["库存信号"] == "恢复有货"
     assert recent_range.selected_start_date == date(2026, 7, 23)
     assert recent_range.selected_end_date == date(2026, 7, 24)
 

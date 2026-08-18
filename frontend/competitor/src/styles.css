@@ -326,7 +326,11 @@ h2 {
 
 .target-offer-row {
   display: grid;
-  grid-template-columns: minmax(210px, 1.4fr) minmax(130px, 0.6fr) auto;
+  grid-template-columns:
+    minmax(210px, 1.35fr)
+    minmax(120px, 0.55fr)
+    minmax(140px, 0.65fr)
+    auto;
   align-items: center;
   gap: 14px;
   padding: 10px 12px;
@@ -335,10 +339,27 @@ h2 {
 }
 
 .target-offer-row > div,
-.target-offer-price {
+.target-offer-price,
+.target-offer-stock {
   display: grid;
   min-width: 0;
   gap: 3px;
+}
+
+.target-offer-price .price-signal {
+  margin-top: 0;
+}
+
+.target-offer-stock .stock-increase {
+  color: #16724d;
+}
+
+.target-offer-stock .stock-decrease {
+  color: #b24b38;
+}
+
+.target-offer-stock .stock-flat {
+  color: #6f6654;
 }
 
 .target-offer-row strong,
