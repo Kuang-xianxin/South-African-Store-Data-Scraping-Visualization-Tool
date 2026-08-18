@@ -21,7 +21,7 @@ from urllib.parse import quote, urlsplit
 
 import httpx
 from dotenv import load_dotenv
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -48,7 +48,7 @@ from takealot_ops.storage.models import (
 )
 
 
-PROMPT_VERSION = "takealot-v11-za-phrase-roots"
+PROMPT_VERSION = "takealot-v12-concise-query"
 MODEL_MARKET_CONTEXT: Literal["South Africa"] = "South Africa"
 MODEL_LANGUAGE_VARIANT: Literal["South African English"] = "South African English"
 MODEL_SHOPPER_CONTEXT: Literal["South African local customer habits"] = (
@@ -81,6 +81,10 @@ PLATFORM_ROOT_EXPANSION_SOURCES = {
 }
 SHOPPER_JOURNEY_CANDIDATE_POOL_LIMIT = 18
 MODEL_DIRECT_QUERY_TARGET = 6
+MODEL_DIRECT_QUERY_MIN_WORDS = 2
+MODEL_DIRECT_QUERY_MAX_WORDS = 4
+MODEL_DIRECT_QUERY_PREFERRED_MAX_WORDS = 3
+MODEL_DIRECT_QUERY_MIN_PREFERRED_COUNT = 4
 ROOT_EXPANSION_CORE_QUERY_TARGET = 6
 SELLER_TITLE_COMPLETE_PHRASE_QUERY_MAX = 1
 ROOT_EXPANSION_OPPORTUNITY_QUERY_TARGET = 1
@@ -566,6 +570,39 @@ class FusionVisionProfile(LocalizedVisionProfile):
     autocomplete_seeds: list[KeywordCandidate] = Field(min_length=6, max_length=10)
     same_product_aliases: list[str] = Field(min_length=2, max_length=8)
     opportunity_seeds: Sequence[AdjacentDemandCandidate] = Field(min_length=1, max_length=4)
+
+    @field_validator("keywords")
+    @classmethod
+    def _validate_concise_direct_queries(
+        cls,
+        values: list[KeywordCandidate],
+    ) -> list[KeywordCandidate]:
+        word_counts = [
+            len(TOKEN_PATTERN.findall(item.phrase.casefold())) for item in values
+        ]
+        if any(
+            count < MODEL_DIRECT_QUERY_MIN_WORDS
+            or count > MODEL_DIRECT_QUERY_MAX_WORDS
+            for count in word_counts
+        ):
+            raise ValueError("keywords must each contain 2 to 4 words")
+        if (
+            sum(count <= MODEL_DIRECT_QUERY_PREFERRED_MAX_WORDS for count in word_counts)
+            < MODEL_DIRECT_QUERY_MIN_PREFERRED_COUNT
+        ):
+            raise ValueError("at least four keywords must contain no more than 3 words")
+        return values
+
+    @field_validator("same_product_aliases")
+    @classmethod
+    def _reject_generic_single_word_aliases(cls, values: list[str]) -> list[str]:
+        for value in values:
+            tokens = _identity_term_tokens(value)
+            if len(tokens) == 1 and tokens[0] in GENERIC_IDENTITY_HEAD_TOKENS:
+                raise ValueError(
+                    "same_product_aliases cannot use a generic one-word product head"
+                )
+        return values
 
 
 @dataclass(frozen=True)
@@ -1299,7 +1336,8 @@ class OpenAICompatibleProductVisionClient:
                 ),
                 function_name="submit_takealot_fused_search_profile",
                 function_description=(
-                    "Return image-title fused South African shopper roots and full search phrases."
+                    "Return image-title fused South African shopper roots and concise 2-4 word "
+                    "search queries."
                 ),
                 max_tokens=1800,
                 profile_type=FusionVisionProfile,
@@ -1645,6 +1683,12 @@ class SearchRankingService:
             "public_request_min_interval_seconds": self.runtime.page_delay_seconds,
             "public_request_jitter_seconds": self.runtime.page_delay_jitter_seconds,
             "public_request_retry_policy": "no_automatic_retry_for_search_endpoints",
+            "model_direct_query_policy": {
+                "min_words": MODEL_DIRECT_QUERY_MIN_WORDS,
+                "max_words": MODEL_DIRECT_QUERY_MAX_WORDS,
+                "preferred_max_words": MODEL_DIRECT_QUERY_PREFERRED_MAX_WORDS,
+                "min_preferred_count": MODEL_DIRECT_QUERY_MIN_PREFERRED_COUNT,
+            },
             "query_source_targets": {
                 "model_south_african_direct": MODEL_DIRECT_QUERY_TARGET,
                 "takealot_root_expansion": ROOT_EXPANSION_CORE_QUERY_TARGET,
@@ -2665,6 +2709,12 @@ class SearchRankingService:
                 "search_query_attempt_limit": self.runtime.max_keywords,
                 "public_request_min_interval_seconds": self.runtime.page_delay_seconds,
                 "public_request_jitter_seconds": (self.runtime.page_delay_jitter_seconds),
+                "model_direct_query_policy": {
+                    "min_words": MODEL_DIRECT_QUERY_MIN_WORDS,
+                    "max_words": MODEL_DIRECT_QUERY_MAX_WORDS,
+                    "preferred_max_words": MODEL_DIRECT_QUERY_PREFERRED_MAX_WORDS,
+                    "min_preferred_count": MODEL_DIRECT_QUERY_MIN_PREFERRED_COUNT,
+                },
                 "query_source_targets": {
                     "model_south_african_direct": MODEL_DIRECT_QUERY_TARGET,
                     "takealot_root_expansion": ROOT_EXPANSION_CORE_QUERY_TARGET,
@@ -3716,6 +3766,12 @@ async def _result_page_learning_candidates(
                 "reason": "result_page_followup_missing_primary_product_shape",
                 "matched_terms": list(decision["matched_terms"]),
             }
+        query_word_count = len(TOKEN_PATTERN.findall(normalized_phrase.casefold()))
+        query_length_status = (
+            "eligible"
+            if query_word_count <= MODEL_DIRECT_QUERY_MAX_WORDS
+            else "rejected_too_long"
+        )
         expansion_rows.append(
             {
                 "phrase": normalized_phrase,
@@ -3726,6 +3782,8 @@ async def _result_page_learning_candidates(
                 "relation": decision["relation"],
                 "reason": decision["reason"],
                 "matched_terms": list(decision["matched_terms"]),
+                "query_word_count": query_word_count,
+                "query_length_status": query_length_status,
                 "used_as_followup_root": False,
             }
         )
@@ -3734,7 +3792,7 @@ async def _result_page_learning_candidates(
             profile,
             source_title=source_title,
         )
-        if decision["accepted"] and fit > 0:
+        if decision["accepted"] and fit > 0 and query_length_status == "eligible":
             ranked.append((fit, rank, normalized_phrase))
     if existing_check is None:
         autocomplete_checks.append(
@@ -3755,10 +3813,18 @@ async def _result_page_learning_candidates(
                 "suggestions": suggestions,
                 "expansions": expansion_rows,
                 "eligible_expansion_count": sum(
-                    item["relevance_status"] == "eligible" for item in expansion_rows
+                    item["relevance_status"] == "eligible"
+                    and item["query_length_status"] == "eligible"
+                    for item in expansion_rows
                 ),
                 "rejected_expansion_count": sum(
                     item["relevance_status"] == "rejected_irrelevant"
+                    or item["query_length_status"] == "rejected_too_long"
+                    for item in expansion_rows
+                ),
+                "related_but_too_long_count": sum(
+                    item["relevance_status"] == "eligible"
+                    and item["query_length_status"] == "rejected_too_long"
                     for item in expansion_rows
                 ),
                 "raw_suggestions_are_selected": False,
@@ -3886,6 +3952,10 @@ def _same_product_relation_terms(profile: VisionProfile) -> list[str]:
             normalized
             for value in (*profile.product_type_terms, *profile.same_product_aliases)
             if (normalized := " ".join(str(value or "").casefold().split()))
+            and not (
+                len(tokens := _identity_term_tokens(normalized)) == 1
+                and tokens[0] in GENERIC_IDENTITY_HEAD_TOKENS
+            )
         )
     )
 
@@ -4378,7 +4448,11 @@ def _confirmed_decision_parameter_candidates(
             query_shape = str(registry_evidence["query_shape"])
             rule = str(registry_evidence["rule"])
         phrase = " ".join((normalized_value, query_shape)).strip().casefold()
-        if not query_shape or phrase in seen:
+        if (
+            not query_shape
+            or phrase in seen
+            or len(TOKEN_PATTERN.findall(phrase)) > MODEL_DIRECT_QUERY_MAX_WORDS
+        ):
             continue
         seen.add(phrase)
         output.append(
@@ -4918,7 +4992,7 @@ def _title_journey_priority(evidence: Mapping[str, Any] | Any) -> int:
     if not isinstance(evidence, Mapping):
         return 4
     journey_types = set(_journey_types_from_evidence(evidence))
-    if "known_long_tail" in journey_types:
+    if journey_types & {"concise_direct", "known_long_tail"}:
         return 0
     if journey_types & {
         "platform_root_expansion",
@@ -5041,6 +5115,9 @@ def _title_root_expansions(
     generic_identity_rows = [
         row for row in identity_rows if row and row[-1] in GENERIC_IDENTITY_HEAD_TOKENS
     ]
+    identity_context_tokens = set().union(*(set(row) for row in identity_rows)) - (
+        GENERIC_IDENTITY_HEAD_TOKENS | TITLE_CONNECTOR_TOKENS
+    )
     phrase_candidates: list[tuple[int, int, int, str]] = []
     segments = re.split(r"\s+(?:[-–—|:/])\s+|[,;()]", source_title.casefold())
     for segment_index, segment in enumerate(segments):
@@ -5063,11 +5140,15 @@ def _title_root_expansions(
                 phrase_tokens = set(_identity_term_tokens(phrase))
                 full_identity_match = any(set(row).issubset(phrase_tokens) for row in identity_rows)
                 matched_heads = phrase_tokens & identity_heads
+                shared_identity_context = phrase_tokens & identity_context_tokens
                 contextual_generic_matches = [
                     row
                     for row in generic_identity_rows
                     if row[-1] in phrase_tokens
-                    and bool((set(row[:-1]) & phrase_tokens) - GENERIC_IDENTITY_HEAD_TOKENS)
+                    and bool(
+                        ((set(row[:-1]) & phrase_tokens) - GENERIC_IDENTITY_HEAD_TOKENS)
+                        or shared_identity_context
+                    )
                 ]
                 if not full_identity_match and not matched_heads and not contextual_generic_matches:
                     continue
@@ -5078,6 +5159,7 @@ def _title_root_expansions(
                         ({row[-1]} | (set(row[:-1]) & phrase_tokens))
                         for row in contextual_generic_matches
                     ),
+                    shared_identity_context,
                 )
                 if matched_identity and _semantic_retargets_product(phrase, matched_identity):
                     continue
@@ -5089,6 +5171,7 @@ def _title_root_expansions(
                         len(set(row[:-1]) & phrase_tokens)
                         for row in contextual_generic_matches
                     )
+                    + (3 * len(shared_identity_context))
                     + (6 - phrase_length)
                     + (
                         2
@@ -6262,22 +6345,61 @@ def _precise_candidates(
     # absent from the current title; the stricter title-suggestion gate remains
     # in _title_supported_keywords.
     _ = source_title
-    output: list[SearchKeywordCandidate] = []
-    seen: set[str] = set()
+    candidate_rows: list[tuple[str, str, int]] = []
     for candidate in profile.keywords:
-        phrase = " ".join(candidate.phrase.split())
+        candidate_rows.append((candidate.phrase, candidate.rationale, 0))
+    for term in profile.product_type_terms:
+        candidate_rows.append(
+            (
+                str(term),
+                "图文融合商品身份中的精简搜索表达，用于补足直接查询候选",
+                1,
+            )
+        )
+    for term in profile.same_product_aliases:
+        candidate_rows.append(
+            (
+                str(term),
+                "图文融合同品别名中的精简搜索表达，用于补足直接查询候选",
+                2,
+            )
+        )
+
+    concise_rows: list[tuple[int, int, str, str]] = []
+    seen: set[str] = set()
+    for raw_phrase, rationale, fallback_order in candidate_rows:
+        phrase = " ".join(raw_phrase.split())
+        word_count = len(TOKEN_PATTERN.findall(phrase.casefold()))
         key = phrase.casefold()
-        if key in seen:
+        if (
+            key in seen
+            or word_count < MODEL_DIRECT_QUERY_MIN_WORDS
+            or word_count > MODEL_DIRECT_QUERY_MAX_WORDS
+        ):
             continue
         seen.add(key)
+        concise_rows.append(
+            (
+                fallback_order,
+                0 if word_count <= MODEL_DIRECT_QUERY_PREFERRED_MAX_WORDS else 1,
+                phrase,
+                rationale.strip(),
+            )
+        )
+
+    output: list[SearchKeywordCandidate] = []
+    for _, _, phrase, rationale in sorted(
+        concise_rows,
+        key=lambda row: (row[0], row[1]),
+    ):
         output.append(
             SearchKeywordCandidate(
                 phrase=phrase,
-                rationale=candidate.rationale.strip(),
+                rationale=rationale,
                 candidate_source="image_title_fused_precise",
                 intended_strategy="core",
                 seed_source="image_title_fusion_model",
-                journey_type="known_long_tail",
+                journey_type="concise_direct",
                 journey_root=phrase,
                 journey_path=(phrase,),
                 journey_depth=0,
@@ -6286,7 +6408,7 @@ def _precise_candidates(
                         "candidate_source": "image_title_fused_precise",
                         "intended_strategy": "core",
                         "seed_source": "image_title_fusion_model",
-                        "journey_type": "known_long_tail",
+                        "journey_type": "concise_direct",
                         "journey_root": phrase,
                         "journey_path": [phrase],
                         "journey_depth": 0,
@@ -6536,6 +6658,12 @@ async def _discover_keyword_candidates(
                 profile,
                 source_title=source_title,
             )
+            query_word_count = len(TOKEN_PATTERN.findall(normalized_phrase.casefold()))
+            query_length_status = (
+                "eligible"
+                if query_word_count <= MODEL_DIRECT_QUERY_MAX_WORDS
+                else "rejected_too_long"
+            )
             expansion_evidence = {
                 "phrase": normalized_phrase,
                 "rank": rank,
@@ -6545,10 +6673,16 @@ async def _discover_keyword_candidates(
                 "relation": decision["relation"],
                 "reason": decision["reason"],
                 "matched_terms": list(decision["matched_terms"]),
+                "query_word_count": query_word_count,
+                "query_length_status": query_length_status,
                 "used_as_followup_root": False,
             }
             expansion_rows.append(expansion_evidence)
-            if not decision["accepted"] or fit <= 0:
+            if (
+                not decision["accepted"]
+                or fit <= 0
+                or query_length_status != "eligible"
+            ):
                 continue
 
             candidate_journey_path = tuple(
@@ -6643,10 +6777,18 @@ async def _discover_keyword_candidates(
                 "suggestions": suggestions,
                 "expansions": expansion_rows,
                 "eligible_expansion_count": sum(
-                    item["relevance_status"] == "eligible" for item in expansion_rows
+                    item["relevance_status"] == "eligible"
+                    and item["query_length_status"] == "eligible"
+                    for item in expansion_rows
                 ),
                 "rejected_expansion_count": sum(
                     item["relevance_status"] == "rejected_irrelevant"
+                    or item["query_length_status"] == "rejected_too_long"
+                    for item in expansion_rows
+                ),
+                "related_but_too_long_count": sum(
+                    item["relevance_status"] == "eligible"
+                    and item["query_length_status"] == "rejected_too_long"
                     for item in expansion_rows
                 ),
                 **cache_evidence,
@@ -6700,7 +6842,11 @@ async def _discover_keyword_candidates(
     seller_title_targets: list[SearchKeywordCandidate] = []
     for root in title_roots:
         normalized_root = " ".join(root.split())
-        if len(_identity_term_tokens(normalized_root)) < 2:
+        if (
+            len(_identity_term_tokens(normalized_root)) < 2
+            or len(TOKEN_PATTERN.findall(normalized_root.casefold()))
+            > MODEL_DIRECT_QUERY_MAX_WORDS
+        ):
             continue
         root_check = next(
             (
@@ -6722,7 +6868,11 @@ async def _discover_keyword_candidates(
         fallback_reason = (
             "platform_returned_no_suggestions"
             if suggestion_count == 0
-            else "platform_returned_no_relevant_suggestions"
+            else (
+                "platform_returned_no_concise_relevant_suggestions"
+                if int(root_check.get("related_but_too_long_count") or 0) > 0
+                else "platform_returned_no_relevant_suggestions"
+            )
         )
         root_check["direct_query_fallback_selected"] = True
         root_check["direct_query_fallback_reason"] = fallback_reason
@@ -6824,8 +6974,8 @@ async def _discover_keyword_candidates(
     ]
     # The normal phase is at most thirteen queries: six core slots shared by
     # platform-root-expansion winners, at most one seller-title complete phrase,
-    # and operator-confirmed parameter probes; plus six South-African model long
-    # tails and one adjacent-demand probe. The fourteenth search-query slot stays
+    # and operator-confirmed parameter probes; plus six concise South-African model
+    # queries and one adjacent-demand probe. The fourteenth search-query slot stays
     # outside this list for adaptive recovery.
     priority_candidates: list[SearchKeywordCandidate] = []
     channel_span = max(
@@ -7134,6 +7284,17 @@ def _root_expansion_relevance_decision(
             "accepted": False,
             "relation": "irrelevant",
             "reason": "empty_or_unusable_phrase",
+            "matched_terms": [],
+        }
+    ordered_phrase_tokens = _identity_term_tokens(normalized)
+    if (
+        len(ordered_phrase_tokens) == 1
+        and ordered_phrase_tokens[0] in GENERIC_IDENTITY_HEAD_TOKENS
+    ):
+        return {
+            "accepted": False,
+            "relation": "irrelevant",
+            "reason": "generic_single_word_without_product_context",
             "matched_terms": [],
         }
 
@@ -8640,6 +8801,11 @@ def _inject_comparison_resample_candidates(
     for keyword in ordered_keywords:
         if len(output) >= max_keywords:
             break
+        if (
+            len(TOKEN_PATTERN.findall(keyword.casefold()))
+            > MODEL_DIRECT_QUERY_MAX_WORDS
+        ):
+            continue
         role = "primary" if keyword in primary_keys else "secondary"
         fresh = fresh_by_keyword.get(keyword)
         if fresh is not None:
@@ -10200,8 +10366,14 @@ language_variant="South African English", and shopper_context="South African loc
 habits". This is a mandatory localization context, not measured platform search demand.
 
 Return the localized shopper wording in four deliberately different groups:
-1. keywords: 6-10 complete, natural 2-7 word search phrases a South African shopper could
-   actually submit. Cover distinct high-confidence formulations; avoid near duplicates.
+1. keywords: 6-10 concise, natural search queries a South African shopper would realistically
+   type. Every query must contain 2-4 meaningful words, at least four queries must contain no
+   more than 3 words, and no query may exceed 4 words. Lead with the common exact product type,
+   then cover distinct high-confidence synonyms or essential use intent. Prefer compact forms
+   such as "wireless mouse", "cat litter box", "hooded litter tray", or "projection screen".
+   Do not write SEO-title fragments, descriptive sentences, colours, specifications, or chained
+   "with"/"and" feature clauses unless that word is essential to identify the product. Avoid
+   near duplicates.
 2. autocomplete_seeds: 6-10 distinct complete shopper roots of 1-5 meaningful words. A root
    may be a single word or a natural product phrase such as "lazy sofa", "floor chair", or
    "l shaped desk". Prefer the shortest phrase that preserves the intended product identity;
@@ -10213,7 +10385,8 @@ Return the localized shopper wording in four deliberately different groups:
    and may use a related platform expansion as one additional phrase root.
 3. same_product_aliases: 2-8 concise names for the exact same physical product, not uses,
    accessories, complements, or merely similar products. Include direct marketplace synonyms
-   such as sofa/couch only when the image-title evidence supports that identity.
+   such as sofa/couch only when the image-title evidence supports that identity. Never use a
+   generic one-word alias such as "box", "case", "bar", "light", "stand", or "device".
 4. opportunity_seeds: 1-4 closely adjacent complete roots under the same 1-5 word rule.
    Every item must also contain buyer_job (the shared outcome in plain English), one or more
    alternative_product_terms naming different product families that can fulfil that job, and

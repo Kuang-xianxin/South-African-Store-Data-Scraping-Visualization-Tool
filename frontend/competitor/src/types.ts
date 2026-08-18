@@ -1387,6 +1387,12 @@ export interface SearchRankingStatus {
   public_request_min_interval_seconds: number;
   public_request_jitter_seconds: number;
   public_request_retry_policy: "no_automatic_retry_for_search_endpoints";
+  model_direct_query_policy: {
+    min_words: 2;
+    max_words: 4;
+    preferred_max_words: 3;
+    min_preferred_count: 4;
+  };
   query_source_targets: {
     model_south_african_direct: number;
     takealot_root_expansion: number;
@@ -1677,6 +1683,7 @@ export interface SearchRankingKeywordResult {
     same_type_validation_requires_contiguous_phrase?: false;
     same_type_validation_limitations?: string;
     journey_type?:
+      | "concise_direct"
       | "known_long_tail"
       | "platform_root_expansion"
       | "human_confirmed_fact_root_expansion"
@@ -1908,10 +1915,12 @@ export interface SearchRankingAnalysis extends SearchRankingAnalysisSummary {
     selection_policy?: "same_product_identity_or_structured_adjacent_product_family";
     eligible_expansion_count?: number;
     rejected_expansion_count?: number;
+    related_but_too_long_count?: number;
     direct_query_fallback_selected?: boolean;
     direct_query_fallback_reason?:
       | "platform_returned_no_suggestions"
-      | "platform_returned_no_relevant_suggestions";
+      | "platform_returned_no_relevant_suggestions"
+      | "platform_returned_no_concise_relevant_suggestions";
     expansions?: Array<{
       phrase: string;
       rank: number;
@@ -1919,6 +1928,8 @@ export interface SearchRankingAnalysis extends SearchRankingAnalysisSummary {
       relation?: "same_product" | "adjacent_demand" | "irrelevant";
       reason?: string;
       matched_terms?: string[];
+      query_word_count?: number;
+      query_length_status?: "eligible" | "rejected_too_long";
       used_as_followup_root?: boolean;
     }>;
     cache_status?:
@@ -1951,6 +1962,12 @@ export interface SearchRankingAnalysis extends SearchRankingAnalysisSummary {
     search_query_attempt_limit?: number;
     public_request_min_interval_seconds?: number;
     public_request_jitter_seconds?: number;
+    model_direct_query_policy?: {
+      min_words: 2;
+      max_words: 4;
+      preferred_max_words: 3;
+      min_preferred_count: 4;
+    };
     query_source_targets?: {
       model_south_african_direct: number;
       takealot_root_expansion: number;

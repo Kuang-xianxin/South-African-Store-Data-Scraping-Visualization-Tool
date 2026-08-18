@@ -55,6 +55,7 @@ from takealot_ops.search_ranking.service import (
     _opportunity_phrase_safety,
     _normalize_title_score_payload,
     _previous_analysis_snapshot,
+    _precise_candidates,
     _result_page_learning_seed,
     _root_expansion_relevance_decision,
     _search_products,
@@ -478,9 +479,43 @@ def test_cat_storage_box_root_keeps_cat_context_and_rejects_generic_storage_boxe
         )
         assert decision["accepted"] is False
         assert decision["relation"] == "irrelevant"
+    generic_alias_profile = profile.model_copy(
+        update={"same_product_aliases": ["boxes", "enclosed litter box"]}
+    )
+    generic_alias_decision = _root_expansion_relevance_decision(
+        "boxes",
+        generic_alias_profile,
+        source_title=title,
+    )
+    assert generic_alias_decision == {
+        "accepted": False,
+        "relation": "irrelevant",
+        "reason": "generic_single_word_without_product_context",
+        "matched_terms": [],
+    }
     _, recognition = _cross_check_image_profile(profile, title)
     assert recognition["title_identity_support"] is False
     assert recognition["title_identity_supported_terms"] == []
+
+
+def test_cat_storage_box_root_survives_the_actual_fused_identity_vocabulary() -> None:
+    roots = _title_root_expansions(
+        "Blue Cat Foldable Villa Cat Storage Box With Scratching Pad",
+        identity_terms=[
+            "enclosed litter box",
+            "cat toilet cabinet",
+            "litter tray with scratcher",
+            "multi-functional cat house",
+            "hooded litter station",
+            "covered cat tray",
+            "litter furniture",
+            "2-in-1 cat toilet and scratcher",
+            "stackable pet waste station",
+        ],
+    )
+
+    assert roots[0] == "cat storage box"
+    assert "storage box" not in roots
 
 
 @pytest.mark.asyncio
@@ -548,6 +583,70 @@ async def test_empty_cat_storage_box_autocomplete_uses_one_honest_title_phrase_q
     assert cat_check["direct_query_fallback_selected"] is True
     assert cat_check["direct_query_fallback_reason"] == (
         "platform_returned_no_suggestions"
+    )
+
+
+@pytest.mark.asyncio
+async def test_long_platform_expansion_is_audited_but_not_used_as_search_query() -> None:
+    title = "Blue Cat Foldable Villa Cat Storage Box With Scratching Pad"
+    profile = VisionProfile(
+        product_name="Cream enclosed cat litter box with scratcher top",
+        category="Cat litter boxes",
+        product_type_terms=[
+            "covered litter tray",
+            "cat house with litter box",
+            "litter box with scratcher",
+            "enclosed cat toilet",
+            "stackable cat furniture",
+            "hooded litter box",
+        ],
+        same_product_aliases=["enclosed litter box"],
+        distinctive_terms=["scratcher top"],
+        keywords=[
+            KeywordCandidate(phrase="cat litter box", rationale="Exact product query"),
+            KeywordCandidate(phrase="hooded litter box", rationale="Direct alias"),
+        ],
+        autocomplete_seeds=[
+            KeywordCandidate(phrase="covered litter tray", rationale="Product root"),
+            KeywordCandidate(phrase="hooded litter box", rationale="Alias root"),
+        ],
+        opportunity_seeds=[
+            KeywordCandidate(phrase="odor control cat toilet", rationale="Adjacent need")
+        ],
+        exclusions=["storage container"],
+        confidence=0.95,
+        title_suggestion="Enclosed Cat Litter Box With Scratcher Top",
+        title_reason="Image-title fused identity",
+    )
+
+    class LongSuggestionClient:
+        async def fetch_search_suggestions(self, keyword: str) -> list[str]:
+            if keyword == "cat storage box":
+                return ["enclosed cat litter box scratcher"]
+            return []
+
+    candidates, checks = await _discover_keyword_candidates(
+        LongSuggestionClient(),  # type: ignore[arg-type]
+        profile=profile,
+        source_title=title,
+        official_title=title,
+        title_reference_terms=[],
+        max_keywords=14,
+    )
+
+    assert all(item.phrase != "enclosed cat litter box scratcher" for item in candidates)
+    direct = [
+        item
+        for item in candidates
+        if item.candidate_source == "seller_title_complete_phrase"
+    ]
+    assert direct[0].phrase == "cat storage box"
+    cat_check = next(item for item in checks if item["root"] == "cat storage box")
+    assert cat_check["eligible_expansion_count"] == 0
+    assert cat_check["related_but_too_long_count"] == 1
+    assert cat_check["expansions"][0]["query_length_status"] == "rejected_too_long"
+    assert cat_check["direct_query_fallback_reason"] == (
+        "platform_returned_no_concise_relevant_suggestions"
     )
 
 
@@ -1325,6 +1424,12 @@ async def test_service_validates_keywords_locates_cursor_page_and_reuses_vision(
     )
     assert first["status"]["model_localization_is_measured_demand"] is False
     assert first["status"]["search_query_attempt_limit"] == 14
+    assert first["status"]["model_direct_query_policy"] == {
+        "min_words": 2,
+        "max_words": 4,
+        "preferred_max_words": 3,
+        "min_preferred_count": 4,
+    }
     assert first["status"]["query_source_targets"] == {
         "model_south_african_direct": 6,
         "takealot_root_expansion": 6,
@@ -3771,6 +3876,82 @@ def _fusion_ready_profile(base: VisionProfile | None = None) -> VisionProfile:
     )
 
 
+def test_fusion_profile_requires_concise_direct_search_queries() -> None:
+    payload = _fusion_ready_profile().model_dump(mode="json")
+    FusionVisionProfile.model_validate(payload)
+
+    payload["keywords"][0]["phrase"] = "wireless rechargeable gaming mouse for laptop"
+    with pytest.raises(ValueError, match="2 to 4 words"):
+        FusionVisionProfile.model_validate(payload)
+
+
+def test_fusion_profile_requires_most_direct_queries_to_be_at_most_three_words() -> None:
+    payload = _fusion_ready_profile().model_dump(mode="json")
+    payload["keywords"] = [
+        {
+            "phrase": f"wireless mouse office model{index}",
+            "rationale": "Distinct compact formulation",
+        }
+        for index in range(6)
+    ]
+
+    with pytest.raises(ValueError, match="at least four keywords"):
+        FusionVisionProfile.model_validate(payload)
+
+
+def test_historical_long_model_queries_fall_back_to_concise_identity_terms() -> None:
+    profile = VisionProfile(
+        product_name="Cream Enclosed Cat Litter Box With Scratcher Top",
+        category="Cat litter boxes",
+        product_type_terms=[
+            "enclosed litter box",
+            "cat toilet cabinet",
+            "litter tray with scratcher",
+            "multi functional cat house",
+            "hooded litter station",
+        ],
+        same_product_aliases=["covered cat tray", "litter furniture"],
+        distinctive_terms=["scratcher top"],
+        keywords=[
+            KeywordCandidate(
+                phrase="enclosed cat litter box with scratcher top",
+                rationale="Historical long query",
+            ),
+            KeywordCandidate(
+                phrase="cat toilet cabinet with scratching pad",
+                rationale="Historical long query",
+            ),
+        ],
+        autocomplete_seeds=[
+            KeywordCandidate(phrase="covered litter tray", rationale="Product root"),
+            KeywordCandidate(phrase="hooded litter box", rationale="Alias root"),
+        ],
+        opportunity_seeds=[
+            KeywordCandidate(phrase="odor control cat toilet", rationale="Adjacent need")
+        ],
+        exclusions=["storage container"],
+        confidence=0.95,
+        title_suggestion="Enclosed Cat Litter Box With Scratcher Top",
+        title_reason="Image-title fused identity",
+    )
+
+    candidates = _precise_candidates(profile)
+
+    assert [item.phrase for item in candidates[:6]] == [
+        "enclosed litter box",
+        "cat toilet cabinet",
+        "hooded litter station",
+        "litter tray with scratcher",
+        "multi functional cat house",
+        "covered cat tray",
+    ]
+    assert all(
+        2 <= len(search_ranking_service.TOKEN_PATTERN.findall(item.phrase.casefold())) <= 4
+        for item in candidates
+    )
+    assert all(item.journey_type == "concise_direct" for item in candidates)
+
+
 @pytest.mark.parametrize(
     ("field_name", "invalid_value"),
     [
@@ -4296,6 +4477,8 @@ async def test_discovery_queries_lazy_phrase_and_rejects_unrelated_raw_expansion
             "relation": "irrelevant",
             "reason": "no_product_identity_or_structured_adjacent_match",
             "matched_terms": [],
+            "query_word_count": 2,
+            "query_length_status": "eligible",
             "used_as_followup_root": False,
         },
         {
@@ -4305,6 +4488,8 @@ async def test_discovery_queries_lazy_phrase_and_rejects_unrelated_raw_expansion
             "relation": "irrelevant",
             "reason": "no_product_identity_or_structured_adjacent_match",
             "matched_terms": [],
+            "query_word_count": 3,
+            "query_length_status": "eligible",
             "used_as_followup_root": False,
         },
         {
@@ -4314,6 +4499,8 @@ async def test_discovery_queries_lazy_phrase_and_rejects_unrelated_raw_expansion
             "relation": "irrelevant",
             "reason": "no_product_identity_or_structured_adjacent_match",
             "matched_terms": [],
+            "query_word_count": 3,
+            "query_length_status": "eligible",
             "used_as_followup_root": False,
         },
         {
@@ -4323,6 +4510,8 @@ async def test_discovery_queries_lazy_phrase_and_rejects_unrelated_raw_expansion
             "relation": "irrelevant",
             "reason": "no_product_identity_or_structured_adjacent_match",
             "matched_terms": [],
+            "query_word_count": 2,
+            "query_length_status": "eligible",
             "used_as_followup_root": False,
         },
         {
@@ -4332,6 +4521,8 @@ async def test_discovery_queries_lazy_phrase_and_rejects_unrelated_raw_expansion
             "relation": "irrelevant",
             "reason": "no_product_identity_or_structured_adjacent_match",
             "matched_terms": [],
+            "query_word_count": 2,
+            "query_length_status": "eligible",
             "used_as_followup_root": False,
         },
     ]
@@ -4743,6 +4934,10 @@ async def test_adaptive_ten_query_base_keeps_both_source_channels_and_five_roots
     assert len(seller_title_direct) == 1
     assert len(platform_core_roots) == 5
     assert sum(item.intended_strategy == "opportunity" for item in platform) == 1
+    assert all(
+        len(search_ranking_service.TOKEN_PATTERN.findall(item.phrase.casefold())) <= 4
+        for item in selected
+    )
 
 
 @pytest.mark.asyncio
@@ -4754,19 +4949,19 @@ async def test_human_confirmed_projection_size_uses_one_bounded_query_slot() -> 
         distinctive_terms=["portable", "retractable"],
         keywords=[
             KeywordCandidate(
-                phrase="portable projection screen with stand",
-                rationale="Known long tail",
+                phrase="portable projection screen",
+                rationale="Compact product query",
             ),
             KeywordCandidate(
-                phrase="outdoor movie screen with stand",
+                phrase="outdoor movie screen",
                 rationale="Local use wording",
             ),
             KeywordCandidate(
-                phrase="collapsible projector screen with tripod",
+                phrase="tripod projector screen",
                 rationale="Feature-led wording",
             ),
             KeywordCandidate(
-                phrase="large portable projection screen",
+                phrase="large projection screen",
                 rationale="Alternative wording",
             ),
         ],
@@ -4821,13 +5016,18 @@ async def test_human_confirmed_projection_size_uses_one_bounded_query_slot() -> 
 
     assert len(selected) <= 10
     assert [item.phrase for item in model_direct] == [
-        "portable projection screen with stand",
-        "outdoor movie screen with stand",
-        "collapsible projector screen with tripod",
-        "large portable projection screen",
+        "portable projection screen",
+        "outdoor movie screen",
+        "tripod projector screen",
+        "large projection screen",
+        "projection screen",
     ]
     assert [item.phrase for item in parameter] == ["100 inch projection screen"]
     assert parameter[0].candidate_provenance[0]["operator_confirmed"] is True
+    assert all(
+        len(search_ranking_service.TOKEN_PATTERN.findall(item.phrase.casefold())) <= 4
+        for item in selected
+    )
     assert "projection screen 100 inch" not in client.calls
     assert len(client.calls) <= 16
 
@@ -4963,7 +5163,11 @@ async def test_rejected_page_can_learn_one_supported_seed_then_validate_live_com
 
         async def fetch_search_suggestions(self, keyword: str) -> list[str]:
             self.suggestion_calls.append(keyword)
-            return ["rgb light bars"] if keyword.casefold() == "light bars" else []
+            return (
+                ["rgb led ambient light bars", "rgb light bars"]
+                if keyword.casefold() == "light bars"
+                else []
+            )
 
         async def fetch_search_first_page(
             self,
@@ -5045,6 +5249,9 @@ async def test_rejected_page_can_learn_one_supported_seed_then_validate_live_com
     assert observations[1].validation_evidence["journey_parent_query"] == ("ambient lighting")
     assert steps[1]["path"][-2:] == ["light bars", "rgb light bars"]
     assert autocomplete_checks[0]["seed_source"] == "result_page_learning"
+    assert autocomplete_checks[0]["expansions"][0]["query_length_status"] == (
+        "rejected_too_long"
+    )
     assert adaptive["adaptive_recovery_used"] is True
     assert adaptive["adaptive_recovery_source"] == "result_page_learning"
 
@@ -5498,6 +5705,35 @@ def test_comparison_injection_prioritizes_targets_and_preserves_fresh_classifica
     assert candidates[1].intended_strategy == "core"
     assert candidates[1].comparison_baseline_rank == 41
     assert candidates[1].comparison_role == "secondary"
+
+
+def test_comparison_injection_skips_historical_queries_over_four_words() -> None:
+    current_title = "Enclosed Cat Litter Box"
+    candidates = _inject_comparison_resample_candidates(
+        [],
+        previous={
+            "source_title": "Old Cat Box Title",
+            "title_suggestions": [current_title],
+            "issued_strategies": [
+                {
+                    "strategy": "contiguous_core",
+                    "title": current_title,
+                    "evidence_keywords": [
+                        "enclosed cat litter box with scratcher",
+                        "cat storage box",
+                    ],
+                }
+            ],
+            "ranks": {
+                "enclosed cat litter box with scratcher": 18,
+                "cat storage box": 27,
+            },
+        },
+        current_title=current_title,
+        max_keywords=4,
+    )
+
+    assert [item.phrase for item in candidates] == ["cat storage box"]
 
 
 @pytest.mark.asyncio

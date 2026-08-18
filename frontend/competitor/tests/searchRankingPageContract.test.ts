@@ -231,16 +231,23 @@ test("separates platform root expansions from South African model-direct queries
   assert.match(statusTypeSource, /seller_title_complete_phrase_max: number;/);
   assert.match(typesSource, /query_source_channel\?:/);
   assert.match(pageSource, /平台根词扩展词/);
-  assert.match(pageSource, /图文融合·南非完整搜索词/);
+  assert.match(pageSource, /图文融合·南非精简搜索词/);
   assert.match(pageSource, /主标题完整词组直验/);
   assert.match(pageSource, /平台根词扩展 \+ 南非模型/);
   assert.match(pageSource, /同词可同时属于多类/);
-  assert.match(pageSource, /含图文融合南非完整搜索词/);
+  assert.match(pageSource, /含图文融合南非直接搜索词/);
+  assert.match(pageSource, /2–4词精简精准词/);
+  assert.match(typesSource, /\| "concise_direct"/);
+  assert.match(statusTypeSource, /model_direct_query_policy:/);
+  assert.match(statusTypeSource, /preferred_max_words: 3;/);
+  assert.match(statusTypeSource, /min_preferred_count: 4;/);
 });
 
 test("shows phrase roots and the per-product platform expansion relevance gate", () => {
   assert.match(analysisTypeSource, /relevance_status\?: "eligible" \| "rejected_irrelevant";/);
   assert.match(analysisTypeSource, /relation\?: "same_product" \| "adjacent_demand" \| "irrelevant";/);
+  assert.match(analysisTypeSource, /query_length_status\?: "eligible" \| "rejected_too_long";/);
+  assert.match(analysisTypeSource, /related_but_too_long_count\?: number;/);
   assert.match(analysisTypeSource, /used_as_followup_root\?: boolean;/);
   assert.match(analysisTypeSource, /direct_query_fallback_selected\?: boolean;/);
   assert.match(analysisTypeSource, /root\?: string;/);
@@ -249,7 +256,10 @@ test("shows phrase roots and the per-product platform expansion relevance gate",
   assert.match(pageSource, /rootExpansionCheckIsPhrase\(check\)/);
   assert.doesNotMatch(pageSource, /check\.root\.trim\(\)/);
   assert.match(pageSource, /本商品词根\/词组与平台扩展筛选/);
-  assert.match(pageSource, /只有保留本商品身份，或命中结构化相邻需求所列替代商品族的扩展，才可进入搜索/);
+  assert.match(pageSource, /只有不超过4词/);
+  assert.match(pageSource, /超过4词的相关扩展只保留为平台原始证据/);
+  assert.match(pageSource, /rootExpansionDecisionClass\(expansion\)/);
+  assert.match(pageSource, /同品相关，但超过4词；仅保留平台原始证据，不进入搜索/);
   assert.match(pageSource, /已作为完整词组词根继续观察下一层平台扩展/);
   assert.match(pageSource, /Takealot 本次未返回补全词/);
   assert.match(pageSource, /不把空结果伪装成热词/);

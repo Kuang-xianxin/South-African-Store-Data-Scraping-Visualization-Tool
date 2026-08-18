@@ -26,6 +26,7 @@ import {
 import { formatChinaDateTime } from "../time";
 import type {
   OwnStoreScope,
+  SearchRankingAnalysis,
   SearchRankingDetailPayload,
   SearchRankingBatchPreviewPayload,
   SearchRankingBatchStatusValue,
@@ -208,8 +209,14 @@ const contextualRootExpansionSummary = computed(() => {
     if (rootExpansionCheckIsPhrase(check)) phraseRoots += 1;
     if ((check.journey_depth ?? 0) > 0) followupRoots += 1;
     for (const expansion of check.expansions ?? []) {
-      if (expansion.relevance_status === "eligible") eligible += 1;
-      if (expansion.relevance_status === "rejected_irrelevant") rejected += 1;
+      if (
+        expansion.relevance_status === "eligible"
+        && expansion.query_length_status !== "rejected_too_long"
+      ) eligible += 1;
+      if (
+        expansion.relevance_status === "rejected_irrelevant"
+        || expansion.query_length_status === "rejected_too_long"
+      ) rejected += 1;
     }
   }
   return { eligible, rejected, phraseRoots, followupRoots };
@@ -908,6 +915,12 @@ function semanticResultCountLabel(item: SearchRankingKeywordResult) {
 }
 
 function sourceChannelLabel(item: SearchRankingKeywordResult) {
+  const journeyTypes = new Set([
+    ...(item.validation_evidence.journey_types ?? []),
+    ...(item.validation_evidence.journey_type
+      ? [item.validation_evidence.journey_type]
+      : []),
+  ]);
   const hasPlatformExpansion = hasQuerySourceChannel(item, "takealot_root_expansion")
     || hasQuerySourceChannel(item, "takealot_autocomplete_path");
   const hasModelDirect = hasQuerySourceChannel(item, "model_south_african_direct");
@@ -928,7 +941,11 @@ function sourceChannelLabel(item: SearchRankingKeywordResult) {
   const channel = item.validation_evidence.query_source_channel;
   if (channel === "takealot_root_expansion") return "平台根词扩展词";
   if (channel === "takealot_autocomplete_path") return "历史补全路径词（旧口径）";
-  if (channel === "model_south_african_direct") return "图文融合·南非完整搜索词";
+  if (channel === "model_south_african_direct") {
+    return journeyTypes.has("concise_direct")
+      ? "图文融合·南非精简搜索词"
+      : "图文融合·历史完整搜索词";
+  }
   if (channel === "seller_title_complete_phrase") return "主标题完整词组直验";
   if (channel === "comparison_resample") return "历史同词复采";
   if (channel === "title_verified_parameter") return "标题确认参数词";
@@ -1011,14 +1028,17 @@ function sourceLabel(item: SearchRankingKeywordResult) {
   if (journeyTypes.has("switched_instinct_root")) {
     return `${recoveryPrefix}历史补全路径（旧口径），更换词根“${evidence.journey_root ?? evidence.autocomplete_seed ?? "—"}”后取得的平台词${resampleSuffix}`;
   }
+  if (journeyTypes.has("concise_direct") && !evidence.autocomplete_rank) {
+    return `${recoveryPrefix}图文融合提出的2–4词精简精准词，并经完整搜索页验证${resampleSuffix}`;
+  }
   if (journeyTypes.has("known_long_tail") && !evidence.autocomplete_rank) {
-    return `${recoveryPrefix}目标明确买家会直接输入的长尾词，由图片识别提出并经完整搜索页验证${resampleSuffix}`;
+    return `${recoveryPrefix}旧提示版本生成的历史长尾词；排名证据仍按当时原词保留${resampleSuffix}`;
   }
   if (evidence.autocomplete_rank && evidence.autocomplete_seed) {
     const directAlso = journeyTypes.has("known_long_tail") ? " · 同时命中图片长尾词" : "";
     return `${recoveryPrefix}历史输入“${evidence.autocomplete_seed}”后的 Takealot 第 ${evidence.autocomplete_rank} 项（旧补全口径）${directAlso}${resampleSuffix}`;
   }
-  return `${recoveryPrefix}主图与当前标题融合生成的南非完整搜索词${resampleSuffix}`;
+  return `${recoveryPrefix}主图与当前标题融合生成的南非直接搜索词${resampleSuffix}`;
 }
 
 function journeyPathLabel(item: SearchRankingKeywordResult) {
@@ -1067,8 +1087,19 @@ function rootExpansionReasonLabel(reason: string | null | undefined) {
     adjacent_family_requires_structured_opportunity_root: "虽像相邻商品，但不是由结构化相邻需求词根进入",
     result_page_followup_missing_primary_product_shape: "偏差页补救仍未保留当前商品的主要形态",
     no_product_identity_or_structured_adjacent_match: "只有修饰词重合，未保留商品身份，也未命中结构化相邻商品族",
+    generic_single_word_without_product_context: "只有宽泛单词商品名，没有足够商品上下文",
     empty_or_unusable_phrase: "平台返回内容无法形成完整词根",
   }[String(reason ?? "")] ?? "旧记录没有保存逐项筛选原因";
+}
+
+function rootExpansionDecisionClass(
+  expansion: NonNullable<
+    NonNullable<SearchRankingAnalysis["root_expansion_checks"]>[number]["expansions"]
+  >[number],
+) {
+  return expansion.query_length_status === "rejected_too_long"
+    ? "rejected_too_long"
+    : expansion.relevance_status;
 }
 
 function validationStatusLabel(status: string | null | undefined) {
@@ -1542,7 +1573,7 @@ function errorMessage(caught: unknown, fallback: string) {
 
           <p v-if="analyzing" class="running-note">
             当前商品族只走一次链路：模型同时读取共同主体标题、代表标题和各 Offer 的标题变体参数，
-            用代表 Offer 主图做隔离交叉验证，再生成完整搜索词，并把标题有效词和模型根词逐个提交平台扩展；
+            用代表 Offer 主图做隔离交叉验证，再生成 2–4 词的精简搜索词，并把标题有效词和模型根词逐个提交平台扩展；
             颜色、尺寸、容量等差异值始终留在各自 Offer，不会互相套用。
             所有根词扩展和搜索页公开请求共用间隔。
           </p>
@@ -1801,7 +1832,7 @@ function errorMessage(caught: unknown, fallback: string) {
                 </span>
                 <small>
                   证据覆盖：{{ platformExpansionKeywords.length }} 个含平台根词扩展 ·
-                  {{ modelDirectKeywords.length }} 个含图文融合南非完整搜索词 ·
+                  {{ modelDirectKeywords.length }} 个含图文融合南非直接搜索词 ·
                   {{ sellerTitleDirectKeywords.length }} 个含主标题完整词组直验 ·
                   {{ titleParameterKeywords.length }} 个含标题确认参数（同词可同时属于多类）
                 </small>
@@ -1818,7 +1849,8 @@ function errorMessage(caught: unknown, fallback: string) {
                 </summary>
                 <p>
                   Takealot 对每个词根返回的原始第1–5项都会留作审计，但不会盲选。
-                  只有保留本商品身份，或命中结构化相邻需求所列替代商品族的扩展，才可进入搜索；
+                  只有不超过4词，并且保留本商品身份或命中结构化相邻需求所列替代商品族的扩展，才可进入搜索；
+                  超过4词的相关扩展只保留为平台原始证据，不占搜索位。
                   其中 {{ contextualRootExpansionSummary.followupRoots }} 个相关扩展已作为完整词组词根继续观察下一层平台扩展。
                 </p>
                 <div class="root-expansion-selection-grid">
@@ -1838,12 +1870,15 @@ function errorMessage(caught: unknown, fallback: string) {
                       v-for="expansion in check.expansions ?? []"
                       :key="`${rootExpansionCheckLabel(check)}-${expansion.rank}-${expansion.phrase}`"
                       class="root-expansion-decision"
-                      :class="expansion.relevance_status"
+                      :class="rootExpansionDecisionClass(expansion)"
                     >
                       <b>第 {{ expansion.rank }} 项</b>
                       <strong>{{ expansion.phrase }}</strong>
                       <em>{{ rootExpansionRelationLabel(expansion.relation) }}</em>
                       <small>{{ rootExpansionReasonLabel(expansion.reason) }}</small>
+                      <mark v-if="expansion.query_length_status === 'rejected_too_long'">
+                        同品相关，但超过4词；仅保留平台原始证据，不进入搜索
+                      </mark>
                       <mark v-if="expansion.used_as_followup_root">已作为词组词根继续扩展</mark>
                     </div>
                     <p v-if="check.status === 'unavailable'">该词根本次平台扩展不可用，没有扩展词被选中。</p>
@@ -1856,7 +1891,7 @@ function errorMessage(caught: unknown, fallback: string) {
                     <p
                       v-else-if="check.status === 'observed' && check.direct_query_fallback_selected"
                     >
-                      平台返回项均未通过同品相关性筛选；该完整词组已改为直接搜索页验证。
+                      平台没有返回可采用的精简同品词（候选不相关或超过4词）；该完整词组已改为直接搜索页验证。
                     </p>
                   </article>
                 </div>
@@ -1911,7 +1946,8 @@ function errorMessage(caught: unknown, fallback: string) {
               </div>
               <p class="position-notice">
                 本轮最多验证 {{ detail?.status.search_query_attempt_limit ?? 14 }} 个图文融合搜索词，
-                其中完整搜索词 {{ detail?.status.query_source_targets.model_south_african_direct ?? 6 }} 个、
+                其中 2–4 词的精简直接搜索词 {{ detail?.status.query_source_targets.model_south_african_direct ?? 6 }} 个
+                （至少4个不超过3词）、
                 词根相关核心位 {{ detail?.status.query_source_targets.root_related_core_total ?? 6 }} 个；
                 平台根词扩展最多占满这些位置，若补全为空或全部无关，主标题完整词组直验最多占
                 {{ detail?.status.query_source_targets.seller_title_complete_phrase_max ?? 1 }} 个，二者不叠加扩容。
@@ -2401,8 +2437,9 @@ dt { color: #738078; font-size: 12px; } dd { margin: 0; font-weight: 750; }
 .root-expansion-selection-grid header small, .root-expansion-selection-grid > article > small { color: #6c7971; }
 .root-expansion-decision { display: grid; grid-template-columns: 58px minmax(150px, 1fr) minmax(128px, auto); gap: 6px 10px; align-items: center; padding: 8px 10px; border-left: 3px solid #39765a; border-radius: 7px; background: #f3f8f5; }
 .root-expansion-decision.rejected_irrelevant { border-left-color: #bb6a3b; background: #fff8f2; }
+.root-expansion-decision.rejected_too_long { border-left-color: #b88a2f; background: #fffaf0; }
 .root-expansion-decision b { color: #607168; font-size: 11px; }.root-expansion-decision em { color: #32644d; font-size: 11px; font-style: normal; font-weight: 850; }
-.root-expansion-decision.rejected_irrelevant em { color: #9a552f; }.root-expansion-decision small { grid-column: 2 / -1; color: #6b7770; }.root-expansion-decision mark { grid-column: 2 / -1; width: fit-content; padding: 2px 6px; border-radius: 6px; color: #24583f; background: #dfeee5; font-size: 10px; font-weight: 850; }
+.root-expansion-decision.rejected_irrelevant em { color: #9a552f; }.root-expansion-decision.rejected_too_long em { color: #8b681f; }.root-expansion-decision small { grid-column: 2 / -1; color: #6b7770; }.root-expansion-decision mark { grid-column: 2 / -1; width: fit-content; padding: 2px 6px; border-radius: 6px; color: #24583f; background: #dfeee5; font-size: 10px; font-weight: 850; }.root-expansion-decision.rejected_too_long mark { color: #765718; background: #f6e7bc; }
 .keyword-list { display: grid; gap: 10px; }
 .keyword-card { padding: 16px; border: 1px solid #d5ded8; border-left: 4px solid #35765a; border-radius: 11px; background: #fbfdfb; }
 .keyword-card.opportunity { border-left-color: #8f6b24; background: #fffdf4; }
