@@ -315,14 +315,15 @@ def _offer_payload(
     current_fee_adjusted = (
         _profit_scenario(
             key="current_fee_adjusted",
-            label="当前售价平台扣费后利润（估算）",
+            label="平台直接费用后利润（估算）",
             price_zar=selling_price_zar,
             cost_rmb=cost_rmb,
             rate=rate,
             fee_rate=fee_rate,
             note=(
-                "按近 30 个已完成南非自然日中已验证 Seller Sales 明细的"
-                "真实综合费率估算；未计头程、税费、广告或退货损失等其他成本。"
+                "按近 30 个已完成南非自然日中同店同 Offer 的已验证 "
+                "Seller Sales 综合费率估算；total_fees 包含成功费、履约费、"
+                "揽收费和库存调拨费，不含仓储费、广告费、月租、头程、税费或退货损失。"
             ),
         )
         if fee_rate is not None
@@ -460,8 +461,9 @@ def _fee_basis_payload(
             "total_fees_zar": float(_money(fees)),
             "fee_rate_percentage": float(_percentage(fee_rate * Decimal(100))),
             "message": (
-                "综合费率 = 已验证 Seller Sales 行 total_fees 合计 / "
-                "selling_price 合计；total_fees 已包含库存调拨费。"
+                "综合费率 = 同店同 Offer 已验证 Seller Sales 行 total_fees 合计 / "
+                "selling_price 合计；total_fees 包含成功费、履约费、揽收费和"
+                "库存调拨费，不含仓储费、广告费及月租。"
             ),
         },
         fee_rate,

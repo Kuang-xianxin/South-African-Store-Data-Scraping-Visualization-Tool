@@ -4150,7 +4150,7 @@ td small {
 
 .own-profitability-grid {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 10px;
 }
 
@@ -4168,6 +4168,16 @@ td small {
 .own-profitability-card.cost-card {
   border-color: #c7d8c5;
   background: #f6fbf6;
+}
+
+.own-profitability-card.fee-adjusted-card {
+  border-color: #c8d8de;
+  background: #f4f9fa;
+}
+
+.own-profitability-card.unavailable-card {
+  border-color: #ded9ca;
+  background: #f8f7f2;
 }
 
 .own-profitability-card small,

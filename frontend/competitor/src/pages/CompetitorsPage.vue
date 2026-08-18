@@ -8679,6 +8679,72 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
                       </em>
                     </article>
 
+                    <article
+                      v-if="selectedOwnProfitability.scenarios.current_fee_adjusted"
+                      class="own-profitability-card fee-adjusted-card"
+                    >
+                      <small>平台直接费用后利润（估算）</small>
+                      <strong
+                        :class="profitAmountClass(
+                          selectedOwnProfitability.scenarios.current_fee_adjusted.profit_rmb,
+                        )"
+                      >
+                        {{
+                          formatRmb(
+                            selectedOwnProfitability.scenarios.current_fee_adjusted.profit_rmb,
+                          )
+                        }}
+                      </strong>
+                      <span>
+                        销售利润率
+                        {{
+                          formatProfitPercentage(
+                            selectedOwnProfitability.scenarios.current_fee_adjusted
+                              .profit_margin_percentage,
+                          )
+                        }}
+                        · 成本加价率
+                        {{
+                          formatProfitPercentage(
+                            selectedOwnProfitability.scenarios.current_fee_adjusted
+                              .cost_markup_percentage,
+                          )
+                        }}
+                      </span>
+                      <em>
+                        预计平台直接费用
+                        {{
+                          formatRmb(
+                            selectedOwnProfitability.scenarios.current_fee_adjusted
+                              .estimated_fees_rmb,
+                          )
+                        }}
+                        · 综合费率
+                        {{
+                          formatProfitPercentage(
+                            selectedOwnProfitability.fee_basis.fee_rate_percentage,
+                          )
+                        }}
+                      </em>
+                    </article>
+
+                    <article v-else class="own-profitability-card unavailable-card">
+                      <small>平台直接费用后利润（估算）</small>
+                      <strong class="neutral">—</strong>
+                      <span>
+                        {{
+                          selectedOwnProfitability.scenarios.current_gross
+                            ? selectedOwnProfitability.fee_basis.message
+                            : selectedOwnProfitability.message
+                        }}
+                      </span>
+                      <em>
+                        已验证
+                        {{ selectedOwnProfitability.fee_basis.covered_days }} /
+                        {{ selectedOwnProfitability.fee_basis.window_days }} 天
+                        · {{ selectedOwnProfitability.fee_basis.order_line_count }} 条销售行
+                      </em>
+                    </article>
                   </div>
 
                   <div class="own-profitability-evidence">
@@ -8706,9 +8772,38 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
                         {{ detail.own_store_profitability.exchange_rate.message }}
                       </template>
                     </p>
+                    <p>
+                      <strong>平台直接费用依据</strong>
+                      {{ selectedOwnProfitability.fee_basis.source }} ·
+                      <template
+                        v-if="selectedOwnProfitability.fee_basis.fee_rate_percentage !== null"
+                      >
+                        近 {{ selectedOwnProfitability.fee_basis.window_days }} 个已完成南非自然日中
+                        已验证 {{ selectedOwnProfitability.fee_basis.covered_days }} 天
+                        · 有销售 {{ selectedOwnProfitability.fee_basis.sales_days }} 天
+                        · {{ selectedOwnProfitability.fee_basis.order_line_count }} 条销售行 /
+                        {{ selectedOwnProfitability.fee_basis.ordered_units }} 件
+                        · 综合费率
+                        {{
+                          formatProfitPercentage(
+                            selectedOwnProfitability.fee_basis.fee_rate_percentage,
+                          )
+                        }}
+                        · 总费用
+                        {{ formatCurrency(selectedOwnProfitability.fee_basis.total_fees_zar) }} /
+                        销售额
+                        {{ formatCurrency(selectedOwnProfitability.fee_basis.sales_revenue_zar) }}
+                      </template>
+                      <template v-else>
+                        {{ selectedOwnProfitability.fee_basis.message }}
+                      </template>
+                    </p>
                     <p class="own-profitability-formula">
                       当前售价毛利润 = 售价（ZAR）÷ CNY/ZAR 汇率 − 人民币成本；
-                      未扣平台及履约费用，也未计未进入主档成本的头程、税费、广告或退货损失等；
+                      平台直接费用后利润 = 当前售价毛利润 − 当前售价折合人民币
+                      × 同店同 Offer 已验证销售行的实际综合费率；费率按
+                      sum(total_fees) / sum(selling_price) 计算，total_fees 已包含成功费、履约费、揽收费和库存调拨费，不重复扣减；
+                      仓储费、广告费、月租、头程、税费及退货损失未按该 SKU 完整核实，不包含在此估算中，因此不是净利润或平台结算金额；
                       销售利润率以折合人民币售价为分母，所有利润金额均为人民币。
                     </p>
                   </div>

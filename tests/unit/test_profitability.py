@@ -98,8 +98,9 @@ def test_builds_multiple_rmb_profit_scenarios_with_both_margin_definitions() -> 
         "status": "available",
         "invalid_line_count": 0,
         "message": (
-            "综合费率 = 已验证 Seller Sales 行 total_fees 合计 / "
-            "selling_price 合计；total_fees 已包含库存调拨费。"
+            "综合费率 = 同店同 Offer 已验证 Seller Sales 行 total_fees 合计 / "
+            "selling_price 合计；total_fees 包含成功费、履约费、揽收费和"
+            "库存调拨费，不含仓储费、广告费及月租。"
         ),
     }
     assert item["scenarios"]["current_gross"] == {
@@ -123,7 +124,13 @@ def test_builds_multiple_rmb_profit_scenarios_with_both_margin_definitions() -> 
     assert item["scenarios"]["current_fee_adjusted"]["estimated_fees_rmb"] == 30.0
     assert (
         item["scenarios"]["current_fee_adjusted"]["label"]
-        == "当前售价平台扣费后利润（估算）"
+        == "平台直接费用后利润（估算）"
+    )
+    assert (
+        item["scenarios"]["current_fee_adjusted"]["note"]
+        == "按近 30 个已完成南非自然日中同店同 Offer 的已验证 "
+        "Seller Sales 综合费率估算；total_fees 包含成功费、履约费、"
+        "揽收费和库存调拨费，不含仓储费、广告费、月租、头程、税费或退货损失。"
     )
     assert item["scenarios"]["rrp_gross"]["profit_rmb"] == 100.0
     assert item["scenarios"]["rrp_gross"]["profit_margin_percentage"] == 50.0
