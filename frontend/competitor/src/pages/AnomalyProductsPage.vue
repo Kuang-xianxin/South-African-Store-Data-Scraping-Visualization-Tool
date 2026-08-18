@@ -185,7 +185,7 @@ function emptyMessage(): string {
               有库存 {{ days }} 天没动销
             </option>
           </select>
-          <small>仅统计状态为可购买且当前现货大于 0 的商品</small>
+          <small>从连续有库存的完整日开始累计；库存归零后，重新有货时重新起算</small>
         </template>
         <template v-else>
           <span>当前规则</span>
@@ -260,7 +260,10 @@ function emptyMessage(): string {
         <div v-else-if="item.anomaly_type === 'slow_moving'" class="primary-signal slow">
           <span>实际滞销天数</span>
           <strong>{{ noSalesLabel(item) }}</strong>
-          <small>上次动销 {{ item.last_sale_on || "现有完整历史内未见销量" }}</small>
+          <small>
+            滞销起算 {{ item.slow_moving_started_on || "库存历史边界待补充" }} ·
+            上次动销 {{ item.last_sale_on || "现有完整历史内未见销量" }}
+          </small>
         </div>
         <div v-else class="primary-signal disabled">
           <span>已到平台仓</span>

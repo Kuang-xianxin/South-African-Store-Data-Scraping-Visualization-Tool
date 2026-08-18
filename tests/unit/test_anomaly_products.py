@@ -19,6 +19,7 @@ THROUGH = date(2026, 8, 14)
 def _dataset(
     offers: list[dict[str, object]],
     metrics: list[dict[str, object]],
+    history: list[dict[str, object]] | None = None,
 ) -> DashboardDataset:
     return DashboardDataset(
         store_daily=pd.DataFrame(),
@@ -26,6 +27,7 @@ def _dataset(
         offer_current=pd.DataFrame(offers),
         anomalies=pd.DataFrame(),
         quality_events=pd.DataFrame(),
+        offer_history=pd.DataFrame(history or []),
     )
 
 
@@ -61,6 +63,20 @@ def _metric(offer_id: str, metric_date: date, units: int | None) -> dict[str, ob
         "offer_id": offer_id,
         "metric_date": metric_date,
         "ordered_units": units,
+    }
+
+
+def _snapshot(
+    offer_id: str,
+    snapshot_date: date,
+    stock: int | None,
+) -> dict[str, object]:
+    return {
+        "offer_id": offer_id,
+        "snapshot_date": snapshot_date,
+        "total_stock": stock,
+        "takealot_available_stock": stock,
+        "seller_available_stock": 0 if stock is not None else None,
     }
 
 
@@ -170,9 +186,14 @@ def test_slow_moving_counts_use_actual_consecutive_zero_days() -> None:
         _metric("slow", metric_date, 1 if index == 0 else 0)
         for index, metric_date in enumerate(dates)
     ]
+    history = [_snapshot("slow", metric_date, 8) for metric_date in dates]
 
     payload = build_anomaly_product_payload(
-        _dataset([_offer("slow", status="buyable", total_stock=8)], metrics),
+        _dataset(
+            [_offer("slow", status="buyable", total_stock=8)],
+            metrics,
+            history,
+        ),
         requested_as_of=THROUGH,
         completed_through=THROUGH,
         verified_dates=set(dates),
@@ -181,6 +202,7 @@ def test_slow_moving_counts_use_actual_consecutive_zero_days() -> None:
     item = payload["slow_moving"][0]
     assert item["no_sales_days"] == 12
     assert item["no_sales_days_exact"] is True
+    assert item["slow_moving_started_on"] == "2026-08-03"
     assert item["last_sale_on"] == "2026-08-02"
     assert payload["summary"]["slow_moving_by_days"] == {
         "4": 1,
@@ -190,3 +212,112 @@ def test_slow_moving_counts_use_actual_consecutive_zero_days() -> None:
         "20": 0,
         "30": 0,
     }
+
+
+def test_slow_moving_starts_when_stock_becomes_available() -> None:
+    dates = [THROUGH - timedelta(days=offset) for offset in range(11, -1, -1)]
+    metrics = [_metric("restocked", metric_date, 0) for metric_date in dates]
+    history = [
+        _snapshot(
+            "restocked",
+            metric_date,
+            6 if metric_date >= date(2026, 8, 11) else 0,
+        )
+        for metric_date in dates
+    ]
+
+    payload = build_anomaly_product_payload(
+        _dataset(
+            [_offer("restocked", status="buyable", total_stock=6)],
+            metrics,
+            history,
+        ),
+        requested_as_of=THROUGH,
+        completed_through=THROUGH,
+        verified_dates=set(dates),
+    )
+
+    item = payload["slow_moving"][0]
+    assert item["no_sales_days"] == 4
+    assert item["no_sales_days_exact"] is True
+    assert item["slow_moving_started_on"] == "2026-08-11"
+    assert item["last_sale_on"] is None
+    assert payload["summary"]["slow_moving_by_days"] == {
+        "4": 1,
+        "7": 0,
+        "10": 0,
+        "15": 0,
+        "20": 0,
+        "30": 0,
+    }
+
+
+def test_slow_moving_requires_four_complete_stocked_zero_sale_days() -> None:
+    dates = [THROUGH - timedelta(days=offset) for offset in range(9, -1, -1)]
+    metrics = [_metric("new-stock", metric_date, 0) for metric_date in dates]
+    history = [
+        _snapshot(
+            "new-stock",
+            metric_date,
+            5 if metric_date >= date(2026, 8, 12) else 0,
+        )
+        for metric_date in dates
+    ]
+
+    payload = build_anomaly_product_payload(
+        _dataset(
+            [_offer("new-stock", status="buyable", total_stock=5)],
+            metrics,
+            history,
+        ),
+        requested_as_of=THROUGH,
+        completed_through=THROUGH,
+        verified_dates=set(dates),
+    )
+
+    assert payload["slow_moving"] == []
+    assert payload["summary"]["slow_moving_by_days"]["4"] == 0
+
+
+def test_missing_stock_history_does_not_extend_slow_moving_days() -> None:
+    dates = [THROUGH - timedelta(days=offset) for offset in range(9, -1, -1)]
+    metrics = [_metric("stock-gap", metric_date, 0) for metric_date in dates]
+    history = [
+        _snapshot("stock-gap", metric_date, 5)
+        for metric_date in dates
+        if metric_date >= date(2026, 8, 10)
+    ]
+
+    payload = build_anomaly_product_payload(
+        _dataset(
+            [_offer("stock-gap", status="buyable", total_stock=5)],
+            metrics,
+            history,
+        ),
+        requested_as_of=THROUGH,
+        completed_through=THROUGH,
+        verified_dates=set(dates),
+    )
+
+    item = payload["slow_moving"][0]
+    assert item["no_sales_days"] == 5
+    assert item["no_sales_days_exact"] is False
+    assert item["slow_moving_started_on"] == "2026-08-10"
+
+
+def test_current_stock_does_not_backfill_missing_historical_stock() -> None:
+    dates = [THROUGH - timedelta(days=offset) for offset in range(9, -1, -1)]
+    metrics = [_metric("no-stock-history", metric_date, 0) for metric_date in dates]
+
+    payload = build_anomaly_product_payload(
+        _dataset(
+            [_offer("no-stock-history", status="buyable", total_stock=5)],
+            metrics,
+        ),
+        requested_as_of=THROUGH,
+        completed_through=THROUGH,
+        verified_dates=set(dates),
+    )
+
+    assert payload["slow_moving"] == []
+    assert payload["summary"]["slow_moving_by_days"]["4"] == 0
