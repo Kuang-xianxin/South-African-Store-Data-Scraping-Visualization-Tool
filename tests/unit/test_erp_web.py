@@ -517,6 +517,9 @@ def test_competitor_radar_returns_automatic_store_targets_and_separate_items(
         all_store_own_store_overview = client.get(
             "/api/competitors/own-store?own_store_scope=all"
         )
+        one_plid_own_store_overview = client.get(
+            "/api/competitors/own-store?own_store_scope=all&plid=87654321"
+        )
         operating_own_store_overview = client.get(
             "/api/competitors/own-store?own_store_scope=operating"
         )
@@ -638,6 +641,11 @@ def test_competitor_radar_returns_automatic_store_targets_and_separate_items(
         item["plid"]
         for item in all_store_own_store_overview.json()["store_items"]
     } == {"12345678", "87654321"}
+    assert one_plid_own_store_overview.status_code == 200
+    assert [
+        item["plid"]
+        for item in one_plid_own_store_overview.json()["store_items"]
+    ] == ["87654321"]
     assert operating_own_store_overview.status_code == 200
     assert {
         item["plid"]

@@ -803,6 +803,8 @@ export interface AnomalyProductPayload {
     slow_moving_requires_status: "buyable";
     slow_moving_requires_available_stock: boolean;
     slow_moving_day_basis: "verified_zero_sales_and_positive_stock_days";
+    stock_status_requires_available_stock: boolean;
+    stock_status_excluded_inventory: Array<"receiving" | "on_way">;
   };
   summary: {
     sudden_sales_stop: number;

@@ -290,11 +290,13 @@ export function fetchOwnStoreCompetitors(
   endDate?: string,
   ownStoreScope: OwnStoreScope = "current",
   signal?: AbortSignal,
+  plid?: string,
 ): Promise<OwnStoreCompetitorOverview> {
   const query = new URLSearchParams();
   if (startDate) query.set("start_date", startDate);
   if (endDate) query.set("end_date", endDate);
   query.set("own_store_scope", ownStoreScope);
+  if (plid) query.set("plid", plid);
   return request<OwnStoreCompetitorOverview>(
     `/api/competitors/own-store?${query.toString()}`,
     { signal },

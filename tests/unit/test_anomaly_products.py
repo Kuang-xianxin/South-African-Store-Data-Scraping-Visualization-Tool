@@ -1,16 +1,30 @@
 from __future__ import annotations
 
-from datetime import date, timedelta
+from datetime import UTC, date, datetime, timedelta
 
 import pandas as pd
+from sqlalchemy import create_engine
+from sqlalchemy.orm import Session
 
-from takealot_ops.erp.anomaly_products import build_anomaly_product_payload
+from takealot_ops.erp.anomaly_products import (
+    AnomalyProductPayloadCache,
+    build_anomaly_product_payload,
+    load_cached_anomaly_product_payload,
+)
 from takealot_ops.erp.permissions import STORE_VIEW
 from takealot_ops.erp.web import (
     _required_permission,
     _requires_connected_store_access,
 )
 from takealot_ops.metrics.service import DashboardDataset
+from takealot_ops.storage.models import (
+    Base,
+    CollectionRun,
+    DailyProductMetric,
+    DailySalesMetricState,
+    OfferSnapshot,
+)
+from takealot_ops.storage.store_context import store_scope
 
 
 THROUGH = date(2026, 8, 14)
@@ -138,7 +152,7 @@ def test_unverified_day_is_not_treated_as_zero_sales() -> None:
     assert payload["slow_moving"] == []
 
 
-def test_non_buyable_inventory_statuses_exclude_stock_still_on_the_way() -> None:
+def test_non_buyable_inventory_statuses_require_sellable_stock_only() -> None:
     offers = [
         _offer("not", status="not_buyable", total_stock=0, receiving=4),
         _offer("takealot", status="disabled_by_takealot", total_stock=3),
@@ -165,18 +179,25 @@ def test_non_buyable_inventory_statuses_exclude_stock_still_on_the_way() -> None
     )
 
     groups = payload["stock_status_anomalies"]
-    assert [item["offer_id"] for item in groups["not_buyable"]] == ["not"]
+    assert groups["not_buyable"] == []
     assert [item["offer_id"] for item in groups["disabled_by_takealot"]] == [
         "takealot"
     ]
     assert [item["offer_id"] for item in groups["disabled_by_seller"]] == [
         "seller"
     ]
-    assert groups["not_buyable"][0]["inventory_units"] == 4
-    assert groups["not_buyable"][0]["anomaly_label"] == "不可购买但平台仓仍有库存"
     assert groups["disabled_by_takealot"][0]["available_stock"] == 3
-    assert groups["disabled_by_seller"][0]["inventory_units"] == 3
+    assert groups["disabled_by_takealot"][0]["anomaly_label"] == (
+        "平台已停用但仍有可售库存"
+    )
+    assert groups["disabled_by_seller"][0]["inventory_units"] == 1
+    assert groups["disabled_by_seller"][0]["receiving_stock"] == 2
     assert groups["disabled_by_seller"][0]["on_way_stock"] == 5
+    assert payload["rules"]["stock_status_requires_available_stock"] is True
+    assert payload["rules"]["stock_status_excluded_inventory"] == [
+        "receiving",
+        "on_way",
+    ]
     assert payload["slow_moving"] == []
 
 
@@ -321,3 +342,107 @@ def test_current_stock_does_not_backfill_missing_historical_stock() -> None:
 
     assert payload["slow_moving"] == []
     assert payload["summary"]["slow_moving_by_days"]["4"] == 0
+
+
+def test_narrow_anomaly_cache_reuses_payload_and_invalidates_after_refresh() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    captured_at = datetime(2026, 8, 14, 8, tzinfo=UTC)
+    with store_scope("current"), Session(engine) as session:
+        session.add_all(
+            [
+                CollectionRun(
+                    run_id="offers-1",
+                    run_type="offers",
+                    scope_date=THROUGH,
+                    started_at=captured_at,
+                    finished_at=captured_at,
+                    status="success",
+                    counts={},
+                ),
+                OfferSnapshot(
+                    snapshot_date=THROUGH,
+                    offer_id="cached",
+                    productline_id="12345678",
+                    title="Cached Product",
+                    status="not_buyable",
+                    captured_at=captured_at,
+                    total_stock=2,
+                    takealot_available_stock=2,
+                    seller_available_stock=0,
+                    takealot_stock_in_receiving=5,
+                    takealot_stock_on_way=7,
+                ),
+                DailyProductMetric(
+                    metric_date=THROUGH,
+                    offer_id="cached",
+                    ordered_units=0,
+                ),
+                DailySalesMetricState(
+                    metric_date=THROUGH,
+                    ordered_units=0,
+                    ordered_revenue=0,
+                    source_kind="takealot_sales_api",
+                    source_run_id="sales-1",
+                    source_details={"verified_at": captured_at.isoformat()},
+                    verified_at=captured_at,
+                    first_published_at=captured_at,
+                    updated_at=captured_at,
+                    revision_count=0,
+                ),
+            ]
+        )
+        session.commit()
+        cache = AnomalyProductPayloadCache(max_entries=4)
+
+        first = load_cached_anomaly_product_payload(
+            session,
+            cache=cache,
+            store_code="current",
+            requested_as_of=THROUGH,
+            completed_through=THROUGH,
+        )
+        second = load_cached_anomaly_product_payload(
+            session,
+            cache=cache,
+            store_code="current",
+            requested_as_of=THROUGH,
+            completed_through=THROUGH,
+        )
+
+        assert second is first
+        assert first["summary"]["not_buyable_with_stock"] == 1
+        assert first["stock_status_anomalies"]["not_buyable"][0][
+            "inventory_units"
+        ] == 2
+        assert cache.stats() == {"entries": 1, "hits": 1, "misses": 1}
+
+        snapshot = session.get(OfferSnapshot, 1)
+        assert snapshot is not None
+        snapshot.total_stock = 0
+        snapshot.takealot_available_stock = 0
+        session.add(
+            CollectionRun(
+                run_id="offers-2",
+                run_type="offers",
+                scope_date=THROUGH,
+                started_at=captured_at + timedelta(minutes=1),
+                finished_at=captured_at + timedelta(minutes=1),
+                status="success",
+                counts={},
+            )
+        )
+        session.commit()
+
+        refreshed = load_cached_anomaly_product_payload(
+            session,
+            cache=cache,
+            store_code="current",
+            requested_as_of=THROUGH,
+            completed_through=THROUGH,
+        )
+
+        assert refreshed is not first
+        assert refreshed["summary"]["not_buyable_with_stock"] == 0
+        assert cache.stats() == {"entries": 2, "hits": 1, "misses": 2}
+    engine.dispose()

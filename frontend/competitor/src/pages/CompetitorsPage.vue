@@ -1662,19 +1662,6 @@ function isAbortError(error: unknown): boolean {
 onMounted(async () => {
   window.addEventListener("keydown", handleWindowKeydown);
   if (props.detailOnly) {
-    loading.value = true;
-    await Promise.all([
-      loadOwnStoreScope(),
-      loadPersonalWatchlist().catch(() => undefined),
-    ]);
-    if (!appliedStartDate.value && competitorDateRange.value.selected_start) {
-      appliedStartDate.value = competitorDateRange.value.selected_start;
-    }
-    if (!appliedEndDate.value && competitorDateRange.value.selected_end) {
-      appliedEndDate.value = competitorDateRange.value.selected_end;
-    }
-    if (!rangeStartDate.value) rangeStartDate.value = appliedStartDate.value;
-    if (!rangeEndDate.value) rangeEndDate.value = appliedEndDate.value;
     loading.value = false;
     return;
   }
@@ -1884,6 +1871,7 @@ watch(
 );
 
 watch([ownStoreScope, () => props.currentStoreCode ?? ""], () => {
+  if (props.detailOnly) return;
   storeCompetitorPage.value = 1;
   selectedPlid.value = "";
   void loadOwnStoreScope();
@@ -2135,27 +2123,73 @@ function openProductModal(
 }
 
 let handledRequestedDetailRevision = 0;
+let requestedDetailRequestId = 0;
+
+async function openRequestedOwnStoreDetail(
+  revision: number,
+  plid: string,
+): Promise<void> {
+  const requestId = ++requestedDetailRequestId;
+  const requestScope = ownStoreScope.value;
+  const requestStoreCode = props.currentStoreCode ?? "";
+  ownStoreAbortController?.abort();
+  const controller = new AbortController();
+  ownStoreAbortController = controller;
+  pageError.value = "";
+  try {
+    const overview = await fetchOwnStoreCompetitors(
+      undefined,
+      undefined,
+      requestScope,
+      controller.signal,
+      plid,
+    );
+    if (
+      requestId !== requestedDetailRequestId
+      || !ownStoreScopeStillCurrent(requestScope, requestStoreCode)
+      || revision <= handledRequestedDetailRevision
+    ) {
+      return;
+    }
+    const ownItem = overview.store_items.find((item) => item.plid === plid);
+    if (!ownItem) {
+      pageError.value = `未找到 PLID${plid} 的账号可见自有链接详情`;
+      handledRequestedDetailRevision = revision;
+      return;
+    }
+    applyOwnStoreOverview(overview);
+    appliedStartDate.value = overview.date_range.selected_start ?? "";
+    appliedEndDate.value = overview.date_range.selected_end ?? "";
+    rangeStartDate.value = appliedStartDate.value;
+    rangeEndDate.value = appliedEndDate.value;
+    competitorSourceView.value = "own_store";
+    openProductModal(ownItem);
+    handledRequestedDetailRevision = revision;
+  } catch (error) {
+    if (requestId !== requestedDetailRequestId || isAbortError(error)) return;
+    pageError.value = error instanceof Error ? error.message : "读取自有链接详情失败";
+  } finally {
+    if (ownStoreAbortController === controller) ownStoreAbortController = null;
+  }
+}
+
 watch(
   [
     () => props.requestedDetailRevision ?? 0,
     () => props.requestedDetailPlid ?? "",
-    storeCompetitors,
-    loading,
+    ownStoreScope,
+    () => props.currentStoreCode ?? "",
   ],
-  ([revision, plid, ownItems, pageLoading]) => {
+  ([revision, plid]) => {
     if (
-      pageLoading
+      !props.detailOnly
       || !revision
       || revision <= handledRequestedDetailRevision
       || !plid
     ) {
       return;
     }
-    const ownItem = ownItems.find((item) => item.plid === plid);
-    if (!ownItem) return;
-    competitorSourceView.value = "own_store";
-    openProductModal(ownItem);
-    handledRequestedDetailRevision = revision;
+    void openRequestedOwnStoreDetail(revision, plid);
   },
   { immediate: true },
 );

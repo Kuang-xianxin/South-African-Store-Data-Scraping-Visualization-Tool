@@ -65,6 +65,8 @@ const payload: AnomalyProductPayload = {
     slow_moving_requires_status: "buyable",
     slow_moving_requires_available_stock: true,
     slow_moving_day_basis: "verified_zero_sales_and_positive_stock_days",
+    stock_status_requires_available_stock: true,
+    stock_status_excluded_inventory: ["receiving", "on_way"],
   },
   summary: {
     sudden_sales_stop: 1,
@@ -146,10 +148,20 @@ test("cards open the existing full own-link detail modal in the anomaly page", (
   assert.match(appSource, /requestedDetailPlid: competitorDetailRequest\.value\.plid/);
   assert.match(competitorSource, /detailOnly\?: boolean/);
   assert.match(competitorSource, /if \(props\.detailOnly\)/);
-  assert.match(competitorSource, /loadOwnStoreScope\(\)/);
-  assert.match(competitorSource, /loadPersonalWatchlist\(\)\.catch/);
+  assert.match(competitorSource, /async function openRequestedOwnStoreDetail/);
+  assert.match(
+    competitorSource,
+    /fetchOwnStoreCompetitors\([\s\S]*controller\.signal,[\s\S]*plid/,
+  );
+  assert.doesNotMatch(
+    competitorSource.slice(
+      competitorSource.indexOf("if (props.detailOnly)"),
+      competitorSource.indexOf("let checkpoint"),
+    ),
+    /loadOwnStoreScope|loadPersonalWatchlist/,
+  );
   assert.match(competitorSource, /<template v-if="!props\.detailOnly">/);
-  assert.match(competitorSource, /const ownItem = ownItems\.find/);
+  assert.match(competitorSource, /const ownItem = overview\.store_items\.find/);
   assert.match(competitorSource, /openProductModal\(ownItem\)/);
   assert.match(
     competitorSource,
@@ -161,16 +173,16 @@ test("cards open the existing full own-link detail modal in the anomaly page", (
   );
 });
 
-test("stock-status cards state that on-way units do not count", () => {
+test("stock-status cards count only sellable units", () => {
   const pageSource = readFileSync(
     new URL("../src/pages/AnomalyProductsPage.vue", import.meta.url),
     "utf8",
   );
 
-  assert.match(pageSource, /在途不计入异常库存/);
+  assert.match(pageSource, /只统计可售库存/);
+  assert.match(pageSource, /收货中和在途均展示，但都不计入异常/);
+  assert.match(pageSource, /收货中 .*（不计入）/);
   assert.match(pageSource, /在途 .*（不计入）/);
-  assert.doesNotMatch(
-    pageSource,
-    /item\.on_way_stock > 0 \? `在途 .*` : "",\s*\]\.filter/,
-  );
+  assert.match(pageSource, /当前可售库存/);
+  assert.match(pageSource, /<strong>\{\{ number\(item\.inventory_units\) \}\} 件<\/strong>/);
 });

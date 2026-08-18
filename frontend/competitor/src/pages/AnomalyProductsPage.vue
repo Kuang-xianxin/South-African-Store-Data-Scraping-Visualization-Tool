@@ -118,16 +118,13 @@ function noSalesLabel(item: AnomalyProductItem): string {
 
 function statusInventoryLabel(item: AnomalyProductItem): string {
   const parts = [
-    item.available_stock > 0 ? `现货 ${number(item.available_stock)}` : "",
-    item.receiving_stock > 0 ? `收货中 ${number(item.receiving_stock)}` : "",
+    `可售 ${number(item.available_stock)}`,
+    item.receiving_stock > 0
+      ? `收货中 ${number(item.receiving_stock)}（不计入）`
+      : "",
+    item.on_way_stock > 0 ? `在途 ${number(item.on_way_stock)}（不计入）` : "",
   ].filter(Boolean);
-  return parts.join(" · ") || "到仓库存明细待补充";
-}
-
-function onWayInventoryLabel(item: AnomalyProductItem): string {
-  return item.on_way_stock > 0
-    ? ` · 在途 ${number(item.on_way_stock)}（不计入）`
-    : "";
+  return parts.join(" · ");
 }
 
 function emptyMessage(): string {
@@ -146,7 +143,7 @@ function emptyMessage(): string {
         <p class="section-kicker">EXCEPTION PRODUCT RADAR</p>
         <h2>异常商品</h2>
         <p class="hero-copy">
-          各类异常独立展示；零销量只采用已核验完成的南非业务日，不可售库存只统计已经到平台仓的商品。
+          各类异常独立展示；零销量只采用已核验完成的南非业务日，不可售异常只认当前可售库存。
         </p>
       </div>
       <div class="evidence-card">
@@ -190,7 +187,7 @@ function emptyMessage(): string {
         <template v-else>
           <span>当前规则</span>
           <strong>{{ ANOMALY_VIEW_LABELS[activeView] }}</strong>
-          <small>只统计现货和平台收货中，在途不计入异常库存</small>
+          <small>只统计可售库存；收货中和在途均展示，但都不计入异常</small>
         </template>
       </div>
       <label class="anomaly-search">
@@ -266,11 +263,9 @@ function emptyMessage(): string {
           </small>
         </div>
         <div v-else class="primary-signal disabled">
-          <span>已到平台仓</span>
+          <span>当前可售库存</span>
           <strong>{{ number(item.inventory_units) }} 件</strong>
-          <small>
-            {{ statusInventoryLabel(item) }}{{ onWayInventoryLabel(item) }}
-          </small>
+          <small>{{ statusInventoryLabel(item) }}</small>
         </div>
 
         <dl class="card-metrics">
@@ -279,7 +274,7 @@ function emptyMessage(): string {
             <dd>{{ currency(item.selling_price) }}</dd>
           </div>
           <div>
-            <dt>现货</dt>
+            <dt>可售</dt>
             <dd>{{ number(item.available_stock) }}</dd>
           </div>
           <div>

@@ -92,8 +92,8 @@ from takealot_ops.erp.auth import (
     UserIdentity,
 )
 from takealot_ops.erp.anomaly_products import (
-    build_anomaly_product_payload,
-    verified_sales_metric_dates,
+    AnomalyProductPayloadCache,
+    load_cached_anomaly_product_payload,
 )
 from takealot_ops.erp.coordination import RefreshBusyError, RefreshCoordinator
 from takealot_ops.erp.daily_report import (
@@ -218,6 +218,7 @@ from takealot_ops.storage.models import (
 from takealot_ops.storage.repository import is_closed_day_sales_revision
 from takealot_ops.storage.store_context import (
     STORE_CODE_HEADER,
+    current_store_code,
     store_scope,
 )
 
@@ -1420,6 +1421,7 @@ def create_app(project_root: Path | None = None) -> FastAPI:
     listing_preview_registry = CompetitorListingPreviewRegistry()
     refresh_coordinator = RefreshCoordinator(root)
     product_thumbnails = ProductThumbnailCache(root)
+    anomaly_product_cache = AnomalyProductPayloadCache()
     logistics_overview = LogisticsOverviewService(root)
     platform_warehouse = PlatformWarehouseService(root)
     search_ranking = SearchRankingService(root)
@@ -1456,6 +1458,7 @@ def create_app(project_root: Path | None = None) -> FastAPI:
     app.add_middleware(GZipMiddleware, minimum_size=1024, compresslevel=5)
     app.state.auth_manager = auth
     app.state.product_thumbnail_cache = product_thumbnails
+    app.state.anomaly_product_cache = anomaly_product_cache
     app.state.search_ranking_service = search_ranking
     app.state.search_ranking_batch_controller = search_ranking_batch
 
@@ -2387,21 +2390,15 @@ def create_app(project_root: Path | None = None) -> FastAPI:
         engine = create_read_only_erp_engine(settings.database_url)
         try:
             with Session(engine) as session:
-                states = list(
-                    session.scalars(
-                        select(DailySalesMetricState).where(
-                            DailySalesMetricState.metric_date <= completed_through
-                        )
-                    )
+                return load_cached_anomaly_product_payload(
+                    session,
+                    cache=anomaly_product_cache,
+                    store_code=current_store_code(),
+                    requested_as_of=as_of,
+                    completed_through=completed_through,
                 )
         finally:
             engine.dispose()
-        return build_anomaly_product_payload(
-            load_erp_dataset(settings, as_of),
-            requested_as_of=as_of,
-            completed_through=completed_through,
-            verified_dates=verified_sales_metric_dates(states),
-        )
 
     @app.get("/api/erp/logistics")
     def logistics(refresh: bool = Query(False)) -> dict[str, Any]:
@@ -3104,6 +3101,7 @@ def create_app(project_root: Path | None = None) -> FastAPI:
         request: Request,
         start_date: date | None = Query(default=None),
         end_date: date | None = Query(default=None),
+        plid: str | None = Query(default=None, min_length=1, max_length=30),
         own_store_scope: Literal["current", "all", "operating"] = Query(
             default="current"
         ),
@@ -3114,6 +3112,7 @@ def create_app(project_root: Path | None = None) -> FastAPI:
             start_date=start_date,
             end_date=end_date,
             own_store_codes=_own_store_codes_for_request(request, own_store_scope),
+            plids={plid} if plid else None,
             include_detail_frames=False,
             own_store_only=True,
         )
