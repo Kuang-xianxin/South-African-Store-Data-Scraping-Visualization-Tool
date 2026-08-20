@@ -5353,6 +5353,7 @@ def create_app(project_root: Path | None = None) -> FastAPI:
         load_targets=load_scheduled_competitor_targets,
         collect_target=collect_scheduled_target,
         logger=competitor_logger,
+        continuous_rounds=True,
     )
     app.state.scheduled_competitor_runner = scheduled_competitor_runner
 

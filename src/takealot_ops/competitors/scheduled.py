@@ -86,7 +86,7 @@ def register_scheduled_trigger(
 
 
 class ScheduledCompetitorBatchRunner:
-    """Register once per Beijing day and run through the shared batch registry.
+    """Bootstrap from the daily trigger, then continuously run shared batches.
 
     Windows Task Scheduler only calls ``trigger``.  The long-running work stays
     inside the ERP process, so every browser reads the same progress and the
@@ -109,6 +109,7 @@ class ScheduledCompetitorBatchRunner:
         network_pause_seconds: float = 600.0,
         pending_retry_delay_seconds: float = PENDING_RETRY_DELAY_SECONDS,
         pending_retry_round_limit: int = PENDING_RETRY_ROUND_LIMIT,
+        continuous_rounds: bool = False,
     ) -> None:
         self._registry = registry
         self._journal_path = journal_path
@@ -123,6 +124,7 @@ class ScheduledCompetitorBatchRunner:
         self._network_pause_seconds = network_pause_seconds
         self._pending_retry_delay_seconds = max(0.0, pending_retry_delay_seconds)
         self._pending_retry_round_limit = max(0, pending_retry_round_limit)
+        self._continuous_rounds = continuous_rounds
         self._lock = asyncio.Lock()
         self._task: asyncio.Task[None] | None = None
         self._closing = False
@@ -132,6 +134,8 @@ class ScheduledCompetitorBatchRunner:
         """Resume a durable pending or interrupted scheduled run on ERP startup."""
         self._import_trigger_files()
         self._restore_completed_pending_wait()
+        if self._queue_next_continuous_round():
+            self._persist_journal()
         if self._needs_driver():
             self._ensure_driver()
 
@@ -165,6 +169,8 @@ class ScheduledCompetitorBatchRunner:
                 self._persist_journal()
                 return self._trigger_payload("already_started", accepted=False)
             if self._state.get("pending"):
+                if self._is_continuous_pending():
+                    return self._trigger_payload("already_pending", accepted=False)
                 active_status = self._active_batch_status()
                 if not active_status.get("active"):
                     return self._trigger_payload("already_pending", accepted=False)
@@ -174,6 +180,7 @@ class ScheduledCompetitorBatchRunner:
                     return self._trigger_payload("skipped_busy", accepted=False)
             self._state["pending"] = True
             self._state["pending_for"] = trigger_date
+            self._state["pending_kind"] = "trigger"
             self._state["requested_at"] = self._utc_iso()
             self._state["last_error"] = ""
             active_status = self._active_batch_status()
@@ -202,6 +209,7 @@ class ScheduledCompetitorBatchRunner:
                 return False
             self._state["run_status"] = "stopped"
             self._state["pending"] = False
+            self._state["pending_kind"] = None
             self._state["active_item"] = None
             self._state["resume_after"] = None
             self._state["network_failures"] = []
@@ -248,6 +256,7 @@ class ScheduledCompetitorBatchRunner:
                 {
                     "run_status": "running",
                     "pending": False,
+                    "pending_kind": None,
                     "queue": resume_queue,
                     "active_item": None,
                     "resume_after": None,
@@ -322,6 +331,7 @@ class ScheduledCompetitorBatchRunner:
         return {
             "pending": bool(self._state.get("pending")),
             "pending_for": self._state.get("pending_for"),
+            "pending_kind": self._state.get("pending_kind"),
             "run_status": run_status,
             "batch_id": self._state.get("batch_id"),
             "last_started_on": self._state.get("last_started_on"),
@@ -337,6 +347,8 @@ class ScheduledCompetitorBatchRunner:
             "resume_after": self._state.get("resume_after"),
             "pending_retry_round": self._pending_retry_round(),
             "pending_retry_round_limit": self._pending_retry_round_limit,
+            "continuous_rounds": self._continuous_rounds,
+            "round_number": self._round_number(),
         }
 
     def stopped_checkpoint_status(
@@ -423,6 +435,9 @@ class ScheduledCompetitorBatchRunner:
                 if self._state.get("pending"):
                     active_status = self._active_batch_status()
                     if active_status.get("active"):
+                        if self._is_continuous_pending():
+                            await self._sleep(self._busy_poll_seconds)
+                            continue
                         self._skip_pending_due_to_busy(active_status)
                 run_status = str(self._state.get("run_status") or "idle")
                 if run_status == "running":
@@ -438,7 +453,10 @@ class ScheduledCompetitorBatchRunner:
                     return
                 active_status = self._active_batch_status()
                 if active_status.get("active"):
-                    self._skip_pending_due_to_busy(active_status)
+                    if self._is_continuous_pending():
+                        await self._sleep(self._busy_poll_seconds)
+                    else:
+                        self._skip_pending_due_to_busy(active_status)
                     continue
                 try:
                     targets = await self._load_targets()
@@ -458,7 +476,10 @@ class ScheduledCompetitorBatchRunner:
                 try:
                     started = await self._begin_run(targets)
                 except CollectionBatchBusyError:
-                    self._skip_pending_due_to_busy(self._registry.status())
+                    if self._is_continuous_pending():
+                        await self._sleep(self._busy_poll_seconds)
+                    else:
+                        self._skip_pending_due_to_busy(self._registry.status())
                     continue
                 if not started:
                     await self._sleep(self._busy_poll_seconds)
@@ -521,6 +542,7 @@ class ScheduledCompetitorBatchRunner:
             {
                 "pending": False,
                 "pending_for": None,
+                "pending_kind": None,
                 "last_error": "",
                 "last_skipped_on": trigger_date,
                 "last_skipped_at": self._utc_iso(),
@@ -551,6 +573,8 @@ class ScheduledCompetitorBatchRunner:
 
         today = self._beijing_date()
         pending_for = str(self._state.get("pending_for") or today)
+        pending_kind = self._optional_text(self._state.get("pending_kind"))
+        round_number = self._round_number() + 1
         batch_id = f"scheduled-{pending_for.replace('-', '')}-{uuid4().hex[:12]}"
         queue = [
             {"index": index, "url": target.url}
@@ -568,7 +592,11 @@ class ScheduledCompetitorBatchRunner:
             succeeded=0,
             failed=0,
             terminal=0,
-            reason="Windows 计划任务已在 09:00 自动开始同一共享采集批次",
+            reason=(
+                f"上一轮完成后立即开始第 {round_number} 轮持续采集"
+                if pending_kind == "continuous"
+                else f"Windows 计划任务已在 09:00 自动开始第 {round_number} 轮共享采集"
+            ),
             with_stock_probe=True,
             visible_browser=False,
             source="scheduled",
@@ -581,6 +609,7 @@ class ScheduledCompetitorBatchRunner:
                 {
                     "pending": False,
                     "pending_for": None,
+                    "pending_kind": None,
                     "run_status": "running",
                     "batch_id": batch_id,
                     # This is the trigger date, not merely the wall-clock date on
@@ -608,6 +637,7 @@ class ScheduledCompetitorBatchRunner:
                     "resume_after": None,
                     "network_failures": [],
                     "pending_retry_round": 0,
+                    "round_number": round_number,
                     "completion_reason": "",
                     "active_item": None,
                     "run_revision": self._run_revision() + 1,
@@ -615,10 +645,11 @@ class ScheduledCompetitorBatchRunner:
             )
             self._persist_journal()
         self._logger.info(
-            "scheduled_batch batch=%s event=start total=%s date=%s",
+            "scheduled_batch batch=%s event=start total=%s date=%s round=%s",
             batch_id,
             len(queue),
             today,
+            round_number,
         )
         return True
 
@@ -1030,12 +1061,20 @@ class ScheduledCompetitorBatchRunner:
             return
         metrics = self._metrics()
         retry_round = self._pending_retry_round()
-        reason = (
-            f"09:00 自动批次已完成 {retry_round} 轮延时自动重试，仍有 "
-            f"{metrics['pending']} 个待重试或未完成链接；可继续同一服务端断点"
-            if metrics["pending"]
-            else "09:00 自动批次全部链接已检查"
-        )
+        if metrics["pending"]:
+            reason = (
+                f"09:00 自动批次已完成 {retry_round} 轮延时自动重试，仍有 "
+                f"{metrics['pending']} 个待重试或未完成链接"
+            )
+            reason += (
+                "；本轮结束，立即重新读取最新目标并开始下一轮复核"
+                if self._continuous_rounds
+                else "；可继续同一服务端断点"
+            )
+        else:
+            reason = "09:00 自动批次全部链接已检查"
+            if self._continuous_rounds:
+                reason += "；立即重新读取最新目标并开始下一轮"
         self._registry.event(
             batch_id=batch_id,
             client_id=SCHEDULED_CLIENT_ID,
@@ -1063,10 +1102,11 @@ class ScheduledCompetitorBatchRunner:
         self._state["resume_after"] = None
         self._state["network_failures"] = []
         self._state["completion_reason"] = reason
+        queued_next_round = self._queue_next_continuous_round()
         self._persist_journal()
         self._logger.info(
             "scheduled_batch batch=%s event=completed completed=%s total=%s "
-            "pending=%s succeeded=%s failed=%s terminal=%s",
+            "pending=%s succeeded=%s failed=%s terminal=%s next_round=%s",
             batch_id,
             metrics["completed"],
             metrics["total"],
@@ -1074,6 +1114,7 @@ class ScheduledCompetitorBatchRunner:
             metrics["succeeded"],
             metrics["failed"],
             metrics["terminal"],
+            queued_next_round,
         )
 
     def _merge_server_queue(self) -> None:
@@ -1450,6 +1491,27 @@ class ScheduledCompetitorBatchRunner:
             resume_after.isoformat(),
         )
 
+    def _queue_next_continuous_round(self) -> bool:
+        """Durably queue a fresh-target round after a completed automatic round."""
+        if (
+            not self._continuous_rounds
+            or self._state.get("run_status")
+            not in {"completed", "completed_with_pending"}
+            or self._state.get("pending")
+            or not self._optional_text(self._state.get("batch_id"))
+        ):
+            return False
+        self._state.update(
+            {
+                "pending": True,
+                "pending_for": self._beijing_date(),
+                "pending_kind": "continuous",
+                "requested_at": self._utc_iso(),
+                "last_error": "",
+            }
+        )
+        return True
+
     def _import_trigger_files(self) -> None:
         if self._trigger_dir is None or not self._trigger_dir.is_dir():
             return
@@ -1472,6 +1534,7 @@ class ScheduledCompetitorBatchRunner:
                 break
             self._state["pending"] = True
             self._state["pending_for"] = trigger_date
+            self._state["pending_kind"] = "trigger"
             self._state["requested_at"] = self._utc_iso()
             changed = True
             break
@@ -1523,6 +1586,7 @@ class ScheduledCompetitorBatchRunner:
             "version": 1,
             "pending": False,
             "pending_for": None,
+            "pending_kind": None,
             "requested_at": None,
             "run_status": "idle",
             "batch_id": None,
@@ -1546,6 +1610,7 @@ class ScheduledCompetitorBatchRunner:
             "resume_after": None,
             "network_failures": [],
             "pending_retry_round": 0,
+            "round_number": 0,
             "completion_reason": "",
             "handled_trigger_dates": [],
             "active_item": None,
@@ -1613,6 +1678,16 @@ class ScheduledCompetitorBatchRunner:
 
     def _pending_retry_round(self) -> int:
         return self._optional_int(self._state.get("pending_retry_round")) or 0
+
+    def _round_number(self) -> int:
+        return self._optional_int(self._state.get("round_number")) or 0
+
+    def _is_continuous_pending(self) -> bool:
+        return (
+            self._continuous_rounds
+            and self._state.get("pending") is True
+            and self._state.get("pending_kind") == "continuous"
+        )
 
     def _beijing_date(self) -> str:
         now = self._clock()

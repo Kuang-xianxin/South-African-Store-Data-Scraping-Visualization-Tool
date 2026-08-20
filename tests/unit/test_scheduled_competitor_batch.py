@@ -35,6 +35,7 @@ def _runner(
     network_pause_seconds: float = 600,
     pending_retry_delay_seconds: float = 600,
     pending_retry_round_limit: int = 3,
+    continuous_rounds: bool = False,
 ) -> ScheduledCompetitorBatchRunner:
     import logging
 
@@ -52,6 +53,7 @@ def _runner(
         network_pause_seconds=network_pause_seconds,
         pending_retry_delay_seconds=pending_retry_delay_seconds,
         pending_retry_round_limit=pending_retry_round_limit,
+        continuous_rounds=continuous_rounds,
     )
 
 
@@ -117,6 +119,166 @@ async def test_runner_publishes_visible_results_and_only_starts_once(
         assert repeated["accepted"] is False
         assert repeated["state"] == "already_handled"
     finally:
+        await runner.close()
+
+
+async def test_continuous_runner_reloads_fresh_targets_in_a_new_batch(
+    tmp_path: Path,
+) -> None:
+    registry = CollectionBatchRegistry()
+    load_calls = 0
+    collected: list[tuple[str, str]] = []
+    second_round_started = asyncio.Event()
+    release_second_round = asyncio.Event()
+
+    async def load_targets() -> list[ScheduledCollectionTarget]:
+        nonlocal load_calls
+        load_calls += 1
+        # The first round loads once at start and once more before completion.
+        # Only the following fresh round should see the changed target set.
+        plid = "12100001" if load_calls <= 2 else "12100002"
+        return [
+            ScheduledCollectionTarget(plid, f"https://takealot.com/p/PLID{plid}")
+        ]
+
+    async def collect_target(
+        url: str,
+        batch_id: str,
+        *_args,
+    ) -> ScheduledCollectionAttempt:
+        plid = url.rsplit("PLID", 1)[1]
+        collected.append((batch_id, plid))
+        if plid == "12100002":
+            second_round_started.set()
+            await release_second_round.wait()
+        return ScheduledCollectionAttempt(plid, f"Product {plid}", "采集成功", True)
+
+    runner = _runner(
+        tmp_path,
+        registry=registry,
+        load_targets=load_targets,
+        collect_target=collect_target,
+        continuous_rounds=True,
+    )
+    try:
+        assert (await runner.trigger())["accepted"] is True
+        await _wait_for(second_round_started.is_set)
+
+        assert load_calls >= 3
+        assert [plid for _, plid in collected] == ["12100001", "12100002"]
+        assert collected[0][0] != collected[1][0]
+        assert runner.status()["run_status"] == "running"
+        assert runner.status()["round_number"] == 2
+        assert runner.status()["continuous_rounds"] is True
+
+        batch_id = str(registry.status()["batch_id"])
+        registry.stop(batch_id=batch_id, reason="test cleanup")
+        assert await runner.mark_stopped(batch_id, stopped_by="kxx") is True
+        registry.complete_stop(batch_id=batch_id)
+        release_second_round.set()
+        await _wait_for(lambda: runner.status()["run_status"] == "stopped")
+    finally:
+        release_second_round.set()
+        await runner.close()
+
+
+async def test_completed_continuous_round_survives_restart_and_yields_to_manual(
+    tmp_path: Path,
+) -> None:
+    old_batch_id = "scheduled-20260810-completed"
+    (tmp_path / "scheduled.json").write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "pending": False,
+                "run_status": "completed",
+                "batch_id": old_batch_id,
+                "last_started_on": "2026-08-10",
+                "last_started_at": (FIXED_NOW - timedelta(hours=1)).isoformat(),
+                "last_completed_at": FIXED_NOW.isoformat(),
+                "round_number": 4,
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    registry = CollectionBatchRegistry()
+    registry.event(
+        batch_id="manual-before-continuous",
+        client_id="manual-client",
+        event="start",
+        username="kxx",
+        display_name="KXX",
+        completed=0,
+        total=1,
+        pending=1,
+        succeeded=0,
+        failed=0,
+        terminal=0,
+        reason="manual owns shared slot",
+    )
+    load_calls = 0
+    collection_started = asyncio.Event()
+    release_collection = asyncio.Event()
+
+    async def load_targets() -> list[ScheduledCollectionTarget]:
+        nonlocal load_calls
+        load_calls += 1
+        return [
+            ScheduledCollectionTarget(
+                "12200001",
+                "https://takealot.com/p/PLID12200001",
+            )
+        ]
+
+    async def collect_target(*_args) -> ScheduledCollectionAttempt:
+        collection_started.set()
+        await release_collection.wait()
+        return ScheduledCollectionAttempt("12200001", "Product", "采集成功", True)
+
+    runner = _runner(
+        tmp_path,
+        registry=registry,
+        load_targets=load_targets,
+        collect_target=collect_target,
+        continuous_rounds=True,
+    )
+    try:
+        runner.start()
+        await asyncio.sleep(0.03)
+        assert load_calls == 0
+        assert runner.status()["pending"] is True
+        assert runner.status()["pending_kind"] == "continuous"
+        assert registry.status()["batch_id"] == "manual-before-continuous"
+
+        registry.event(
+            batch_id="manual-before-continuous",
+            client_id="manual-client",
+            event="completed",
+            username="kxx",
+            display_name="KXX",
+            completed=1,
+            total=1,
+            pending=0,
+            succeeded=1,
+            failed=0,
+            terminal=0,
+            reason="manual completed",
+        )
+        await _wait_for(collection_started.is_set)
+        assert load_calls == 1
+        assert registry.status()["batch_id"] != old_batch_id
+        assert registry.status()["source"] == "scheduled"
+        assert runner.status()["round_number"] == 5
+
+        batch_id = str(registry.status()["batch_id"])
+        registry.stop(batch_id=batch_id, reason="test cleanup")
+        assert await runner.mark_stopped(batch_id, stopped_by="kxx") is True
+        registry.complete_stop(batch_id=batch_id)
+        release_collection.set()
+        await _wait_for(lambda: runner.status()["run_status"] == "stopped")
+    finally:
+        release_collection.set()
         await runner.close()
 
 
@@ -620,8 +782,11 @@ async def test_stopped_scheduled_batch_does_not_restart_same_day(tmp_path: Path)
     registry = CollectionBatchRegistry()
     collection_started = asyncio.Event()
     release_collection = asyncio.Event()
+    load_calls = 0
 
     async def load_targets() -> list[ScheduledCollectionTarget]:
+        nonlocal load_calls
+        load_calls += 1
         return [ScheduledCollectionTarget("66666666", "https://takealot.com/p/PLID66666666")]
 
     async def collect_target(
@@ -636,6 +801,7 @@ async def test_stopped_scheduled_batch_does_not_restart_same_day(tmp_path: Path)
         registry=registry,
         load_targets=load_targets,
         collect_target=collect_target,
+        continuous_rounds=True,
     )
     try:
         await runner.trigger()
@@ -646,11 +812,13 @@ async def test_stopped_scheduled_batch_does_not_restart_same_day(tmp_path: Path)
         registry.complete_stop(batch_id=batch_id)
         release_collection.set()
         await _wait_for(lambda: runner.status()["run_status"] == "stopped")
+        await asyncio.sleep(0.03)
 
         repeated = await runner.trigger()
         assert repeated["accepted"] is False
         assert repeated["state"] == "already_handled"
         assert registry.status()["active"] is False
+        assert load_calls == 1
     finally:
         release_collection.set()
         await runner.close()
