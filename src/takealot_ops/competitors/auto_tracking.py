@@ -168,8 +168,8 @@ async def run_automatic_follower_tracking(
     max_targets: int | None,
     with_stock_probe: bool,
     store_codes: Sequence[str] | None = None,
-    minimum_delay_seconds: float = 3.0,
-    maximum_delay_seconds: float = 8.0,
+    minimum_delay_seconds: float = 2.0,
+    maximum_delay_seconds: float = 5.0,
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     collector_factory: Callable[[], CompetitorCollector] | None = None,
 ) -> AutomaticFollowerRunResult:

@@ -2705,9 +2705,14 @@ def test_erp_reuses_and_recycles_hidden_competitor_browser(
     public_clients: list[object] = []
     collector_clients: list[object] = []
     link_delays: list[float] = []
+    link_delay_ranges: list[tuple[float, float]] = []
 
     async def fake_link_cooldown(seconds: float) -> None:
         link_delays.append(seconds)
+
+    def choose_link_cooldown(min_seconds: float, max_seconds: float) -> float:
+        link_delay_ranges.append((min_seconds, max_seconds))
+        return (min_seconds + max_seconds) / 2
 
     class FakePublicClient:
         def __init__(self) -> None:
@@ -2765,7 +2770,7 @@ def test_erp_reuses_and_recycles_hidden_competitor_browser(
     )
     monkeypatch.setattr(
         "takealot_ops.erp.web._competitor_link_cooldown_seconds",
-        lambda min_seconds, max_seconds: (min_seconds + max_seconds) / 2,
+        choose_link_cooldown,
     )
     monkeypatch.setattr(
         "takealot_ops.erp.web._sleep_competitor_link_cooldown",
@@ -2790,7 +2795,8 @@ def test_erp_reuses_and_recycles_hidden_competitor_browser(
     assert collector_clients[:3] == [public_clients[0]] * 3
     assert collector_clients[3] is public_clients[1]
     assert [client.close_calls for client in public_clients] == [1, 1]
-    assert link_delays == [5.5, 5.5, 5.5]
+    assert link_delay_ranges == [(2.0, 5.0)] * 3
+    assert link_delays == [3.5, 3.5, 3.5]
 
 
 def test_collect_returns_locked_when_another_link_is_still_active(

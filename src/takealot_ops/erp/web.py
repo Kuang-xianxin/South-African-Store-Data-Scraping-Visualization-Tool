@@ -666,8 +666,8 @@ class _SharedCompetitorPublicClient:
         self,
         *,
         max_uses: int = 25,
-        min_link_delay_seconds: float = 3.0,
-        max_link_delay_seconds: float = 8.0,
+        min_link_delay_seconds: float = 2.0,
+        max_link_delay_seconds: float = 5.0,
     ) -> None:
         if max_uses < 1:
             raise ValueError("max_uses must be at least 1")

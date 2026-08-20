@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from inspect import signature
 
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
 from takealot_ops.competitors.auto_tracking import (
     record_automatic_follower_attempt,
+    run_automatic_follower_tracking,
     select_automatic_follower_targets,
 )
 from takealot_ops.competitors.own_store import (
@@ -176,6 +178,13 @@ def test_connected_store_plid_queries_keep_exact_store_membership() -> None:
         assert is_connected_store_plid(session, "400") is False
         assert is_connected_store_plid(session, "") is False
     engine.dispose()
+
+
+def test_automatic_follower_tracking_uses_short_randomized_safe_delay() -> None:
+    parameters = signature(run_automatic_follower_tracking).parameters
+
+    assert parameters["minimum_delay_seconds"].default == 2.0
+    assert parameters["maximum_delay_seconds"].default == 5.0
 
 
 def test_automatic_attempt_state_keeps_partial_snapshot_success() -> None:
