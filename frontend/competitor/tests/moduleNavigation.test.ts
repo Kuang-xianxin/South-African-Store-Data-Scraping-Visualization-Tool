@@ -140,6 +140,10 @@ test("the sidebar exposes real links while retaining guarded left-click navigati
   assert.match(appSource, /@click="openPage\(\$event, page\)"/);
   assert.match(appSource, /event\.preventDefault\(\);\s+showPermissionDenied\(\)/);
   assert.match(appSource, /window\.addEventListener\("hashchange", handleModuleHashChange\)/);
+  assert.match(
+    appSource,
+    /function switchPage[\s\S]*window\.scrollTo\(\{ top: 0, left: 0, behavior: "auto" \}\)/,
+  );
   assert.match(appSource, /const linkedPage = modulePageFromHash\(window\.location\.hash\)/);
   assert.match(appSource, /ownStoreDetailRequestFromHash\(window\.location\.hash\)/);
   assert.match(appSource, /class="standalone-own-detail-shell"/);

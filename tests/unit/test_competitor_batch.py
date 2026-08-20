@@ -914,3 +914,58 @@ def test_collection_batch_registry_rejects_priority_without_active_batch() -> No
             url="https://www.takealot.com/example/PLID12345678",
             requested_by="Supervisor",
         )
+
+
+def test_collection_batch_status_hides_and_pages_large_task_details() -> None:
+    registry = CollectionBatchRegistry()
+    registry.event(
+        batch_id="batch-large",
+        client_id="client-1",
+        event="start",
+        username="operator.one",
+        display_name="Operator One",
+        completed=0,
+        total=125,
+        pending=125,
+        succeeded=0,
+        failed=0,
+        terminal=0,
+        reason="",
+    )
+    for index in range(120):
+        plid = str(10_000_000 + index)
+        registry.record_outcome(
+            batch_id="batch-large",
+            plid=plid,
+            url=f"https://www.takealot.com/p/PLID{plid}",
+            title=f"Product {index}",
+            message="collected",
+            succeeded=True,
+        )
+    for index in range(5):
+        plid = str(20_000_000 + index)
+        registry.record_outcome(
+            batch_id="batch-large",
+            plid=plid,
+            url=f"https://www.takealot.com/p/PLID{plid}",
+            title=None,
+            message="retry later",
+            succeeded=False,
+        )
+
+    lightweight = registry.status(include_details=False)
+    page = registry.status(
+        include_details=True,
+        result_offset=50,
+        error_offset=2,
+        detail_limit=25,
+    )
+
+    assert lightweight["result_count"] == 120
+    assert lightweight["error_count"] == 5
+    assert lightweight["results"] == []
+    assert lightweight["errors"] == []
+    assert len(page["results"]) == 25
+    assert page["results"][0]["plid"] == "10000050"
+    assert len(page["errors"]) == 3
+    assert page["errors"][0]["plid"] == "20000002"

@@ -13,6 +13,7 @@ from sqlalchemy import (
     Date,
     DateTime,
     ForeignKey,
+    Index,
     Integer,
     Numeric,
     String,
@@ -32,6 +33,15 @@ class CollectionRun(StoreScopedMixin, Base):
     """One collection attempt and its outcome."""
 
     __tablename__ = "collection_runs"
+    __table_args__ = (
+        Index(
+            "ix_collection_runs_store_type_status_scope",
+            "store_code",
+            "run_type",
+            "status",
+            "scope_date",
+        ),
+    )
 
     run_id: Mapped[str] = mapped_column(String(36), primary_key=True)
     run_type: Mapped[str] = mapped_column(String(50), nullable=False)
@@ -47,6 +57,13 @@ class OfferCurrent(StoreScopedMixin, Base):
     """Latest known state for a seller offer."""
 
     __tablename__ = "offer_current"
+    __table_args__ = (
+        Index(
+            "ix_offer_current_store_productline",
+            "store_code",
+            "productline_id",
+        ),
+    )
 
     offer_id: Mapped[str] = mapped_column(String(100), primary_key=True)
     tsin_id: Mapped[str | None] = mapped_column(String(100))
@@ -375,6 +392,12 @@ class StoreOfferObservation(StoreScopedMixin, Base):
             "offer_id",
             name="uq_store_offer_observations_store_time_offer",
         ),
+        Index(
+            "ix_store_offer_observations_store_productline_time",
+            "store_code",
+            "productline_id",
+            "captured_at",
+        ),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -428,6 +451,13 @@ class ReturnItem(StoreScopedMixin, Base):
     """Latest expanded seller-return state keyed by Seller Return ID."""
 
     __tablename__ = "return_items"
+    __table_args__ = (
+        Index(
+            "ix_return_items_store_return_date",
+            "store_code",
+            "return_date",
+        ),
+    )
 
     seller_return_id: Mapped[str] = mapped_column(String(100), primary_key=True)
     order_item_id: Mapped[str | None] = mapped_column(String(100))
@@ -461,6 +491,12 @@ class DailyProductMetric(StoreScopedMixin, Base):
             "metric_date",
             "offer_id",
             name="uq_daily_product_metrics_store_date_offer",
+        ),
+        Index(
+            "ix_daily_product_metrics_store_offer_date",
+            "store_code",
+            "offer_id",
+            "metric_date",
         ),
     )
 

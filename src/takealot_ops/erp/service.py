@@ -55,14 +55,17 @@ def create_read_only_erp_engine(database_url: str) -> Engine:
 def load_erp_dataset(
     settings: DashboardSettings,
     as_of: date,
+    *,
+    engine: Engine | None = None,
 ) -> DashboardDataset:
     """Load the canonical dashboard dataset without creating a database."""
     database_path = sqlite_database_path(settings.database_url)
     if database_path is not None and not database_path.exists():
         return EMPTY_DATASET
-    engine = create_read_only_erp_engine(settings.database_url)
+    owned_engine = engine is None
+    read_engine = engine or create_read_only_erp_engine(settings.database_url)
     try:
-        with Session(engine) as session:
+        with Session(read_engine) as session:
             service = MetricService(
                 Repository(session),
                 anomaly_rules_path=settings.project_root / "config" / "anomaly_rules.yaml",
@@ -74,7 +77,8 @@ def load_erp_dataset(
     except SQLAlchemyError:
         return EMPTY_DATASET
     finally:
-        engine.dispose()
+        if owned_engine:
+            read_engine.dispose()
 
 
 _QUADRANT_METRIC_COLUMNS = (
@@ -112,6 +116,184 @@ _QUADRANT_HISTORY_COLUMNS = (
     "captured_at",
     "total_stock",
 )
+_PRODUCT_LIST_OFFER_COLUMNS = (
+    "offer_id",
+    "title",
+    "sku",
+    "tsin_id",
+    "barcode",
+    "selling_price",
+    "rrp",
+    "status",
+    "image_url",
+    "productline_id",
+)
+_PRODUCT_DETAIL_OFFER_COLUMNS = (
+    "offer_id",
+    "tsin_id",
+    "sku",
+    "barcode",
+    "title",
+    "selling_price",
+    "rrp",
+    "benchmark_price",
+    "status",
+    "image_url",
+    "productline_id",
+    "conversion_percentage_30_days",
+    "conversion_percentage_previous_30_days",
+    "page_views_30_days",
+    "quantity_returned_30_days",
+    "total_wishlist",
+    "wishlist_30_days",
+    "listing_quality",
+    "discount_percentage",
+    "created_at",
+    "updated_at",
+    "captured_at",
+    "total_stock",
+    "takealot_available_stock",
+    "seller_available_stock",
+    "takealot_stock_in_receiving",
+    "takealot_stock_on_way",
+)
+
+
+def load_product_list_dataset(
+    settings: DashboardSettings,
+    as_of: date,
+    *,
+    engine: Engine | None = None,
+) -> DashboardDataset:
+    """Load only the latest metric and identity rows required by the product list."""
+    database_path = sqlite_database_path(settings.database_url)
+    if database_path is not None and not database_path.exists():
+        return EMPTY_DATASET
+
+    owned_engine = engine is None
+    read_engine = engine or create_read_only_erp_engine(settings.database_url)
+    try:
+        with Session(read_engine) as session:
+            latest_metric_scope = session.scalar(
+                select(func.max(DailyProductMetric.metric_date)).where(
+                    DailyProductMetric.metric_date <= as_of
+                )
+            )
+            metric_rows = (
+                session.execute(
+                    select(
+                        *(
+                            getattr(DailyProductMetric, column)
+                            for column in _QUADRANT_METRIC_COLUMNS
+                        )
+                    )
+                    .where(DailyProductMetric.metric_date == latest_metric_scope)
+                    .order_by(DailyProductMetric.offer_id)
+                ).all()
+                if latest_metric_scope is not None
+                else []
+            )
+            latest_offer_scope = _latest_offer_scope_date(session, as_of)
+            offer_rows = (
+                session.execute(
+                    select(
+                        *(
+                            getattr(OfferSnapshot, column)
+                            for column in _PRODUCT_LIST_OFFER_COLUMNS
+                        )
+                    )
+                    .where(OfferSnapshot.snapshot_date == latest_offer_scope)
+                    .order_by(OfferSnapshot.offer_id)
+                ).all()
+                if latest_offer_scope is not None
+                else []
+            )
+    except SQLAlchemyError:
+        return EMPTY_DATASET
+    finally:
+        if owned_engine:
+            read_engine.dispose()
+
+    return DashboardDataset(
+        store_daily=pd.DataFrame(),
+        product_daily=_query_rows_frame(metric_rows, _QUADRANT_METRIC_COLUMNS),
+        offer_current=_query_rows_frame(offer_rows, _PRODUCT_LIST_OFFER_COLUMNS),
+        anomalies=pd.DataFrame(),
+        quality_events=pd.DataFrame(),
+    )
+
+
+def load_product_detail_dataset(
+    settings: DashboardSettings,
+    as_of: date,
+    offer_id: str,
+    *,
+    engine: Engine | None = None,
+) -> DashboardDataset:
+    """Load one offer's metric history and as-of identity for product detail."""
+    database_path = sqlite_database_path(settings.database_url)
+    if database_path is not None and not database_path.exists():
+        return EMPTY_DATASET
+
+    owned_engine = engine is None
+    read_engine = engine or create_read_only_erp_engine(settings.database_url)
+    try:
+        with Session(read_engine) as session:
+            metric_rows = session.execute(
+                select(
+                    *(
+                        getattr(DailyProductMetric, column)
+                        for column in _QUADRANT_METRIC_COLUMNS
+                    )
+                )
+                .where(
+                    DailyProductMetric.offer_id == offer_id,
+                    DailyProductMetric.metric_date <= as_of,
+                )
+                .order_by(DailyProductMetric.metric_date)
+            ).all()
+            latest_offer_scope = _latest_offer_scope_date(session, as_of)
+            offer_rows = (
+                session.execute(
+                    select(
+                        *(
+                            getattr(OfferSnapshot, column)
+                            for column in _PRODUCT_DETAIL_OFFER_COLUMNS
+                        )
+                    )
+                    .where(
+                        OfferSnapshot.snapshot_date == latest_offer_scope,
+                        OfferSnapshot.offer_id == offer_id,
+                    )
+                    .order_by(OfferSnapshot.offer_id)
+                ).all()
+                if latest_offer_scope is not None
+                else []
+            )
+    except SQLAlchemyError:
+        return EMPTY_DATASET
+    finally:
+        if owned_engine:
+            read_engine.dispose()
+
+    return DashboardDataset(
+        store_daily=pd.DataFrame(),
+        product_daily=_query_rows_frame(metric_rows, _QUADRANT_METRIC_COLUMNS),
+        offer_current=_query_rows_frame(offer_rows, _PRODUCT_DETAIL_OFFER_COLUMNS),
+        anomalies=pd.DataFrame(),
+        quality_events=pd.DataFrame(),
+    )
+
+
+def _latest_offer_scope_date(session: Session, as_of: date) -> date | None:
+    return session.scalar(
+        select(func.max(CollectionRun.scope_date)).where(
+            CollectionRun.run_type == "offers",
+            CollectionRun.status == "success",
+            CollectionRun.scope_date.is_not(None),
+            CollectionRun.scope_date <= as_of,
+        )
+    )
 
 
 def load_quadrant_dataset(
@@ -136,14 +318,7 @@ def load_quadrant_dataset(
                 .where(DailyProductMetric.metric_date <= as_of)
                 .order_by(DailyProductMetric.metric_date, DailyProductMetric.offer_id)
             ).all()
-            latest_scope_date = session.scalar(
-                select(func.max(CollectionRun.scope_date)).where(
-                    CollectionRun.run_type == "offers",
-                    CollectionRun.status == "success",
-                    CollectionRun.scope_date.is_not(None),
-                    CollectionRun.scope_date <= as_of,
-                )
-            )
+            latest_scope_date = _latest_offer_scope_date(session, as_of)
             offer_rows = (
                 session.execute(
                     select(

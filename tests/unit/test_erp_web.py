@@ -300,12 +300,14 @@ def test_competitor_detail_requests_only_the_selected_plid(
     assert sales_calls[0]["plid"] == "101163999"
     assert sales_calls[0]["own_store_codes"] == {"current"}
     assert isinstance(sales_calls[0]["through"], date)
+    assert sales_calls[0]["engine"] is app.state.read_engine
     assert traffic_calls == [
         {
             "plid": "101163999",
             "own_store_codes": {"current"},
             "start_date": date(2026, 8, 1),
             "end_date": date(2026, 8, 14),
+            "engine": app.state.read_engine,
         }
     ]
     assert return_calls == [
@@ -314,6 +316,7 @@ def test_competitor_detail_requests_only_the_selected_plid(
             "own_store_codes": {"current"},
             "start_date": date(2026, 8, 1),
             "end_date": date(2026, 8, 14),
+            "engine": app.state.read_engine,
         }
     ]
     assert len(profitability_calls) == 1
@@ -322,6 +325,7 @@ def test_competitor_detail_requests_only_the_selected_plid(
     assert profitability_calls[0]["rate_service"] is app.state.cny_zar_rate_service
     assert isinstance(profitability_calls[0]["cost_as_of"], date)
     assert isinstance(profitability_calls[0]["fee_window_end"], date)
+    assert profitability_calls[0]["engine"] is app.state.read_engine
 
 
 def test_returns_route_exposes_detail_and_collection_coverage(
@@ -1717,7 +1721,8 @@ def test_store_summary_compares_only_accessible_connected_stores(
         loaded_single_store_codes: list[str] = []
         loaded_store_scopes: list[tuple[str, ...]] = []
 
-        def fake_load_dataset(_settings, _as_of):
+        def fake_load_dataset(_settings, _as_of, *, engine=None):
+            assert engine is not None
             store_code = current_store_code()
             loaded_single_store_codes.append(store_code)
             return store_code
@@ -3829,12 +3834,14 @@ def test_competitor_personal_watchlist_is_account_scoped_and_viewer_editable(
         assert selection_client.get(
             "/api/competitors/personal-watchlist"
         ).json()["items"] == []
+        cache_generation = app.state.read_projection_cache.generation
         duplicate = selection_client.post(
             "/api/competitors/targets",
             headers={"X-CSRF-Token": selection_csrf},
             json={"url": target_url},
         )
         assert duplicate.status_code == 409
+        assert app.state.read_projection_cache.generation == cache_generation + 1
         assert [
             item["plid"]
             for item in selection_client.get(
@@ -4884,7 +4891,8 @@ def test_products_all_store_scope_reads_every_authorized_connected_store(
 
     loaded_store_codes: list[str] = []
 
-    def fake_load_dataset(_settings, _as_of):
+    def fake_load_dataset(_settings, _as_of, *, engine=None):
+        assert engine is not None
         store_code = current_store_code()
         loaded_store_codes.append(store_code)
         return store_code
@@ -4905,7 +4913,7 @@ def test_products_all_store_scope_reads_every_authorized_connected_store(
         }
 
     monkeypatch.setattr(
-        "takealot_ops.erp.web.load_erp_dataset",
+        "takealot_ops.erp.web.load_product_list_dataset",
         fake_load_dataset,
     )
     monkeypatch.setattr(
@@ -4961,8 +4969,8 @@ def test_product_detail_converts_rmb_cost_with_the_latest_reference_rate(
         f"sqlite:///{database_path.as_posix()}",
     )
     monkeypatch.setattr(
-        "takealot_ops.erp.web.load_erp_dataset",
-        lambda _settings, _as_of: object(),
+        "takealot_ops.erp.web.load_product_detail_dataset",
+        lambda _settings, _as_of, _offer_id, *, engine=None: object(),
     )
     monkeypatch.setattr(
         "takealot_ops.erp.web.build_product_detail_payload",
@@ -5164,3 +5172,30 @@ def test_all_store_platform_warehouse_is_aggregated_but_read_only() -> None:
     assert payload["portal"]["authenticated"] is False
     assert "必须先切换到明确单店" in payload["capability"]["message"]
     assert payload["platform_snapshot_synced_at"] == "2026-08-17T01:00:00+00:00"
+def test_frontend_shell_revalidates_while_hashed_assets_are_immutable(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    database_path = tmp_path / "asset-cache.db"
+    monkeypatch.setenv(
+        "TAKEALOT_DATABASE_URL",
+        f"sqlite:///{database_path.as_posix()}",
+    )
+    frontend_dist = tmp_path / "frontend" / "competitor" / "dist"
+    assets = frontend_dist / "assets"
+    assets.mkdir(parents=True)
+    (frontend_dist / "index.html").write_text(
+        '<!doctype html><script src="/assets/index-contenthash.js"></script>',
+        encoding="utf-8",
+    )
+    (assets / "index-contenthash.js").write_text("export {};", encoding="utf-8")
+
+    app = create_app(tmp_path)
+    with TestClient(app, client=("127.0.0.1", 50000)) as client:
+        shell = client.get("/")
+        asset = client.get("/assets/index-contenthash.js")
+
+    assert shell.status_code == 200
+    assert shell.headers["cache-control"] == "no-cache"
+    assert asset.status_code == 200
+    assert asset.headers["cache-control"] == "public, max-age=31536000, immutable"

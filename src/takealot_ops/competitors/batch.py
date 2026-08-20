@@ -7,7 +7,7 @@ import json
 import logging
 from collections import OrderedDict
 from collections.abc import Awaitable, Callable
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
@@ -74,10 +74,22 @@ class CollectionBatchRegistry:
         self._journal_path = journal_path
         self._journal = self._load_journal()
 
-    def status(self) -> dict[str, object]:
+    def status(
+        self,
+        *,
+        include_details: bool = True,
+        result_offset: int = 0,
+        error_offset: int = 0,
+        detail_limit: int | None = None,
+    ) -> dict[str, object]:
         with self._lock:
             self._expire_if_abandoned()
-            return asdict(self._state)
+            return self._status_payload(
+                include_details=include_details,
+                result_offset=result_offset,
+                error_offset=error_offset,
+                detail_limit=detail_limit,
+            )
 
     def stop(self, *, batch_id: str, reason: str) -> dict[str, object]:
         """Stop either a page-owned or scheduled batch without changing counters."""
@@ -352,6 +364,7 @@ class CollectionBatchRegistry:
         source: str = "manual",
         results: list[dict[str, object]] | None = None,
         errors: list[dict[str, str]] | None = None,
+        include_details: bool = True,
     ) -> dict[str, object]:
         with self._lock:
             self._expire_if_abandoned()
@@ -458,7 +471,45 @@ class CollectionBatchRegistry:
                     self._clear_journal()
                 else:
                     self._persist_journal()
-            return asdict(self._state)
+            return self._status_payload(include_details=include_details)
+
+    def _status_payload(
+        self,
+        *,
+        include_details: bool,
+        result_offset: int = 0,
+        error_offset: int = 0,
+        detail_limit: int | None = None,
+    ) -> dict[str, object]:
+        """Return a bounded wire projection without copying hidden task history."""
+        result_count = len(self._state.results)
+        error_count = len(self._state.errors)
+        if include_details:
+            if detail_limit is None:
+                results = self._state.results
+                errors = self._state.errors
+            else:
+                safe_limit = max(0, detail_limit)
+                safe_result_offset = max(0, result_offset)
+                safe_error_offset = max(0, error_offset)
+                results = self._state.results[
+                    safe_result_offset : safe_result_offset + safe_limit
+                ]
+                errors = self._state.errors[
+                    safe_error_offset : safe_error_offset + safe_limit
+                ]
+        else:
+            results = []
+            errors = []
+        projected = replace(
+            self._state,
+            results=results,
+            errors=errors,
+        )
+        payload = asdict(projected)
+        payload["result_count"] = result_count
+        payload["error_count"] = error_count
+        return payload
 
     def start_link(
         self,

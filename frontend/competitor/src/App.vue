@@ -1,5 +1,15 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import {
+  computed,
+  defineAsyncComponent,
+  defineComponent,
+  h,
+  onBeforeUnmount,
+  onMounted,
+  ref,
+  type Component,
+  watch,
+} from "vue";
 
 import {
   AUTH_SESSION_ENDING_EVENT,
@@ -14,17 +24,7 @@ import {
   setAuthSession,
   type RefreshStatus,
 } from "./api";
-import AnomalyProductsPage from "./pages/AnomalyProductsPage.vue";
-import CompetitorsPage from "./pages/CompetitorsPage.vue";
 import LoginPage from "./pages/LoginPage.vue";
-import LogisticsPage from "./pages/LogisticsPage.vue";
-import KeywordTrafficPage from "./pages/KeywordTrafficPage.vue";
-import SearchRankingPage from "./pages/SearchRankingPage.vue";
-import OverviewPage from "./pages/OverviewPage.vue";
-import ProductsPage from "./pages/ProductsPage.vue";
-import QuadrantsPage from "./pages/QuadrantsPage.vue";
-import ReturnsPage from "./pages/ReturnsPage.vue";
-import UsersPage from "./pages/UsersPage.vue";
 import {
   competitorDetailPageHref,
   competitorDetailPlidFromHash,
@@ -61,6 +61,58 @@ import type {
 import type { PermissionKey } from "./types";
 
 type PageKey = ErpModuleKey;
+
+const ModuleLoading = defineComponent({
+  name: "ModuleLoading",
+  setup: () => () =>
+    h(
+      "div",
+      {
+        class: "module-load-state",
+        role: "status",
+        "aria-live": "polite",
+      },
+      [
+        h("span", { class: "module-load-spinner", "aria-hidden": "true" }),
+        h("div", [
+          h("strong", "正在打开当前模块…"),
+          h("small", "页面会先加载当前需要的数据。"),
+        ]),
+      ],
+    ),
+});
+const ModuleLoadError = defineComponent({
+  name: "ModuleLoadError",
+  setup: () => () =>
+    h(
+      "div",
+      { class: "module-load-state error", role: "alert" },
+      [
+        h("div", [
+          h("strong", "模块资源暂时无法打开"),
+          h("small", "请刷新页面重试；当前数据没有被修改。"),
+        ]),
+      ],
+    ),
+});
+const lazyPage = (loader: () => Promise<{ default: Component }>) =>
+  defineAsyncComponent({
+    loader,
+    loadingComponent: ModuleLoading,
+    errorComponent: ModuleLoadError,
+    delay: 80,
+    timeout: 30_000,
+  });
+const OverviewPage = lazyPage(() => import("./pages/OverviewPage.vue"));
+const ProductsPage = lazyPage(() => import("./pages/ProductsPage.vue"));
+const KeywordTrafficPage = lazyPage(() => import("./pages/KeywordTrafficPage.vue"));
+const SearchRankingPage = lazyPage(() => import("./pages/SearchRankingPage.vue"));
+const QuadrantsPage = lazyPage(() => import("./pages/QuadrantsPage.vue"));
+const AnomalyProductsPage = lazyPage(() => import("./pages/AnomalyProductsPage.vue"));
+const ReturnsPage = lazyPage(() => import("./pages/ReturnsPage.vue"));
+const LogisticsPage = lazyPage(() => import("./pages/LogisticsPage.vue"));
+const CompetitorsPage = lazyPage(() => import("./pages/CompetitorsPage.vue"));
+const UsersPage = lazyPage(() => import("./pages/UsersPage.vue"));
 
 const storeScopedPages = new Set<PageKey>([
   "overview",
@@ -802,6 +854,7 @@ function requestCompetitorDetail(plid: string) {
 
 function switchPage(page: PageKey, updateUrl = true) {
   currentPage.value = page;
+  window.scrollTo({ top: 0, left: 0, behavior: "auto" });
   try {
     localStorage.setItem(pageStorageKey, page);
   } catch {

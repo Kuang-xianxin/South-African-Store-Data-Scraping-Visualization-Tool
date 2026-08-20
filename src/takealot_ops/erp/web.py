@@ -178,6 +178,8 @@ from takealot_ops.erp.service import (
     create_read_only_erp_engine,
     frame_records,
     load_erp_dataset,
+    load_product_detail_dataset,
+    load_product_list_dataset,
     load_quadrant_dataset,
     sqlite_database_path,
 )
@@ -1264,6 +1266,21 @@ def create_app(project_root: Path | None = None) -> FastAPI:
     app.state.read_engine = read_engine
     app.state.read_projection_cache = read_projection_cache
 
+    @app.middleware("http")
+    async def cache_fingerprinted_frontend_assets(
+        request: Request,
+        call_next: Callable[[Request], Awaitable[Response]],
+    ) -> Response:
+        response = await call_next(request)
+        if request.method not in {"GET", "HEAD"} or response.status_code != 200:
+            return response
+        path = request.url.path
+        if path.startswith("/assets/"):
+            response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+        elif path in {"/", "/index.html"}:
+            response.headers["Cache-Control"] = "no-cache"
+        return response
+
     def _control_search_ranking_batch(
         request: Request,
         action: Literal["pause", "resume", "retry_failed", "stop"],
@@ -1639,43 +1656,49 @@ def create_app(project_root: Path | None = None) -> FastAPI:
         if start_date is not None and start_date > as_of:
             raise HTTPException(status_code=422, detail="开始日期不能晚于截止日期")
         settings = DashboardSettings.from_env(root)
-        dataset = load_erp_dataset(settings, as_of)
-        payload = (
-            build_summary_payload(dataset, as_of, start_date=start_date)
-            if start_date is not None
-            else build_summary_payload(dataset, as_of)
+        store = request.state.erp_store
+        cache_key = (
+            "store-summary-v2",
+            store.code,
+            as_of.isoformat(),
+            start_date.isoformat() if start_date else None,
         )
-        engine = create_read_only_erp_engine(settings.database_url)
-        try:
-            store = request.state.erp_store
+
+        def load_projection() -> dict[str, Any]:
+            dataset = load_erp_dataset(settings, as_of, engine=read_engine)
+            payload = (
+                build_summary_payload(dataset, as_of, start_date=start_date)
+                if start_date is not None
+                else build_summary_payload(dataset, as_of)
+            )
             try:
                 payload["traffic_series"] = (
                     period_end_traffic_series(
-                        engine,
+                        read_engine,
                         as_of=as_of,
                         days=(as_of - start_date).days + 1,
                     )
                     if start_date is not None
-                    else period_end_traffic_series(engine, as_of=as_of)
+                    else period_end_traffic_series(read_engine, as_of=as_of)
                 )
             except SQLAlchemyError:
                 payload["traffic_series"] = []
             try:
                 payload["operators"] = _responsible_users_by_store(
-                    engine,
+                    read_engine,
                     (store,),
                 ).get(store.code, [])
             except SQLAlchemyError:
                 payload["operators"] = []
-            with Session(engine) as session:
+            with Session(read_engine) as session:
                 payload["top_products"] = enrich_product_master_records(
                     session,
                     payload.get("top_products", []),
                     as_of_date=as_of,
                 )
-        finally:
-            engine.dispose()
-        return payload
+            return payload
+
+        return read_projection_cache.get_or_load(cache_key, load_projection)
 
     @app.get("/api/erp/summary/stores")
     def store_summaries(
@@ -1850,17 +1873,21 @@ def create_app(project_root: Path | None = None) -> FastAPI:
         if start_date is not None and end_date is not None and start_date > end_date:
             raise HTTPException(status_code=422, detail="开始日期不能晚于结束日期")
         stores = _multi_store_identities_for_request(request, selected_store_scope)
-        settings = DashboardSettings.from_env(root)
-        engine = create_read_only_erp_engine(settings.database_url)
-        try:
-            rows = _sales_revenue_revision_rows(
-                engine,
+        cache_key = (
+            "sales-revisions-v2",
+            tuple(store.code for store in stores),
+            start_date.isoformat() if start_date else None,
+            end_date.isoformat() if end_date else None,
+        )
+        rows = read_projection_cache.get_or_load(
+            cache_key,
+            lambda: _sales_revenue_revision_rows(
+                read_engine,
                 stores=stores,
                 start_date=start_date,
                 end_date=end_date,
-            )
-        finally:
-            engine.dispose()
+            ),
+        )
         offset = (page - 1) * page_size
         return {
             "items": rows[offset : offset + page_size],
@@ -1887,33 +1914,51 @@ def create_app(project_root: Path | None = None) -> FastAPI:
     ) -> dict[str, Any]:
         settings = DashboardSettings.from_env(root)
         stores = _read_store_identities_for_request(request, selected_store_scope)
-        items: list[dict[str, Any]] = []
-        metric_dates: dict[str, str | None] = {}
-        for store in stores:
-            with store_scope(store.code):
-                payload = build_products_payload(
-                    load_erp_dataset(settings, as_of),
-                    as_of,
-                )
-            metric_dates[store.code] = payload.get("latest_metric_date")
-            items.extend(_tag_store_records(payload.get("items", []), store))
-        items = _product_master_records(root, items, as_of_date=as_of)
-        items.sort(
-            key=lambda item: (
-                -float(item.get("ordered_units") or 0),
-                -float(item.get("page_views_30_days") or 0),
-                str(item.get("store_name") or "").casefold(),
-                str(item.get("title") or "").casefold(),
-            )
+        cache_key = (
+            "products-v2",
+            tuple(store.code for store in stores),
+            as_of.isoformat(),
         )
-        latest_dates = [value for value in metric_dates.values() if value]
-        return {
-            "latest_metric_date": max(latest_dates) if latest_dates else None,
-            "store_scope": selected_store_scope,
-            "store_count": len(stores),
-            "store_metric_dates": metric_dates,
-            "items": items,
-        }
+
+        def load_projection() -> dict[str, Any]:
+            items: list[dict[str, Any]] = []
+            metric_dates: dict[str, str | None] = {}
+            for store in stores:
+                with store_scope(store.code):
+                    payload = build_products_payload(
+                        load_product_list_dataset(
+                            settings,
+                            as_of,
+                            engine=read_engine,
+                        ),
+                        as_of,
+                    )
+                metric_dates[store.code] = payload.get("latest_metric_date")
+                items.extend(_tag_store_records(payload.get("items", []), store))
+            items = _product_master_records(
+                root,
+                items,
+                as_of_date=as_of,
+                engine=read_engine,
+            )
+            items.sort(
+                key=lambda item: (
+                    -float(item.get("ordered_units") or 0),
+                    -float(item.get("page_views_30_days") or 0),
+                    str(item.get("store_name") or "").casefold(),
+                    str(item.get("title") or "").casefold(),
+                )
+            )
+            latest_dates = [value for value in metric_dates.values() if value]
+            return {
+                "latest_metric_date": max(latest_dates) if latest_dates else None,
+                "store_scope": selected_store_scope,
+                "store_count": len(stores),
+                "store_metric_dates": metric_dates,
+                "items": items,
+            }
+
+        return read_projection_cache.get_or_load(cache_key, load_projection)
 
     @app.get("/api/erp/products/{offer_id}")
     def product_detail(
@@ -1922,30 +1967,49 @@ def create_app(project_root: Path | None = None) -> FastAPI:
         as_of: date = Query(default_factory=date.today),
     ) -> dict[str, Any]:
         settings = DashboardSettings.from_env(root)
-        payload = build_product_detail_payload(
-            load_erp_dataset(settings, as_of),
-            as_of,
-            offer_id,
-        )
-        identity = payload.get("identity")
-        enriched = _product_master_records(
-            root,
-            [identity] if isinstance(identity, Mapping) else [],
-            as_of_date=as_of,
-        )
         store = request.state.erp_store
-        payload["identity"] = (
-            _tag_store_record(enriched[0], store) if enriched else {}
+        cache_key = (
+            "product-detail-v2",
+            store.code,
+            offer_id,
+            as_of.isoformat(),
         )
-        enriched_identity = payload["identity"]
-        payload["cost_conversion"] = product_cost_conversion_payload(
-            enriched_identity.get("cost_rmb")
-            if isinstance(enriched_identity, Mapping)
-            else None,
-            request.app.state.cny_zar_rate_service,
-        )
-        payload["history"] = _tag_store_records(payload.get("history", []), store)
-        return payload
+
+        def load_projection() -> dict[str, Any]:
+            payload = build_product_detail_payload(
+                load_product_detail_dataset(
+                    settings,
+                    as_of,
+                    offer_id,
+                    engine=read_engine,
+                ),
+                as_of,
+                offer_id,
+            )
+            identity = payload.get("identity")
+            enriched = _product_master_records(
+                root,
+                [identity] if isinstance(identity, Mapping) else [],
+                as_of_date=as_of,
+                engine=read_engine,
+            )
+            payload["identity"] = (
+                _tag_store_record(enriched[0], store) if enriched else {}
+            )
+            enriched_identity = payload["identity"]
+            payload["cost_conversion"] = product_cost_conversion_payload(
+                enriched_identity.get("cost_rmb")
+                if isinstance(enriched_identity, Mapping)
+                else None,
+                request.app.state.cny_zar_rate_service,
+            )
+            payload["history"] = _tag_store_records(
+                payload.get("history", []),
+                store,
+            )
+            return payload
+
+        return read_projection_cache.get_or_load(cache_key, load_projection)
 
     @app.get("/api/erp/returns")
     def seller_returns(
@@ -1968,14 +2032,19 @@ def create_app(project_root: Path | None = None) -> FastAPI:
         if selected_start > selected_end:
             raise HTTPException(status_code=422, detail="开始日期不能晚于结束日期")
         stores = _read_store_identities_for_request(request, selected_store_scope)
-        settings = DashboardSettings.from_env(root)
-        engine = create_read_only_erp_engine(settings.database_url)
-        all_rows: list[dict[str, Any]] = []
-        statuses: list[dict[str, Any]] = []
-        counters: list[dict[str, Any]] = []
-        try:
+        cache_key = (
+            "seller-returns-v2",
+            tuple(store.code for store in stores),
+            selected_start.isoformat(),
+            selected_end.isoformat(),
+        )
+
+        def load_projection() -> dict[str, list[dict[str, Any]]]:
+            all_rows: list[dict[str, Any]] = []
+            statuses: list[dict[str, Any]] = []
+            counters: list[dict[str, Any]] = []
             for store in stores:
-                with store_scope(store.code), Session(engine) as session:
+                with store_scope(store.code), Session(read_engine) as session:
                     store_rows = enrich_product_master_records(
                         session,
                         load_store_return_rows(
@@ -2000,8 +2069,16 @@ def create_app(project_root: Path | None = None) -> FastAPI:
                 )
                 statuses.append({**status, "store_code": store.code, "store_name": store.display_name})
                 counters.append({**counter, "store_code": store.code, "store_name": store.display_name})
-        finally:
-            engine.dispose()
+            return {
+                "rows": all_rows,
+                "statuses": statuses,
+                "counters": counters,
+            }
+
+        projection = read_projection_cache.get_or_load(cache_key, load_projection)
+        all_rows = projection["rows"]
+        statuses = projection["statuses"]
+        counters = projection["counters"]
 
         options = return_filter_options(all_rows)
         filtered = filter_return_rows(
@@ -2041,10 +2118,14 @@ def create_app(project_root: Path | None = None) -> FastAPI:
             alias="store_scope",
         ),
     ) -> dict[str, Any]:
-        settings = DashboardSettings.from_env(root)
         stores = _read_store_identities_for_request(request, selected_store_scope)
-        engine = create_read_only_erp_engine(settings.database_url)
-        try:
+        cache_key = (
+            "keyword-traffic-list-v2",
+            tuple(store.code for store in stores),
+            as_of.isoformat(),
+        )
+
+        def load_projection() -> dict[str, Any]:
             items: list[dict[str, Any]] = []
             summary = {
                 "product_count": 0,
@@ -2053,7 +2134,7 @@ def create_app(project_root: Path | None = None) -> FastAPI:
                 "keyword_change_count": 0,
             }
             for store in stores:
-                with store_scope(store.code), Session(engine) as session:
+                with store_scope(store.code), Session(read_engine) as session:
                     payload = build_keyword_product_list(session, as_of=as_of)
                     store_items = enrich_product_master_records(
                         session,
@@ -2071,8 +2152,8 @@ def create_app(project_root: Path | None = None) -> FastAPI:
                 "items": items,
                 "summary": summary,
             }
-        finally:
-            engine.dispose()
+
+        return read_projection_cache.get_or_load(cache_key, load_projection)
 
     @app.get("/api/erp/keyword-traffic/{offer_id}")
     def keyword_traffic_product_detail(
@@ -2082,10 +2163,18 @@ def create_app(project_root: Path | None = None) -> FastAPI:
         history_days: int = Query(90, ge=30, le=365),
         comparison_days: int = Query(7, ge=3, le=30),
     ) -> dict[str, Any]:
-        settings = DashboardSettings.from_env(root)
-        engine = create_read_only_erp_engine(settings.database_url)
-        try:
-            with Session(engine) as session:
+        store = request.state.erp_store
+        cache_key = (
+            "keyword-traffic-detail-v2",
+            store.code,
+            offer_id,
+            as_of.isoformat(),
+            history_days,
+            comparison_days,
+        )
+
+        def load_projection() -> dict[str, Any] | None:
+            with Session(read_engine) as session:
                 payload = build_keyword_product_detail(
                     session,
                     offer_id=offer_id,
@@ -2101,12 +2190,13 @@ def create_app(project_root: Path | None = None) -> FastAPI:
                         as_of_date=as_of,
                     )
                     payload["product"] = (
-                        _tag_store_record(enriched[0], request.state.erp_store)
+                        _tag_store_record(enriched[0], store)
                         if enriched
                         else {}
                     )
-        finally:
-            engine.dispose()
+            return payload
+
+        payload = read_projection_cache.get_or_load(cache_key, load_projection)
         if payload is None:
             raise HTTPException(status_code=404, detail="没有找到对应的店铺商品")
         return payload
@@ -2524,32 +2614,27 @@ def create_app(project_root: Path | None = None) -> FastAPI:
     ) -> dict[str, Any]:
         """Return the new separated anomaly workspace from local evidence only."""
 
-        settings = DashboardSettings.from_env(root)
         stores = _read_store_identities_for_request(request, selected_store_scope)
         completed_through = min(
             as_of,
             sast_date(datetime.now(UTC)) - timedelta(days=1),
         )
-        engine = create_read_only_erp_engine(settings.database_url)
         store_payloads: list[tuple[StoreIdentity, dict[str, Any]]] = []
-        try:
-            for store in stores:
-                with store_scope(store.code), Session(engine) as session:
-                    store_payload = load_cached_anomaly_product_payload(
-                        session,
-                        cache=anomaly_product_cache,
-                        store_code=store.code,
-                        requested_as_of=as_of,
-                        completed_through=completed_through,
-                    )
-                store_payloads.append(
-                    (
-                        store,
-                        store_payload,
-                    )
+        for store in stores:
+            with store_scope(store.code), Session(read_engine) as session:
+                store_payload = load_cached_anomaly_product_payload(
+                    session,
+                    cache=anomaly_product_cache,
+                    store_code=store.code,
+                    requested_as_of=as_of,
+                    completed_through=completed_through,
                 )
-        finally:
-            engine.dispose()
+            store_payloads.append(
+                (
+                    store,
+                    store_payload,
+                )
+            )
         return _aggregate_anomaly_payloads(
             root,
             store_payloads,
@@ -2864,33 +2949,22 @@ def create_app(project_root: Path | None = None) -> FastAPI:
                 status_code=422,
                 detail="数据完整性说明开始日期不能晚于结束日期",
             )
-        settings = DashboardSettings.from_env(root)
-        engine = create_read_only_erp_engine(settings.database_url)
-        try:
-            return daily_report_payload(
-                engine,
-                business_date,
-                capture_start=capture_start,
-                capture_end=capture_end,
-            )
-        finally:
-            engine.dispose()
+        return daily_report_payload(
+            read_engine,
+            business_date,
+            capture_start=capture_start,
+            capture_end=capture_end,
+        )
 
     @app.get("/api/erp/daily-report/events")
     def operations_daily_report_events(request: Request) -> StreamingResponse:
-        settings = DashboardSettings.from_env(root)
-        engine = create_read_only_erp_engine(settings.database_url)
-
         async def stream() -> AsyncIterator[str]:
-            try:
-                async for event in daily_report_event_stream(
-                    engine,
-                    is_disconnected=request.is_disconnected,
-                    business_date=_default_operations_business_date,
-                ):
-                    yield event
-            finally:
-                engine.dispose()
+            async for event in daily_report_event_stream(
+                read_engine,
+                is_disconnected=request.is_disconnected,
+                business_date=_default_operations_business_date,
+            ):
+                yield event
 
         return StreamingResponse(
             stream(),
@@ -2904,12 +2978,7 @@ def create_app(project_root: Path | None = None) -> FastAPI:
 
     @app.get("/api/erp/daily-report/reminders")
     def operations_daily_report_reminders() -> dict[str, Any]:
-        settings = DashboardSettings.from_env(root)
-        engine = create_read_only_erp_engine(settings.database_url)
-        try:
-            return reminder_payload(engine)
-        finally:
-            engine.dispose()
+        return reminder_payload(read_engine)
 
     @app.post("/api/erp/daily-report/{business_date}/{offer_id}/manual")
     def operations_daily_report_manual(
@@ -3132,12 +3201,7 @@ def create_app(project_root: Path | None = None) -> FastAPI:
     def operations_daily_report_export_status(
         through: date = Query(default_factory=_default_operations_business_date),
     ) -> dict[str, Any]:
-        settings = DashboardSettings.from_env(root)
-        engine = create_read_only_erp_engine(settings.database_url)
-        try:
-            unresolved = unresolved_locations(engine, through)
-        finally:
-            engine.dispose()
+        unresolved = unresolved_locations(read_engine, through)
         path = _operations_export_path(root, through)
         return {
             "through": through.isoformat(),
@@ -3358,16 +3422,31 @@ def create_app(project_root: Path | None = None) -> FastAPI:
         require_competitor_admin(request)
         return {"items": load_competitor_link_health(read_engine)}
 
-    @app.get("/api/competitors/batch-status")
-    def competitor_batch_status() -> dict[str, object]:
-        status = collection_registry.status()
+    def _competitor_batch_status_payload(
+        *,
+        include_details: bool = False,
+        result_page: int = 1,
+        error_page: int = 1,
+        page_size: int = 50,
+    ) -> dict[str, object]:
+        status = collection_registry.status(
+            include_details=include_details,
+            result_offset=(result_page - 1) * page_size,
+            error_offset=(error_page - 1) * page_size,
+            detail_limit=page_size if include_details else None,
+        )
         runner_status = (
             scheduled_competitor_runner.status()
             if scheduled_competitor_runner is not None
             else {}
         )
         stopped_checkpoint = (
-            scheduled_competitor_runner.stopped_checkpoint_status()
+            scheduled_competitor_runner.stopped_checkpoint_status(
+                include_details=include_details,
+                result_offset=(result_page - 1) * page_size,
+                error_offset=(error_page - 1) * page_size,
+                detail_limit=page_size if include_details else None,
+            )
             if scheduled_competitor_runner is not None
             else None
         )
@@ -3405,7 +3484,25 @@ def create_app(project_root: Path | None = None) -> FastAPI:
             "pending_retry_round_limit",
             0,
         )
+        status["result_page"] = result_page
+        status["error_page"] = error_page
+        status["detail_page_size"] = page_size
         return status
+
+    @app.get("/api/competitors/batch-status")
+    def competitor_batch_status(
+        include_details: bool = Query(default=False),
+        result_page: int = Query(default=1, ge=1),
+        error_page: int = Query(default=1, ge=1),
+        page_size: int = Query(default=50, ge=10, le=100),
+    ) -> dict[str, object]:
+        """Return lightweight progress by default and bounded task detail on demand."""
+        return _competitor_batch_status_payload(
+            include_details=include_details,
+            result_page=result_page,
+            error_page=error_page,
+            page_size=page_size,
+        )
 
     @app.post("/api/competitors/batch-options")
     def update_competitor_batch_options(
@@ -3415,7 +3512,7 @@ def create_app(project_root: Path | None = None) -> FastAPI:
         require_competitor_batch_controller(request)
         user = request.state.erp_user
         try:
-            status = collection_registry.update_options(
+            collection_registry.update_options(
                 batch_id=payload.batch_id,
                 username=user.username,
                 visible_browser=payload.visible_browser,
@@ -3428,7 +3525,7 @@ def create_app(project_root: Path | None = None) -> FastAPI:
             payload.visible_browser,
             user.username,
         )
-        return {"ok": True, "status": status}
+        return {"ok": True, "status": _competitor_batch_status_payload()}
 
     @app.post("/api/competitors/batch-takeover")
     def takeover_competitor_batch(
@@ -3452,44 +3549,42 @@ def create_app(project_root: Path | None = None) -> FastAPI:
             status.get("current_plid") or "-",
             user.username,
         )
-        return {"ok": True, "ready": ready, "status": status}
+        return {
+            "ok": True,
+            "ready": ready,
+            "status": _competitor_batch_status_payload(),
+        }
 
     @app.get("/api/competitors/targets")
     def competitor_targets() -> dict[str, list[dict[str, object]]]:
-        settings = DashboardSettings.from_env(root)
-        engine = create_read_only_erp_engine(settings.database_url)
-        try:
-            with Session(engine) as session:
-                store_plids = connected_store_plids(session)
-                has_history = (
-                    select(CompetitorSnapshot.id)
-                    .where(CompetitorSnapshot.plid == CompetitorTarget.plid)
-                    .exists()
+        with Session(read_engine) as session:
+            store_plids = connected_store_plids(session)
+            has_history = (
+                select(CompetitorSnapshot.id)
+                .where(CompetitorSnapshot.plid == CompetitorTarget.plid)
+                .exists()
+            )
+            statement = select(
+                CompetitorTarget,
+                has_history.label("has_history"),
+            ).where(CompetitorTarget.active.is_(True))
+            if store_plids:
+                statement = statement.where(CompetitorTarget.plid.not_in(store_plids))
+            target_rows = session.execute(
+                statement.order_by(
+                    CompetitorTarget.created_at.asc(),
+                    CompetitorTarget.plid.asc(),
                 )
-                statement = select(
-                    CompetitorTarget,
-                    has_history.label("has_history"),
-                ).where(CompetitorTarget.active.is_(True))
-                if store_plids:
-                    statement = statement.where(CompetitorTarget.plid.not_in(store_plids))
-                target_rows = session.execute(
-                    statement
-                    .order_by(
-                        CompetitorTarget.created_at.asc(),
-                        CompetitorTarget.plid.asc(),
+            ).all()
+            return {
+                "items": [
+                    _competitor_target_payload(
+                        target,
+                        has_history=bool(target_has_history),
                     )
-                ).all()
-                return {
-                    "items": [
-                        _competitor_target_payload(
-                            target,
-                            has_history=bool(target_has_history),
-                        )
-                        for target, target_has_history in target_rows
-                    ]
-                }
-        finally:
-            engine.dispose()
+                    for target, target_has_history in target_rows
+                ]
+            }
 
     @app.get("/api/competitors/personal-watchlist")
     def competitor_personal_watchlist(
@@ -3497,21 +3592,19 @@ def create_app(project_root: Path | None = None) -> FastAPI:
     ) -> dict[str, object]:
         """Return personal memberships plus owned and explicitly shared libraries."""
         user = request.state.erp_user
-        settings = DashboardSettings.from_env(root)
-        engine = create_read_only_erp_engine(settings.database_url)
-        try:
-            with Session(engine) as session:
-                return _personal_watchlist_payload(
-                    session,
-                    user_id=user.id,
-                    accessible_store_codes={
-                        store.code
-                        for store in user.accessible_stores
-                        if store.active and store.data_connected
-                    },
-                )
-        finally:
-            engine.dispose()
+        accessible_store_codes = tuple(
+            sorted(
+                store.code
+                for store in user.accessible_stores
+                if store.active and store.data_connected
+            )
+        )
+        with Session(read_engine) as session:
+            return _personal_watchlist_payload(
+                session,
+                user_id=user.id,
+                accessible_store_codes=set(accessible_store_codes),
+            )
 
     @app.get("/api/competitors/personal-watchlist/overview")
     def competitor_personal_watchlist_overview(
@@ -3522,30 +3615,42 @@ def create_app(project_root: Path | None = None) -> FastAPI:
         """Hydrate personal-pool cards across every store authorized to the account."""
 
         user = request.state.erp_user
-        with Session(read_engine) as session:
-            plids = _personal_watchlist_projection_plids(
-                session,
-                user_id=user.id,
-            )
-        dataset = _load_competitor_dataset(
-            root,
-            start_date=start_date,
-            end_date=end_date,
-            own_store_codes=_own_store_codes_for_request(request, "all"),
-            plids=plids,
-            include_detail_frames=False,
-            engine=read_engine,
+        own_store_codes = _own_store_codes_for_request(request, "all")
+        cache_key = (
+            "competitor-personal-overview-v2",
+            user.id,
+            tuple(sorted(own_store_codes)),
+            start_date.isoformat() if start_date else None,
+            end_date.isoformat() if end_date else None,
         )
-        return {
-            "items": frame_records(dataset.current),
-            "store_items": _product_master_competitor_store_records(
+
+        def load_projection() -> dict[str, object]:
+            with Session(read_engine) as session:
+                plids = _personal_watchlist_projection_plids(
+                    session,
+                    user_id=user.id,
+                )
+            dataset = _load_competitor_dataset(
                 root,
-                frame_records(dataset.store_current),
+                start_date=start_date,
+                end_date=end_date,
+                own_store_codes=own_store_codes,
+                plids=plids,
+                include_detail_frames=False,
                 engine=read_engine,
-            ),
-            "own_follower_events": [],
-            "date_range": dataset.date_range_payload(),
-        }
+            )
+            return {
+                "items": frame_records(dataset.current),
+                "store_items": _product_master_competitor_store_records(
+                    root,
+                    frame_records(dataset.store_current),
+                    engine=read_engine,
+                ),
+                "own_follower_events": [],
+                "date_range": dataset.date_range_payload(),
+            }
+
+        return read_projection_cache.get_or_load(cache_key, load_projection)
 
     @app.get("/api/competitors/personal-watchlist/share-users")
     def personal_watchlist_share_users(
@@ -3553,22 +3658,17 @@ def create_app(project_root: Path | None = None) -> FastAPI:
     ) -> dict[str, object]:
         """Return the minimal account directory needed to choose share recipients."""
         user = request.state.erp_user
-        settings = DashboardSettings.from_env(root)
-        engine = create_read_only_erp_engine(settings.database_url)
-        try:
-            with Session(engine) as session:
-                accounts = session.scalars(
-                    select(ErpUser)
-                    .where(ErpUser.id != user.id)
-                    .order_by(
-                        ErpUser.active.desc(),
-                        ErpUser.display_name.asc(),
-                        ErpUser.username.asc(),
-                        ErpUser.id.asc(),
-                    )
-                ).all()
-        finally:
-            engine.dispose()
+        with Session(read_engine) as session:
+            accounts = session.scalars(
+                select(ErpUser)
+                .where(ErpUser.id != user.id)
+                .order_by(
+                    ErpUser.active.desc(),
+                    ErpUser.display_name.asc(),
+                    ErpUser.username.asc(),
+                    ErpUser.id.asc(),
+                )
+            ).all()
         return {
             "items": [
                 {
@@ -4376,6 +4476,8 @@ def create_app(project_root: Path | None = None) -> FastAPI:
                         user.username,
                         personal_created,
                     )
+                    if personal_created:
+                        read_projection_cache.clear()
                     raise HTTPException(status_code=409, detail=f"PLID{plid} 已在监控清单中")
                 old_url = target.url if target is not None else None
                 if target is None:
@@ -4514,36 +4616,32 @@ def create_app(project_root: Path | None = None) -> FastAPI:
         user = request.state.erp_user
         source = payload.source if payload is not None else "manual"
         settings = DashboardSettings.from_env(root)
-        engine = create_read_only_erp_engine(settings.database_url)
         is_true_competitor = False
-        try:
-            with Session(engine) as session:
-                target = session.get(CompetitorTarget, plid)
-                if target is not None and target.active:
-                    is_true_competitor = True
-                    url = target.url
-                else:
-                    accessible_store_codes = _own_store_codes_for_request(
-                        request,
-                        "all",
+        with Session(read_engine) as session:
+            target = session.get(CompetitorTarget, plid)
+            if target is not None and target.active:
+                is_true_competitor = True
+                url = target.url
+            else:
+                accessible_store_codes = _own_store_codes_for_request(
+                    request,
+                    "all",
+                )
+                own_store_match = next(
+                    (
+                        row
+                        for row in load_connected_store_offers(session)
+                        if row.store_code in accessible_store_codes
+                        and str(row.offer.productline_id or "").strip() == plid
+                    ),
+                    None,
+                )
+                if own_store_match is None:
+                    raise HTTPException(
+                        status_code=404,
+                        detail=f"PLID{plid} 不在可访问的真正竞品或自有链接中",
                     )
-                    own_store_match = next(
-                        (
-                            row
-                            for row in load_connected_store_offers(session)
-                            if row.store_code in accessible_store_codes
-                            and str(row.offer.productline_id or "").strip() == plid
-                        ),
-                        None,
-                    )
-                    if own_store_match is None:
-                        raise HTTPException(
-                            status_code=404,
-                            detail=f"PLID{plid} 不在可访问的真正竞品或自有链接中",
-                        )
-                    url = f"https://www.takealot.com/p/PLID{plid}"
-        finally:
-            engine.dispose()
+                url = f"https://www.takealot.com/p/PLID{plid}"
 
         try:
             status, accepted = collection_registry.prioritize_target(
@@ -4589,17 +4687,24 @@ def create_app(project_root: Path | None = None) -> FastAPI:
         own_store_scope: Literal["current", "all", "operating"] = Query(default="current"),
     ) -> dict[str, object]:
         """Return private PLIDs for the selected store or authorized all-store view."""
-        settings = DashboardSettings.from_env(root)
-        engine = create_read_only_erp_engine(settings.database_url)
-        try:
-            with Session(engine) as session:
+        accessible_codes = _own_store_codes_for_request(request, "all")
+        selected_codes = _own_store_codes_for_request(request, own_store_scope)
+        cache_key = (
+            "competitor-store-targets-v2",
+            own_store_scope,
+            tuple(sorted(accessible_codes)),
+            tuple(sorted(selected_codes)),
+        )
+
+        def load_projection() -> dict[str, object]:
+            with Session(read_engine) as session:
                 rows = load_connected_store_offers(session)
-            accessible_codes = _own_store_codes_for_request(request, "all")
             accessible_rows = [row for row in rows if row.store_code in accessible_codes]
-            selected_codes = _own_store_codes_for_request(request, own_store_scope)
-            rows = [row for row in accessible_rows if row.store_code in selected_codes]
+            selected_rows = [
+                row for row in accessible_rows if row.store_code in selected_codes
+            ]
             grouped: dict[str, list[ConnectedStoreOffer]] = defaultdict(list)
-            for row in rows:
+            for row in selected_rows:
                 plid = str(row.offer.productline_id or "").strip()
                 if plid:
                     grouped[plid].append(row)
@@ -4627,7 +4732,7 @@ def create_app(project_root: Path | None = None) -> FastAPI:
             }
             selected_memberships = {
                 (row.store_code, str(row.offer.productline_id).strip())
-                for row in rows
+                for row in selected_rows
                 if str(row.offer.productline_id or "").strip()
             }
             accessible_plids = {plid for _, plid in accessible_memberships}
@@ -4640,8 +4745,8 @@ def create_app(project_root: Path | None = None) -> FastAPI:
                 "all_store_unique_count": len(accessible_plids),
                 "all_store_membership_count": len(accessible_memberships),
             }
-        finally:
-            engine.dispose()
+
+        return read_projection_cache.get_or_load(cache_key, load_projection)
 
     @app.get("/api/competitors/target-audits")
     def competitor_target_audits(
@@ -4839,6 +4944,7 @@ def create_app(project_root: Path | None = None) -> FastAPI:
                 plid=plid,
                 own_store_codes=own_store_codes,
                 through=datetime.now(ZoneInfo("Asia/Shanghai")).date(),
+                engine=read_engine,
             )
             if store_item is not None
             else []
@@ -4850,6 +4956,7 @@ def create_app(project_root: Path | None = None) -> FastAPI:
                 own_store_codes=own_store_codes,
                 start_date=start_date,
                 end_date=end_date,
+                engine=read_engine,
             )
             if store_item is not None
             else []
@@ -4861,6 +4968,7 @@ def create_app(project_root: Path | None = None) -> FastAPI:
                 own_store_codes=own_store_codes,
                 start_date=start_date,
                 end_date=end_date,
+                engine=read_engine,
             )
             if store_item is not None
             else _empty_return_payload(
@@ -4885,6 +4993,7 @@ def create_app(project_root: Path | None = None) -> FastAPI:
                     rate_service=request.app.state.cny_zar_rate_service,
                     cost_as_of=datetime.now(ZoneInfo("Asia/Shanghai")).date(),
                     fee_window_end=profit_fee_window_end,
+                    engine=read_engine,
                 )
                 if store_item is not None
                 else empty_own_store_profitability(
@@ -4898,6 +5007,7 @@ def create_app(project_root: Path | None = None) -> FastAPI:
                     root,
                     plid=plid,
                     own_store_codes=inventory_store_codes,
+                    engine=read_engine,
                 )
                 if store_item is not None
                 else {
@@ -5276,7 +5386,7 @@ def create_app(project_root: Path | None = None) -> FastAPI:
             )
         except (CollectionBatchBusyError, ValueError) as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
-        return {"ok": True, "status": competitor_batch_status()}
+        return {"ok": True, "status": _competitor_batch_status_payload()}
 
     @app.post("/api/competitors/collect")
     async def collect_competitor(
@@ -5362,7 +5472,7 @@ def create_app(project_root: Path | None = None) -> FastAPI:
             reason=payload.reason,
             stopped_by=request.state.erp_user.username,
         )
-        return {"ok": True, "status": competitor_batch_status()}
+        return {"ok": True, "status": _competitor_batch_status_payload()}
 
     @app.post("/api/competitors/batch-events")
     async def competitor_batch_event(
@@ -5377,7 +5487,7 @@ def create_app(project_root: Path | None = None) -> FastAPI:
                 reason=payload.reason,
                 stopped_by=user.username,
             )
-            return {"ok": True, "status": competitor_batch_status()}
+            return {"ok": True, "status": _competitor_batch_status_payload()}
         try:
             status = collection_registry.event(
                 batch_id=payload.batch_id,
@@ -5394,6 +5504,7 @@ def create_app(project_root: Path | None = None) -> FastAPI:
                 reason=payload.reason,
                 with_stock_probe=payload.with_stock_probe,
                 visible_browser=payload.visible_browser,
+                include_details=False,
             )
         except CollectionBatchBusyError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
@@ -6919,6 +7030,7 @@ def _load_own_store_returns(
     own_store_codes: set[str],
     start_date: date | None,
     end_date: date | None,
+    engine: Engine | None = None,
 ) -> dict[str, Any]:
     """Load one own PLID's detailed returns without widening store authorization."""
     selected_end = end_date or datetime.now(ZoneInfo("Africa/Johannesburg")).date()
@@ -6937,9 +7049,10 @@ def _load_own_store_returns(
             end_date=selected_end,
             message="本地退货数据库尚未建立。",
         )
-    engine = create_read_only_erp_engine(settings.database_url)
+    owned_engine = engine is None
+    read_engine = engine or create_read_only_erp_engine(settings.database_url)
     try:
-        with Session(engine) as session:
+        with Session(read_engine) as session:
             store_names = {
                 store.code: store.display_name
                 for store in session.scalars(
@@ -6951,7 +7064,7 @@ def _load_own_store_returns(
         counters: list[dict[str, Any]] = []
         for store_code in sorted(own_store_codes):
             store_name = store_names.get(store_code, store_code)
-            with store_scope(store_code), Session(engine) as session:
+            with store_scope(store_code), Session(read_engine) as session:
                 store_rows = enrich_product_master_records(
                     session,
                     load_store_return_rows(
@@ -7011,7 +7124,8 @@ def _load_own_store_returns(
             data_status="unavailable",
         )
     finally:
-        engine.dispose()
+        if owned_engine:
+            read_engine.dispose()
 
 
 def _combined_return_data_status(statuses: Sequence[Mapping[str, Any]]) -> str:
@@ -7097,12 +7211,14 @@ def _load_company_inventory(
     *,
     plid: str,
     own_store_codes: set[str],
+    engine: Engine | None = None,
 ) -> dict[str, Any]:
     settings = DashboardSettings.from_env(project_root)
-    engine = create_read_only_erp_engine(settings.database_url)
+    owned_engine = engine is None
+    read_engine = engine or create_read_only_erp_engine(settings.database_url)
     try:
         return load_company_inventory_for_plid(
-            engine,
+            read_engine,
             plid=plid,
             store_codes=own_store_codes,
         )
@@ -7116,7 +7232,8 @@ def _load_company_inventory(
             "message": "公司 SKU 库存快照暂时不可读。",
         }
     finally:
-        engine.dispose()
+        if owned_engine:
+            read_engine.dispose()
 
 
 def _load_own_store_profitability(
@@ -7127,6 +7244,7 @@ def _load_own_store_profitability(
     rate_service: CnyZarRateService,
     cost_as_of: date,
     fee_window_end: date,
+    engine: Engine | None = None,
 ) -> dict[str, Any]:
     if not own_store_codes:
         return empty_own_store_profitability(
@@ -7142,10 +7260,11 @@ def _load_own_store_profitability(
             fee_window_end=fee_window_end,
             message="本地业务数据库尚不存在，暂不能读取自有 Offer 成本与利润。",
         )
-    engine = create_read_only_erp_engine(settings.database_url)
+    owned_engine = engine is None
+    read_engine = engine or create_read_only_erp_engine(settings.database_url)
     try:
         return load_own_store_profitability_payload(
-            engine,
+            read_engine,
             plid=plid,
             store_codes=own_store_codes,
             rate_service=rate_service,
@@ -7159,7 +7278,8 @@ def _load_own_store_profitability(
             message="自有 Offer 的本地成本或 Seller Sales 费用数据暂时不可读。",
         )
     finally:
-        engine.dispose()
+        if owned_engine:
+            read_engine.dispose()
 
 
 def _load_own_store_sales(
@@ -7168,6 +7288,7 @@ def _load_own_store_sales(
     plid: str,
     own_store_codes: set[str],
     through: date,
+    engine: Engine | None = None,
 ) -> list[dict[str, Any]]:
     if not own_store_codes:
         return []
@@ -7175,9 +7296,10 @@ def _load_own_store_sales(
     path = sqlite_database_path(settings.database_url)
     if path is not None and not path.exists():
         return []
-    engine = create_read_only_erp_engine(settings.database_url)
+    owned_engine = engine is None
+    read_engine = engine or create_read_only_erp_engine(settings.database_url)
     try:
-        with Session(engine) as session:
+        with Session(read_engine) as session:
             return build_own_store_sales_series(
                 session,
                 plid=plid,
@@ -7185,7 +7307,8 @@ def _load_own_store_sales(
                 through=through,
             )
     finally:
-        engine.dispose()
+        if owned_engine:
+            read_engine.dispose()
 
 
 def _load_own_store_traffic(
@@ -7195,6 +7318,7 @@ def _load_own_store_traffic(
     own_store_codes: set[str],
     start_date: date | None,
     end_date: date | None,
+    engine: Engine | None = None,
 ) -> list[dict[str, Any]]:
     if not own_store_codes:
         return []
@@ -7202,9 +7326,10 @@ def _load_own_store_traffic(
     path = sqlite_database_path(settings.database_url)
     if path is not None and not path.exists():
         return []
-    engine = create_read_only_erp_engine(settings.database_url)
+    owned_engine = engine is None
+    read_engine = engine or create_read_only_erp_engine(settings.database_url)
     try:
-        with Session(engine) as session:
+        with Session(read_engine) as session:
             return build_own_store_traffic_series(
                 session,
                 plid=plid,
@@ -7213,7 +7338,8 @@ def _load_own_store_traffic(
                 end_date=end_date,
             )
     finally:
-        engine.dispose()
+        if owned_engine:
+            read_engine.dispose()
 
 
 def _read_store_identities_for_request(

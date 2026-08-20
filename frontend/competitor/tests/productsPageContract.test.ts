@@ -32,3 +32,11 @@ test("product detail API type keeps converted, stale, missing, and unavailable s
     /status: "converted" \| "stale" \| "missing_cost" \| "unavailable";/,
   );
 });
+
+test("large product lists render one bounded page at a time", () => {
+  assert.match(pageSource, /const productPageSize = ref\(50\)/);
+  assert.match(pageSource, /const pagedProducts = computed/);
+  assert.match(pageSource, /v-for="item in pagedProducts"/);
+  assert.match(pageSource, /第 \{\{ productPage \}\} \/ \{\{ productPageCount \}\} 页/);
+  assert.doesNotMatch(pageSource, /v-for="item in filtered"/);
+});

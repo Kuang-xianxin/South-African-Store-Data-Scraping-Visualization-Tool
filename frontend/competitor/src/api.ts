@@ -714,6 +714,11 @@ export interface CompetitorBatchStatus {
     url: string;
     message: string;
   }>;
+  result_count?: number;
+  error_count?: number;
+  result_page?: number;
+  error_page?: number;
+  detail_page_size?: number;
   scheduled_resume_available?: boolean;
   scheduled_resume_pending?: number;
   scheduled_wait_kind?: "network" | "pending_retry" | null;
@@ -775,8 +780,18 @@ export async function logCompetitorBatchEvent(
   return result.status;
 }
 
-export function fetchCompetitorBatchStatus(): Promise<CompetitorBatchStatus> {
-  return request<CompetitorBatchStatus>("/api/competitors/batch-status");
+export function fetchCompetitorBatchStatus(
+  detail?: { resultPage: number; errorPage: number; pageSize: number },
+): Promise<CompetitorBatchStatus> {
+  const query = new URLSearchParams();
+  if (detail) {
+    query.set("include_details", "true");
+    query.set("result_page", String(detail.resultPage));
+    query.set("error_page", String(detail.errorPage));
+    query.set("page_size", String(detail.pageSize));
+  }
+  const suffix = query.size ? `?${query.toString()}` : "";
+  return request<CompetitorBatchStatus>(`/api/competitors/batch-status${suffix}`);
 }
 
 export async function updateCompetitorBatchOptions(

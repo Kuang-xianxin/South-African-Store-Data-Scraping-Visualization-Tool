@@ -339,7 +339,14 @@ class ScheduledCompetitorBatchRunner:
             "pending_retry_round_limit": self._pending_retry_round_limit,
         }
 
-    def stopped_checkpoint_status(self) -> dict[str, object] | None:
+    def stopped_checkpoint_status(
+        self,
+        *,
+        include_details: bool = True,
+        result_offset: int = 0,
+        error_offset: int = 0,
+        detail_limit: int | None = None,
+    ) -> dict[str, object] | None:
         """Project any durable, explicitly resumable scheduled checkpoint."""
         run_status = str(self._state.get("run_status") or "idle")
         batch_id = self._optional_text(self._state.get("batch_id"))
@@ -360,6 +367,8 @@ class ScheduledCompetitorBatchRunner:
                 f"延时自动重试后仍有 {metrics['pending']} 条未解决；"
                 "可由 kxx 继续同一服务端断点"
             )
+        result_count = self._row_count("results")
+        error_count = self._row_count("errors")
         return {
             "active": False,
             "batch_id": batch_id,
@@ -392,8 +401,18 @@ class ScheduledCompetitorBatchRunner:
             "queued_targets": [],
             "priority_targets": [],
             "prioritized_targets": [],
-            "results": self._result_rows(),
-            "errors": self._error_rows(),
+            "result_count": result_count,
+            "error_count": error_count,
+            "results": (
+                self._result_rows(offset=result_offset, limit=detail_limit)
+                if include_details
+                else []
+            ),
+            "errors": (
+                self._error_rows(offset=error_offset, limit=detail_limit)
+                if include_details
+                else []
+            ),
             "stopped_by": stopped_by if stopped else None,
         }
 
@@ -1542,19 +1561,40 @@ class ScheduledCompetitorBatchRunner:
         raw = self._state.get("queue")
         return [dict(item) for item in raw if isinstance(item, dict)] if isinstance(raw, list) else []
 
-    def _result_rows(self) -> list[dict[str, object]]:
+    def _result_rows(
+        self,
+        *,
+        offset: int = 0,
+        limit: int | None = None,
+    ) -> list[dict[str, object]]:
         raw = self._state.get("results")
-        return [dict(item) for item in raw if isinstance(item, dict)] if isinstance(raw, list) else []
+        if not isinstance(raw, list):
+            return []
+        rows = [item for item in raw if isinstance(item, dict)]
+        end = None if limit is None else max(0, offset) + max(0, limit)
+        return [dict(item) for item in rows[max(0, offset):end]]
 
-    def _error_rows(self) -> list[dict[str, str]]:
+    def _error_rows(
+        self,
+        *,
+        offset: int = 0,
+        limit: int | None = None,
+    ) -> list[dict[str, str]]:
         raw = self._state.get("errors")
         if not isinstance(raw, list):
             return []
+        rows = [item for item in raw if isinstance(item, dict)]
+        end = None if limit is None else max(0, offset) + max(0, limit)
         return [
             {str(key): str(value) for key, value in item.items()}
-            for item in raw
-            if isinstance(item, dict)
+            for item in rows[max(0, offset):end]
         ]
+
+    def _row_count(self, key: str) -> int:
+        raw = self._state.get(key)
+        if not isinstance(raw, list):
+            return 0
+        return sum(1 for item in raw if isinstance(item, dict))
 
     def _index_set(self, key: str) -> set[int]:
         raw = self._state.get(key)

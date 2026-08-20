@@ -344,6 +344,7 @@ const collectionClientKey = "takealot-competitor-client-v1";
 const collectionClientChannelName = "takealot-competitor-client-claims-v1";
 const collectionCheckpointVersion = 9;
 const automaticResumeDelayMs = 10 * 60 * 1_000;
+const collectionDetailPageSize = 50;
 const competitorEntryOptions = [
   { value: "product", label: "商品链接" },
   { value: "seller", label: "店铺链接" },
@@ -617,6 +618,11 @@ const sharedBatchStatus = ref<CompetitorBatchStatus>({
   prioritized_targets: [],
   results: [],
   errors: [],
+  result_count: 0,
+  error_count: 0,
+  result_page: 1,
+  error_page: 1,
+  detail_page_size: collectionDetailPageSize,
   scheduled_resume_available: false,
   scheduled_resume_pending: 0,
   scheduled_wait_kind: null,
@@ -624,6 +630,11 @@ const sharedBatchStatus = ref<CompetitorBatchStatus>({
   scheduled_retry_round: 0,
   scheduled_retry_round_limit: 0,
 });
+const collectionDetailsOpen = ref(false);
+const collectionDetailsLoading = ref(false);
+const collectionDetailsError = ref("");
+const collectionResultPage = ref(1);
+const collectionErrorPage = ref(1);
 const linkHealth = ref<CompetitorLinkHealthItem[]>([]);
 const linkHealthOpen = ref(false);
 const pageError = ref("");
@@ -1615,6 +1626,58 @@ const displayedCollectionErrors = computed(() =>
     ? sharedBatchStatus.value.errors
     : collectionErrors.value,
 );
+const displayedCollectionResultCount = computed(() =>
+  sharedBatchDetailsAreAuthoritative.value
+    ? (sharedBatchStatus.value.result_count ?? sharedBatchStatus.value.results.length)
+    : collectionResults.value.length,
+);
+const displayedCollectionErrorCount = computed(() =>
+  sharedBatchDetailsAreAuthoritative.value
+    ? (sharedBatchStatus.value.error_count ?? sharedBatchStatus.value.errors.length)
+    : collectionErrors.value.length,
+);
+const collectionResultPageCount = computed(() =>
+  Math.max(
+    1,
+    Math.ceil(displayedCollectionResultCount.value / collectionDetailPageSize),
+  ),
+);
+const collectionErrorPageCount = computed(() =>
+  Math.max(
+    1,
+    Math.ceil(displayedCollectionErrorCount.value / collectionDetailPageSize),
+  ),
+);
+const visibleDisplayedCollectionResults = computed(() => {
+  if (sharedBatchDetailsAreAuthoritative.value) {
+    return displayedCollectionResults.value;
+  }
+  const start = (collectionResultPage.value - 1) * collectionDetailPageSize;
+  return displayedCollectionResults.value.slice(
+    start,
+    start + collectionDetailPageSize,
+  );
+});
+const visibleDisplayedCollectionErrors = computed(() => {
+  if (sharedBatchDetailsAreAuthoritative.value) {
+    return displayedCollectionErrors.value;
+  }
+  const start = (collectionErrorPage.value - 1) * collectionDetailPageSize;
+  return displayedCollectionErrors.value.slice(
+    start,
+    start + collectionDetailPageSize,
+  );
+});
+watch(collectionResultPageCount, (pageCount) => {
+  if (collectionResultPage.value > pageCount) {
+    collectionResultPage.value = pageCount;
+  }
+});
+watch(collectionErrorPageCount, (pageCount) => {
+  if (collectionErrorPage.value > pageCount) {
+    collectionErrorPage.value = pageCount;
+  }
+});
 const hasDisplayedBatchProgress = computed(
   () =>
     sharedBatchStatus.value.active
@@ -1703,8 +1766,8 @@ const displayedBatchPending = computed(() =>
 const showCollectionDetails = computed(
   () =>
     Boolean(
-      displayedCollectionResults.value.length
-      || displayedCollectionErrors.value.length,
+      displayedCollectionResultCount.value
+      || displayedCollectionErrorCount.value,
     ),
 );
 const activeCollectionStatus = computed(() => {
@@ -2844,9 +2907,27 @@ async function loadOwnStoreScope(): Promise<void> {
   }
 }
 
-async function loadSharedBatchStatus() {
+async function loadSharedBatchStatus(
+  includeDetails = collectionDetailsOpen.value,
+) {
+  if (includeDetails) {
+    collectionDetailsLoading.value = true;
+    collectionDetailsError.value = "";
+  }
   try {
-    const status = await fetchCompetitorBatchStatus();
+    const status = await fetchCompetitorBatchStatus(
+      includeDetails
+        ? {
+            resultPage: collectionResultPage.value,
+            errorPage: collectionErrorPage.value,
+            pageSize: collectionDetailPageSize,
+          }
+        : undefined,
+    );
+    if (status.batch_id !== sharedBatchStatus.value.batch_id) {
+      collectionResultPage.value = 1;
+      collectionErrorPage.value = 1;
+    }
     sharedBatchStatus.value = status;
     suspendLoadedCollectionCheckpoint(status);
     if (
@@ -2877,8 +2958,42 @@ async function loadSharedBatchStatus() {
       adoptableCheckpoint.value = checkpoint;
     }
     mergeQueuedTargetsIntoLocalBatch(status);
-  } catch {
+  } catch (error) {
+    if (includeDetails) {
+      collectionDetailsError.value =
+        error instanceof Error ? error.message : "读取任务明细失败";
+    }
     // Keep the last shared progress during a short local-service interruption.
+  } finally {
+    if (includeDetails) collectionDetailsLoading.value = false;
+  }
+}
+
+async function handleCollectionDetailsToggle(event: Event) {
+  const open = (event.currentTarget as HTMLDetailsElement).open;
+  collectionDetailsOpen.value = open;
+  if (open && sharedBatchDetailsAreAuthoritative.value) {
+    await loadSharedBatchStatus(true);
+  }
+}
+
+async function changeCollectionDetailPage(
+  kind: "result" | "error",
+  page: number,
+) {
+  if (kind === "result") {
+    collectionResultPage.value = Math.min(
+      collectionResultPageCount.value,
+      Math.max(1, page),
+    );
+  } else {
+    collectionErrorPage.value = Math.min(
+      collectionErrorPageCount.value,
+      Math.max(1, page),
+    );
+  }
+  if (sharedBatchDetailsAreAuthoritative.value) {
+    await loadSharedBatchStatus(true);
   }
 }
 
@@ -2895,10 +3010,14 @@ async function loadTargets() {
         return payload;
       },
     );
+    const storeTargetPayloadRequest = fetchCompetitorStoreTargets(requestScope);
+    const allStoreTargetPayloadRequest = requestScope === "all"
+      ? storeTargetPayloadRequest
+      : fetchCompetitorStoreTargets("all");
     const [loadedTargets, storeTargetPayload, allStoreTargetPayload] = await Promise.all([
       fetchCompetitorTargets(),
-      fetchCompetitorStoreTargets(requestScope),
-      fetchCompetitorStoreTargets("all"),
+      storeTargetPayloadRequest,
+      allStoreTargetPayloadRequest,
       personalWatchlistPayloadRequest,
     ]);
     if (requestId !== targetsRequestId) return;
@@ -7539,31 +7658,35 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
         </span>
       </div>
       <details
-        v-if="
-          showCollectionDetails
-          && (displayedCollectionResults.length || displayedCollectionErrors.length)
-        "
+        v-if="showCollectionDetails"
         class="collection-task-detail collection-task-detail-panel"
+        @toggle="handleCollectionDetailsToggle"
       >
         <summary>
           <span>
             <strong>任务爬取详情</strong>
-            <small>成功与待重试任务在同一面板内分组查看</small>
+            <small>展开后按页读取，不影响页面刷新与批次运行</small>
           </span>
-          <b>{{ displayedCollectionResults.length + displayedCollectionErrors.length }}</b>
+          <b>{{ displayedCollectionResultCount + displayedCollectionErrorCount }}</b>
         </summary>
-        <div class="collection-task-detail-groups">
+        <div v-if="collectionDetailsOpen" class="collection-task-detail-groups">
+          <p v-if="collectionDetailsLoading" class="collection-detail-state" role="status">
+            正在读取当前页任务明细…
+          </p>
+          <p v-else-if="collectionDetailsError" class="collection-detail-state error" role="alert">
+            {{ collectionDetailsError }}
+          </p>
           <section
-            v-if="displayedCollectionResults.length"
+            v-if="displayedCollectionResultCount"
             class="collection-task-detail-group success"
           >
             <header>
               <strong>成功任务</strong>
-              <span>{{ displayedCollectionResults.length }} 个</span>
+              <span>{{ displayedCollectionResultCount }} 个</span>
             </header>
             <div class="collection-task-detail-list">
               <article
-                v-for="result in displayedCollectionResults"
+                v-for="result in visibleDisplayedCollectionResults"
                 :key="result.plid"
                 class="collection-task-link-action"
                 tabindex="0"
@@ -7593,18 +7716,44 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
                 <small>{{ result.message }}</small>
               </article>
             </div>
+            <div
+              v-if="collectionResultPageCount > 1"
+              class="compact-pagination collection-detail-pagination"
+            >
+              <button
+                type="button"
+                :disabled="collectionDetailsLoading || collectionResultPage <= 1"
+                @click="changeCollectionDetailPage('result', collectionResultPage - 1)"
+              >
+                上一页
+              </button>
+              <span>
+                第 {{ collectionResultPage }} / {{ collectionResultPageCount }} 页
+                · 每页 {{ collectionDetailPageSize }} 条
+              </span>
+              <button
+                type="button"
+                :disabled="
+                  collectionDetailsLoading
+                  || collectionResultPage >= collectionResultPageCount
+                "
+                @click="changeCollectionDetailPage('result', collectionResultPage + 1)"
+              >
+                下一页
+              </button>
+            </div>
           </section>
           <section
-            v-if="displayedCollectionErrors.length"
+            v-if="displayedCollectionErrorCount"
             class="collection-task-detail-group retry"
           >
             <header>
               <strong>待重试任务</strong>
-              <span>{{ displayedCollectionErrors.length }} 个</span>
+              <span>{{ displayedCollectionErrorCount }} 个</span>
             </header>
             <div class="collection-task-detail-list">
               <article
-                v-for="error in displayedCollectionErrors"
+                v-for="error in visibleDisplayedCollectionErrors"
                 :key="`${error.plid}-${error.message}`"
                 :class="{ 'collection-task-link-action': Boolean(error.plid && error.url) }"
                 :tabindex="error.plid && error.url ? 0 : undefined"
@@ -7630,6 +7779,32 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
                 <span>{{ error.message }}</span>
                 <small v-if="error.plid && error.url">点击可修改队列或发起人工重试</small>
               </article>
+            </div>
+            <div
+              v-if="collectionErrorPageCount > 1"
+              class="compact-pagination collection-detail-pagination"
+            >
+              <button
+                type="button"
+                :disabled="collectionDetailsLoading || collectionErrorPage <= 1"
+                @click="changeCollectionDetailPage('error', collectionErrorPage - 1)"
+              >
+                上一页
+              </button>
+              <span>
+                第 {{ collectionErrorPage }} / {{ collectionErrorPageCount }} 页
+                · 每页 {{ collectionDetailPageSize }} 条
+              </span>
+              <button
+                type="button"
+                :disabled="
+                  collectionDetailsLoading
+                  || collectionErrorPage >= collectionErrorPageCount
+                "
+                @click="changeCollectionDetailPage('error', collectionErrorPage + 1)"
+              >
+                下一页
+              </button>
             </div>
           </section>
         </div>

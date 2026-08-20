@@ -745,6 +745,12 @@ async def test_kxx_explicitly_resumes_stopped_batch_in_frozen_target_order(
         assert projected["completed"] == 3
         assert projected["pending"] == 2
         assert [row["plid"] for row in projected["results"]] == ["91000001"]
+        lightweight = runner.stopped_checkpoint_status(include_details=False)
+        assert lightweight is not None
+        assert lightweight["result_count"] == 1
+        assert lightweight["error_count"] == len(projected["errors"])
+        assert lightweight["results"] == []
+        assert lightweight["errors"] == []
 
         resumed = await runner.resume_stopped(batch_id, resumed_by="kxx")
         assert resumed["active"] is True

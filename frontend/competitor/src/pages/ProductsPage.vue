@@ -25,6 +25,9 @@ const payload = ref<ProductsPayload | null>(null);
 const detail = ref<ProductDetailPayload | null>(null);
 const selectedKey = ref("");
 const query = ref("");
+const productPage = ref(1);
+const productPageSize = ref(50);
+const productPageSizeOptions = [25, 50, 100] as const;
 const loading = ref(true);
 const detailLoading = ref(false);
 const error = ref("");
@@ -53,6 +56,19 @@ const filtered = computed(() => {
     query.value,
   ));
 });
+const productPageCount = computed(() =>
+  Math.max(1, Math.ceil(filtered.value.length / productPageSize.value)),
+);
+const pagedProducts = computed(() => {
+  const start = (productPage.value - 1) * productPageSize.value;
+  return filtered.value.slice(start, start + productPageSize.value);
+});
+const visibleProductStart = computed(() =>
+  filtered.value.length ? (productPage.value - 1) * productPageSize.value + 1 : 0,
+);
+const visibleProductEnd = computed(() =>
+  Math.min(productPage.value * productPageSize.value, filtered.value.length),
+);
 const selected = computed(
   () => payload.value?.items.find((item) => itemKey(item) === selectedKey.value) ?? null,
 );
@@ -76,6 +92,12 @@ watch(
   loadProducts,
   { immediate: true },
 );
+watch([query, productPageSize], () => {
+  productPage.value = 1;
+});
+watch(productPageCount, (pageCount) => {
+  if (productPage.value > pageCount) productPage.value = pageCount;
+});
 watch(detailModalOpen, (open) => {
   document.body.style.overflow = open ? "hidden" : "";
 });
@@ -107,6 +129,7 @@ async function loadProducts() {
       || requestedStoreScope !== (props.storeScope ?? "current")
     ) return;
     payload.value = nextPayload;
+    productPage.value = 1;
     if (
       selectedKey.value &&
       !payload.value.items.some((item) => itemKey(item) === selectedKey.value)
@@ -256,13 +279,25 @@ function salesBarHeight(value: number | null) {
             type="search"
             placeholder="商品名称支持模糊搜索，也可输入平台 SKU、公司 SKU 或条码"
           />
-          <span>{{ filtered.length }} 个商品</span>
+          <div class="product-list-toolbar">
+            <span>
+              显示 {{ visibleProductStart }}–{{ visibleProductEnd }} / {{ filtered.length }} 个商品
+            </span>
+            <label>
+              每页
+              <select v-model.number="productPageSize" aria-label="商品列表每页数量">
+                <option v-for="size in productPageSizeOptions" :key="size" :value="size">
+                  {{ size }} 条
+                </option>
+              </select>
+            </label>
+          </div>
         </div>
         <div v-if="loading" class="state-card slim">正在读取商品……</div>
         <p v-else-if="error" class="state-card error">{{ error }}</p>
         <div v-else class="product-scroll">
           <button
-            v-for="item in filtered"
+            v-for="item in pagedProducts"
             :key="itemKey(item)"
             v-memo="[item, failedImageUrls.has(String(item.image_url ?? '').trim()), selectedKey === itemKey(item)]"
             :class="{ active: selectedKey === itemKey(item) }"
@@ -299,6 +334,23 @@ function salesBarHeight(value: number | null) {
           <p v-if="filtered.length === 0" class="state-card slim">
             没有找到匹配的商品。
           </p>
+        </div>
+        <div v-if="productPageCount > 1" class="compact-pagination product-pagination">
+          <button
+            type="button"
+            :disabled="productPage <= 1"
+            @click="productPage -= 1"
+          >
+            上一页
+          </button>
+          <span>第 {{ productPage }} / {{ productPageCount }} 页</span>
+          <button
+            type="button"
+            :disabled="productPage >= productPageCount"
+            @click="productPage += 1"
+          >
+            下一页
+          </button>
         </div>
       </section>
     </div>

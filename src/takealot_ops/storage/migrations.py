@@ -92,6 +92,7 @@ def create_schema(engine: Engine) -> None:
     """Create the current schema and apply retained in-place upgrades."""
     Base.metadata.create_all(engine)
     _add_store_scope_columns_and_keys(engine)
+    _ensure_read_projection_indexes(engine)
     _add_return_item_detail_columns(engine)
     _add_offer_created_at_columns(engine)
     traffic_columns_added = _add_store_offer_observation_traffic_columns(engine)
@@ -369,6 +370,52 @@ def _add_store_scope_columns_and_keys(engine: Engine) -> None:
             )
             connection.exec_driver_sql(
                 f"ALTER TABLE {table} DROP PRIMARY KEY, ADD PRIMARY KEY ({quoted_columns})"
+            )
+
+
+_READ_PROJECTION_INDEXES: dict[str, tuple[str, tuple[str, ...]]] = {
+    "collection_runs": (
+        "ix_collection_runs_store_type_status_scope",
+        ("store_code", "run_type", "status", "scope_date"),
+    ),
+    "offer_current": (
+        "ix_offer_current_store_productline",
+        ("store_code", "productline_id"),
+    ),
+    "store_offer_observations": (
+        "ix_store_offer_observations_store_productline_time",
+        ("store_code", "productline_id", "captured_at"),
+    ),
+    "return_items": (
+        "ix_return_items_store_return_date",
+        ("store_code", "return_date"),
+    ),
+    "daily_product_metrics": (
+        "ix_daily_product_metrics_store_offer_date",
+        ("store_code", "offer_id", "metric_date"),
+    ),
+}
+
+
+def _ensure_read_projection_indexes(engine: Engine) -> None:
+    """Add composite indexes matching the ERP's store-scoped read paths."""
+    with engine.begin() as connection:
+        preparer = connection.dialect.identifier_preparer
+        for table_name, (index_name, columns) in _READ_PROJECTION_INDEXES.items():
+            schema = inspect(connection)
+            if not schema.has_table(table_name):
+                continue
+            existing_columns = {
+                tuple(index.get("column_names") or ())
+                for index in schema.get_indexes(table_name)
+            }
+            if columns in existing_columns:
+                continue
+            table = preparer.quote(table_name)
+            index = preparer.quote(index_name)
+            quoted_columns = ", ".join(preparer.quote(column) for column in columns)
+            connection.exec_driver_sql(
+                f"CREATE INDEX {index} ON {table} ({quoted_columns})"
             )
 
 
