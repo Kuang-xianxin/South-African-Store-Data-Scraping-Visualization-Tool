@@ -1182,6 +1182,10 @@ class ScheduledCompetitorBatchRunner:
     ) -> None:
         if bool(item.get("deferred_retry")):
             return
+        if attempt.failure_kind == "suspected-invalid":
+            # The invalid-link evidence counter cannot advance again until the
+            # bounded delayed wave, so an inline retry only repeats the same read.
+            return
         queue = self._queue()
         retry_kind: str | None = None
         limit = 0
@@ -1191,7 +1195,6 @@ class ScheduledCompetitorBatchRunner:
         elif attempt.retryable or attempt.failure_kind in {
             "network",
             "validation-uncertain",
-            "suspected-invalid",
         }:
             retry_kind = "automatic"
             limit = 3

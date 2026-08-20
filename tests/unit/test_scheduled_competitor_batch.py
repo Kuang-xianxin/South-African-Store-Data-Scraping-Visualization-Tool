@@ -844,6 +844,71 @@ async def test_tail_failure_waits_and_retries_until_confirmed_invalid(
         await runner.close()
 
 
+async def test_suspected_invalid_skips_inline_retry_until_delayed_wave(
+    tmp_path: Path,
+) -> None:
+    registry = CollectionBatchRegistry()
+    observed_now = [FIXED_NOW]
+    calls: list[str] = []
+    sleeps: list[float] = []
+    suspect_attempts = 0
+
+    async def sleeper(seconds: float) -> None:
+        sleeps.append(seconds)
+        observed_now[0] += timedelta(seconds=seconds)
+        await asyncio.sleep(0)
+
+    async def load_targets() -> list[ScheduledCollectionTarget]:
+        return [
+            ScheduledCollectionTarget(
+                plid,
+                f"https://takealot.com/p/PLID{plid}",
+            )
+            for plid in ("92500001", "92500002", "92500003")
+        ]
+
+    async def collect_target(
+        url: str,
+        *_args,
+    ) -> ScheduledCollectionAttempt:
+        nonlocal suspect_attempts
+        plid = url.rsplit("PLID", 1)[-1]
+        calls.append(plid)
+        if plid == "92500001":
+            suspect_attempts += 1
+            if suspect_attempts == 1:
+                return ScheduledCollectionAttempt(
+                    plid,
+                    None,
+                    "疑似失效，等待间隔复核",
+                    False,
+                    failure_kind="suspected-invalid",
+                    retryable=True,
+                )
+        return ScheduledCollectionAttempt(plid, f"Product {plid}", "采集成功", True)
+
+    runner = _runner(
+        tmp_path,
+        registry=registry,
+        load_targets=load_targets,
+        collect_target=collect_target,
+        clock=lambda: observed_now[0],
+        sleeper=sleeper,
+        pending_retry_delay_seconds=0.02,
+    )
+    try:
+        await runner.trigger()
+        await _wait_for(lambda: runner.status()["run_status"] == "completed")
+
+        assert calls == ["92500001", "92500002", "92500003", "92500001"]
+        assert round(sum(sleeps), 6) == 0.02
+        status = registry.status()
+        assert status["succeeded"] == 3
+        assert status["failed"] == 0
+    finally:
+        await runner.close()
+
+
 async def test_exhausted_delayed_retries_can_continue_same_server_batch(
     tmp_path: Path,
 ) -> None:

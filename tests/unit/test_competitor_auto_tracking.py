@@ -9,6 +9,10 @@ from takealot_ops.competitors.auto_tracking import (
     record_automatic_follower_attempt,
     select_automatic_follower_targets,
 )
+from takealot_ops.competitors.own_store import (
+    connected_store_plids,
+    is_connected_store_plid,
+)
 from takealot_ops.competitors.service import CompetitorCollectionResult
 from takealot_ops.storage.migrations import create_schema
 from takealot_ops.storage.models import (
@@ -106,6 +110,72 @@ def test_automatic_targets_cover_connected_stores_dedupe_and_rotate() -> None:
     # Disabled own Offers still identify PLIDs that must remain in follower monitoring.
     assert {target.plid for target in all_targets} == {"100", "200", "300"}
     assert targets[2].store_codes == ("alpha", "beta")
+
+
+def test_connected_store_plid_queries_keep_exact_store_membership() -> None:
+    engine = create_engine("sqlite:///:memory:")
+    create_schema(engine)
+    now = datetime(2026, 8, 20, 8, tzinfo=UTC)
+    with Session(engine) as session, session.begin():
+        session.add_all(
+            [
+                ErpStore(
+                    code="alpha",
+                    display_name="Alpha",
+                    active=True,
+                    data_connected=True,
+                    created_at=now,
+                    updated_at=now,
+                ),
+                ErpStore(
+                    code="beta",
+                    display_name="Beta",
+                    active=True,
+                    data_connected=True,
+                    created_at=now,
+                    updated_at=now,
+                ),
+                ErpStore(
+                    code="offline",
+                    display_name="Offline",
+                    active=True,
+                    data_connected=False,
+                    created_at=now,
+                    updated_at=now,
+                ),
+                ErpStore(
+                    code="inactive",
+                    display_name="Inactive",
+                    active=False,
+                    data_connected=True,
+                    created_at=now,
+                    updated_at=now,
+                ),
+            ]
+        )
+    for store_code, offer_id, plid in (
+        ("alpha", "alpha-1", "100"),
+        ("beta", "beta-1", " 200 "),
+        ("offline", "offline-1", "300"),
+        ("inactive", "inactive-1", "400"),
+    ):
+        with store_scope(store_code), Session(engine) as session, session.begin():
+            session.add(
+                OfferCurrent(
+                    offer_id=offer_id,
+                    productline_id=plid,
+                    captured_at=now,
+                )
+            )
+
+    with Session(engine) as session:
+        assert connected_store_plids(session) == {"100", "200"}
+        assert is_connected_store_plid(session, "100") is True
+        assert is_connected_store_plid(session, " 200 ") is True
+        assert is_connected_store_plid(session, "300") is False
+        assert is_connected_store_plid(session, "400") is False
+        assert is_connected_store_plid(session, "") is False
+    engine.dispose()
 
 
 def test_automatic_attempt_state_keeps_partial_snapshot_success() -> None:

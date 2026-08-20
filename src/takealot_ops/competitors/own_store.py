@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal
 
-from sqlalchemy import exists, literal, select, union_all
+from sqlalchemy import exists, func, literal, select, union_all
 from sqlalchemy.orm import Session
 
 from takealot_ops.storage.models import (
@@ -209,11 +209,43 @@ def load_connected_store_offer_points(
 
 def connected_store_plids(session: Session) -> set[str]:
     """Return the global deduplicated PLID set for all connected stores."""
+    store_codes = tuple(code for code, _ in _connected_store_catalog(session))
+    if not store_codes:
+        return set()
+    offer_current = OfferCurrent.__table__
+    statement = (
+        select(offer_current.c.productline_id)
+        .where(
+            offer_current.c.store_code.in_(store_codes),
+            offer_current.c.productline_id.is_not(None),
+        )
+        .distinct()
+    )
     return {
-        str(item.offer.productline_id).strip()
-        for item in load_connected_store_offers(session)
-        if str(item.offer.productline_id or "").strip()
+        str(plid).strip()
+        for plid in session.connection().execute(statement).scalars()
+        if str(plid or "").strip()
     }
+
+
+def is_connected_store_plid(session: Session, plid: str) -> bool:
+    """Return exact current own-store membership without loading every Offer row."""
+    normalized_plid = str(plid or "").strip()
+    if not normalized_plid:
+        return False
+    store_codes = tuple(code for code, _ in _connected_store_catalog(session))
+    if not store_codes:
+        return False
+    offer_current = OfferCurrent.__table__
+    statement = (
+        select(offer_current.c.offer_id)
+        .where(
+            offer_current.c.store_code.in_(store_codes),
+            func.trim(offer_current.c.productline_id) == normalized_plid,
+        )
+        .limit(1)
+    )
+    return session.connection().execute(statement).first() is not None
 
 
 def own_store_offer_identity(

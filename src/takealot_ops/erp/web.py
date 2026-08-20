@@ -135,6 +135,7 @@ from takealot_ops.erp.keyword_traffic import (
 from takealot_ops.competitors.own_store import (
     ConnectedStoreOffer,
     connected_store_plids,
+    is_connected_store_plid,
     load_connected_store_offers,
 )
 from takealot_ops.erp.permissions import (
@@ -663,8 +664,8 @@ class _SharedCompetitorPublicClient:
         self,
         *,
         max_uses: int = 25,
-        min_link_delay_seconds: float = 5.0,
-        max_link_delay_seconds: float = 10.0,
+        min_link_delay_seconds: float = 3.0,
+        max_link_delay_seconds: float = 8.0,
     ) -> None:
         if max_uses < 1:
             raise ValueError("max_uses must be at least 1")
@@ -4976,7 +4977,7 @@ def create_app(project_root: Path | None = None) -> FastAPI:
             try:
                 create_schema(engine)
                 with Session(engine) as session:
-                    followers_only = plid in connected_store_plids(session)
+                    followers_only = is_connected_store_plid(session, plid)
                 try:
                     async with competitor_public_client.lease(
                         wait_callback=lambda delay_seconds: report_stage(
@@ -5139,7 +5140,7 @@ def create_app(project_root: Path | None = None) -> FastAPI:
                             CompetitorTarget.plid.asc(),
                         )
                     ).all()
-                    own_targets = sorted(connected_store_plids(session))
+                    own_targets = sorted(own_plids)
                 return [
                     *[
                         ScheduledCollectionTarget(plid=target.plid, url=target.url)

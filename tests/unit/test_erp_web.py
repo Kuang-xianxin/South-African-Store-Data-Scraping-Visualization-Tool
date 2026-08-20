@@ -2785,7 +2785,7 @@ def test_erp_reuses_and_recycles_hidden_competitor_browser(
     assert collector_clients[:3] == [public_clients[0]] * 3
     assert collector_clients[3] is public_clients[1]
     assert [client.close_calls for client in public_clients] == [1, 1]
-    assert link_delays == [7.5, 7.5, 7.5]
+    assert link_delays == [5.5, 5.5, 5.5]
 
 
 def test_collect_returns_locked_when_another_link_is_still_active(
