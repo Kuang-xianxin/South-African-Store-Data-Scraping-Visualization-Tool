@@ -43,8 +43,8 @@ function Import-UserEnvironmentVariableIfMissing {
     }
 }
 
-# Codex or another long-running launcher may predate a Windows user-variable change.
-# Import only the two optional search-model keys, without printing or persisting values.
+# A long-running launcher may predate a Windows user-variable change. Import
+# only the two optional search-model keys, without printing or persisting values.
 Import-UserEnvironmentVariableIfMissing -Name "DASHSCOPE_API_KEY"
 Import-UserEnvironmentVariableIfMissing -Name "ARK_API_KEY"
 

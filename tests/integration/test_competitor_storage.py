@@ -6,6 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from fastapi.testclient import TestClient
+from pandas.testing import assert_frame_equal
 from sqlalchemy import create_engine, event
 from sqlalchemy.orm import Session
 
@@ -100,18 +101,40 @@ def test_store_offer_points_filter_scope_and_skip_observation_duplicates(
             point(StoreOfferObservation, "other-store", "11111111", captured_at)
         )
 
+    statements: list[str] = []
+
+    @event.listens_for(engine, "before_cursor_execute")
+    def record_statement(_conn, _cursor, statement, _params, _context, _many):
+        statements.append(str(statement))
+
     with Session(engine) as session:
         points = load_connected_store_offer_points(
             session,
             plids={"11111111"},
             store_codes={"current"},
         )
+        statements.clear()
+        all_store_points = load_connected_store_offer_points(
+            session,
+            plids={"11111111"},
+            store_codes={"current", "store-02"},
+        )
     engine.dispose()
 
     assert [point.offer_id for point in points] == ["duplicate", "legacy-only"]
-    assert isinstance(points[0], StoreOfferObservation)
-    assert isinstance(points[1], StoreOfferBaseline)
+    assert [point.source_kind for point in points] == ["observation", "baseline"]
     assert {point.store_code for point in points} == {"current"}
+    assert {point.store_code for point in all_store_points} == {
+        "current",
+        "store-02",
+    }
+    point_queries = [
+        statement
+        for statement in statements
+        if "store_offer_observations" in statement
+        and "store_offer_baselines" in statement
+    ]
+    assert len(point_queries) == 1
 
 
 def test_only_default_variant_falls_back_to_snapshot_product_image() -> None:
@@ -464,6 +487,11 @@ def test_competitor_observation_persists_snapshot_and_deduplicated_reviews(
         )
 
     dataset = load_competitor_dataset(engine)
+    true_competitor_list = load_competitor_dataset(
+        engine,
+        include_detail_frames=False,
+        include_store_projection=False,
+    )
     link_health = load_competitor_link_health(engine)
     engine.dispose()
 
@@ -498,6 +526,11 @@ def test_competitor_observation_persists_snapshot_and_deduplicated_reviews(
     assert bool(dataset.current.iloc[0]["库存参考过期"])
     assert dataset.current.iloc[0]["上次成功库存"] == "9"
     assert dataset.current.iloc[0]["上次成功库存时间"] == datetime(2026, 7, 22, 8)
+    assert_frame_equal(true_competitor_list.current, dataset.current)
+    assert true_competitor_list.store_current.empty
+    assert true_competitor_list.history.empty
+    assert true_competitor_list.reviews.empty
+    assert true_competitor_list.variants.empty
     assert link_health[0]["商品"] == "Laser Lipo"
     assert link_health[0]["图片"] == "https://example.invalid/laser-lipo.jpg"
 

@@ -32,6 +32,7 @@ from takealot_ops.search_ranking.service import (
     SearchRankingRuntimeSettings,
     SearchRankingService,
     VisionCallResult,
+    VisionProviderSettings,
     VisionProfile,
     _PacedSearchClient,
     _PublicRequestThrottle,
@@ -61,6 +62,7 @@ from takealot_ops.search_ranking.service import (
     _search_products,
     _semantic_relation_evidence,
     _title_validation,
+    _title_keyword_journey_evidence,
     _title_strategy_keywords,
     _title_matches_terms,
     _title_parameter_candidates,
@@ -86,6 +88,42 @@ from takealot_ops.storage.models import (
     SearchRankingProductFact,
 )
 from takealot_ops.storage.store_context import store_scope
+
+
+def _openai_compatible_runtime(tmp_path: Path) -> SearchRankingRuntimeSettings:
+    """Build the production-shaped Doubao-primary, Qwen-fallback runtime."""
+
+    return SearchRankingRuntimeSettings(
+        project_root=tmp_path,
+        providers=(
+            VisionProviderSettings(
+                name="doubao",
+                display_name="Doubao test",
+                api_key="doubao-test-key",
+                base_url="https://ark.cn-beijing.volces.com/api/v3",
+                model="doubao-seed-2-0-lite-260215",
+                input_price_cny_per_million=0.6,
+                output_price_cny_per_million=3.6,
+            ),
+            VisionProviderSettings(
+                name="qwen",
+                display_name="Qwen test",
+                api_key="qwen-test-key",
+                base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
+                model="qwen3.7-plus",
+                input_price_cny_per_million=2.0,
+                output_price_cny_per_million=8.0,
+            ),
+        ),
+        max_pages=5,
+        max_keywords=14,
+        confidence_threshold=0.68,
+        relevance_threshold=0.60,
+        request_timeout_seconds=60.0,
+        page_delay_seconds=3.0,
+        offer_max_age_hours=36.0,
+        image_max_dimension=640,
+    )
 
 
 class FakeVisionClient:
@@ -130,9 +168,12 @@ class FakeVisionClient:
                     ),
                 ],
                 opportunity_seeds=[
-                    KeywordCandidate(
+                    AdjacentDemandCandidate(
                         phrase="mouse for laptop",
                         rationale="Adjacent laptop-use demand",
+                        buyer_job="control a laptop pointer",
+                        alternative_product_terms=["trackpad", "trackball"],
+                        excluded_product_terms=["laptop sleeve"],
                     )
                 ],
                 exclusions=["keyboard combo"],
@@ -1159,7 +1200,11 @@ class FakeSearchClient:
                 (str(70_000_000 + index), f"Wireless Mouse Laptop {index}") for index in range(2)
             )
             products.extend(
-                (str(75_000_000 + index), f"Laptop Sleeve Style {index}") for index in range(33)
+                (
+                    str(75_000_000 + index),
+                    f"Laptop Trackpad Alternative Model {index}",
+                )
+                for index in range(33)
             )
             return _search_url(keyword), _payload(products, after="", total=640)
         return _search_url(keyword), _payload(
@@ -1199,7 +1244,11 @@ class RankingScenarioSearchClient(FakeSearchClient):
             (str(70_000_000 + index), f"Wireless Mouse Laptop {index}") for index in range(2)
         ]
         products.extend(
-            (str(75_000_000 + index), f"Laptop Sleeve Style {index}") for index in range(34)
+            (
+                str(75_000_000 + index),
+                f"Laptop Trackpad Alternative Model {index}",
+            )
+            for index in range(34)
         )
         products[self.opportunity_rank - 1] = (
             "12345678",
@@ -1303,7 +1352,12 @@ def _opportunity_page(
     ]
     while len(products) < page_size:
         index = len(products)
-        products.append((str(63_000_000 + index), f"Laptop Sleeve Style {index}"))
+        products.append(
+            (
+                str(63_000_000 + index),
+                f"Laptop Trackpad Alternative Model {index}",
+            )
+        )
     if target_rank is not None:
         products[target_rank - 1] = (
             "12345678",
@@ -1378,14 +1432,22 @@ async def test_service_validates_keywords_locates_cursor_page_and_reuses_vision(
     assert accepted["validation_evidence"]["query_source_channel"] == (
         "takealot_root_expansion"
     )
-    assert "model_south_african_direct" in accepted["validation_evidence"]["query_source_channels"]
+    assert "same_product_lexicon_direct" in accepted["validation_evidence"][
+        "query_source_channels"
+    ]
     assert accepted["validation_evidence"]["autocomplete_rank"] == 1
     assert accepted["validation_evidence"]["evaluated_first_page_results"] == 36
     assert accepted["validation_evidence"]["matched_first_page_results"] == 36
     assert second_accepted["relevance_status"] == "accepted"
     assert opportunity["relevance_status"] == "opportunity"
     assert opportunity["validation_evidence"]["autocomplete_rank"] == 1
-    assert opportunity["validation_evidence"]["matched_first_page_results"] == 3
+    assert opportunity["validation_evidence"]["matched_first_page_results"] == 36
+    assert opportunity["validation_evidence"][
+        "semantic_relation_same_product_result_count"
+    ] == 3
+    assert opportunity["validation_evidence"][
+        "semantic_relation_same_demand_result_count"
+    ] == 33
     assert opportunity["validation_evidence"]["evaluated_first_page_results"] == 36
     assert (
         opportunity["validation_evidence"]["direct_competitor_count_excluding_target_first_page"]
@@ -1399,6 +1461,22 @@ async def test_service_validates_keywords_locates_cursor_page_and_reuses_vision(
     assert first["analysis"]["usage"]["total_tokens"] == 200
     assert first["analysis"]["provider"] == "qwen"
     assert first["analysis"]["estimated_cost_cny"] == 0.00088
+    assert first["analysis"]["profile"]["same_product_lexicon"]["entries"] == [
+        {
+            "term": "wireless mouse",
+            "sources": ["fusion_product_type_terms"],
+            "word_count": 2,
+            "direct_query_eligible": True,
+        }
+    ]
+    assert first["analysis"]["profile"]["same_product_lexicon"]["excluded"] == [
+        {
+            "term": "mouse",
+            "source": "fusion_product_type_terms",
+            "word_count": 1,
+            "reason": "outside_2_to_4_words",
+        }
+    ]
     assert first["status"]["operation_scope"] == (
         "manual_single_offer_or_confirmed_serial_batch"
     )
@@ -1408,6 +1486,7 @@ async def test_service_validates_keywords_locates_cursor_page_and_reuses_vision(
     assert first["status"]["root_expansion_raw_suggestions_are_selected"] is False
     assert first["status"]["root_source_priority"] == [
         "human_confirmed_product_fact",
+        "image_title_same_product_lexicon",
         "image_title_first_instinct",
         "title_word_root",
         "result_page_learning",
@@ -1429,9 +1508,11 @@ async def test_service_validates_keywords_locates_cursor_page_and_reuses_vision(
         "max_words": 4,
         "preferred_max_words": 3,
         "min_preferred_count": 4,
+        "source_priority": ["same_product_lexicon", "fusion_keywords"],
     }
     assert first["status"]["query_source_targets"] == {
         "model_south_african_direct": 6,
+        "same_product_lexicon_first": True,
         "takealot_root_expansion": 6,
         "seller_title_complete_phrase_max": 1,
         "root_related_core_total": 6,
@@ -2041,26 +2122,31 @@ async def test_changed_adjacent_title_resamples_only_its_primary_evidence_end_to
     assert FakeVisionClient.calls == 2
 
 
-def test_provider_signature_tracks_the_configured_fallback_chain(
+def test_provider_signature_uses_doubao_then_qwen_and_disables_codex_cli(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("DASHSCOPE_API_KEY", "qwen-secret")
-    monkeypatch.delenv("ARK_API_KEY", raising=False)
-    qwen_only = SearchRankingRuntimeSettings.from_env(tmp_path).provider_signature
-
     monkeypatch.setenv("ARK_API_KEY", "doubao-secret")
-    both = SearchRankingRuntimeSettings.from_env(tmp_path).provider_signature
+    monkeypatch.setenv("TAKEALOT_SEARCH_CODEX_CLI_PATH", str(tmp_path / "codex.exe"))
+    runtime = SearchRankingRuntimeSettings.from_env(tmp_path)
 
-    monkeypatch.delenv("DASHSCOPE_API_KEY", raising=False)
-    doubao_only = SearchRankingRuntimeSettings.from_env(tmp_path).provider_signature
+    assert runtime.provider_signature == (
+        "doubao:doubao-seed-2-0-lite-260215|qwen:qwen3.7-plus"
+    )
+    assert runtime.primary_provider.name == "doubao"
+    assert runtime.primary_provider.model == "doubao-seed-2-0-lite-260215"
+    assert runtime.fallback_provider is not None
+    assert runtime.fallback_provider.name == "qwen"
+    assert runtime.fallback_provider.model == "qwen3.7-plus"
+    assert runtime.codex_cli_path is None
+    assert all(provider.name != "codex_cli" for provider in runtime.providers)
+    assert "secret" not in runtime.provider_signature
 
-    assert qwen_only.startswith("qwen:")
-    assert both.startswith("doubao:")
-    assert "|qwen:" in both
-    assert doubao_only.startswith("doubao:")
-    assert len({qwen_only, both, doubao_only}) == 3
-    assert "secret" not in f"{qwen_only}{both}{doubao_only}"
+    service = SearchRankingService(tmp_path)
+    assert service._vision_client_factory is OpenAICompatibleProductVisionClient
+    assert not hasattr(service, "prepare_model_quota")
+    assert not hasattr(service, "model_quota_status")
 
 
 @pytest.mark.asyncio
@@ -2574,6 +2660,79 @@ def test_title_colour_parameter_never_leads_a_supported_core_phrase() -> None:
     assert suggestion.endswith("Blue")
 
 
+def test_cat_storage_core_and_platform_litter_query_generate_two_title_tactics() -> None:
+    source_title = "Blue Cat Foldable Villa Cat Storage Box With Scratching Pad"
+    storage_result = replace(
+        _observation(
+            "cat storage box",
+            45,
+            validation_evidence={
+                "semantic_relation_grade": "S",
+                "page_validation_status": "completed",
+                "semantic_relation_core_page_qualified": True,
+                "journey_type": "same_product_lexicon_direct",
+            },
+        ),
+        candidate_order=1,
+    )
+    platform_litter_result = replace(
+        _observation(
+            "cat litter box large",
+            4,
+            validation_evidence={
+                "semantic_relation_grade": "S",
+                "page_validation_status": "completed",
+                "semantic_relation_core_page_qualified": True,
+                "semantic_relation_evaluated_result_count": 36,
+                "semantic_relation_same_product_result_count": 31,
+                "semantic_relation_query_same_product_terms": ["cat litter box"],
+                "candidate_provenance": [
+                    {
+                        "candidate_source": "takealot_root_expansion",
+                        "autocomplete_rank": 1,
+                        "journey_type": "platform_root_expansion",
+                        "journey_root": "cat litter box",
+                        "journey_path": ["cat litter box", "cat litter box large"],
+                    }
+                ],
+            },
+        ),
+        candidate_order=2,
+    )
+    observations = [storage_result, platform_litter_result]
+
+    accepted, hot_terms, opportunity = _title_strategy_keywords(
+        observations,
+        source_title,
+    )
+    strategies = _build_title_strategies(
+        source_title=source_title,
+        accepted_keywords=accepted,
+        hot_term_keywords=hot_terms,
+        opportunity_keywords=opportunity,
+        validated_core_keywords=accepted,
+        keyword_journey_evidence=_title_keyword_journey_evidence(
+            observations,
+            source_title=source_title,
+        ),
+    )
+
+    assert accepted[:2] == ["cat storage box", "cat litter box"]
+    assert hot_terms == ["cat litter box"]
+    assert strategies[0]["available"] is True
+    assert strategies[0]["title"] == (
+        "Cat Storage Box With Scratching Pad Foldable Blue"
+    )
+    assert strategies[0]["evidence_keywords"] == ["cat storage box"]
+    assert strategies[1]["available"] is True
+    assert strategies[1]["title"] == (
+        "Cat Litter Box With Scratching Pad Foldable Blue"
+    )
+    assert strategies[1]["evidence_keywords"] == ["cat litter box"]
+    assert "platform_root_expansion" in strategies[1]["evidence"]["journey_types"]
+    assert all(str(strategy["title"] or "").endswith("Blue") for strategy in strategies[:2])
+
+
 def test_page_majority_never_unlocks_an_unsupported_smart_identity_claim() -> None:
     result = _observation(
         "smart cat litter box",
@@ -3007,31 +3166,25 @@ def test_title_keywords_prioritize_known_long_tail_and_diverse_instinct_roots() 
     assert opportunity == []
 
 
-@pytest.mark.parametrize(
-    ("source_title", "accepted_keywords", "hot_term_keywords"),
-    [
-        (
-            "Silent Rechargeable Wireless Gaming Mouse",
-            ["wireless mouse"],
-            ["wireless gaming mouse"],
-        ),
-        (
-            "Silent Wireless Mouse",
-            ["wireless mouse"],
-            ["wireless mouse", "wireless mice"],
-        ),
-    ],
-    ids=["only-one-hot-term", "merged-title-duplicates-core"],
-)
-def test_hot_term_strategy_is_unavailable_without_a_distinct_multi_term_tactic(
-    source_title: str,
-    accepted_keywords: list[str],
-    hot_term_keywords: list[str],
-) -> None:
+def test_one_distinct_platform_term_can_form_a_hot_term_coverage_tactic() -> None:
     strategies = _build_title_strategies(
-        source_title=source_title,
-        accepted_keywords=accepted_keywords,
-        hot_term_keywords=hot_term_keywords,
+        source_title="Silent Rechargeable Wireless Gaming Mouse",
+        accepted_keywords=["wireless mouse"],
+        hot_term_keywords=["wireless gaming mouse"],
+        opportunity_keywords=[],
+    )
+
+    hot = strategies[1]
+    assert hot["strategy"] == "hot_term_coverage"
+    assert hot["available"] is True
+    assert str(hot["title"]).startswith("Wireless Gaming Mouse")
+
+
+def test_hot_term_strategy_is_unavailable_when_merged_title_duplicates_core() -> None:
+    strategies = _build_title_strategies(
+        source_title="Silent Wireless Mouse",
+        accepted_keywords=["wireless mouse"],
+        hot_term_keywords=["wireless mouse", "wireless mice"],
         opportunity_keywords=[],
     )
 
@@ -3692,7 +3845,7 @@ def test_generic_light_modifier_overlap_does_not_cross_certify_wrong_type() -> N
 
 
 @pytest.mark.asyncio
-async def test_core_validation_uses_the_complete_first_page_majority() -> None:
+async def test_core_validation_uses_same_demand_density_not_exact_majority() -> None:
     class FirstPageClient:
         async def fetch_search_first_page(
             self,
@@ -3742,10 +3895,86 @@ async def test_core_validation_uses_the_complete_first_page_majority() -> None:
         page_delay_seconds=0,
     )
 
-    assert observation.relevance_status == "rejected_irrelevant"
+    assert observation.relevance_status == "accepted"
     assert observation.validation_evidence["evaluated_first_page_results"] == 36
     assert observation.validation_evidence["matched_first_page_results"] == 20
+    assert observation.validation_evidence[
+        "semantic_relation_core_density_qualified"
+    ] is True
+    assert observation.validation_evidence[
+        "semantic_relation_core_competitor_ratio"
+    ] == pytest.approx(20 / 36, abs=0.0001)
     assert observation.relevance_score == pytest.approx(20 / 36)
+
+
+@pytest.mark.asyncio
+async def test_core_validation_rejects_four_of_five_exact_results_as_too_narrow() -> None:
+    class TinySupplyClient:
+        async def fetch_search_first_page(
+            self,
+            keyword: str,
+        ) -> tuple[str, dict[str, Any]]:
+            products = [
+                ("12345678", "Blue Villa Cat Storage Box With Scratching Pad"),
+                ("65000001", "Yellow Villa Cat Storage Box With Scratching Pad"),
+                ("65000002", "Foldable Villa Cat Storage Box"),
+                ("65000003", "Two Tier Villa Cat Storage Box"),
+                ("65000004", "Pet Food Storage Container"),
+            ]
+            return _search_url(keyword), _payload(products, after="", total=5)
+
+    profile = VisionProfile(
+        product_name="Foldable cat villa storage box",
+        category="Cat furniture",
+        product_type_terms=["cat storage box"],
+        same_product_aliases=["cat villa"],
+        distinctive_terms=["foldable", "scratching pad"],
+        keywords=[
+            KeywordCandidate(phrase="cat storage box", rationale="Product identity"),
+            KeywordCandidate(phrase="foldable cat villa", rationale="Product form"),
+        ],
+        autocomplete_seeds=[
+            KeywordCandidate(phrase="cat house", rationale="Product root"),
+            KeywordCandidate(phrase="cat villa", rationale="Product root"),
+        ],
+        opportunity_seeds=[
+            KeywordCandidate(phrase="cat furniture", rationale="Adjacent demand")
+        ],
+        exclusions=["pet food container"],
+        confidence=0.94,
+        title_suggestion="Foldable Cat Villa Storage Box With Scratching Pad",
+        title_reason="Image-title identity",
+    )
+
+    observation = await _collect_keyword_observation(
+        TinySupplyClient(),  # type: ignore[arg-type]
+        candidate=SearchKeywordCandidate(
+            phrase="villa cat storage box",
+            rationale="Complete title phrase",
+            candidate_source="seller_title_identity_phrase",
+            intended_strategy="core",
+        ),
+        candidate_order=1,
+        target_plid="12345678",
+        profile=profile,
+        max_pages=1,
+        relevance_threshold=0.60,
+        page_delay_seconds=0,
+        source_title="Blue Villa Cat Storage Box With Scratching Pad",
+    )
+
+    evidence = observation.validation_evidence
+    assert observation.total_num_found == 5
+    assert observation.relevance_status == "rejected_irrelevant"
+    assert evidence["semantic_relation_grade"] == "C/I"
+    assert evidence["semantic_relation_decision"] == (
+        "insufficient_platform_supply_for_core_keyword"
+    )
+    assert evidence["semantic_relation_same_product_result_count"] == 4
+    assert evidence["semantic_relation_same_product_ratio"] == pytest.approx(0.8)
+    assert evidence["semantic_relation_platform_supply_qualified"] is False
+    assert evidence["semantic_relation_core_min_platform_results"] == 36
+    assert evidence["platform_result_count_is_search_volume"] is False
 
 
 @pytest.mark.asyncio
@@ -3810,6 +4039,13 @@ async def test_same_type_validation_treats_floodlight_as_flood_light() -> None:
     assert observation.relevance_score == 1.0
     assert observation.validation_evidence["matched_first_page_results"] == 36
     assert observation.validation_evidence["page_validation_status"] == "completed"
+    assert observation.validation_evidence["captured_request_qsearch"] == (
+        "colour changing outdoor led floodlight"
+    )
+    assert observation.validation_evidence["captured_request_matches_keyword"] is True
+    assert observation.validation_evidence["captured_request_endpoint"] == (
+        "https://api.takealot.com/rest/v-1-18-0/searches/products,filters"
+    )
 
 
 def _opportunity_profile() -> VisionProfile:
@@ -3899,6 +4135,106 @@ def test_fusion_profile_requires_most_direct_queries_to_be_at_most_three_words()
         FusionVisionProfile.model_validate(payload)
 
 
+def test_fusion_payload_safely_filters_long_queries_and_generic_aliases() -> None:
+    payload = _fusion_ready_profile().model_dump(mode="json")
+    payload["product_type_terms"] = [
+        "wireless mouse",
+        "optical mouse",
+        "computer mouse",
+    ]
+    payload["same_product_aliases"] = ["device", "gaming mouse"]
+    payload["keywords"][0]["phrase"] = "wireless rechargeable gaming mouse for laptop"
+
+    normalized, audit = search_ranking_service._normalize_fusion_payload(payload)
+    profile = FusionVisionProfile.model_validate(normalized)
+
+    assert "wireless rechargeable gaming mouse for laptop" not in {
+        item.phrase for item in profile.keywords
+    }
+    assert "wireless mouse" in {item.phrase for item in profile.keywords}
+    assert "device" not in profile.same_product_aliases
+    assert profile.same_product_aliases == ["gaming mouse", "wireless mouse"]
+    assert audit["applied"] is True
+    assert audit["keywords_removed"][0]["reason"] == "outside_2_to_4_words"
+    assert audit["same_product_aliases_removed"] == [
+        {"phrase": "device", "reason": "generic_one_word_identity"}
+    ]
+    assert all(
+        2 <= len(search_ranking_service.TOKEN_PATTERN.findall(item.phrase.casefold())) <= 4
+        for item in profile.keywords
+    )
+
+
+def test_provider_fusion_validation_applies_safe_query_normalization_first() -> None:
+    payload = _fusion_ready_profile().model_dump(mode="json")
+    payload["product_type_terms"] = [
+        "wireless mouse",
+        "optical mouse",
+        "computer mouse",
+    ]
+    payload["same_product_aliases"] = ["gaming mouse", "office mouse"]
+    payload["keywords"] = [
+        {
+            **item,
+            "phrase": f"wireless mouse office model{index}",
+        }
+        for index, item in enumerate(payload["keywords"])
+    ]
+    body = {
+        "choices": [
+            {
+                "message": {
+                    "tool_calls": [
+                        {
+                            "function": {
+                                "name": "submit_takealot_fused_search_profile",
+                                "arguments": json.dumps(payload),
+                            }
+                        }
+                    ]
+                }
+            }
+        ]
+    }
+
+    profile = _validated_chat_profile(
+        body,
+        function_name="submit_takealot_fused_search_profile",
+        profile_type=FusionVisionProfile,
+    )
+
+    assert {
+        "wireless mouse",
+        "optical mouse",
+        "computer mouse",
+        "gaming mouse",
+    }.issubset({item.phrase for item in profile.keywords})
+    assert sum(
+        len(search_ranking_service.TOKEN_PATTERN.findall(item.phrase.casefold())) <= 3
+        for item in profile.keywords
+    ) >= 4
+
+
+def test_fusion_payload_still_fails_when_no_safe_identity_can_repair_it() -> None:
+    payload = _fusion_ready_profile().model_dump(mode="json")
+    payload["product_name"] = "Light"
+    payload["product_type_terms"] = ["light"]
+    payload["same_product_aliases"] = ["device", "light"]
+    payload["keywords"] = [
+        {
+            **item,
+            "phrase": f"orange red therapy body light model{index}",
+        }
+        for index, item in enumerate(payload["keywords"])
+    ]
+
+    normalized, audit = search_ranking_service._normalize_fusion_payload(payload)
+
+    assert audit["applied"] is True
+    with pytest.raises(ValueError):
+        FusionVisionProfile.model_validate(normalized)
+
+
 def test_historical_long_model_queries_fall_back_to_concise_identity_terms() -> None:
     profile = VisionProfile(
         product_name="Cream Enclosed Cat Litter Box With Scratcher Top",
@@ -3940,16 +4276,144 @@ def test_historical_long_model_queries_fall_back_to_concise_identity_terms() -> 
     assert [item.phrase for item in candidates[:6]] == [
         "enclosed litter box",
         "cat toilet cabinet",
-        "hooded litter station",
         "litter tray with scratcher",
         "multi functional cat house",
+        "hooded litter station",
         "covered cat tray",
     ]
     assert all(
         2 <= len(search_ranking_service.TOKEN_PATTERN.findall(item.phrase.casefold())) <= 4
         for item in candidates
     )
-    assert all(item.journey_type == "concise_direct" for item in candidates)
+    assert all(item.journey_type == "same_product_lexicon_direct" for item in candidates)
+
+
+def test_same_product_lexicon_prioritizes_identity_terms_and_confirmed_facts() -> None:
+    model_profile = VisionProfile(
+        product_name="Foldable cat storage box",
+        category="Cat litter boxes",
+        product_type_terms=["cat storage box", "enclosed litter box", "box"],
+        same_product_aliases=["covered cat tray"],
+        distinctive_terms=["foldable"],
+        keywords=[
+            KeywordCandidate(phrase="foldable cat villa", rationale="Feature-led query"),
+            KeywordCandidate(phrase="cat toilet furniture", rationale="Broader query"),
+        ],
+        autocomplete_seeds=[
+            KeywordCandidate(phrase="cat box", rationale="Shopper root"),
+            KeywordCandidate(phrase="litter tray", rationale="Alias root"),
+        ],
+        opportunity_seeds=[KeywordCandidate(phrase="cat privacy", rationale="Adjacent use")],
+        exclusions=["storage container"],
+        confidence=0.94,
+        title_suggestion="Cat Storage Box Foldable",
+        title_reason="Image-title identity",
+    )
+    facts = [
+        {
+            "fact_type": "product_type",
+            "fact_term": "cat toilet cabinet",
+            "source_type": "manual_confirmation",
+        },
+        {
+            "fact_type": "construction",
+            "fact_term": "foldable litter box",
+            "source_type": "manual_confirmation",
+        },
+        {
+            "fact_type": "material",
+            "fact_term": "blue plastic",
+            "source_type": "manual_confirmation",
+        },
+    ]
+    enriched = _enrich_profile_with_confirmed_facts(model_profile, facts)
+
+    lexicon = search_ranking_service._same_product_lexicon(
+        enriched,
+        model_profile=model_profile,
+        confirmed_fact_records=facts,
+    )
+    candidates = _precise_candidates(
+        enriched,
+        same_product_lexicon=lexicon,
+    )
+
+    assert [entry["term"] for entry in lexicon["entries"]] == [
+        "cat toilet cabinet",
+        "foldable litter box",
+        "cat storage box",
+        "covered cat tray",
+    ]
+    assert lexicon["entries"][0]["sources"] == ["human_confirmed_product_fact"]
+    assert "blue plastic" not in {entry["term"] for entry in lexicon["entries"]}
+    assert [item.phrase for item in candidates[:4]] == [
+        "cat toilet cabinet",
+        "foldable litter box",
+        "cat storage box",
+        "covered cat tray",
+    ]
+    assert all(item.candidate_source == "same_product_lexicon" for item in candidates[:4])
+    assert candidates[4].phrase == "foldable cat villa"
+    assert {
+        (entry["term"], entry["reason"])
+        for entry in lexicon["excluded"]
+    } == {
+        ("box", "outside_2_to_4_words"),
+        ("enclosed litter box", "broad_identity_head_without_title_or_primary_shape"),
+    }
+
+
+def test_cat_storage_title_identity_leads_lexicon_and_drops_broad_model_terms() -> None:
+    profile = VisionProfile(
+        product_name="Foldable cat villa storage unit",
+        category="Cat furniture",
+        product_type_terms=["cat house", "enclosed cat bed", "cat furniture unit"],
+        same_product_aliases=[
+            "cat condo",
+            "kitty house",
+            "cat playhouse",
+            "feline furniture",
+        ],
+        distinctive_terms=["foldable", "scratching pad"],
+        keywords=[
+            KeywordCandidate(phrase="foldable cat villa", rationale="Product form"),
+            KeywordCandidate(phrase="cat house scratcher", rationale="Feature form"),
+        ],
+        autocomplete_seeds=[
+            KeywordCandidate(phrase="cat house", rationale="Product root"),
+            KeywordCandidate(phrase="cat villa", rationale="Marketplace root"),
+        ],
+        opportunity_seeds=[
+            KeywordCandidate(phrase="cat hideaway", rationale="Adjacent need")
+        ],
+        exclusions=["litter box enclosure", "cat tree", "pet carrier"],
+        confidence=0.94,
+        title_suggestion="Cat Foldable Villa Storage Box With Scratching Pad",
+        title_reason="Image-title identity",
+    )
+
+    lexicon = search_ranking_service._same_product_lexicon(
+        profile,
+        source_title=(
+            "Blue Cat Foldable Villa Cat Storage Box With Scratching Pad"
+        ),
+    )
+
+    assert lexicon["entries"][0] == {
+        "term": "cat storage box",
+        "sources": ["seller_title_identity_phrase"],
+        "word_count": 3,
+        "direct_query_eligible": True,
+    }
+    assert "cat furniture unit" not in {
+        entry["term"] for entry in lexicon["entries"]
+    }
+    assert "feline furniture" not in {
+        entry["term"] for entry in lexicon["entries"]
+    }
+    assert {
+        entry["term"] for entry in lexicon["excluded"]
+    }.issuperset({"cat furniture unit", "feline furniture"})
 
 
 @pytest.mark.parametrize(
@@ -4082,7 +4546,7 @@ def test_semantic_relation_recognizes_multiple_s_grade_paths(
         first_page_titles=[
             "Corduroy Foldable Lazy Sofa Chair",
             "Navy Floor Chair For Living Room",
-            "Compressed Sofa Lounge Seat",
+            "Compact Floor Sofa Lounge Seat",
             "Unrelated Home Decor",
         ],
         profile=profile,
@@ -4095,7 +4559,7 @@ def test_semantic_relation_recognizes_multiple_s_grade_paths(
     assert evidence["semantic_relation_source_priority_decides_grade"] is False
 
 
-def test_semantic_relation_recognizes_s_from_first_page_same_product_majority() -> None:
+def test_semantic_relation_does_not_grant_s_without_query_product_identity() -> None:
     titles = [
         *(f"Foldable Lazy Sofa Chair Model {index}" for index in range(24)),
         *(f"Compact Living Room Decor {index}" for index in range(12)),
@@ -4108,10 +4572,140 @@ def test_semantic_relation_recognizes_s_from_first_page_same_product_majority() 
         core_threshold=0.60,
     )
 
-    assert evidence["semantic_relation_grade"] == "S"
-    assert evidence["semantic_relation_decision"] == "first_page_same_product_majority"
+    assert evidence["semantic_relation_grade"] == "C/I"
+    assert evidence["semantic_relation_decision"] == (
+        "no_verified_same_product_or_adjacent_buyer_job"
+    )
     assert evidence["semantic_relation_query_same_product_terms"] == []
     assert evidence["semantic_relation_same_product_result_count"] == 24
+
+
+def test_cat_storage_page_audit_separates_exact_and_same_demand_competitors() -> None:
+    profile = VisionProfile(
+        product_name="Foldable cat villa storage unit",
+        category="Cat furniture",
+        product_type_terms=["cat house", "enclosed cat bed", "cat furniture unit"],
+        same_product_aliases=[
+            "cat condo",
+            "kitty house",
+            "cat playhouse",
+            "feline furniture",
+        ],
+        same_demand_product_terms=[
+            "cat litter box",
+            "cat tree",
+            "cat cage",
+            "enclosed cat toilet",
+        ],
+        distinctive_terms=["foldable", "scratching pad"],
+        keywords=[
+            KeywordCandidate(phrase="foldable cat villa", rationale="Product form"),
+            KeywordCandidate(phrase="cat house scratcher", rationale="Feature form"),
+        ],
+        autocomplete_seeds=[
+            KeywordCandidate(phrase="cat house", rationale="Product root"),
+            KeywordCandidate(phrase="cat villa", rationale="Marketplace root"),
+        ],
+        opportunity_seeds=[
+            KeywordCandidate(phrase="cat hideaway", rationale="Adjacent need")
+        ],
+        exclusions=[
+            "open cat bed",
+            "carpeted cat tree",
+            "wooden cat house",
+            "fabric cat tent",
+            "dog crate",
+            "litter box enclosure",
+        ],
+        confidence=0.94,
+        title_suggestion="Cat Foldable Villa Storage Box With Scratching Pad",
+        title_reason="Image-title identity",
+    )
+    filler_titles = [
+        "Covered Cat Litter Box Furniture Cabinet",
+        "Cat Tree Scratching Post Tower",
+        "Pet Food Storage Container With Scoop",
+        "Pet Carrier Travel Crate",
+    ]
+    products = [
+        {
+            "plid": str(90_000_000 + index),
+            "title": filler_titles[index % len(filler_titles)],
+            "subtitle": "Different pet product family",
+            "url": f"https://www.takealot.com/example/PLID{90_000_000 + index}",
+            "image_url": f"https://media.takealot.com/example-{index}.jpg",
+        }
+        for index in range(36)
+    ]
+    products[0] = {
+        **products[0],
+        "plid": "102111270",
+        "title": "Blue Cat Foldable Villa Cat Storage Box With Scratching Pad",
+    }
+    products[1] = {
+        **products[1],
+        "title": (
+            "Cat Foldable Villa Cat Storage Box Litter Box Enclosure"
+        ),
+    }
+    products[16] = {
+        **products[16],
+        "title": "Nala Cat Foldable Villa- Rex",
+    }
+    products[18] = {
+        **products[18],
+        "title": "Nala Cat Foldable Treat Storage Box - Rex",
+    }
+    products[23] = {
+        **products[23],
+        "title": "Yellow Cat Foldable Villa Cat Storage Box With Scratching Pad",
+    }
+
+    evidence = _semantic_relation_evidence(
+        keyword="cat storage box",
+        first_page_titles=[item["title"] for item in products],
+        first_page_products=products,
+        profile=profile,
+        candidate=SearchKeywordCandidate(
+            phrase="cat storage box",
+            rationale="Title-supported same-product identity",
+            candidate_source="same_product_lexicon",
+            intended_strategy="core",
+        ),
+        core_threshold=0.60,
+        source_title=(
+            "Blue Cat Foldable Villa Cat Storage Box With Scratching Pad"
+        ),
+        target_plid="102111270",
+        total_num_found=1401,
+    )
+
+    audit = evidence["first_page_result_classifications"]
+    assert evidence["semantic_relation_grade"] == "S"
+    assert evidence["semantic_relation_decision"] == (
+        "first_page_same_demand_competitor_density"
+    )
+    assert evidence["semantic_relation_evaluated_result_count"] == 36
+    assert evidence["semantic_relation_same_product_result_count"] == 3
+    assert evidence["semantic_relation_same_demand_result_count"] == 16
+    assert evidence["semantic_relation_core_competitor_result_count"] == 19
+    assert evidence["semantic_relation_same_product_ratio"] == pytest.approx(3 / 36, abs=0.0001)
+    assert evidence["semantic_relation_core_competitor_ratio"] == pytest.approx(
+        19 / 36,
+        abs=0.0001,
+    )
+    assert evidence["semantic_relation_platform_total_num_found"] == 1401
+    assert evidence["semantic_relation_platform_supply_qualified"] is True
+    assert sum(
+        item["is_direct_competitor"] and not item["is_target"] for item in audit
+    ) == 2
+    assert audit[0]["reason"] == "target_product"
+    assert audit[1]["reason"] == "same_product_identity_with_different_form"
+    assert audit[1]["classification"] == "same_demand_competitor"
+    assert audit[16]["reason"] == "source_title_identity_signature"
+    assert audit[18]["reason"] == "identity_tokens_scattered_not_direct_proof"
+    assert audit[23]["reason"] == "source_title_identity_signature"
+    assert "cat storage box" in evidence["source_title_identity_signatures"]
 
 
 @pytest.mark.parametrize(
@@ -4256,7 +4850,7 @@ async def test_a_grade_is_independent_from_platform_blue_ocean_gate(
 
 
 @pytest.mark.asyncio
-async def test_title_lazy_sofa_is_s_blue_ocean_when_model_alias_omits_it() -> None:
+async def test_title_lazy_sofa_is_not_s_when_page_lacks_same_product_majority() -> None:
     products = [
         (str(84_000_000 + index), f"Lazy Susan Kitchen Turntable {index}")
         for index in range(36)
@@ -4281,9 +4875,9 @@ async def test_title_lazy_sofa_is_s_blue_ocean_when_model_alias_omits_it() -> No
         source_title="Corduroy Lazy Sofa Chair Foldable",
     )
 
-    assert observation.validation_evidence["semantic_relation_grade"] == "S"
+    assert observation.validation_evidence["semantic_relation_grade"] == "C/I"
     assert observation.validation_evidence["semantic_relation_decision"] == (
-        "query_is_current_title_product_phrase"
+        "same_demand_competitor_density_below_core_threshold"
     )
     assert observation.validation_evidence["semantic_relation_current_title_alias"] == (
         "lazy sofa"
@@ -4293,8 +4887,8 @@ async def test_title_lazy_sofa_is_s_blue_ocean_when_model_alias_omits_it() -> No
     ]
     assert observation.validation_evidence["semantic_relation_same_product_result_count"] == 2
     assert observation.relevance_score == pytest.approx(2 / 36)
-    assert observation.relevance_status == "opportunity"
-    assert observation.validation_evidence["blue_ocean_qualified"] is True
+    assert observation.relevance_status == "rejected_irrelevant"
+    assert observation.validation_evidence["blue_ocean_qualified"] is False
 
 
 def _opportunity_candidate(
@@ -4395,8 +4989,7 @@ async def test_discovery_reads_complete_roots_without_typing_paths() -> None:
     )
     rgb_candidate = next(item for item in candidates if item.phrase == "rgb light bar")
 
-    assert client.calls[:2] == ["rgb light", "ambient light"]
-    assert "light bars" in client.calls
+    assert client.calls[:3] == ["light bars", "rgb light", "ambient light"]
     assert "gaming lights" in client.calls
     assert len(checks) <= 20
     assert rgb_candidate.candidate_source == "takealot_root_expansion"
@@ -4689,11 +5282,10 @@ async def test_root_sources_follow_operator_priority_and_keep_all_provenance() -
         max_keywords=8,
     )
 
-    assert client.calls == [
-        "compressed sofa",
+    assert client.calls[:2] == ["compressed sofa", "sofa chair"]
+    assert {
         "sofa",
         "lounger",
-        "sofa chair",
         "lazy sofa chair",
         "corduroy lazy sofa chair",
         "corduroy",
@@ -4701,12 +5293,16 @@ async def test_root_sources_follow_operator_priority_and_keep_all_provenance() -
         "chair",
         "reading",
         "lazy sofa",
-    ]
+    }.issubset(client.calls)
     assert checks[0]["root_source"] == "human_confirmed_product_fact"
     assert checks[0]["origin_phrases"] == ["compressed sofa"]
     assert checks[0]["root"] == "compressed sofa"
     sofa_chair_check = next(item for item in checks if item["root"] == "sofa chair")
-    assert sofa_chair_check["seed_sources"] == ["title_word_root", "title_cross_check"]
+    assert sofa_chair_check["seed_sources"] == [
+        "image_title_same_product_lexicon",
+        "title_word_root",
+        "title_cross_check",
+    ]
     lazy_check = next(item for item in checks if item["root"] == "lazy")
     assert lazy_check["expansions"][0]["phrase"] == "lazy sofa"
     assert lazy_check["expansions"][0]["used_as_followup_root"] is True
@@ -5008,6 +5604,9 @@ async def test_human_confirmed_projection_size_uses_one_bounded_query_slot() -> 
     model_direct = [
         item for item in selected if item.candidate_source == "image_title_fused_precise"
     ]
+    lexicon_direct = [
+        item for item in selected if item.candidate_source == "same_product_lexicon"
+    ]
     parameter = [
         item
         for item in selected
@@ -5015,12 +5614,14 @@ async def test_human_confirmed_projection_size_uses_one_bounded_query_slot() -> 
     ]
 
     assert len(selected) <= 10
+    assert [item.phrase for item in lexicon_direct] == [
+        "projection screen",
+        "outdoor movie screen",
+    ]
     assert [item.phrase for item in model_direct] == [
         "portable projection screen",
-        "outdoor movie screen",
         "tripod projector screen",
         "large projection screen",
-        "projection screen",
     ]
     assert [item.phrase for item in parameter] == ["100 inch projection screen"]
     assert parameter[0].candidate_provenance[0]["operator_confirmed"] is True
@@ -5427,6 +6028,10 @@ async def test_blue_ocean_rejects_candidates_without_every_required_signal(
 def test_search_products_accepts_only_unflagged_product_results() -> None:
     payload = _payload([("12345678", "Organic Projection Screen")], after="", total=1)
     organic = payload["sections"]["products"]["results"][0]
+    organic["product_views"]["core"]["subtitle"] = "Portable outdoor screen"
+    organic["product_views"]["gallery"] = {
+        "images": ["https://media.takealot.com/{size}/screen.jpg"]
+    }
     different_type = {
         **organic,
         "type": "sponsored_product_views",
@@ -5445,6 +6050,10 @@ def test_search_products_accepts_only_unflagged_product_results() -> None:
     products, _ = _search_products(payload)
 
     assert [item["plid"] for item in products] == ["12345678"]
+    assert products[0]["subtitle"] == "Portable outdoor screen"
+    assert products[0]["image_url"] == (
+        "https://media.takealot.com/pdpxl/screen.jpg"
+    )
 
 
 @pytest.mark.parametrize(
@@ -6059,6 +6668,13 @@ def test_web_reads_local_status_and_missing_key_never_starts_external_search(
         "pause_after_provider_or_network_error": True,
         "reverse_image_search": False,
         "requires_snapshot_confirmation": True,
+        "primary_provider": "doubao",
+        "primary_model": "doubao-seed-2-0-lite-260215",
+        "fallback_provider": None,
+        "fallback_model": None,
+        "model_fallback_allowed": False,
+        "codex_cli_integration_retained": True,
+        "codex_cli_execution_enabled": False,
         "public_request_min_interval_seconds": 3.0,
         "public_request_max_interval_seconds": 5.0,
     }
@@ -6067,6 +6683,7 @@ def test_web_reads_local_status_and_missing_key_never_starts_external_search(
     assert batch_without_provider.status_code == 409
     assert run.status_code == 503
     assert "DASHSCOPE_API_KEY" in run.json()["detail"]
+    assert "ARK_API_KEY" in run.json()["detail"]
     assert reverse_without_acknowledgements.status_code == 404
     assert reverse_with_false_confirmation.status_code == 404
     assert manual_fact_without_acknowledgements.status_code == 422
@@ -6256,7 +6873,7 @@ async def test_doubao_failure_falls_back_to_qwen_with_forced_schema_tool(
 ) -> None:
     monkeypatch.setenv("DASHSCOPE_API_KEY", "qwen-test-key")
     monkeypatch.setenv("ARK_API_KEY", "doubao-test-key")
-    runtime = SearchRankingRuntimeSettings.from_env(tmp_path)
+    runtime = _openai_compatible_runtime(tmp_path)
     requests: list[tuple[str, dict[str, str], dict[str, Any]]] = []
 
     class FakeAsyncClient:
@@ -6400,7 +7017,7 @@ async def test_semantic_title_identity_avoids_unnecessary_provider_fallback(
 ) -> None:
     monkeypatch.setenv("DASHSCOPE_API_KEY", "qwen-test-key")
     monkeypatch.setenv("ARK_API_KEY", "doubao-test-key")
-    runtime = SearchRankingRuntimeSettings.from_env(tmp_path)
+    runtime = _openai_compatible_runtime(tmp_path)
     client = OpenAICompatibleProductVisionClient(runtime)
     profile = _opportunity_profile().model_copy(
         update={
@@ -6461,7 +7078,7 @@ async def test_large_identity_difference_does_not_trigger_provider_fallback(
 ) -> None:
     monkeypatch.setenv("DASHSCOPE_API_KEY", "qwen-test-key")
     monkeypatch.setenv("ARK_API_KEY", "doubao-test-key")
-    runtime = SearchRankingRuntimeSettings.from_env(tmp_path)
+    runtime = _openai_compatible_runtime(tmp_path)
     mouse_profile = _opportunity_profile()
     chair_profile = mouse_profile.model_copy(update={"product_name": "Dining Chair"})
     lamp_profile = mouse_profile.model_copy(update={"product_name": "Floor Lamp"})
@@ -6541,7 +7158,7 @@ async def test_schema_invalid_200_response_usage_is_included_in_fallback_total(
 ) -> None:
     monkeypatch.setenv("DASHSCOPE_API_KEY", "qwen-test-key")
     monkeypatch.setenv("ARK_API_KEY", "doubao-test-key")
-    runtime = SearchRankingRuntimeSettings.from_env(tmp_path)
+    runtime = _openai_compatible_runtime(tmp_path)
 
     class FakeAsyncClient:
         def __init__(self, **_: Any) -> None:
@@ -6695,7 +7312,11 @@ async def test_all_schema_failures_persist_known_cost_without_creating_cache(
         lambda *_: "data:image/jpeg;base64,AA==",
     )
     monkeypatch.setattr(search_ranking_service.httpx, "AsyncClient", FakeAsyncClient)
-    service = SearchRankingService(tmp_path)
+    service = SearchRankingService(
+        tmp_path,
+        vision_client_factory=OpenAICompatibleProductVisionClient,
+    )
+    service.runtime = _openai_compatible_runtime(tmp_path)
 
     for expected_posts in (2, 4):
         with pytest.raises(SearchRankingProviderError, match="均未返回可用"):
@@ -6712,6 +7333,98 @@ async def test_all_schema_failures_persist_known_cost_without_creating_cache(
         }
         assert detail["latest_attempt"]["estimated_cost_cny"] == pytest.approx(0.00084)
         assert FakeAsyncClient.posts == expected_posts
+
+
+@pytest.mark.asyncio
+async def test_counted_local_validation_failure_persists_usage_and_exact_audit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database_url = f"sqlite:///{(tmp_path / 'counted-validation-failure.db').as_posix()}"
+    monkeypatch.setenv("TAKEALOT_DATABASE_URL", database_url)
+    monkeypatch.setenv("TAKEALOT_SEARCH_PAGE_DELAY_SECONDS", "0")
+    engine = create_engine_for_database_url(database_url)
+    create_schema(engine)
+    with Session(engine) as session, session.begin():
+        session.add(
+            OfferCurrent(
+                offer_id="offer-counted-validation",
+                productline_id="12345678",
+                sku="COUNTED-01",
+                title="Red Light Upgrade Therapy for Body - Orange",
+                image_url="http://media.takealot.com/covers_images/test/s.file",
+                status="buyable",
+                takealot_available_stock=1,
+                captured_at=datetime.now(UTC),
+            )
+        )
+    engine.dispose()
+
+    class CountedFailureVisionClient:
+        def __init__(self, _: SearchRankingRuntimeSettings) -> None:
+            pass
+
+        async def identify(self, **_: Any) -> VisionCallResult:
+            raise search_ranking_service._CountedVisionProviderError(
+                "Codex Terra 图片标题融合结果无法安全校正：keywords：词数不足",
+                usage={
+                    "input_tokens": 320,
+                    "output_tokens": 80,
+                    "total_tokens": 400,
+                },
+                estimated_cost_cny=0.0,
+                provider_attempts=(
+                    {
+                        "provider": "codex_cli",
+                        "status": "local_validation_failed",
+                        "stage": "image_title_fusion",
+                    },
+                ),
+                failure_audit={
+                    "stage": "image_title_fusion",
+                    "summary": "keywords：词数不足",
+                    "validation_errors": [
+                        {
+                            "path": "keywords",
+                            "type": "value_error",
+                            "message": "词数不足",
+                        }
+                    ],
+                    "raw_payload": {"keywords": ["too long query payload"]},
+                },
+            )
+
+    service = SearchRankingService(
+        tmp_path,
+        vision_client_factory=CountedFailureVisionClient,
+    )
+    service.runtime = _openai_compatible_runtime(tmp_path)
+
+    with pytest.raises(SearchRankingProviderError, match="词数不足"):
+        await service.analyze_offer("offer-counted-validation")
+
+    detail = service.detail_payload("offer-counted-validation")
+    assert detail is not None
+    assert detail["latest_attempt"]["usage"] == {
+        "input_tokens": 320,
+        "output_tokens": 80,
+        "total_tokens": 400,
+    }
+    assert detail["latest_attempt"]["failure_audit"]["stage"] == (
+        "image_title_fusion"
+    )
+    assert detail["latest_attempt"]["failure_audit"]["summary"] == (
+        "keywords：词数不足"
+    )
+
+    engine = create_engine_for_database_url(database_url)
+    with Session(engine) as session:
+        analysis = session.get(SearchRankingAnalysis, detail["latest_attempt"]["id"])
+        assert analysis is not None
+        assert analysis.vision_payload["failure_audit"]["raw_payload"] == {
+            "keywords": ["too long query payload"]
+        }
+    engine.dispose()
 
 
 @pytest.mark.asyncio

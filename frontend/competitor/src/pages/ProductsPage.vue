@@ -247,9 +247,6 @@ function salesBarHeight(value: number | null) {
         <p class="section-kicker">PRODUCT COMMAND CENTER</p>
         <h2>店铺商品明细表</h2>
       </div>
-      <p>
-        {{ props.storeScope === "current" ? "点击商品查看每日销售件数快照。" : `${props.multiStoreLabel || "全部店铺"}合并查看；每条记录保留所属店铺。` }}
-      </p>
     </div>
     <div class="product-workspace">
       <section class="product-list erp-panel">
@@ -399,7 +396,8 @@ function salesBarHeight(value: number | null) {
                   </small>
                   <small v-if="detail?.cost_conversion.fetched_at">
                     {{ detail.cost_conversion.source }} ·
-                    北京时间 {{ formatChinaDateTime(detail.cost_conversion.fetched_at) }} 获取
+                    {{ detail.cost_conversion.status === "stale" ? "最近成功于" : "获取于" }}
+                    北京时间 {{ formatChinaDateTime(detail.cost_conversion.fetched_at) }}
                   </small>
                   <small v-if="detail?.cost_conversion.message">
                     {{ detail.cost_conversion.message }}

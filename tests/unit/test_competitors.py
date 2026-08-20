@@ -557,19 +557,43 @@ async def test_public_client_cross_checks_target_against_known_good_page() -> No
         side_effect=["not-found", "product"]
     )
 
-    await client.confirm_product_page_absent(
+    assert await client.confirm_product_page_absent(
         "https://www.takealot.com/missing/PLID111",
-        "https://www.takealot.com/control/PLID222",
-    )
+        [("222", "https://www.takealot.com/control/PLID222")],
+    ) == "222"
 
     client._product_page_state = AsyncMock(  # type: ignore[method-assign]
-        side_effect=["product", "product"]
+        side_effect=["product"]
     )
     with pytest.raises(CompetitorPageValidationError, match="接口暂时返回 404"):
         await client.confirm_product_page_absent(
             "https://www.takealot.com/visible/PLID111",
-            "https://www.takealot.com/control/PLID222",
+            [("222", "https://www.takealot.com/control/PLID222")],
         )
+
+
+async def test_public_client_rotates_controls_until_one_renders_as_product() -> None:
+    client = CompetitorPublicClient()
+    client._product_page_state = AsyncMock(  # type: ignore[method-assign]
+        side_effect=[
+            "not-found",
+            "uncertain",
+            CompetitorNetworkError("first control challenged"),
+            "product",
+        ]
+    )
+
+    control_plid = await client.confirm_product_page_absent(
+        "https://www.takealot.com/missing/PLID111",
+        [
+            ("222", "https://www.takealot.com/control-a/PLID222"),
+            ("333", "https://www.takealot.com/control-b/PLID333"),
+            ("444", "https://www.takealot.com/control-c/PLID444"),
+        ],
+    )
+
+    assert control_plid == "444"
+    assert client._product_page_state.await_count == 4  # type: ignore[attr-defined]
 
 
 @pytest.mark.parametrize(
@@ -612,6 +636,90 @@ async def test_public_client_classifies_rendered_product_page(
     )
 
 
+async def test_public_client_waits_for_a_delayed_product_heading_and_logs_it() -> None:
+    response = MagicMock(status=200)
+    locator = MagicMock()
+    locator.all_text_contents = AsyncMock(
+        side_effect=[[], [], [], ["Delayed product title"]]
+    )
+    page = MagicMock()
+    page.url = "https://www.takealot.com/example/PLID123"
+    page.goto = AsyncMock(return_value=response)
+    page.title = AsyncMock(return_value="Takealot.com")
+    page.locator.return_value = locator
+    page.wait_for_timeout = AsyncMock()
+    diagnostics: list[str] = []
+    client = CompetitorPublicClient()
+    client._page = page
+
+    state = await client._product_page_state(  # type: ignore[attr-defined]
+        page.url,
+        role="control",
+        plid="123",
+        diagnostic_callback=diagnostics.append,
+    )
+
+    assert state == "product"
+    assert page.wait_for_timeout.await_count == 3
+    assert diagnostics and "role=control" in diagnostics[-1]
+    assert "state=product" in diagnostics[-1]
+    assert "h1='delayed product title'" in diagnostics[-1]
+
+
+async def test_public_client_logs_generic_shell_and_keeps_it_uncertain() -> None:
+    response = MagicMock(status=200)
+    locator = MagicMock()
+    locator.all_text_contents = AsyncMock(return_value=[])
+    page = MagicMock()
+    page.url = "https://www.takealot.com/example/PLID123"
+    page.goto = AsyncMock(return_value=response)
+    page.title = AsyncMock(
+        return_value="Takealot.com: Online Shopping | SA's leading online store"
+    )
+    page.locator.return_value = locator
+    page.wait_for_timeout = AsyncMock()
+    diagnostics: list[str] = []
+    client = CompetitorPublicClient()
+    client._page = page
+
+    state = await client._product_page_state(  # type: ignore[attr-defined]
+        page.url,
+        role="target",
+        plid="123",
+        diagnostic_callback=diagnostics.append,
+    )
+
+    assert state == "uncertain"
+    assert page.wait_for_timeout.await_count == 6
+    assert diagnostics and "generic_shell=true" in diagnostics[-1]
+    assert "challenge=false" in diagnostics[-1]
+
+
+async def test_public_client_treats_rendered_challenge_as_network_failure() -> None:
+    response = MagicMock(status=200)
+    locator = MagicMock()
+    locator.all_text_contents = AsyncMock(return_value=["Just a moment..."])
+    page = MagicMock()
+    page.url = "https://www.takealot.com/example/PLID123"
+    page.goto = AsyncMock(return_value=response)
+    page.title = AsyncMock(return_value="Just a moment...")
+    page.locator.return_value = locator
+    diagnostics: list[str] = []
+    client = CompetitorPublicClient()
+    client._page = page
+
+    with pytest.raises(CompetitorNetworkError, match="访问验证"):
+        await client._product_page_state(  # type: ignore[attr-defined]
+            page.url,
+            role="control",
+            plid="123",
+            diagnostic_callback=diagnostics.append,
+        )
+
+    assert diagnostics and "challenge=true" in diagnostics[-1]
+    assert "error=challenge" in diagnostics[-1]
+
+
 async def test_collector_keeps_uncertain_page_validation_out_of_network_failures(
     tmp_path: Path,
 ) -> None:
@@ -625,8 +733,8 @@ async def test_collector_keeps_uncertain_page_validation_out_of_network_failures
         project_root=tmp_path,
         client=client,
     )
-    collector._latest_control_product = MagicMock(  # type: ignore[method-assign]
-        return_value=("222", "https://www.takealot.com/control/PLID222")
+    collector._recent_control_products = MagicMock(  # type: ignore[method-assign]
+        return_value=[("222", "https://www.takealot.com/control/PLID222")]
     )
     collector._is_confirmed_invalid = MagicMock(return_value=False)  # type: ignore[method-assign]
 
@@ -639,6 +747,44 @@ async def test_collector_keeps_uncertain_page_validation_out_of_network_failures
     assert result.retryable is True
     assert result.failure_kind == "validation-uncertain"
     assert result.message == "页面复核结果不确定"
+
+
+async def test_collector_records_the_control_that_passed_rotation(tmp_path: Path) -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    controls = [
+        ("222", "https://www.takealot.com/control-a/PLID222"),
+        ("333", "https://www.takealot.com/control-b/PLID333"),
+    ]
+    client = MagicMock()
+    client.fetch_product = AsyncMock(side_effect=CompetitorNotFoundError())
+    client.confirm_product_page_absent = AsyncMock(return_value="333")
+    collector = CompetitorCollector(
+        engine=engine,
+        project_root=tmp_path,
+        client=client,
+    )
+    collector._recent_control_products = MagicMock(  # type: ignore[method-assign]
+        return_value=controls
+    )
+    collector._is_confirmed_invalid = MagicMock(return_value=False)  # type: ignore[method-assign]
+    url = "https://www.takealot.com/missing/PLID111"
+
+    result = await collector.collect(url, with_stock_probe=False)
+
+    assert result.failure_kind == "suspected-invalid"
+    client.confirm_product_page_absent.assert_awaited_once()
+    assert client.confirm_product_page_absent.await_args.args == (url, controls)
+    assert callable(
+        client.confirm_product_page_absent.await_args.kwargs["diagnostic_callback"]
+    )
+    with Session(engine) as session:
+        health = session.get(CompetitorLinkHealth, "111")
+        assert health is not None
+        assert health.control_plid == "333"
+        assert health.control_check_ok is True
+        assert health.confirmed_not_found_count == 1
+    engine.dispose()
 
 
 async def test_previously_confirmed_link_uses_one_future_404_as_terminal(
@@ -689,6 +835,102 @@ async def test_previously_confirmed_link_uses_one_future_404_as_terminal(
         assert row.confirmed_not_found_count == 3
         assert row.control_plid == "222"
         assert row.control_check_ok is True
+    engine.dispose()
+
+
+def test_recent_control_products_are_distinct_fresh_and_healthy() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    now = datetime(2026, 8, 19, 2, 0, tzinfo=UTC)
+
+    def add_target_and_snapshot(
+        session: Session,
+        plid: str,
+        collected_at: datetime,
+    ) -> None:
+        url = f"https://www.takealot.com/product/PLID{plid}"
+        if session.get(CompetitorTarget, plid) is None:
+            session.add(
+                CompetitorTarget(
+                    plid=plid,
+                    offer_group_plid=plid,
+                    url=url,
+                    title=f"Product {plid}",
+                    active=True,
+                    created_at=collected_at,
+                    updated_at=collected_at,
+                )
+            )
+        session.add(
+            CompetitorSnapshot(
+                plid=plid,
+                collected_at=collected_at,
+                url=url,
+                title=f"Product {plid}",
+                image_url=None,
+                category_path=None,
+                sku=None,
+                seller_id=None,
+                seller_name=None,
+                price=None,
+                stock_status=None,
+                stock_quantity=None,
+                stock_exact=False,
+                stock_method="not-probed",
+                stock_note=None,
+                review_count=0,
+                fetched_review_count=0,
+                rating=None,
+                positive_reviews=0,
+                neutral_reviews=0,
+                negative_reviews=0,
+                lifetime_sales_min=0,
+                lifetime_sales_max=0,
+                previous_snapshot_id=None,
+                observed_stock_outflow=None,
+                review_delta=None,
+                period_sales_min=None,
+                period_sales_max=None,
+                trend_label="待建立基线",
+                trend_note="test",
+                offers=[],
+            )
+        )
+
+    with Session(engine) as session, session.begin():
+        add_target_and_snapshot(session, "111", now - timedelta(minutes=1))
+        add_target_and_snapshot(session, "222", now - timedelta(minutes=2))
+        add_target_and_snapshot(session, "333", now - timedelta(minutes=4))
+        add_target_and_snapshot(session, "333", now - timedelta(minutes=3))
+        add_target_and_snapshot(session, "444", now - timedelta(minutes=5))
+        add_target_and_snapshot(session, "555", now - timedelta(days=8))
+        session.add(
+            CompetitorLinkHealth(
+                plid="222",
+                url="https://www.takealot.com/product/PLID222",
+                status="suspected_invalid",
+                confirmed_not_found_count=1,
+                first_not_found_at=now,
+                last_evidence_at=now,
+                last_checked_at=now,
+                last_success_at=None,
+                control_plid="333",
+                control_check_ok=True,
+                last_error="404",
+            )
+        )
+
+    with Session(engine) as session:
+        controls = CompetitorRepository(session).recent_control_products(
+            exclude_plid="111",
+            limit=3,
+            collected_after=now - timedelta(days=7),
+        )
+
+    assert controls == [
+        ("333", "https://www.takealot.com/product/PLID333"),
+        ("444", "https://www.takealot.com/product/PLID444"),
+    ]
     engine.dispose()
 
 

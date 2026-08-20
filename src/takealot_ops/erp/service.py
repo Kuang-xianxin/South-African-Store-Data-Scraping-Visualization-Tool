@@ -4,13 +4,15 @@ from __future__ import annotations
 
 import json
 import math
+from collections.abc import Sequence
 from datetime import UTC, date, datetime, timedelta
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
 import pandas as pd
-from sqlalchemy import Engine
+from sqlalchemy import Engine, func, select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
@@ -30,6 +32,7 @@ from takealot_ops.metrics.service import (
 )
 from takealot_ops.settings import DashboardSettings
 from takealot_ops.storage.migrations import create_read_only_engine
+from takealot_ops.storage.models import CollectionRun, DailyProductMetric, OfferSnapshot
 from takealot_ops.storage.repository import Repository
 
 
@@ -72,6 +75,128 @@ def load_erp_dataset(
         return EMPTY_DATASET
     finally:
         engine.dispose()
+
+
+_QUADRANT_METRIC_COLUMNS = (
+    "metric_date",
+    "offer_id",
+    "sku",
+    "ordered_units",
+    "effective_units",
+    "ordered_revenue",
+    "page_views_30_days",
+    "page_views_30_day_average",
+    "page_views_window_net_change",
+    "conversion_percentage_30_days",
+    "conversion_percentage_previous_30_days",
+    "conversion_change_points",
+    "total_stock",
+    "offer_status",
+)
+_QUADRANT_OFFER_COLUMNS = (
+    "offer_id",
+    "title",
+    "sku",
+    "tsin_id",
+    "barcode",
+    "selling_price",
+    "rrp",
+    "status",
+    "image_url",
+    "created_at",
+    "productline_id",
+)
+_QUADRANT_HISTORY_COLUMNS = (
+    "snapshot_date",
+    "offer_id",
+    "captured_at",
+    "total_stock",
+)
+
+
+def load_quadrant_dataset(
+    settings: DashboardSettings,
+    as_of: date,
+    *,
+    engine: Engine | None = None,
+) -> DashboardDataset:
+    """Load only the durable frames required by the operating-coordinate page."""
+    database_path = sqlite_database_path(settings.database_url)
+    if database_path is not None and not database_path.exists():
+        return EMPTY_DATASET
+
+    owned_engine = engine is None
+    read_engine = engine or create_read_only_erp_engine(settings.database_url)
+    try:
+        with Session(read_engine) as session:
+            product_rows = session.execute(
+                select(
+                    *(getattr(DailyProductMetric, column) for column in _QUADRANT_METRIC_COLUMNS)
+                )
+                .where(DailyProductMetric.metric_date <= as_of)
+                .order_by(DailyProductMetric.metric_date, DailyProductMetric.offer_id)
+            ).all()
+            latest_scope_date = session.scalar(
+                select(func.max(CollectionRun.scope_date)).where(
+                    CollectionRun.run_type == "offers",
+                    CollectionRun.status == "success",
+                    CollectionRun.scope_date.is_not(None),
+                    CollectionRun.scope_date <= as_of,
+                )
+            )
+            offer_rows = (
+                session.execute(
+                    select(
+                        *(getattr(OfferSnapshot, column) for column in _QUADRANT_OFFER_COLUMNS)
+                    )
+                    .where(OfferSnapshot.snapshot_date == latest_scope_date)
+                    .order_by(OfferSnapshot.offer_id)
+                ).all()
+                if latest_scope_date is not None
+                else []
+            )
+            history_rows = session.execute(
+                select(
+                    *(getattr(OfferSnapshot, column) for column in _QUADRANT_HISTORY_COLUMNS)
+                )
+                .where(OfferSnapshot.snapshot_date <= as_of)
+                .order_by(
+                    OfferSnapshot.offer_id,
+                    OfferSnapshot.snapshot_date,
+                    OfferSnapshot.captured_at,
+                )
+            ).all()
+    except SQLAlchemyError:
+        return EMPTY_DATASET
+    finally:
+        if owned_engine:
+            read_engine.dispose()
+
+    return DashboardDataset(
+        store_daily=pd.DataFrame(),
+        product_daily=_query_rows_frame(product_rows, _QUADRANT_METRIC_COLUMNS),
+        offer_current=_query_rows_frame(offer_rows, _QUADRANT_OFFER_COLUMNS),
+        anomalies=pd.DataFrame(),
+        quality_events=pd.DataFrame(),
+        offer_history=_query_rows_frame(history_rows, _QUADRANT_HISTORY_COLUMNS),
+    )
+
+
+def _query_rows_frame(rows: Sequence[Any], columns: tuple[str, ...]) -> pd.DataFrame:
+    return pd.DataFrame(
+        [
+            {
+                column: (
+                    float(value)
+                    if isinstance((value := row._mapping[column]), Decimal)
+                    else value
+                )
+                for column in columns
+            }
+            for row in rows
+        ],
+        columns=columns,
+    )
 
 
 def build_summary_payload(
@@ -542,6 +667,7 @@ def _enrich_products(
         "rrp",
         "status",
         "image_url",
+        "productline_id",
     ]
     if offers.empty or "offer_id" not in offers.columns:
         identity = pd.DataFrame(columns=identity_columns)

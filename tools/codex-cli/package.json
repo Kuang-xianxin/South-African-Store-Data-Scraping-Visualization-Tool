@@ -1,0 +1,9 @@
+{
+  "name": "takealot-erp-codex-cli-runtime",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Pinned Codex CLI runtime used by the Takealot search-ranking service.",
+  "dependencies": {
+    "@openai/codex": "0.147.0"
+  }
+}

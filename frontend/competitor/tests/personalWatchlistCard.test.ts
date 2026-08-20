@@ -53,7 +53,7 @@ test("the personal pool is a standalone top workspace with direct card location"
   assert.match(pageSource, /v-if="props\.isAdmin && linkHealth\.length"/);
   assert.match(
     pageSource,
-    /v-if="props\.isAdmin && selected\.来源 === 'competitor'"/,
+    /v-if="!props\.detailOnly && props\.isAdmin && selected\.来源 === 'competitor'"/,
   );
   assert.match(
     pageSource,
@@ -97,6 +97,39 @@ test("the personal pool is a standalone top workspace with direct card location"
   );
 });
 
+test("personal watchlist supports cross-page selection and safe bulk removal", () => {
+  assert.match(pageSource, /const personalWatchlistSelectionMode = ref\(false\)/);
+  assert.match(pageSource, /const selectedPersonalWatchlistPlids = ref<Set<string>>\(new Set\(\)\)/);
+  assert.match(pageSource, /togglePersonalWatchlistSelectionMode/);
+  assert.match(pageSource, /:aria-pressed="personalWatchlistSelectionMode"/);
+  assert.match(pageSource, /personalWatchlistSelectionMode \? "退出多选" : "多选"/);
+  assert.match(
+    pageSource,
+    /v-if="personalWatchlistSelectionMode && personalWatchlistItems\.length"\s+class="personal-watchlist-bulk-toolbar"/,
+  );
+  assert.match(
+    pageSource,
+    /v-if="personalWatchlistSelectionMode && card\.personalMember"\s+class="personal-watchlist-card-selector"/,
+  );
+  assert.match(
+    pageSource,
+    /if \(!personalWatchlistSelectionMode\.value\) clearPersonalWatchlistSelection\(\)/,
+  );
+  assert.match(pageSource, /selectablePagedPersonalWatchlistCards/);
+  assert.match(pageSource, /toggleCurrentPersonalWatchlistPageSelection/);
+  assert.match(pageSource, /clearPersonalWatchlistSelection/);
+  assert.match(pageSource, /@change\.stop="togglePersonalWatchlistCardSelection\(card\.plid, \$event\)"/);
+  assert.match(pageSource, /删除所选（\$\{selectedPersonalWatchlistCount\}）/);
+  assert.match(pageSource, /window\.confirm\(/);
+  assert.match(pageSource, /只会解除当前账号的个人监控关系/);
+  assert.match(pageSource, /const concurrency = 8/);
+  assert.match(pageSource, /await deleteCompetitorPersonalWatchlistItem\(plid\)/);
+  assert.match(pageSource, /failedPlids\.length[\s\S]*失败项已保留勾选，可直接重试/);
+  assert.match(styleSource, /\.personal-watchlist-bulk-toolbar\s*\{/);
+  assert.match(styleSource, /\.personal-watchlist-product-card\.is-selected/);
+  assert.match(styleSource, /\.personal-watchlist-selection-toggle\.is-active/);
+});
+
 test("personal type libraries separate owner controls from read and edit sharing", () => {
   assert.match(pageSource, /openPersonalWatchlistLibrarySettings/);
   assert.match(pageSource, /openPersonalWatchlistCardLibraries\(card\)/);
@@ -112,7 +145,7 @@ test("personal type libraries separate owner controls from read and edit sharing
   );
   assert.match(pageSource, /v-for="library in defaultPersonalWatchlistLibraries"/);
   assert.match(pageSource, /可编辑共享 · \$\{library\.owner_display_name\}/);
-  assert.match(pageSource, /只读共享库不能作为默认归类/);
+  assert.match(pageSource, /默认归类可选自建库或可编辑共享库/);
   assert.match(pageSource, /filteredPersonalWatchlistCards/);
   assert.match(pageSource, /personalWatchlistLibraryFilter === library\.id/);
   assert.match(pageSource, /unclassifiedPersonalWatchlistCount/);
@@ -124,12 +157,11 @@ test("personal type libraries separate owner controls from read and edit sharing
   assert.match(pageSource, /可编辑/);
   assert.match(pageSource, /library\.access === "owner"/);
   assert.match(pageSource, /deletePersonalWatchlistLibraryItem/);
-  assert.match(pageSource, /共享库仅传递库内 PLID/);
   assert.match(pageSource, /账号全部已授权店铺/);
   assert.match(pageSource, /无权查看店铺详情/);
-  assert.match(pageSource, /当前账号未获授权访问该商品所属店铺/);
-  assert.match(pageSource, /不显示店铺私有图片、商品名、价格、库存或 Seller API 详情/);
-  assert.match(pageSource, /不将它标记为等待首次采集/);
+  assert.match(pageSource, /店铺详情暂不可用/);
+  assert.match(pageSource, /商品详情暂不可用/);
+  assert.doesNotMatch(pageSource, /不显示店铺私有图片、商品名、价格、库存或 Seller API 详情/);
   assert.match(pageSource, /const unavailableNotice = personalWatchlistUnavailableNotice\(card\)/);
   assert.match(styleSource, /\.personal-watchlist-library-modal\s*\{/);
   assert.match(styleSource, /\.personal-watchlist-library-filter\s*\{/);
@@ -165,12 +197,18 @@ test("personal-pool detail keeps every account-authorized store after top-store 
   );
   assert.match(
     pageSource,
-    /openProductModal\(card\.competitor, "personal_watchlist"\)/,
+    /openProductDetail\(card\.competitor, "personal_watchlist"\)/,
   );
   assert.match(
     pageSource,
-    /openProductModal\(card\.competitor, 'personal_watchlist'\)/,
+    /openProductDetail\(card\.competitor, 'personal_watchlist'\)/,
   );
+  assert.match(
+    pageSource,
+    /context === "personal_watchlist"[\s\S]*\? "all"[\s\S]*: ownStoreScope\.value/,
+  );
+  assert.match(pageSource, /if \(item\.来源 !== "own_store"\) \{\s+openProductModal\(item, context\)/);
+  assert.match(pageSource, /openOwnStoreDetailTab\(\{/);
   assert.match(
     pageSource,
     /fetchCompetitorDetail\(plid, start, end, scope\)/,

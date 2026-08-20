@@ -3,8 +3,12 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 
 import {
+  SHARED_BATCH_CHECKPOINT_YIELD_REASON,
+  activeSharedBatchSupersedesLocalCheckpoint,
   canUpdateVisibleBrowserForBatch,
+  scheduledRetryWaitLabel,
   stoppedScheduledBatchResumeCount,
+  suspendCheckpointForActiveSharedBatch,
 } from "../src/collectionBatchOptions.ts";
 
 const competitorsPageSource = readFileSync(
@@ -76,6 +80,118 @@ test("only a controller sees a resumable scheduled checkpoint count", () => {
   );
 });
 
+test("scheduled retry wait shows round, pending count, and live countdown", () => {
+  const status = {
+    active: true,
+    source: "scheduled" as const,
+    event: "scheduled_pause",
+    pending: 24,
+    scheduled_wait_kind: "pending_retry" as const,
+    scheduled_auto_resume_at: "2026-08-19T02:10:00.000Z",
+    scheduled_retry_round: 2,
+    scheduled_retry_round_limit: 3,
+  };
+
+  assert.equal(
+    scheduledRetryWaitLabel(status, Date.parse("2026-08-19T02:02:33.000Z")),
+    "等待第 2/3 轮安全重试 · 待重试 24 条 · 距离自动续爬 07:27",
+  );
+  assert.equal(
+    scheduledRetryWaitLabel(
+      { ...status, event: "progress" },
+      Date.parse("2026-08-19T02:02:33.000Z"),
+    ),
+    null,
+  );
+});
+
+test("a different active shared batch supersedes browser-local automatic resume", () => {
+  const activeScheduledBatch = {
+    active: true,
+    batch_id: "scheduled-20260818-current",
+  };
+  assert.equal(
+    activeSharedBatchSupersedesLocalCheckpoint(
+      "batch-old-browser-checkpoint",
+      activeScheduledBatch,
+    ),
+    true,
+  );
+  assert.equal(
+    activeSharedBatchSupersedesLocalCheckpoint("", activeScheduledBatch),
+    true,
+  );
+  assert.equal(
+    activeSharedBatchSupersedesLocalCheckpoint(
+      activeScheduledBatch.batch_id,
+      activeScheduledBatch,
+    ),
+    false,
+  );
+  assert.equal(
+    activeSharedBatchSupersedesLocalCheckpoint(
+      "batch-old-browser-checkpoint",
+      { ...activeScheduledBatch, active: false },
+    ),
+    false,
+  );
+  assert.equal(
+    activeSharedBatchSupersedesLocalCheckpoint(
+      "batch-old-browser-checkpoint",
+      { active: true, batch_id: null },
+    ),
+    false,
+  );
+});
+
+test("superseded local checkpoint remains available only for explicit resume", () => {
+  const checkpoint = {
+    batchId: "batch-old-browser-checkpoint",
+    running: true,
+    activeIndex: 30,
+    activeRequestId: "request-old-browser",
+    autoResumeAt: "2026-08-18T10:27:00.000Z",
+    stopReason: "网络或 Takealot 临时服务异常，系统将在10分钟后自动继续。",
+    savedAt: "2026-08-18T10:17:00.000Z",
+    untouchedQueue: [31, 32, 33],
+  };
+  const status = {
+    active: true,
+    batch_id: "scheduled-20260818-current",
+  };
+  const suspended = suspendCheckpointForActiveSharedBatch(
+    checkpoint,
+    status,
+    "2026-08-18T10:18:00.000Z",
+  );
+
+  assert.notEqual(suspended, checkpoint);
+  assert.equal(suspended.running, false);
+  assert.equal(suspended.activeIndex, null);
+  assert.equal(suspended.activeRequestId, null);
+  assert.equal(suspended.autoResumeAt, null);
+  assert.equal(suspended.stopReason, SHARED_BATCH_CHECKPOINT_YIELD_REASON);
+  assert.equal(suspended.savedAt, "2026-08-18T10:18:00.000Z");
+  assert.deepEqual(suspended.untouchedQueue, [31, 32, 33]);
+  assert.equal(checkpoint.running, true);
+  assert.equal(
+    suspendCheckpointForActiveSharedBatch(
+      suspended,
+      status,
+      "2026-08-18T10:19:00.000Z",
+    ),
+    suspended,
+  );
+  assert.equal(
+    suspendCheckpointForActiveSharedBatch(
+      checkpoint,
+      { active: true, batch_id: checkpoint.batchId },
+      "2026-08-18T10:19:00.000Z",
+    ),
+    checkpoint,
+  );
+});
+
 test("competitor admin control resumes the server checkpoint instead of starting over", () => {
   assert.match(competitorsPageSource, /resumeStoppedScheduledCompetitorBatch/);
   assert.match(competitorsPageSource, /继续 09:00 自动批次/);
@@ -90,8 +206,12 @@ test("competitor admin control resumes the server checkpoint instead of starting
   );
   assert.match(
     competitorsPageSource,
-    /不会重新读取清单、创建新批次或重采本批已成功、已确认失效链接/,
+    /继续原批次待重试项/,
   );
   assert.match(competitorsPageSource, /全员同步等待重试/);
   assert.match(competitorsPageSource, /正在等待安全复核间隔，届时自动续爬/);
+  assert.match(competitorsPageSource, /showLocalCollectionAlert/);
+  assert.match(competitorsPageSource, /suspendStoredCollectionCheckpoint/);
+  assert.match(competitorsPageSource, /v-if="showLocalCollectionAlert"/);
+  assert.doesNotMatch(competitorsPageSource, /本轮自动续爬暂缓/);
 });

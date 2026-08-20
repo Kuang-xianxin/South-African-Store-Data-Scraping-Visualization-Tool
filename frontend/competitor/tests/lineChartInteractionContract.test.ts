@@ -37,7 +37,7 @@ test("overview revenue and traffic details follow the pointer and clear on chart
   assert.equal(overviewSource.match(/class="trend-missing-mark"/g)?.length, 2);
   assert.equal(overviewSource.match(/missingBridgeSegments/g)?.length >= 6, true);
   assert.match(overviewSource, /当前金额仅合计已有店铺，缺失店铺未按 0 补齐/);
-  assert.match(overviewSource, /只要至少一家店返回该业务日金额，就绘制已有店铺合计并标注覆盖数/);
+  assert.match(overviewSource, /橙色虚线为参考值；缺失商品不补 0/);
   assert.match(overviewSource, /周期末失败 · \{\{ trafficSlotLabel/);
 });
 
@@ -53,7 +53,6 @@ test("overview revenue line discloses pending reconciliation and immutable sourc
   assert.match(overviewSource, /salesSourceLabel\(revision\.before_source\)/);
   assert.match(overviewSource, /salesSourceLabel\(revision\.after_source\)/);
   assert.match(overviewSource, /storeData\.sales_revenue_completed_through/);
-  assert.match(overviewSource, /当前仍在进行的 SAST 业务日不进入折线/);
 });
 
 test("keyword traffic line keeps hover, keyboard, missing-point and rolling-window details", () => {
@@ -77,7 +76,7 @@ test("competitor three-panel line chart keeps a fixed detail panel with pointer 
   assert.doesNotMatch(competitorsSource, /offerTrendTooltipPosition/);
   assert.doesNotMatch(competitorsSource, /floatingChartTooltipStyle/);
   assert.match(competitorsSource, /if \(hoveredOfferTrendIndex\.value === null\) return selectedOfferTrend\.value\.length - 1/);
-  assert.match(competitorsSource, /图表上方固定显示当前 Seller 刷新点/);
+  assert.match(competitorsSource, /近30天浏览量为滚动值；缺失点不补 0/);
   assert.match(competitorsSource, /offerStockEvidenceLabel\(activeOfferTrendPoint\.offer\)/);
   assert.match(competitorsSource, /class="competitor-offer-period-metric"/);
   assert.match(competitorsSource, /区间内售出件数/);
@@ -94,15 +93,15 @@ test("competitor three-panel line chart keeps a fixed detail panel with pointer 
 test("own-store official sales bars sit below comments and preserve zero versus missing evidence", () => {
   assert.match(competitorsSource, /<OwnStoreSalesChart/);
   assert.ok(
-    competitorsSource.indexOf("图表上方固定显示当前 Seller 刷新点") <
+    competitorsSource.indexOf('class="competitor-offer-trend-tooltip"') <
       competitorsSource.indexOf("<OwnStoreSalesChart"),
   );
   assert.match(ownStoreSalesSource, /国内自然日（北京时间）/);
   assert.match(ownStoreSalesSource, /@pointermove="handlePointer"/);
   assert.match(ownStoreSalesSource, /@keydown\.left\.prevent="stepPoint\(-1\)"/);
-  assert.match(ownStoreSalesSource, /完整的 0 件只在该国内日结束后/);
-  assert.match(ownStoreSalesSource, /今天等未结束日期标为“截至采集”/);
-  assert.match(ownStoreSalesSource, /缺失日期不绘制条形柱，不按 0 补齐/);
+  assert.match(ownStoreSalesSource, /橙色柱为已有小计；缺失日期不补 0/);
+  assert.match(ownStoreSalesSource, /完整 0 件基线/);
+  assert.match(ownStoreSalesSource, /截至采集 \/ 周期不完整/);
   assert.match(ownStoreSalesSource, /class="own-sales-bar"/);
   assert.doesNotMatch(ownStoreSalesSource, /class="own-sales-line"/);
   assert.doesNotMatch(ownStoreSalesSource, /overflow-x\s*:\s*(?:auto|scroll)/);

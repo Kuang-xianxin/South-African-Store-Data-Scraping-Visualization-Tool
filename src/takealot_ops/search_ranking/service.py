@@ -17,7 +17,7 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import Any, Literal, Protocol
-from urllib.parse import quote, urlsplit
+from urllib.parse import parse_qsl, quote, urlsplit
 
 import httpx
 from dotenv import load_dotenv
@@ -31,6 +31,14 @@ from takealot_ops.erp.product_images import (
     ProductImageUnavailableError,
     ProductThumbnailCache,
     trusted_product_image_url,
+)
+from takealot_ops.search_ranking.codex_cli import (
+    CODEX_TERRA_MODEL,
+    CodexAppServerClient,
+    CodexCliConfigurationError,
+    CodexCliProviderError,
+    CodexCliQuotaExceededError,
+    CodexWeeklyQuotaGuard,
 )
 from takealot_ops.settings import DashboardSettings
 from takealot_ops.storage.migrations import (
@@ -48,7 +56,7 @@ from takealot_ops.storage.models import (
 )
 
 
-PROMPT_VERSION = "takealot-v12-concise-query"
+PROMPT_VERSION = "takealot-v17-demand-coverage"
 MODEL_MARKET_CONTEXT: Literal["South Africa"] = "South Africa"
 MODEL_LANGUAGE_VARIANT: Literal["South African English"] = "South African English"
 MODEL_SHOPPER_CONTEXT: Literal["South African local customer habits"] = (
@@ -69,6 +77,7 @@ ROOT_EXPANSION_PHRASE_MAX_WORDS = 5
 TITLE_ROOT_EXPANSION_LIMIT = 8
 ROOT_SOURCE_PRIORITY = (
     "human_confirmed_product_fact",
+    "image_title_same_product_lexicon",
     "image_title_first_instinct",
     "title_word_root",
     "result_page_learning",
@@ -85,6 +94,8 @@ MODEL_DIRECT_QUERY_MIN_WORDS = 2
 MODEL_DIRECT_QUERY_MAX_WORDS = 4
 MODEL_DIRECT_QUERY_PREFERRED_MAX_WORDS = 3
 MODEL_DIRECT_QUERY_MIN_PREFERRED_COUNT = 4
+SAME_PRODUCT_LEXICON_POLICY_VERSION = "same-product-lexicon-v2"
+SAME_PRODUCT_LEXICON_ROOT_LIMIT = 4
 ROOT_EXPANSION_CORE_QUERY_TARGET = 6
 SELLER_TITLE_COMPLETE_PHRASE_QUERY_MAX = 1
 ROOT_EXPANSION_OPPORTUNITY_QUERY_TARGET = 1
@@ -100,6 +111,9 @@ DECISION_PARAMETER_POLICY_VERSION = "manual-title-v1"
 DECISION_PARAMETER_MAX_CANDIDATES = 12
 DECISION_PARAMETER_MAX_POSITIVE = 3
 CORE_MAJORITY_FLOOR = 0.51
+CORE_DEMAND_COMPETITOR_RATIO_FLOOR = 0.30
+CORE_DEMAND_COMPETITOR_MIN_RESULTS = 8
+CORE_MIN_PLATFORM_RESULTS = ORGANIC_PAGE_SIZE
 SEMANTIC_ADJACENT_RATIO_FLOOR = 0.50
 SEMANTIC_SUPPORTED_RATIO_FLOOR = 0.70
 SEMANTIC_ADJACENT_MIN_RESULTS = 3
@@ -330,6 +344,14 @@ GENERIC_IDENTITY_HEAD_TOKENS = {
     "system",
     "unit",
 }
+LEXICON_AMBIGUOUS_IDENTITY_HEAD_TOKENS = {
+    "accessory",
+    "box",
+    "device",
+    "furniture",
+    "system",
+    "unit",
+}
 SEMANTIC_RETARGETING_HEAD_TOKENS = GENERIC_IDENTITY_HEAD_TOKENS | {
     "adapter",
     "attachment",
@@ -448,7 +470,7 @@ QWEN_INPUT_PRICE_CNY_PER_MILLION = 2.0
 QWEN_OUTPUT_PRICE_CNY_PER_MILLION = 8.0
 DOUBAO_INPUT_PRICE_CNY_PER_MILLION = 0.6
 DOUBAO_OUTPUT_PRICE_CNY_PER_MILLION = 3.6
-PRICING_SNAPSHOT_DATE = "2026-08-11"
+PRICING_SNAPSHOT_DATE = "2026-08-19"
 PRODUCT_FACT_TYPES = {
     "product_type",
     "construction",
@@ -479,6 +501,30 @@ class SearchRankingProviderError(RuntimeError):
     """The multimodal provider failed without exposing credentials or raw bodies."""
 
 
+class SearchRankingQuotaExceededError(SearchRankingProviderError):
+    """The exact persisted Codex weekly budget no longer permits another turn."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        usage: dict[str, int],
+        quota: Mapping[str, Any],
+    ) -> None:
+        super().__init__(message)
+        self.usage = usage
+        self.estimated_cost_cny = 0.0
+        self.quota = dict(quota)
+        self.provider_attempts = (
+            {
+                "provider": "codex_cli",
+                "status": "weekly_quota_stopped",
+                "usage": dict(usage),
+                "quota": dict(quota),
+            },
+        )
+
+
 class _CountedVisionProviderError(SearchRankingProviderError):
     """A model response consumed known tokens but its profile was unusable."""
 
@@ -488,10 +534,14 @@ class _CountedVisionProviderError(SearchRankingProviderError):
         *,
         usage: dict[str, int],
         estimated_cost_cny: float,
+        provider_attempts: Sequence[Mapping[str, Any]] = (),
+        failure_audit: Mapping[str, Any] | None = None,
     ) -> None:
         super().__init__(message)
         self.usage = usage
         self.estimated_cost_cny = estimated_cost_cny
+        self.provider_attempts = tuple(dict(item) for item in provider_attempts)
+        self.failure_audit = dict(failure_audit or {})
 
 
 class _VisionAttemptsExhaustedError(SearchRankingProviderError):
@@ -542,6 +592,7 @@ class VisionProfile(BaseModel):
     category: str = Field(min_length=2, max_length=160)
     product_type_terms: list[str] = Field(min_length=1, max_length=6)
     same_product_aliases: list[str] = Field(default_factory=list, max_length=8)
+    same_demand_product_terms: list[str] = Field(default_factory=list, max_length=12)
     distinctive_terms: list[str] = Field(min_length=0, max_length=10)
     keywords: list[KeywordCandidate] = Field(min_length=2, max_length=10)
     autocomplete_seeds: list[KeywordCandidate] = Field(min_length=2, max_length=10)
@@ -569,6 +620,7 @@ class FusionVisionProfile(LocalizedVisionProfile):
     keywords: list[KeywordCandidate] = Field(min_length=6, max_length=10)
     autocomplete_seeds: list[KeywordCandidate] = Field(min_length=6, max_length=10)
     same_product_aliases: list[str] = Field(min_length=2, max_length=8)
+    same_demand_product_terms: list[str] = Field(default_factory=list, max_length=12)
     opportunity_seeds: Sequence[AdjacentDemandCandidate] = Field(min_length=1, max_length=4)
 
     @field_validator("keywords")
@@ -603,6 +655,272 @@ class FusionVisionProfile(LocalizedVisionProfile):
                     "same_product_aliases cannot use a generic one-word product head"
                 )
         return values
+
+
+def _fusion_validation_errors(exc: ValidationError) -> list[dict[str, Any]]:
+    """Return bounded, JSON-safe Pydantic evidence without echoing arbitrary inputs."""
+
+    output: list[dict[str, Any]] = []
+    for item in exc.errors(include_url=False)[:20]:
+        location = ".".join(str(part) for part in item.get("loc", ())) or "profile"
+        output.append(
+            {
+                "path": location,
+                "type": str(item.get("type") or "validation_error"),
+                "message": str(item.get("msg") or "invalid value")[:500],
+            }
+        )
+    return output
+
+
+def _fusion_validation_summary(exc: ValidationError) -> str:
+    rows = _fusion_validation_errors(exc)
+    return "；".join(
+        f"{item['path']}：{item['message']}" for item in rows[:3]
+    ) or "结构化字段未通过本地业务校验"
+
+
+def _fusion_identity_supplements(payload: Mapping[str, Any]) -> list[str]:
+    values: list[Any] = []
+    raw_product_types = payload.get("product_type_terms")
+    if isinstance(raw_product_types, list):
+        values.extend(raw_product_types)
+    raw_aliases = payload.get("same_product_aliases")
+    if isinstance(raw_aliases, list):
+        values.extend(raw_aliases)
+    values.append(payload.get("product_name"))
+
+    output: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        phrase = " ".join(str(value or "").split())
+        key = phrase.casefold()
+        if not phrase or key in seen:
+            continue
+        seen.add(key)
+        output.append(phrase)
+    return output
+
+
+def _normalize_fusion_payload(
+    payload: Mapping[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Safely repair only query length and generic-alias contract violations.
+
+    Invalid model phrases are never shortened by dropping arbitrary words. They are
+    removed and may only be replaced by an already returned exact product identity.
+    Pydantic remains the final authority when the payload cannot be repaired safely.
+    """
+
+    normalized = json.loads(json.dumps(dict(payload), ensure_ascii=False))
+    audit: dict[str, Any] = {
+        "policy": "safe_identity_filter_v1",
+        "applied": False,
+        "keywords_removed": [],
+        "keywords_added": [],
+        "same_product_aliases_removed": [],
+        "same_product_aliases_added": [],
+        "same_demand_product_terms_removed": [],
+        "same_demand_product_terms_added": [],
+    }
+
+    raw_aliases = normalized.get("same_product_aliases")
+    aliases: list[str] = []
+    alias_keys: set[str] = set()
+    if isinstance(raw_aliases, list):
+        for raw_alias in raw_aliases:
+            alias = " ".join(str(raw_alias or "").split())
+            key = alias.casefold()
+            tokens = _identity_term_tokens(alias)
+            if not alias or key in alias_keys:
+                if alias:
+                    audit["same_product_aliases_removed"].append(
+                        {"phrase": alias, "reason": "duplicate"}
+                    )
+                continue
+            if len(tokens) == 1 and tokens[0] in GENERIC_IDENTITY_HEAD_TOKENS:
+                audit["same_product_aliases_removed"].append(
+                    {"phrase": alias, "reason": "generic_one_word_identity"}
+                )
+                continue
+            alias_keys.add(key)
+            aliases.append(alias)
+
+    identity_supplements = _fusion_identity_supplements(normalized)
+    for phrase in identity_supplements:
+        if len(aliases) >= 2:
+            break
+        key = phrase.casefold()
+        tokens = _identity_term_tokens(phrase)
+        if (
+            key in alias_keys
+            or not tokens
+            or (len(tokens) == 1 and tokens[0] in GENERIC_IDENTITY_HEAD_TOKENS)
+        ):
+            continue
+        aliases.append(phrase)
+        alias_keys.add(key)
+        audit["same_product_aliases_added"].append(phrase)
+    normalized["same_product_aliases"] = aliases[:8]
+
+    exact_identity_keys = {
+        " ".join(str(value or "").casefold().split())
+        for value in (
+            *(normalized.get("product_type_terms") or []),
+            *normalized["same_product_aliases"],
+        )
+        if str(value or "").strip()
+    }
+    raw_same_demand = normalized.get("same_demand_product_terms")
+    same_demand_values = list(raw_same_demand) if isinstance(raw_same_demand, list) else []
+    raw_opportunity = normalized.get("opportunity_seeds")
+    if isinstance(raw_opportunity, list):
+        for raw_intent in raw_opportunity:
+            if not isinstance(raw_intent, Mapping):
+                continue
+            raw_alternatives = raw_intent.get("alternative_product_terms")
+            if isinstance(raw_alternatives, list):
+                same_demand_values.extend(raw_alternatives)
+
+    same_demand_terms: list[str] = []
+    same_demand_keys: set[str] = set()
+    for raw_term in same_demand_values:
+        term = " ".join(str(raw_term or "").split())
+        key = term.casefold()
+        tokens = _identity_term_tokens(term)
+        if not term or key in same_demand_keys or key in exact_identity_keys:
+            if term and key in exact_identity_keys:
+                audit["same_demand_product_terms_removed"].append(
+                    {"phrase": term, "reason": "exact_same_product_identity"}
+                )
+            continue
+        if len(tokens) == 1 and tokens[0] in GENERIC_IDENTITY_HEAD_TOKENS:
+            audit["same_demand_product_terms_removed"].append(
+                {"phrase": term, "reason": "generic_one_word_identity"}
+            )
+            continue
+        same_demand_keys.add(key)
+        same_demand_terms.append(term)
+    explicit_same_demand_keys = {
+        " ".join(str(value or "").casefold().split())
+        for value in (raw_same_demand or [])
+        if str(value or "").strip()
+    } if isinstance(raw_same_demand, list) else set()
+    audit["same_demand_product_terms_added"] = [
+        term for term in same_demand_terms if term.casefold() not in explicit_same_demand_keys
+    ]
+    normalized["same_demand_product_terms"] = same_demand_terms[:12]
+
+    raw_keywords = normalized.get("keywords")
+    keywords: list[dict[str, Any]] = []
+    keyword_keys: set[str] = set()
+    if isinstance(raw_keywords, list):
+        for raw_keyword in raw_keywords:
+            if not isinstance(raw_keyword, Mapping):
+                audit["keywords_removed"].append(
+                    {"phrase": "", "reason": "not_an_object"}
+                )
+                continue
+            keyword = dict(raw_keyword)
+            phrase = " ".join(str(keyword.get("phrase") or "").split())
+            word_count = len(TOKEN_PATTERN.findall(phrase.casefold()))
+            key = phrase.casefold()
+            if not phrase:
+                audit["keywords_removed"].append(
+                    {"phrase": "", "reason": "empty_phrase"}
+                )
+                continue
+            if key in keyword_keys:
+                audit["keywords_removed"].append(
+                    {"phrase": phrase, "reason": "duplicate"}
+                )
+                continue
+            if not MODEL_DIRECT_QUERY_MIN_WORDS <= word_count <= MODEL_DIRECT_QUERY_MAX_WORDS:
+                audit["keywords_removed"].append(
+                    {
+                        "phrase": phrase,
+                        "reason": "outside_2_to_4_words",
+                        "word_count": word_count,
+                    }
+                )
+                continue
+            keyword["phrase"] = phrase
+            keywords.append(keyword)
+            keyword_keys.add(key)
+
+    def short_keyword_count() -> int:
+        return sum(
+            len(TOKEN_PATTERN.findall(str(item.get("phrase") or "").casefold()))
+            <= MODEL_DIRECT_QUERY_PREFERRED_MAX_WORDS
+            for item in keywords
+        )
+
+    supplement_rows: list[tuple[int, str]] = []
+    for phrase in identity_supplements:
+        word_count = len(TOKEN_PATTERN.findall(phrase.casefold()))
+        if MODEL_DIRECT_QUERY_MIN_WORDS <= word_count <= MODEL_DIRECT_QUERY_MAX_WORDS:
+            supplement_rows.append((word_count, phrase))
+    supplement_rows.sort(key=lambda item: (item[0] > MODEL_DIRECT_QUERY_PREFERRED_MAX_WORDS, item[0]))
+
+    for word_count, phrase in supplement_rows:
+        if (
+            len(keywords) >= 6
+            and short_keyword_count() >= MODEL_DIRECT_QUERY_MIN_PREFERRED_COUNT
+        ):
+            break
+        key = phrase.casefold()
+        if key in keyword_keys:
+            continue
+        if len(keywords) >= 10:
+            replace_index = next(
+                (
+                    index
+                    for index in range(len(keywords) - 1, -1, -1)
+                    if len(
+                        TOKEN_PATTERN.findall(
+                            str(keywords[index].get("phrase") or "").casefold()
+                        )
+                    )
+                    > MODEL_DIRECT_QUERY_PREFERRED_MAX_WORDS
+                ),
+                None,
+            )
+            if replace_index is None or word_count > MODEL_DIRECT_QUERY_PREFERRED_MAX_WORDS:
+                continue
+            replaced = keywords.pop(replace_index)
+            replaced_phrase = str(replaced.get("phrase") or "")
+            keyword_keys.discard(replaced_phrase.casefold())
+            audit["keywords_removed"].append(
+                {
+                    "phrase": replaced_phrase,
+                    "reason": "replaced_to_meet_short_query_mix",
+                }
+            )
+        keywords.append(
+            {
+                "phrase": phrase,
+                "rationale": "Exact product identity already present in the fused profile.",
+                "buyer_job": "",
+                "alternative_product_terms": [],
+                "excluded_product_terms": [],
+            }
+        )
+        keyword_keys.add(key)
+        audit["keywords_added"].append(phrase)
+    normalized["keywords"] = keywords[:10]
+
+    audit["applied"] = any(
+        audit[key]
+        for key in (
+            "keywords_removed",
+            "keywords_added",
+            "same_product_aliases_removed",
+            "same_product_aliases_added",
+            "same_demand_product_terms_removed",
+            "same_demand_product_terms_added",
+        )
+    )
+    return normalized, audit
 
 
 @dataclass(frozen=True)
@@ -689,10 +1007,16 @@ class SearchRankingRuntimeSettings:
     offer_max_age_hours: float
     image_max_dimension: int
     page_delay_jitter_seconds: float = 2.0
+    codex_cli_path: Path | None = None
+    codex_quota_state_path: Path | None = None
 
     @property
     def configured_providers(self) -> tuple[VisionProviderSettings, ...]:
-        configured = [provider for provider in self.providers if provider.api_key]
+        configured = [
+            provider
+            for provider in self.providers
+            if provider.name in {"doubao", "qwen"} and bool(provider.api_key)
+        ]
         priority = {"doubao": 0, "qwen": 1}
         return tuple(sorted(configured, key=lambda item: priority.get(item.name, 99)))
 
@@ -716,9 +1040,16 @@ class SearchRankingRuntimeSettings:
         models = "|".join(f"{provider.name}:{provider.model}" for provider in self.providers)
         return f"unconfigured|{models}"
 
+    @property
+    def codex_quota_path(self) -> Path:
+        return self.codex_quota_state_path or (
+            self.project_root / "logs" / "search-ranking-codex-quota.json"
+        )
+
     @classmethod
     def from_env(cls, project_root: Path) -> SearchRankingRuntimeSettings:
         load_dotenv(project_root / ".env", override=False)
+        resolved_root = project_root.resolve()
         qwen = VisionProviderSettings(
             name="qwen",
             display_name="阿里云百炼千问",
@@ -769,8 +1100,8 @@ class SearchRankingRuntimeSettings:
         if not qwen.model or not doubao.model:
             raise SearchRankingConfigurationError("搜索定位模型名称不能为空")
         return cls(
-            project_root=project_root.resolve(),
-            providers=(qwen, doubao),
+            project_root=resolved_root,
+            providers=(doubao, qwen),
             max_pages=_bounded_int("TAKEALOT_SEARCH_MAX_PAGES", 5, 1, 10),
             max_keywords=_bounded_int("TAKEALOT_SEARCH_MAX_KEYWORDS", 14, 6, 16),
             confidence_threshold=_bounded_float(
@@ -792,6 +1123,8 @@ class SearchRankingRuntimeSettings:
             page_delay_jitter_seconds=_bounded_float(
                 "TAKEALOT_SEARCH_PAGE_DELAY_JITTER_SECONDS", 2.0, 0.0, 5.0
             ),
+            codex_cli_path=None,
+            codex_quota_state_path=None,
         )
 
 
@@ -1496,6 +1829,272 @@ class OpenAICompatibleProductVisionClient:
         raise SearchRankingProviderError("多模态模型暂时不可用") from last_error
 
 
+class CodexCliProductVisionClient:
+    """Two-stage product vision through a Terra-only local Codex App Server."""
+
+    def __init__(self, settings: SearchRankingRuntimeSettings) -> None:
+        self.settings = settings
+        self.quota_guard = CodexWeeklyQuotaGuard(settings.codex_quota_path)
+
+    async def preflight_quota(self) -> dict[str, Any]:
+        executable = self._executable()
+        try:
+            async with CodexAppServerClient(
+                executable,
+                project_root=self.settings.project_root,
+                quota_guard=self.quota_guard,
+                timeout_seconds=self.settings.request_timeout_seconds,
+            ) as client:
+                return await client.preflight_quota()
+        except CodexCliQuotaExceededError as exc:
+            raise SearchRankingQuotaExceededError(
+                str(exc),
+                usage=dict(exc.usage),
+                quota=dict(exc.quota),
+            ) from exc
+        except CodexCliConfigurationError as exc:
+            raise SearchRankingConfigurationError(str(exc)) from exc
+        except CodexCliProviderError as exc:
+            raise SearchRankingProviderError(str(exc)) from exc
+
+    async def identify(
+        self,
+        *,
+        image_url: str,
+        reference_title: str,
+        variant_context: Mapping[str, Any] | None = None,
+    ) -> VisionCallResult:
+        executable = self._executable()
+        image_path = await asyncio.to_thread(
+            _thumbnail_path,
+            self.settings,
+            image_url,
+        )
+        aggregate_usage = {
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "total_tokens": 0,
+        }
+        visual_result: Any = None
+        fusion_result: Any = None
+        fusion_normalization: dict[str, Any] = {"applied": False}
+        try:
+            async with CodexAppServerClient(
+                executable,
+                project_root=self.settings.project_root,
+                quota_guard=self.quota_guard,
+                timeout_seconds=self.settings.request_timeout_seconds,
+            ) as client:
+                visual_result = await client.run_structured_turn(
+                    stage="isolated_image_observation",
+                    system_prompt=_VISUAL_SYSTEM_PROMPT,
+                    user_text=(
+                        "Identify the physical product shown in the image. No seller title or SKU "
+                        "is supplied at this stage; base the identity only on visible evidence. "
+                        "Express every generated term for South African local customers, using "
+                        "South African English and locally plausible shopping vocabulary."
+                    ),
+                    image_path=image_path,
+                    output_schema=LocalizedVisionProfile.model_json_schema(),
+                )
+                aggregate_usage = _sum_usage(aggregate_usage, visual_result.usage)
+                try:
+                    visual_profile = LocalizedVisionProfile.model_validate(visual_result.payload)
+                except ValidationError as exc:
+                    validation_errors = _fusion_validation_errors(exc)
+                    validation_summary = _fusion_validation_summary(exc)
+                    failure_audit = {
+                        "stage": "isolated_image_observation",
+                        "summary": validation_summary,
+                        "validation_errors": validation_errors,
+                        "raw_payload": dict(visual_result.payload),
+                    }
+                    raise _CountedVisionProviderError(
+                        "Codex Terra 隔离图片识别结果校验失败："
+                        + validation_summary,
+                        usage=dict(aggregate_usage),
+                        estimated_cost_cny=0.0,
+                        provider_attempts=(
+                            {
+                                "provider": "codex_cli",
+                                "model": CODEX_TERRA_MODEL,
+                                "status": "local_validation_failed",
+                                "stage": "isolated_image_observation",
+                                "usage": dict(aggregate_usage),
+                                "weekly_quota": dict(visual_result.quota),
+                                "validation_errors": validation_errors,
+                            },
+                        ),
+                        failure_audit=failure_audit,
+                    ) from exc
+
+                normalized_title = " ".join(reference_title.split())
+                _, cross_check = _cross_check_image_profile(
+                    visual_profile,
+                    normalized_title,
+                )
+                fusion_context = json.dumps(
+                    {
+                        "source_title": normalized_title,
+                        "variant_family": dict(variant_context or {}),
+                        "variant_evidence_policy": {
+                            "shared_subject_uses_image_and_titles": True,
+                            "variant_parameters_come_from_seller_titles": True,
+                            "representative_image_does_not_verify_sibling_variant_values": True,
+                            "do_not_apply_one_variant_value_to_the_whole_family": True,
+                        },
+                        "isolated_visual_observation": visual_profile.model_dump(mode="json"),
+                        "independent_cross_validation": {
+                            "source_title_similarity": cross_check["source_title_similarity"],
+                            "title_identity_support": cross_check.get("title_identity_support"),
+                            "title_identity_supported_terms": cross_check.get(
+                                "title_identity_supported_terms"
+                            ),
+                            "difference_level": _identity_difference_level(cross_check),
+                        },
+                    },
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                )
+                fusion_result = await client.run_structured_turn(
+                    stage="image_title_fusion",
+                    system_prompt=_FUSION_SYSTEM_PROMPT,
+                    user_text=(
+                        "Generate one shared product-family search intent from the representative "
+                        "image, shared subject title, representative title, and the explicitly "
+                        "separated Seller-title variant parameters. Preserve variant distinctions "
+                        "but do not turn one variant value into a family-wide fact. Every generated "
+                        "term and search phrase must predict how South African local customers shop, "
+                        "in South African English. The isolated observation and cross-validation "
+                        "are evidence, not permission to silently overwrite either source. "
+                        "Return concise natural shopper queries, normally 2-4 words, and place the "
+                        "product identity before colour or other variant parameters. Context JSON: "
+                        + fusion_context
+                    ),
+                    image_path=image_path,
+                    output_schema=FusionVisionProfile.model_json_schema(),
+                )
+                aggregate_usage = _sum_usage(aggregate_usage, fusion_result.usage)
+                normalized_fusion_payload, fusion_normalization = (
+                    _normalize_fusion_payload(fusion_result.payload)
+                )
+                try:
+                    fusion_profile = FusionVisionProfile.model_validate(
+                        normalized_fusion_payload
+                    )
+                except ValidationError as exc:
+                    validation_errors = _fusion_validation_errors(exc)
+                    validation_summary = _fusion_validation_summary(exc)
+                    failure_audit = {
+                        "stage": "image_title_fusion",
+                        "summary": validation_summary,
+                        "validation_errors": validation_errors,
+                        "normalization": dict(fusion_normalization),
+                        "raw_payload": dict(fusion_result.payload),
+                        "normalized_payload": normalized_fusion_payload,
+                    }
+                    raise _CountedVisionProviderError(
+                        "Codex Terra 图片标题融合结果无法安全校正："
+                        + validation_summary,
+                        usage=dict(aggregate_usage),
+                        estimated_cost_cny=0.0,
+                        provider_attempts=(
+                            {
+                                "provider": "codex_cli",
+                                "model": CODEX_TERRA_MODEL,
+                                "status": "local_validation_failed",
+                                "stage": "image_title_fusion",
+                                "usage": dict(aggregate_usage),
+                                "weekly_quota": dict(fusion_result.quota),
+                                "validation_errors": validation_errors,
+                                "normalization": dict(fusion_normalization),
+                            },
+                        ),
+                        failure_audit=failure_audit,
+                    ) from exc
+        except SearchRankingProviderError:
+            raise
+        except CodexCliQuotaExceededError as exc:
+            usage = _sum_usage(aggregate_usage, exc.usage)
+            raise SearchRankingQuotaExceededError(
+                str(exc),
+                usage=usage,
+                quota=dict(exc.quota),
+            ) from exc
+        except CodexCliConfigurationError as exc:
+            raise SearchRankingConfigurationError(str(exc)) from exc
+        except CodexCliProviderError as exc:
+            usage = _sum_usage(aggregate_usage, exc.usage)
+            if usage["total_tokens"]:
+                failed_stage = (
+                    "image_title_fusion"
+                    if visual_result is not None
+                    else "isolated_image_observation"
+                )
+                raise _CountedVisionProviderError(
+                    str(exc),
+                    usage=usage,
+                    estimated_cost_cny=0.0,
+                    provider_attempts=(
+                        {
+                            "provider": "codex_cli",
+                            "model": CODEX_TERRA_MODEL,
+                            "status": "request_or_schema_failed",
+                            "stage": failed_stage,
+                            "reason": type(exc).__name__,
+                            "usage": dict(usage),
+                            "weekly_quota": dict(exc.quota),
+                        },
+                    ),
+                ) from exc
+            raise SearchRankingProviderError(str(exc)) from exc
+
+        if visual_result is None or fusion_result is None:
+            raise SearchRankingProviderError("Codex Terra 识别流程未完整结束")
+        return VisionCallResult(
+            profile=fusion_profile,
+            provider="codex_cli",
+            model=CODEX_TERRA_MODEL,
+            response_id=fusion_result.turn_id,
+            usage=dict(aggregate_usage),
+            estimated_cost_cny=0.0,
+            provider_attempts=(
+                {
+                    "provider": "codex_cli",
+                    "status": "accepted",
+                    "stages": [
+                        "isolated_image_observation",
+                        "image_title_fusion",
+                    ],
+                    "model": CODEX_TERRA_MODEL,
+                    "model_fallback_allowed": False,
+                    "weekly_quota": dict(fusion_result.quota),
+                    "usage": dict(aggregate_usage),
+                    "estimated_cost_cny": 0.0,
+                    "normalization": dict(fusion_normalization),
+                },
+            ),
+            cache_profile=visual_profile,
+            visual_profile=visual_profile,
+            fusion_profile=fusion_profile,
+            cross_validation=dict(cross_check),
+            visual_response_id=visual_result.turn_id,
+        )
+
+    def _executable(self) -> Path:
+        executable = self.settings.codex_cli_path
+        if executable is None or not executable.is_file():
+            raise SearchRankingConfigurationError(
+                "未安装项目锁定的 Codex CLI；搜索定位不会回退到其他模型"
+            )
+        provider = self.settings.primary_provider
+        if provider.name != "codex_cli" or provider.model != CODEX_TERRA_MODEL:
+            raise SearchRankingConfigurationError(
+                f"搜索定位只允许模型 {CODEX_TERRA_MODEL}"
+            )
+        return executable
+
+
 @dataclass(frozen=True)
 class OfferEligibility:
     eligible: bool
@@ -1663,6 +2262,13 @@ class SearchRankingService:
             "fallback_model": fallback.model if fallback else None,
             "configured_provider_count": len(self.runtime.configured_providers),
             "pricing_snapshot_date": PRICING_SNAPSHOT_DATE,
+            "pricing_mode": "api_unit_price",
+            "model_policy": {
+                "transport": "openai_compatible_https",
+                "model_fallback_allowed": fallback is not None,
+                "codex_cli_integration_retained": True,
+                "codex_cli_execution_enabled": False,
+            },
             "max_pages": self.runtime.max_pages,
             "max_keywords": self.runtime.max_keywords,
             "root_expansion_input_limit": ROOT_EXPANSION_INPUT_LIMIT,
@@ -1688,9 +2294,11 @@ class SearchRankingService:
                 "max_words": MODEL_DIRECT_QUERY_MAX_WORDS,
                 "preferred_max_words": MODEL_DIRECT_QUERY_PREFERRED_MAX_WORDS,
                 "min_preferred_count": MODEL_DIRECT_QUERY_MIN_PREFERRED_COUNT,
+                "source_priority": ["same_product_lexicon", "fusion_keywords"],
             },
             "query_source_targets": {
                 "model_south_african_direct": MODEL_DIRECT_QUERY_TARGET,
+                "same_product_lexicon_first": True,
                 "takealot_root_expansion": ROOT_EXPANSION_CORE_QUERY_TARGET,
                 "seller_title_complete_phrase_max": (
                     SELLER_TITLE_COMPLETE_PHRASE_QUERY_MAX
@@ -1704,10 +2312,16 @@ class SearchRankingService:
             "image_max_dimension": self.runtime.image_max_dimension,
             "organic_page_size": ORGANIC_PAGE_SIZE,
             "columns_per_row": DESKTOP_COLUMNS,
-            "core_first_page_threshold": max(
-                self.runtime.relevance_threshold,
-                CORE_MAJORITY_FLOOR,
+            "core_first_page_threshold": CORE_DEMAND_COMPETITOR_RATIO_FLOOR,
+            "core_same_demand_competitor_ratio_floor": (
+                CORE_DEMAND_COMPETITOR_RATIO_FLOOR
             ),
+            "core_same_demand_competitor_min_results": (
+                CORE_DEMAND_COMPETITOR_MIN_RESULTS
+            ),
+            "core_min_platform_results": CORE_MIN_PLATFORM_RESULTS,
+            "platform_result_count_is_search_volume": False,
+            "platform_result_count_role": "core_keyword_supply_breadth_gate",
             "semantic_relation_grades": ["S", "A", "C/I"],
             "semantic_relation_source_priority_decides_grade": False,
             "semantic_adjacent_ratio_floor": SEMANTIC_ADJACENT_RATIO_FLOOR,
@@ -2597,9 +3211,18 @@ class SearchRankingService:
                 staged_analysis.confidence = Decimal(str(model_profile.confidence))
                 staged_analysis.vision_payload = dict(vision_payload)
 
+            applied_product_fact_records = [
+                item for item in product_fact_records if item["applied_to_current_image"]
+            ]
             profile = _enrich_profile_with_confirmed_facts(
                 model_profile,
-                [item for item in product_fact_records if item["applied_to_current_image"]],
+                applied_product_fact_records,
+            )
+            same_product_lexicon = _same_product_lexicon(
+                profile,
+                model_profile=model_profile,
+                confirmed_fact_records=applied_product_fact_records,
+                source_title=title,
             )
             vision_payload["product_fact_profile"] = {
                 "applied_terms": list(applied_product_fact_terms),
@@ -2607,6 +3230,7 @@ class SearchRankingService:
                 "requires_current_image_match": True,
                 "source_policy": "manual_confirmation_only",
             }
+            vision_payload["same_product_lexicon"] = same_product_lexicon
             vision_payload["decision_parameter_profile"] = decision_parameter_profile
 
             _, recognition = _cross_check_image_profile(
@@ -2714,9 +3338,11 @@ class SearchRankingService:
                     "max_words": MODEL_DIRECT_QUERY_MAX_WORDS,
                     "preferred_max_words": MODEL_DIRECT_QUERY_PREFERRED_MAX_WORDS,
                     "min_preferred_count": MODEL_DIRECT_QUERY_MIN_PREFERRED_COUNT,
+                    "source_priority": ["same_product_lexicon", "fusion_keywords"],
                 },
                 "query_source_targets": {
                     "model_south_african_direct": MODEL_DIRECT_QUERY_TARGET,
+                    "same_product_lexicon_first": True,
                     "takealot_root_expansion": ROOT_EXPANSION_CORE_QUERY_TARGET,
                     "seller_title_complete_phrase_max": (
                         SELLER_TITLE_COMPLETE_PHRASE_QUERY_MAX
@@ -2724,6 +3350,13 @@ class SearchRankingService:
                     "root_related_core_total": ROOT_EXPANSION_CORE_QUERY_TARGET,
                     "adjacent_opportunity": ROOT_EXPANSION_OPPORTUNITY_QUERY_TARGET,
                     "adaptive_recovery": ADAPTIVE_RECOVERY_QUERY_TARGET,
+                },
+                "same_product_lexicon": {
+                    "policy_version": SAME_PRODUCT_LEXICON_POLICY_VERSION,
+                    "entry_count": len(same_product_lexicon["entries"]),
+                    "direct_query_priority": True,
+                    "complete_root_expansion_enabled": True,
+                    "complete_root_expansion_limit": SAME_PRODUCT_LEXICON_ROOT_LIMIT,
                 },
                 "adaptive_policy": {
                     "base_query_target": ADAPTIVE_BASE_QUERY_TARGET,
@@ -2769,6 +3402,7 @@ class SearchRankingService:
                 candidates = _precise_candidates(
                     profile,
                     source_title=evidence_source_title,
+                    same_product_lexicon=same_product_lexicon,
                 )[: self.runtime.max_keywords]
                 for order, candidate in enumerate(candidates, start=1):
                     observations.append(
@@ -2805,6 +3439,7 @@ class SearchRankingService:
                             for item in product_fact_records
                             if item["applied_to_current_image"]
                         ],
+                        same_product_lexicon=same_product_lexicon,
                         model_autocomplete_seeds=model_profile.autocomplete_seeds,
                         model_opportunity_seeds=model_profile.opportunity_seeds,
                         decision_parameter_values=applied_decision_parameter_values,
@@ -2878,6 +3513,7 @@ class SearchRankingService:
                 opportunity_title_suggestion = title_strategies[2]["title"]
                 profile_payload = profile.model_dump(mode="json")
                 profile_payload["confirmed_product_fact_terms"] = list(applied_product_fact_terms)
+                profile_payload["same_product_lexicon"] = same_product_lexicon
                 profile_payload["title_suggestion"] = title_suggestion
                 profile_payload["title_reason"] = title_reason
                 profile_payload["title_strategies"] = title_strategies
@@ -2939,7 +3575,14 @@ class SearchRankingService:
                 with Session(engine) as session, session.begin():
                     failed_analysis = session.get(SearchRankingAnalysis, analysis_id)
                     if failed_analysis is not None:
-                        if isinstance(exc, _VisionAttemptsExhaustedError):
+                        if isinstance(
+                            exc,
+                            (
+                                _CountedVisionProviderError,
+                                _VisionAttemptsExhaustedError,
+                                SearchRankingQuotaExceededError,
+                            ),
+                        ):
                             failed_analysis.vision_payload = {
                                 "vision_stage_completed": False,
                                 "usage": dict(exc.usage),
@@ -2947,6 +3590,15 @@ class SearchRankingService:
                                 "provider_attempts": [dict(item) for item in exc.provider_attempts],
                                 "pricing_snapshot_date": PRICING_SNAPSHOT_DATE,
                             }
+                            if (
+                                isinstance(exc, _CountedVisionProviderError)
+                                and exc.failure_audit
+                            ):
+                                failed_analysis.vision_payload["failure_audit"] = dict(
+                                    exc.failure_audit
+                                )
+                            if isinstance(exc, SearchRankingQuotaExceededError):
+                                failed_analysis.vision_payload["weekly_quota"] = dict(exc.quota)
                         failed_analysis.status = "failed"
                         failed_analysis.error = _safe_error(exc)
                         failed_analysis.completed_at = _utcnow()
@@ -3016,17 +3668,28 @@ async def _collect_keyword_observation(
 ) -> KeywordObservation:
     keyword = candidate.phrase
     request_url, payload = await client.fetch_search_first_page(keyword)
+    request_parts = urlsplit(request_url)
+    captured_request_qsearch = dict(
+        parse_qsl(request_parts.query, keep_blank_values=True)
+    ).get("qsearch", "")
+    captured_request_matches_keyword = " ".join(
+        captured_request_qsearch.casefold().split()
+    ) == " ".join(keyword.casefold().split())
     first_products, paging = _search_products(payload)
     first_products = first_products[:ORGANIC_PAGE_SIZE]
     first_page_titles = [item["title"] for item in first_products]
+    total = _optional_int(paging.get("total_num_found"))
     core_threshold = max(relevance_threshold, CORE_MAJORITY_FLOOR)
     semantic_relation = _semantic_relation_evidence(
         keyword=keyword,
         first_page_titles=first_page_titles,
+        first_page_products=first_products,
         profile=profile,
         candidate=candidate,
         core_threshold=core_threshold,
         source_title=source_title,
+        target_plid=target_plid,
+        total_num_found=total,
     )
     validation_terms = [
         str(term)
@@ -3047,14 +3710,34 @@ async def _collect_keyword_observation(
         )
     )
     validation_term_source = "semantic_verified_same_product_terms"
+    raw_result_classifications = semantic_relation.get("first_page_result_classifications")
+    result_classifications = (
+        raw_result_classifications
+        if isinstance(raw_result_classifications, list)
+        else []
+    )
     relevant_flags = [
-        _semantic_title_matches_product_terms(title, validation_terms)
-        for title in first_page_titles
+        bool(item.get("is_core_competitor")) if isinstance(item, Mapping) else False
+        for item in result_classifications
+    ]
+    direct_flags = [
+        bool(item.get("is_direct_competitor")) if isinstance(item, Mapping) else False
+        for item in result_classifications
+    ]
+    same_demand_flags = [
+        bool(item.get("is_same_demand_competitor"))
+        if isinstance(item, Mapping)
+        else False
+        for item in result_classifications
     ]
     score = sum(relevant_flags) / len(relevant_flags) if relevant_flags else 0.0
     matched_count = sum(relevant_flags)
+    direct_count = sum(direct_flags)
+    same_demand_count = sum(same_demand_flags)
     matched_result_titles = [
-        title for title, relevant in zip(first_page_titles, relevant_flags, strict=True) if relevant
+        title
+        for title, relevant in zip(first_page_titles, relevant_flags, strict=True)
+        if relevant
     ]
     evaluated_count = len(relevant_flags)
     semantic_grade = str(semantic_relation["semantic_relation_grade"])
@@ -3064,8 +3747,10 @@ async def _collect_keyword_observation(
         and candidate.intended_strategy == "comparison"
     )
     comparison_required = candidate.comparison_role in {"primary", "secondary"}
-    accepted_as_core = (
-        semantic_grade == "S" and score >= core_threshold and not comparison_resample
+    accepted_as_core = bool(
+        semantic_grade == "S"
+        and semantic_relation.get("semantic_relation_core_page_qualified")
+        and not comparison_resample
     )
     autocomplete_sources = [
         item
@@ -3110,9 +3795,13 @@ async def _collect_keyword_observation(
     )
     target_on_first_page = target_first_page_index is not None
     target_counted_as_direct_competitor = bool(
-        target_first_page_index is not None and relevant_flags[target_first_page_index]
+        target_first_page_index is not None and direct_flags[target_first_page_index]
     )
     direct_competitors_excluding_target = max(
+        0,
+        direct_count - int(target_counted_as_direct_competitor),
+    )
+    core_competitors_excluding_target = max(
         0,
         matched_count - int(target_counted_as_direct_competitor),
     )
@@ -3238,21 +3927,43 @@ async def _collect_keyword_observation(
         "first_page_same_type_ratio": score,
         **semantic_relation,
         "page_validation_status": "completed",
-        "same_type_validation_method": "semantic_alias_token_subset_with_retarget_rejection",
+        "same_type_validation_method": (
+            "exact_identity_and_same_demand_family_page_audit"
+        ),
         "same_type_validation_controlled_aliases": controlled_validation_aliases,
         "same_type_validation_term_source": validation_term_source,
         "same_type_validation_uses_multimodal_per_result": False,
-        "same_type_validation_requires_contiguous_phrase": False,
+        "same_type_validation_requires_contiguous_phrase": True,
         "same_type_validation_limitations": (
-            "同品统计使用图文融合或人工事实支持的商品名与直接别名，并排除 cover、sleeve、pad 等"
-            "改指向配件的标题；仍是可审计的标题语义证据，不是逐商品图片或类目复核。"
+            "首页36个自然商品分开核验完全同款、同需求替代品和无关商品；"
+            "平台图片链接随判定保存供人工复核，但自动统计不会为每个结果再次调用视觉模型。"
         ),
-        "first_page_majority": score >= CORE_MAJORITY_FLOOR,
+        "first_page_majority": (
+            direct_count / evaluated_count >= CORE_MAJORITY_FLOOR
+            if evaluated_count
+            else False
+        ),
+        "first_page_core_competitor_density_qualified": bool(
+            semantic_relation.get("semantic_relation_core_page_qualified")
+        ),
         "core_threshold": core_threshold,
-        "direct_competitor_count_first_page": matched_count,
-        "direct_competitor_detection": "verified_same_product_terms_and_direct_aliases",
+        "core_demand_ratio_floor": CORE_DEMAND_COMPETITOR_RATIO_FLOOR,
+        "core_demand_min_results": CORE_DEMAND_COMPETITOR_MIN_RESULTS,
+        "core_min_platform_results": CORE_MIN_PLATFORM_RESULTS,
+        "platform_result_count_is_search_volume": False,
+        "platform_result_count_role": "core_keyword_supply_breadth_gate",
+        "direct_competitor_count_first_page": direct_count,
+        "same_demand_competitor_count_first_page": same_demand_count,
+        "core_competitor_count_first_page": matched_count,
+        "core_competitor_count_excluding_target_first_page": (
+            core_competitors_excluding_target
+        ),
+        "direct_competitor_detection": (
+            "ordered_same_product_identity_exclusions_and_title_signatures"
+        ),
         "direct_competitor_detection_note": (
-            "直接同类按已验证商品名和直接别名匹配自然结果标题；来源优先级不参与S/A判级。"
+            "直接同品按完整有序商品名、直接别名、目标PLID或至少3词同款标题签名逐条判定；"
+            "不同形态但满足同一核心需求的商品另计为同需求竞品，不再混入无关商品。"
         ),
         "direct_competitor_count_excluding_target_first_page": (
             direct_competitors_excluding_target
@@ -3268,6 +3979,11 @@ async def _collect_keyword_observation(
         "opportunity_qualified": False,
         "blue_ocean_qualified": False,
         "opportunity_rejection_reasons": opportunity_precheck_reasons,
+        "captured_request_endpoint": (
+            f"{request_parts.scheme}://{request_parts.netloc}{request_parts.path}"
+        ),
+        "captured_request_qsearch": captured_request_qsearch,
+        "captured_request_matches_keyword": captured_request_matches_keyword,
         "api_version": api_match.group(1) if api_match else None,
         "sort": "Relevance",
         "page_size": ORGANIC_PAGE_SIZE,
@@ -3277,7 +3993,6 @@ async def _collect_keyword_observation(
         "sponsored_exclusion": "section_type_and_explicit_flags",
     }
     observed_at = _utcnow()
-    total = _optional_int(paging.get("total_num_found"))
     should_scan_opportunity = (
         opportunity_candidate
         and opportunity_claims_safe
@@ -3896,13 +4611,28 @@ def _search_products(payload: Mapping[str, Any]) -> tuple[list[dict[str, str]], 
             continue
         plid = str(core.get("id") or "")
         title = " ".join(str(core.get("title") or "").split())
+        subtitle = " ".join(str(core.get("subtitle") or "").split())
         slug = str(core.get("slug") or "").strip("/")
         if not plid or not title:
             continue
+        gallery = view.get("gallery") if isinstance(view, Mapping) else None
+        raw_images = gallery.get("images") if isinstance(gallery, Mapping) else None
+        image_url = ""
+        if isinstance(raw_images, list):
+            image_url = next(
+                (
+                    str(value).replace("{size}", "pdpxl")
+                    for value in raw_images
+                    if str(value or "").strip()
+                ),
+                "",
+            )
         products.append(
             {
                 "plid": plid,
                 "title": title,
+                "subtitle": subtitle,
+                "image_url": image_url,
                 "url": f"https://www.takealot.com/{slug}/PLID{plid}" if slug else "",
             }
         )
@@ -3952,6 +4682,33 @@ def _same_product_relation_terms(profile: VisionProfile) -> list[str]:
             normalized
             for value in (*profile.product_type_terms, *profile.same_product_aliases)
             if (normalized := " ".join(str(value or "").casefold().split()))
+            and not (
+                len(tokens := _identity_term_tokens(normalized)) == 1
+                and tokens[0] in GENERIC_IDENTITY_HEAD_TOKENS
+            )
+        )
+    )
+
+
+def _same_demand_relation_terms(profile: VisionProfile) -> list[str]:
+    """Return explicit substitute families for the target's primary buyer need."""
+
+    exact_terms = {
+        term.casefold() for term in _same_product_relation_terms(profile)
+    }
+    return list(
+        dict.fromkeys(
+            normalized
+            for value in (
+                *profile.same_demand_product_terms,
+                *(
+                    term
+                    for intent in profile.opportunity_seeds
+                    for term in intent.alternative_product_terms
+                ),
+            )
+            if (normalized := " ".join(str(value or "").casefold().split()))
+            and normalized not in exact_terms
             and not (
                 len(tokens := _identity_term_tokens(normalized)) == 1
                 and tokens[0] in GENERIC_IDENTITY_HEAD_TOKENS
@@ -4083,28 +4840,332 @@ def _matching_adjacent_demand_intents(
     return output
 
 
+def _strict_identity_sequences(value: str) -> list[tuple[str, ...]]:
+    """Return ordered product-name forms suitable for direct-competitor proof."""
+
+    tokens = _identity_term_tokens(value)
+    if not tokens:
+        return []
+    token_set = set(tokens)
+    if not (
+        token_set & PROJECTION_SCREEN_HEAD_TOKENS
+        and token_set & PROJECTION_SCREEN_FORM_TOKENS
+    ):
+        return [tokens]
+    return [
+        (head, form)
+        for head in sorted(PROJECTION_SCREEN_HEAD_TOKENS)
+        for form in sorted(PROJECTION_SCREEN_FORM_TOKENS)
+    ]
+
+
+def _strict_matching_product_terms(value: str, terms: Sequence[str]) -> list[str]:
+    """Match a complete ordered identity phrase, never scattered title tokens."""
+
+    title_tokens = _identity_term_tokens(value)
+    output: list[str] = []
+    for raw_term in terms:
+        term = " ".join(str(raw_term or "").casefold().split())
+        if not term:
+            continue
+        matched = False
+        for sequence in _strict_identity_sequences(term):
+            if not _contains_token_sequence(title_tokens, sequence):
+                continue
+            if _semantic_retargets_product(value, set(sequence)):
+                continue
+            matched = True
+            break
+        if matched:
+            output.append(term)
+    return list(dict.fromkeys(output))
+
+
+def _source_title_signature_tokens(value: str) -> tuple[str, ...]:
+    output: list[str] = []
+    for raw_token in TOKEN_PATTERN.findall(value.casefold()):
+        for token in _canonical_token_parts(raw_token):
+            if (
+                not token
+                or token in TITLE_CONNECTOR_TOKENS
+                or token in TITLE_ROOT_EXPANSION_NOISE_TOKENS
+                or token in _VARIANT_COLOUR_TOKENS
+                or token in TITLE_PARAMETER_UNIT_TOKENS
+                or token.isdigit()
+                or COMBINED_MEASUREMENT_PATTERN.fullmatch(token)
+                or not any(character.isalpha() for character in token)
+            ):
+                continue
+            output.append(IDENTITY_TOKEN_ALIASES.get(token, token))
+    return tuple(output)
+
+
+def _source_title_identity_signatures(
+    source_title: str,
+    profile: VisionProfile,
+) -> list[str]:
+    """Extract repeated three/four-word title signatures for clone-family evidence."""
+
+    title_tokens = _source_title_signature_tokens(source_title)
+    anchor_tokens = {
+        token
+        for term in (*profile.product_type_terms, *profile.same_product_aliases)
+        for token in _identity_term_tokens(term)
+        if token not in GENERIC_IDENTITY_HEAD_TOKENS
+    }
+    if len(title_tokens) < 3 or not anchor_tokens:
+        return []
+    output: list[str] = []
+    for width in (4, 3):
+        if len(title_tokens) < width:
+            continue
+        for index in range(len(title_tokens) - width + 1):
+            window = title_tokens[index : index + width]
+            if not set(window) & anchor_tokens:
+                continue
+            if len(set(window) - GENERIC_IDENTITY_HEAD_TOKENS) < 2:
+                continue
+            phrase = " ".join(window)
+            if phrase not in output:
+                output.append(phrase)
+    return output
+
+
+def _seller_title_identity_query_terms(
+    source_title: str,
+    profile: VisionProfile,
+) -> list[str]:
+    """Keep one concise title noun phrase as a page-validated search hypothesis."""
+
+    candidates: list[tuple[int, int, str]] = []
+    for order, phrase in enumerate(_source_title_identity_signatures(source_title, profile)):
+        tokens = _identity_term_tokens(phrase)
+        if not 2 <= len(tokens) <= MODEL_DIRECT_QUERY_MAX_WORDS:
+            continue
+        if tokens[-1] not in GENERIC_IDENTITY_HEAD_TOKENS:
+            continue
+        candidates.append((len(tokens), order, phrase))
+    return [
+        phrase
+        for _, _, phrase in sorted(candidates, key=lambda item: (item[0], item[1]))[:1]
+    ]
+
+
+def _same_product_exclusion_rows(
+    profile: VisionProfile,
+    same_product_terms: Sequence[str],
+) -> list[dict[str, str]]:
+    raw_terms = list(
+        dict.fromkeys(
+            normalized
+            for value in (
+                *profile.exclusions,
+                *(term for intent in profile.opportunity_seeds for term in intent.excluded_product_terms),
+            )
+            if (normalized := " ".join(str(value or "").casefold().split()))
+        )
+    )
+    rows: list[dict[str, str]] = [
+        {"term": term, "source": "profile_exact_exclusion"} for term in raw_terms
+    ]
+    seen = {term.casefold() for term in raw_terms}
+    same_sequences = [
+        sequence
+        for term in same_product_terms
+        for sequence in _strict_identity_sequences(term)
+    ]
+
+    def add_core(sequence: tuple[str, ...]) -> None:
+        if len(sequence) != 2 or sequence[0] in GENERIC_IDENTITY_HEAD_TOKENS:
+            return
+        if any(_contains_token_sequence(same_sequence, sequence) for same_sequence in same_sequences):
+            return
+        term = " ".join(sequence)
+        if term in seen:
+            return
+        seen.add(term)
+        rows.append({"term": term, "source": "derived_excluded_product_family"})
+
+    for term in raw_terms:
+        tokens = _identity_term_tokens(term)
+        if len(tokens) >= 3:
+            add_core(tokens[-2:])
+        for index in range(len(tokens) - 1):
+            pair = tokens[index : index + 2]
+            if pair[-1] in GENERIC_IDENTITY_HEAD_TOKENS:
+                add_core(pair)
+    return rows
+
+
+def _matched_exclusion_terms(
+    value: str,
+    rows: Sequence[Mapping[str, str]],
+) -> list[str]:
+    output: list[str] = []
+    for row in rows:
+        term = str(row.get("term") or "")
+        source = str(row.get("source") or "")
+        matched = bool(
+            _semantic_matching_product_terms(value, [term])
+            if source == "profile_exact_exclusion"
+            else _strict_matching_product_terms(value, [term])
+        )
+        if matched:
+            output.append(term)
+    return list(dict.fromkeys(output))
+
+
+def _first_page_result_classification(
+    product: Mapping[str, str],
+    *,
+    same_product_terms: Sequence[str],
+    same_demand_terms: Sequence[str],
+    exclusion_rows: Sequence[Mapping[str, str]],
+    source_title_signatures: Sequence[str],
+    target_plid: str,
+    position: int,
+) -> dict[str, Any]:
+    """Classify one organic result with a complete, inspectable reason trail."""
+
+    plid = str(product.get("plid") or "")
+    title = " ".join(str(product.get("title") or "").split())
+    subtitle = " ".join(str(product.get("subtitle") or "").split())
+    title_identity_terms = _strict_matching_product_terms(title, same_product_terms)
+    loose_identity_terms = _semantic_matching_product_terms(title, same_product_terms)
+    title_exclusions = _matched_exclusion_terms(title, exclusion_rows)
+    subtitle_exclusions = _matched_exclusion_terms(subtitle, exclusion_rows) if subtitle else []
+    signature_matches = _strict_matching_product_terms(title, source_title_signatures)
+    title_demand_terms = _semantic_matching_product_terms(title, same_demand_terms)
+    subtitle_demand_terms = (
+        _semantic_matching_product_terms(subtitle, same_demand_terms) if subtitle else []
+    )
+    is_target = bool(target_plid and plid == target_plid)
+
+    if is_target:
+        classification = "direct_same_product"
+        reason = "target_product"
+    elif title_exclusions and (title_identity_terms or title_demand_terms):
+        classification = "same_demand_competitor"
+        reason = (
+            "same_product_identity_with_different_form"
+            if title_identity_terms
+            else "same_demand_product_family"
+        )
+    elif title_exclusions:
+        classification = "unrelated"
+        reason = "conflicting_product_family_in_title"
+    elif signature_matches:
+        classification = "direct_same_product"
+        reason = "source_title_identity_signature"
+    elif title_identity_terms:
+        classification = "direct_same_product"
+        reason = "ordered_same_product_name_or_alias"
+    elif title_demand_terms:
+        classification = "same_demand_competitor"
+        reason = "same_demand_product_family"
+    elif loose_identity_terms:
+        classification = "unrelated"
+        reason = "identity_tokens_scattered_not_direct_proof"
+    elif subtitle_exclusions and subtitle_demand_terms:
+        classification = "same_demand_competitor"
+        reason = "same_demand_product_family_in_subtitle"
+    elif subtitle_exclusions:
+        classification = "unrelated"
+        reason = "conflicting_product_family_in_subtitle"
+    elif subtitle_demand_terms:
+        classification = "same_demand_competitor"
+        reason = "same_demand_product_family_in_subtitle"
+    else:
+        classification = "unrelated"
+        reason = "no_complete_same_product_identity"
+
+    return {
+        "organic_position": position,
+        "plid": plid,
+        "title": title,
+        "subtitle": subtitle,
+        "url": str(product.get("url") or ""),
+        "image_url": str(product.get("image_url") or ""),
+        "classification": classification,
+        "is_direct_competitor": classification == "direct_same_product",
+        "is_same_demand_competitor": classification == "same_demand_competitor",
+        "is_core_competitor": classification
+        in {"direct_same_product", "same_demand_competitor"},
+        "is_target": is_target,
+        "reason": reason,
+        "matched_identity_terms": title_identity_terms,
+        "matched_loose_identity_terms": loose_identity_terms,
+        "matched_exclusion_terms": title_exclusions,
+        "matched_subtitle_exclusion_terms": subtitle_exclusions,
+        "matched_source_title_signatures": signature_matches,
+        "matched_same_demand_terms": title_demand_terms,
+        "matched_subtitle_same_demand_terms": subtitle_demand_terms,
+    }
+
+
 def _semantic_relation_evidence(
     *,
     keyword: str,
     first_page_titles: Sequence[str],
+    first_page_products: Sequence[Mapping[str, str]] = (),
     profile: VisionProfile,
     candidate: SearchKeywordCandidate,
     core_threshold: float,
     source_title: str = "",
+    target_plid: str = "",
+    total_num_found: int | None = None,
 ) -> dict[str, Any]:
     """Classify query-to-product relation as S, A, or the merged C/I rejection grade."""
 
     same_product_terms = _same_product_relation_terms(profile)
+    same_demand_terms = _same_demand_relation_terms(profile)
+    source_title_signatures = _source_title_identity_signatures(source_title, profile)
+    seller_title_identity_terms = _seller_title_identity_query_terms(
+        source_title,
+        profile,
+    )
     deterministic_title_alias = _current_title_direct_product_alias(
         keyword=keyword,
         source_title=source_title,
         same_product_terms=same_product_terms,
     )
+    normalized_keyword = " ".join(keyword.casefold().split())
+    if not deterministic_title_alias and normalized_keyword in {
+        term.casefold() for term in seller_title_identity_terms
+    }:
+        deterministic_title_alias = normalized_keyword
     if deterministic_title_alias:
         same_product_terms = list(
             dict.fromkeys((*same_product_terms, deterministic_title_alias))
         )
     same_query_terms = _semantic_matching_product_terms(keyword, same_product_terms)
+    strict_query_same_terms = _strict_matching_product_terms(
+        keyword,
+        same_product_terms,
+    )
+    candidate_strategies = {
+        str(item.get("intended_strategy") or "").strip().casefold()
+        for item in _candidate_provenance(candidate)
+    }
+    core_only_candidate = bool(
+        candidate.intended_strategy == "core"
+        and "opportunity" not in candidate_strategies
+    )
+    explicit_opportunity_phrases = {
+        " ".join(intent.phrase.casefold().split())
+        for intent in profile.opportunity_seeds
+        if intent.phrase.strip()
+    }
+    strict_core_query_terms = [
+        term
+        for term in strict_query_same_terms
+        if len(_identity_term_tokens(term)) >= 2
+        or normalized_keyword == " ".join(term.casefold().split())
+        or (
+            core_only_candidate
+            and normalized_keyword not in explicit_opportunity_phrases
+        )
+    ]
     intents = _matching_adjacent_demand_intents(
         profile=profile,
         candidate=candidate,
@@ -4118,32 +5179,39 @@ def _semantic_relation_evidence(
             if (normalized := " ".join(str(term or "").casefold().split()))
         )
     )
-    excluded_terms = list(
-        dict.fromkeys(
-            normalized
-            for value in (
-                *profile.exclusions,
-                *(term for intent in intents for term in intent.excluded_product_terms),
-            )
-            if (normalized := " ".join(str(value or "").casefold().split()))
-        )
+    products = (
+        [dict(item) for item in first_page_products]
+        if first_page_products
+        else [
+            {
+                "plid": "",
+                "title": title,
+                "subtitle": "",
+                "url": "",
+                "image_url": "",
+            }
+            for title in first_page_titles
+        ]
     )
-    same_flags: list[bool] = []
-    adjacent_flags: list[bool] = []
-    for title in first_page_titles:
-        same = _semantic_title_matches_product_terms(title, same_product_terms)
-        excluded = bool(excluded_terms) and _semantic_title_matches_product_terms(
-            title,
-            excluded_terms,
+    first_page_titles = [str(item.get("title") or "") for item in products]
+    exclusion_rows = _same_product_exclusion_rows(profile, same_product_terms)
+    result_classifications = [
+        _first_page_result_classification(
+            product,
+            same_product_terms=same_product_terms,
+            same_demand_terms=same_demand_terms,
+            exclusion_rows=exclusion_rows,
+            source_title_signatures=source_title_signatures,
+            target_plid=target_plid,
+            position=index,
         )
-        adjacent = bool(
-            not same
-            and not excluded
-            and alternative_terms
-            and _semantic_title_matches_product_terms(title, alternative_terms)
-        )
-        same_flags.append(same)
-        adjacent_flags.append(adjacent)
+        for index, product in enumerate(products, start=1)
+    ]
+    excluded_terms = [str(item["term"]) for item in exclusion_rows]
+    same_flags = [bool(item["is_direct_competitor"]) for item in result_classifications]
+    adjacent_flags = [
+        bool(item["is_same_demand_competitor"]) for item in result_classifications
+    ]
 
     evaluated_count = len(first_page_titles)
     same_count = sum(same_flags)
@@ -4154,75 +5222,145 @@ def _semantic_relation_evidence(
     supported_ratio = (
         (same_count + adjacent_count) / evaluated_count if evaluated_count else 0.0
     )
+    # A core query must name the product as one complete, ordered identity phrase.
+    # Loose token overlap remains useful audit evidence, but it must not upgrade an
+    # adjacent-demand query such as ``mouse for laptop`` into an S-grade core term.
+    query_identity_supported = bool(
+        deterministic_title_alias or strict_core_query_terms
+    )
+    platform_supply_evidence_available = total_num_found is not None
+    platform_supply_qualified = bool(
+        total_num_found is None or total_num_found >= CORE_MIN_PLATFORM_RESULTS
+    )
+    competitor_density_qualified = bool(
+        (
+            total_num_found is None
+            and evaluated_count > 0
+            and same_ratio >= core_threshold
+        )
+        or (
+            same_count + adjacent_count >= CORE_DEMAND_COMPETITOR_MIN_RESULTS
+            and supported_ratio >= CORE_DEMAND_COMPETITOR_RATIO_FLOOR
+        )
+    )
+    core_page_qualified = bool(
+        query_identity_supported
+        and platform_supply_qualified
+        and competitor_density_qualified
+    )
     adjacent_page_qualified = bool(
         evaluated_count >= SEMANTIC_ADJACENT_MIN_RESULTS
         and adjacent_count >= SEMANTIC_ADJACENT_MIN_RESULTS
         and adjacent_ratio >= SEMANTIC_ADJACENT_RATIO_FLOOR
         and supported_ratio >= SEMANTIC_SUPPORTED_RATIO_FLOOR
     )
-    if deterministic_title_alias:
+    if core_page_qualified:
         grade = "S"
-        decision = "query_is_current_title_product_phrase"
-    elif same_query_terms:
-        grade = "S"
-        decision = "query_names_verified_same_product_or_alias"
-    elif same_ratio >= core_threshold:
-        grade = "S"
-        decision = "first_page_same_product_majority"
+        decision = "first_page_same_demand_competitor_density"
+    elif query_identity_supported:
+        grade = "C/I"
+        decision = (
+            "insufficient_platform_supply_for_core_keyword"
+            if not platform_supply_qualified
+            else "same_demand_competitor_density_below_core_threshold"
+        )
     elif intents and adjacent_page_qualified:
         grade = "A"
         decision = "buyer_job_and_alternative_product_page_cohere"
     else:
         grade = "C/I"
-        decision = (
-            "adjacent_hypothesis_not_supported_by_first_page"
-            if intents
-            else "no_verified_same_product_or_adjacent_buyer_job"
-        )
+        if intents:
+            decision = "adjacent_hypothesis_not_supported_by_first_page"
+        else:
+            decision = "no_verified_same_product_or_adjacent_buyer_job"
     return {
         "semantic_relation_grade": grade,
         "semantic_relation_label": {
-            "S": "same_product_or_direct_alias",
+            "S": "core_query_with_same_demand_competitor_density",
             "A": "adjacent_demand_alternative",
             "C/I": "complementary_or_irrelevant_rejected",
         }[grade],
         "semantic_relation_decision": decision,
         "semantic_relation_source_priority_decides_grade": False,
+        "semantic_relation_requires_page_majority_for_s": False,
+        "semantic_relation_requires_demand_competitor_density_for_s": True,
         "semantic_relation_current_title_alias": deterministic_title_alias,
+        "semantic_relation_query_identity_supported": query_identity_supported,
         "semantic_relation_query_same_product_terms": same_query_terms,
+        "semantic_relation_query_strict_same_product_terms": (
+            strict_query_same_terms
+        ),
+        "semantic_relation_query_core_identity_terms": strict_core_query_terms,
+        "semantic_relation_query_core_only_candidate": core_only_candidate,
+        "semantic_relation_query_matches_explicit_opportunity_phrase": (
+            normalized_keyword in explicit_opportunity_phrases
+        ),
         "semantic_relation_same_product_terms": same_product_terms,
+        "semantic_relation_same_demand_product_terms": same_demand_terms,
         "semantic_relation_buyer_jobs": list(
             dict.fromkeys(intent.buyer_job.strip() for intent in intents)
         ),
         "semantic_relation_adjacent_roots": list(
             dict.fromkeys(intent.phrase.strip() for intent in intents)
         ),
-        "semantic_relation_alternative_product_terms": alternative_terms,
+        "semantic_relation_alternative_product_terms": same_demand_terms,
+        "semantic_relation_matched_intent_alternative_terms": alternative_terms,
         "semantic_relation_excluded_product_terms": excluded_terms,
         "semantic_relation_same_product_result_count": same_count,
+        "semantic_relation_same_demand_result_count": adjacent_count,
         "semantic_relation_adjacent_result_count": adjacent_count,
         "semantic_relation_rejected_result_count": rejected_count,
         "semantic_relation_evaluated_result_count": evaluated_count,
         "semantic_relation_same_product_ratio": round(same_ratio, 4),
+        "semantic_relation_same_demand_ratio": round(adjacent_ratio, 4),
         "semantic_relation_adjacent_ratio": round(adjacent_ratio, 4),
         "semantic_relation_supported_ratio": round(supported_ratio, 4),
+        "semantic_relation_core_competitor_result_count": same_count + adjacent_count,
+        "semantic_relation_core_competitor_ratio": round(supported_ratio, 4),
+        "semantic_relation_core_density_qualified": competitor_density_qualified,
+        "semantic_relation_core_page_qualified": core_page_qualified,
+        "semantic_relation_core_demand_ratio_floor": (
+            CORE_DEMAND_COMPETITOR_RATIO_FLOOR
+        ),
+        "semantic_relation_core_demand_min_results": (
+            CORE_DEMAND_COMPETITOR_MIN_RESULTS
+        ),
+        "semantic_relation_platform_supply_evidence_available": (
+            platform_supply_evidence_available
+        ),
+        "semantic_relation_platform_supply_qualified": platform_supply_qualified,
+        "semantic_relation_platform_total_num_found": total_num_found,
+        "semantic_relation_core_min_platform_results": CORE_MIN_PLATFORM_RESULTS,
         "semantic_relation_adjacent_page_qualified": adjacent_page_qualified,
         "semantic_relation_adjacent_ratio_floor": SEMANTIC_ADJACENT_RATIO_FLOOR,
         "semantic_relation_supported_ratio_floor": SEMANTIC_SUPPORTED_RATIO_FLOOR,
         "semantic_relation_min_adjacent_results": SEMANTIC_ADJACENT_MIN_RESULTS,
         "semantic_relation_same_product_result_titles": [
-            title for title, matched in zip(first_page_titles, same_flags, strict=True) if matched
+            str(item["title"])
+            for item in result_classifications
+            if item["is_direct_competitor"]
         ][:8],
         "semantic_relation_adjacent_result_titles": [
             title
             for title, matched in zip(first_page_titles, adjacent_flags, strict=True)
             if matched
         ][:8],
-        "semantic_relation_evidence_scope": "first_page_organic_result_titles",
+        "semantic_relation_same_demand_result_titles": [
+            title
+            for title, matched in zip(first_page_titles, adjacent_flags, strict=True)
+            if matched
+        ][:8],
+        "semantic_relation_evidence_scope": (
+            "first_page_organic_result_title_subtitle_and_product_metadata"
+        ),
+        "first_page_result_classifications": result_classifications,
+        "source_title_identity_signatures": source_title_signatures,
         "semantic_relation_uses_per_result_image_or_category": False,
         "semantic_relation_limitations": (
-            "S级使用已确认同品名或直接别名；A级还要求买家任务及替代商品族与首页标题结果共同支持。"
-            "当前公开结果证据不含逐商品图片和类目复核，边界案例合并到C/I而不猜测。"
+            "S级核心词必须同时命中当前商品身份、达到首页同款加同需求竞品的最低数量与占比，"
+            "并通过平台供给规模门槛；只有少量结果的过度组合词不能成为S级。"
+            "完全同款与同需求替代品分开计数，配件、运输、食品储存及无关商品不计入。"
+            "系统保存平台图片供人工核验，但当前自动判定不对每条结果再次调用多模态模型。"
         ),
     }
 
@@ -4622,7 +5760,8 @@ def _validated_identity_title_phrase(
     A current title can be wrong about the product noun, so requiring every
     accepted query token to already exist in that title creates a deadlock. We
     only relax that rule when the stored evidence names a verified same-product
-    term *and* the complete first page has a same-product majority. Unsupported
+    term and the complete first page passes the same-demand competitor density
+    plus supply-breadth gate. Unsupported
     feature, material, colour, audience, brand, or specification claims remain
     blocked.
     """
@@ -4649,10 +5788,16 @@ def _validated_identity_title_phrase(
         or 0
     )
     threshold = float(evidence.get("core_threshold") or CORE_MAJORITY_FLOOR)
-    if evaluated <= 0 or not (
-        bool(evidence.get("first_page_majority"))
-        or (same_count / evaluated) >= max(CORE_MAJORITY_FLOOR, threshold)
-    ):
+    core_page_qualified = evidence.get("semantic_relation_core_page_qualified")
+    if core_page_qualified is None:
+        core_page_qualified = bool(
+            evaluated > 0
+            and (
+                bool(evidence.get("first_page_majority"))
+                or (same_count / evaluated) >= max(CORE_MAJORITY_FLOOR, threshold)
+            )
+        )
+    if evaluated <= 0 or not core_page_qualified:
         return None
     raw_terms = evidence.get("semantic_relation_query_same_product_terms")
     same_product_terms = (
@@ -4903,16 +6048,18 @@ def _title_strategy_keywords(
         )
     )
     accepted_title_keywords: list[str] = []
-    supported_accepted_source_keys: set[str] = set()
+    accepted_title_phrase_by_source_key: dict[str, str] = {}
     for item in accepted_rows:
         supported = _title_supported_keywords([item.keyword], source_title)
         projected_keyword: str | None
         if supported:
             projected_keyword = supported[0]
-            supported_accepted_source_keys.add(item.keyword.casefold())
         else:
             projected_keyword = _validated_identity_title_phrase(item, source_title)
-        if not projected_keyword or projected_keyword.casefold() in {
+        if not projected_keyword:
+            continue
+        accepted_title_phrase_by_source_key[item.keyword.casefold()] = projected_keyword
+        if projected_keyword.casefold() in {
             value.casefold() for value in accepted_title_keywords
         }:
             continue
@@ -4933,7 +6080,7 @@ def _title_strategy_keywords(
         )
         if (
             item.relevance_status == "accepted"
-            and item.keyword.casefold() in supported_accepted_source_keys
+            and item.keyword.casefold() in accepted_title_phrase_by_source_key
             and any(
                 _is_platform_root_expansion_source(source.get("candidate_source"))
                 for source in provenance
@@ -4944,7 +6091,7 @@ def _title_strategy_keywords(
                 (
                     autocomplete_rank,
                     item.candidate_order,
-                    item.keyword,
+                    accepted_title_phrase_by_source_key[item.keyword.casefold()],
                     _journey_roots_from_evidence(evidence),
                 )
             )
@@ -4981,6 +6128,15 @@ def _title_strategy_keywords(
         else:
             deferred_rows.append(row)
     hot_term_keywords.extend(row[2] for row in deferred_rows)
+    deduplicated_hot_terms: list[str] = []
+    seen_hot_terms: set[str] = set()
+    for keyword in hot_term_keywords:
+        key = keyword.casefold()
+        if key in seen_hot_terms:
+            continue
+        seen_hot_terms.add(key)
+        deduplicated_hot_terms.append(keyword)
+    hot_term_keywords = deduplicated_hot_terms
     return (
         accepted_title_keywords,
         hot_term_keywords,
@@ -4992,7 +6148,11 @@ def _title_journey_priority(evidence: Mapping[str, Any] | Any) -> int:
     if not isinstance(evidence, Mapping):
         return 4
     journey_types = set(_journey_types_from_evidence(evidence))
-    if journey_types & {"concise_direct", "known_long_tail"}:
+    if journey_types & {
+        "same_product_lexicon_direct",
+        "concise_direct",
+        "known_long_tail",
+    }:
         return 0
     if journey_types & {
         "platform_root_expansion",
@@ -5037,6 +6197,19 @@ def _title_keyword_journey_evidence(
     source_title: str = "",
 ) -> dict[str, dict[str, Any]]:
     output: dict[str, dict[str, Any]] = {}
+
+    def merge_row(key: str, row: dict[str, Any]) -> None:
+        existing = output.get(key)
+        if existing is None:
+            output[key] = row
+            return
+        for field in ("journey_types", "shopper_roots", "paths"):
+            merged = list(existing.get(field, []))
+            for value in row.get(field, []):
+                if value not in merged:
+                    merged.append(value)
+            existing[field] = merged
+
     for item in results:
         evidence = item.validation_evidence if isinstance(item.validation_evidence, Mapping) else {}
         paths: list[list[str]] = []
@@ -5055,11 +6228,11 @@ def _title_keyword_journey_evidence(
             "shopper_roots": list(_journey_roots_from_evidence(evidence)),
             "paths": paths,
         }
-        output[item.keyword.casefold()] = row
+        merge_row(item.keyword.casefold(), row)
         if source_title and (
             projected_keyword := _validated_identity_title_phrase(item, source_title)
         ):
-            output.setdefault(projected_keyword.casefold(), row)
+            merge_row(projected_keyword.casefold(), row)
     return output
 
 
@@ -6335,39 +7508,185 @@ def _concise_visual_product_name(profile: VisionProfile) -> str:
     return " ".join(output[:7]) or "Product"
 
 
+def _same_product_lexicon(
+    profile: VisionProfile,
+    *,
+    model_profile: VisionProfile | None = None,
+    confirmed_fact_records: Sequence[Mapping[str, Any]] = (),
+    source_title: str = "",
+) -> dict[str, Any]:
+    """Build one auditable, query-ready same-product lexicon.
+
+    Only concise product identities are admitted.  Operator facts are included
+    when they explicitly confirm the product type, or when the existing fact
+    enrichment gate has already accepted the exact phrase as a same-product
+    alias.  Materials, uses, and free-standing feature phrases remain outside
+    this identity lexicon.
+    """
+
+    raw_model_profile = model_profile or profile
+    primary_type_tokens = _identity_term_tokens(raw_model_profile.product_type_terms[0])
+    source_title_tokens = _identity_term_tokens(source_title)
+    enriched_alias_keys = {
+        " ".join(str(value or "").split()).casefold()
+        for value in profile.same_product_aliases
+        if " ".join(str(value or "").split())
+    }
+    entries: list[dict[str, Any]] = []
+    indexes: dict[str, int] = {}
+    excluded: list[dict[str, Any]] = []
+    excluded_keys: set[tuple[str, str, str]] = set()
+
+    def add(raw_term: Any, source: str) -> None:
+        term = " ".join(str(raw_term or "").split())
+        if not term:
+            return
+        word_count = len(TOKEN_PATTERN.findall(term.casefold()))
+        if not MODEL_DIRECT_QUERY_MIN_WORDS <= word_count <= MODEL_DIRECT_QUERY_MAX_WORDS:
+            reason = "outside_2_to_4_words"
+            excluded_key = (term.casefold(), source, reason)
+            if excluded_key not in excluded_keys:
+                excluded_keys.add(excluded_key)
+                excluded.append(
+                    {
+                        "term": term,
+                        "source": source,
+                        "word_count": word_count,
+                        "reason": reason,
+                    }
+                )
+            return
+        term_tokens = _identity_term_tokens(term)
+        broad_head = bool(
+            term_tokens
+            and term_tokens[-1] in LEXICON_AMBIGUOUS_IDENTITY_HEAD_TOKENS
+        )
+        broad_identity_supported = bool(
+            term_tokens
+            and (
+                term_tokens == primary_type_tokens
+                or _contains_token_sequence(source_title_tokens, term_tokens)
+                or (
+                    len(term_tokens) >= 2
+                    and len(primary_type_tokens) >= 2
+                    and term_tokens[-2:] == primary_type_tokens[-2:]
+                )
+            )
+        )
+        if source.startswith("fusion_") and broad_head and not broad_identity_supported:
+            reason = "broad_identity_head_without_title_or_primary_shape"
+            excluded_key = (term.casefold(), source, reason)
+            if excluded_key not in excluded_keys:
+                excluded_keys.add(excluded_key)
+                excluded.append(
+                    {
+                        "term": term,
+                        "source": source,
+                        "word_count": word_count,
+                        "reason": reason,
+                    }
+                )
+            return
+        key = term.casefold()
+        index = indexes.get(key)
+        if index is None:
+            indexes[key] = len(entries)
+            entries.append(
+                {
+                    "term": term,
+                    "sources": [source],
+                    "word_count": word_count,
+                    "direct_query_eligible": True,
+                }
+            )
+            return
+        sources = entries[index]["sources"]
+        if source not in sources:
+            sources.append(source)
+
+    for record in confirmed_fact_records:
+        fact_type = str(record.get("fact_type") or "product_type")
+        term = " ".join(str(record.get("fact_term") or "").split())
+        key = term.casefold()
+        if fact_type == "product_type" or (
+            fact_type in {"construction", "function", "packaging"}
+            and key in enriched_alias_keys
+        ):
+            add(term, "human_confirmed_product_fact")
+    for term in _seller_title_identity_query_terms(source_title, raw_model_profile):
+        add(term, "seller_title_identity_phrase")
+    for term in raw_model_profile.product_type_terms:
+        add(term, "fusion_product_type_terms")
+    for term in raw_model_profile.same_product_aliases:
+        add(term, "fusion_same_product_aliases")
+
+    return {
+        "policy_version": SAME_PRODUCT_LEXICON_POLICY_VERSION,
+        "selection_policy": (
+            "manual_identity_then_title_phrase_then_fusion_types_then_aliases"
+        ),
+        "search_use": "priority_direct_query_and_complete_root_expansion",
+        "direct_query_limit": MODEL_DIRECT_QUERY_TARGET,
+        "complete_root_expansion_limit": SAME_PRODUCT_LEXICON_ROOT_LIMIT,
+        "entries": entries,
+        "excluded": excluded,
+    }
+
+
+def _same_product_lexicon_root_source(entry: Mapping[str, Any]) -> str:
+    sources = entry.get("sources")
+    if isinstance(sources, list) and "human_confirmed_product_fact" in sources:
+        return "human_confirmed_product_fact"
+    return "image_title_same_product_lexicon"
+
+
 def _precise_candidates(
     profile: VisionProfile,
     *,
     source_title: str | None = None,
+    same_product_lexicon: Mapping[str, Any] | None = None,
 ) -> list[SearchKeywordCandidate]:
     # Image-model queries are hypotheses for live page validation, not title
     # claims. Do not discard them merely because words such as stand/tripod are
     # absent from the current title; the stricter title-suggestion gate remains
     # in _title_supported_keywords.
     _ = source_title
-    candidate_rows: list[tuple[str, str, int]] = []
-    for candidate in profile.keywords:
-        candidate_rows.append((candidate.phrase, candidate.rationale, 0))
-    for term in profile.product_type_terms:
-        candidate_rows.append(
-            (
-                str(term),
-                "图文融合商品身份中的精简搜索表达，用于补足直接查询候选",
-                1,
+    lexicon = dict(same_product_lexicon or _same_product_lexicon(profile))
+    candidate_rows: list[tuple[str, str, int, tuple[str, ...]]] = []
+    raw_lexicon_entries = lexicon.get("entries")
+    if isinstance(raw_lexicon_entries, list):
+        for entry in raw_lexicon_entries:
+            if not isinstance(entry, Mapping):
+                continue
+            raw_sources = entry.get("sources")
+            sources = tuple(
+                dict.fromkeys(
+                    str(value)
+                    for value in raw_sources
+                    if str(value).strip()
+                )
+            ) if isinstance(raw_sources, list) else ()
+            candidate_rows.append(
+                (
+                    str(entry.get("term") or ""),
+                    "同品词库中的精准商品名称，优先用于直接搜索页验证",
+                    0,
+                    sources,
+                )
             )
-        )
-    for term in profile.same_product_aliases:
+    for candidate in profile.keywords:
         candidate_rows.append(
             (
-                str(term),
-                "图文融合同品别名中的精简搜索表达，用于补足直接查询候选",
-                2,
+                candidate.phrase,
+                candidate.rationale,
+                1,
+                (),
             )
         )
 
-    concise_rows: list[tuple[int, int, str, str]] = []
+    concise_rows: list[tuple[int, int, str, str, tuple[str, ...]]] = []
     seen: set[str] = set()
-    for raw_phrase, rationale, fallback_order in candidate_rows:
+    for raw_phrase, rationale, fallback_order, lexicon_sources in candidate_rows:
         phrase = " ".join(raw_phrase.split())
         word_count = len(TOKEN_PATTERN.findall(phrase.casefold()))
         key = phrase.casefold()
@@ -6384,34 +7703,55 @@ def _precise_candidates(
                 0 if word_count <= MODEL_DIRECT_QUERY_PREFERRED_MAX_WORDS else 1,
                 phrase,
                 rationale.strip(),
+                lexicon_sources,
             )
         )
 
     output: list[SearchKeywordCandidate] = []
-    for _, _, phrase, rationale in sorted(
+    for _, _, phrase, rationale, lexicon_sources in sorted(
         concise_rows,
-        key=lambda row: (row[0], row[1]),
+        key=lambda row: row[0],
     ):
+        from_lexicon = bool(lexicon_sources)
+        candidate_source = (
+            "same_product_lexicon" if from_lexicon else "image_title_fused_precise"
+        )
+        seed_source = (
+            "human_confirmed_product_fact"
+            if "human_confirmed_product_fact" in lexicon_sources
+            else (
+                "image_title_same_product_lexicon"
+                if from_lexicon
+                else "image_title_fusion_model"
+            )
+        )
+        journey_type = "same_product_lexicon_direct" if from_lexicon else "concise_direct"
         output.append(
             SearchKeywordCandidate(
                 phrase=phrase,
                 rationale=rationale,
-                candidate_source="image_title_fused_precise",
+                candidate_source=candidate_source,
                 intended_strategy="core",
-                seed_source="image_title_fusion_model",
-                journey_type="concise_direct",
+                seed=phrase if from_lexicon else None,
+                seed_source=seed_source,
+                journey_type=journey_type,
                 journey_root=phrase,
                 journey_path=(phrase,),
                 journey_depth=0,
                 candidate_provenance=(
                     {
-                        "candidate_source": "image_title_fused_precise",
+                        "candidate_source": candidate_source,
                         "intended_strategy": "core",
-                        "seed_source": "image_title_fusion_model",
-                        "journey_type": "concise_direct",
+                        "seed": phrase if from_lexicon else None,
+                        "seed_source": seed_source,
+                        "journey_type": journey_type,
                         "journey_root": phrase,
                         "journey_path": [phrase],
                         "journey_depth": 0,
+                        "same_product_lexicon_sources": list(lexicon_sources),
+                        "same_product_lexicon_policy_version": (
+                            SAME_PRODUCT_LEXICON_POLICY_VERSION if from_lexicon else None
+                        ),
                     },
                 ),
             )
@@ -6464,15 +7804,22 @@ async def _discover_keyword_candidates(
     max_keywords: int,
     official_title: str | None = None,
     confirmed_fact_records: Sequence[Mapping[str, Any]] = (),
+    same_product_lexicon: Mapping[str, Any] | None = None,
     model_autocomplete_seeds: Sequence[KeywordCandidate] | None = None,
     model_opportunity_seeds: Sequence[KeywordCandidate] | None = None,
 ) -> tuple[list[SearchKeywordCandidate], list[dict[str, Any]]]:
-    precise = _precise_candidates(profile, source_title=source_title)
+    lexicon = dict(same_product_lexicon or _same_product_lexicon(profile))
+    precise = _precise_candidates(
+        profile,
+        source_title=source_title,
+        same_product_lexicon=lexicon,
+    )
     title_roots = _title_root_expansions(
         official_title or source_title,
         identity_terms=(*profile.product_type_terms, *profile.same_product_aliases),
     )
     manual_fact_seeds = _confirmed_fact_root_seed_specs(confirmed_fact_records)
+    lexicon_core_seeds = _same_product_lexicon_root_seed_specs(lexicon)
     title_reference_seeds = _complete_root_seed_specs(
         [
             KeywordCandidate(
@@ -6512,6 +7859,7 @@ async def _discover_keyword_candidates(
     ]
     prioritized_core_seeds = [
         *manual_core_seeds,
+        *lexicon_core_seeds,
         *image_core_seeds,
         *title_core_seeds,
         *title_reference_seeds,
@@ -6538,6 +7886,7 @@ async def _discover_keyword_candidates(
     }
     prioritized_seed_specs = [
         *manual_fact_seeds,
+        *lexicon_core_seeds,
         *image_core_seeds,
         *title_core_seeds,
         *model_opportunity_roots,
@@ -6564,6 +7913,7 @@ async def _discover_keyword_candidates(
     )[:ROOT_EXPANSION_INPUT_LIMIT]
     root_origin_phrases = _root_seed_origin_phrases(
         confirmed_fact_records=confirmed_fact_records,
+        same_product_lexicon=lexicon,
         title_reference_terms=title_reference_terms,
         model_autocomplete_seeds=list(model_autocomplete_seeds or profile.autocomplete_seeds),
         title_roots=title_roots,
@@ -6968,19 +8318,20 @@ async def _discover_keyword_candidates(
         - len(seller_title_targets),
     )
     platform_targets = diverse_core_pool[:platform_query_target]
-    model_targets = precise[:MODEL_DIRECT_QUERY_TARGET]
+    direct_targets = precise[:MODEL_DIRECT_QUERY_TARGET]
     opportunity_targets = opportunity_root_expansions[
         :ROOT_EXPANSION_OPPORTUNITY_QUERY_TARGET
     ]
     # The normal phase is at most thirteen queries: six core slots shared by
     # platform-root-expansion winners, at most one seller-title complete phrase,
-    # and operator-confirmed parameter probes; plus six concise South-African model
-    # queries and one adjacent-demand probe. The fourteenth search-query slot stays
+    # and operator-confirmed parameter probes; plus six concise direct queries that
+    # take same-product lexicon entries first and use fusion keywords only as filler,
+    # plus one adjacent-demand probe. The fourteenth search-query slot stays
     # outside this list for adaptive recovery.
     priority_candidates: list[SearchKeywordCandidate] = []
     channel_span = max(
         len(platform_targets),
-        len(model_targets),
+        len(direct_targets),
         len(decision_parameter_candidates),
         len(seller_title_targets),
     )
@@ -6989,8 +8340,8 @@ async def _discover_keyword_candidates(
             priority_candidates.append(seller_title_targets[channel_index])
         if channel_index < len(platform_targets):
             priority_candidates.append(platform_targets[channel_index])
-        if channel_index < len(model_targets):
-            priority_candidates.append(model_targets[channel_index])
+        if channel_index < len(direct_targets):
+            priority_candidates.append(direct_targets[channel_index])
         if channel_index < len(decision_parameter_candidates):
             priority_candidates.append(decision_parameter_candidates[channel_index])
         if channel_index == 0:
@@ -7111,6 +8462,49 @@ def _complete_root_seed_specs(
     return output
 
 
+def _same_product_lexicon_root_seed_specs(
+    lexicon: Mapping[str, Any],
+) -> list[tuple[KeywordCandidate, str, str]]:
+    output: list[tuple[KeywordCandidate, str, str]] = []
+    raw_entries = lexicon.get("entries")
+    if not isinstance(raw_entries, list):
+        return output
+    entry_count = 0
+    for entry in raw_entries:
+        if entry_count >= SAME_PRODUCT_LEXICON_ROOT_LIMIT:
+            break
+        if not isinstance(entry, Mapping):
+            continue
+        phrase = " ".join(str(entry.get("term") or "").split())
+        root = _complete_root_expansion_input(phrase)
+        if not root:
+            continue
+        entry_count += 1
+        raw_sources = entry.get("sources")
+        sources = raw_sources if isinstance(raw_sources, list) else []
+        root_sources: list[str] = []
+        if "human_confirmed_product_fact" in sources:
+            root_sources.append("human_confirmed_product_fact")
+        if any(str(source).startswith("fusion_") for source in sources):
+            root_sources.append("image_title_same_product_lexicon")
+        if not root_sources:
+            root_sources.append(_same_product_lexicon_root_source(entry))
+        for root_source in root_sources:
+            output.append(
+                (
+                    KeywordCandidate(
+                        phrase=root,
+                        rationale=(
+                            "同品词库中的精准商品名称，作为完整词组读取Takealot平台扩展"
+                        ),
+                    ),
+                    root_source,
+                    "core",
+                )
+            )
+    return output
+
+
 def _confirmed_fact_root_seed_specs(
     confirmed_fact_records: Sequence[Mapping[str, Any]],
 ) -> list[tuple[KeywordCandidate, str, str]]:
@@ -7164,6 +8558,7 @@ def _bounded_core_seed_specs_with_title_coverage(
 def _root_seed_origin_phrases(
     *,
     confirmed_fact_records: Sequence[Mapping[str, Any]],
+    same_product_lexicon: Mapping[str, Any],
     title_reference_terms: Sequence[str],
     model_autocomplete_seeds: Sequence[KeywordCandidate],
     title_roots: Sequence[str],
@@ -7188,6 +8583,18 @@ def _root_seed_origin_phrases(
             "human_confirmed_product_fact",
             "opportunity" if fact_type == "usage" else "core",
         )
+    raw_lexicon_entries = same_product_lexicon.get("entries")
+    if isinstance(raw_lexicon_entries, list):
+        for entry in raw_lexicon_entries:
+            if not isinstance(entry, Mapping):
+                continue
+            phrase = str(entry.get("term") or "")
+            raw_sources = entry.get("sources")
+            sources = raw_sources if isinstance(raw_sources, list) else []
+            if "human_confirmed_product_fact" in sources:
+                remember(phrase, "human_confirmed_product_fact", "core")
+            if any(str(source).startswith("fusion_") for source in sources):
+                remember(phrase, "image_title_same_product_lexicon", "core")
     for term in title_reference_terms:
         remember(term, "title_cross_check", "core")
     for candidate in model_autocomplete_seeds:
@@ -7215,6 +8622,8 @@ def _root_expansion_journey_type(
         return "adjacent_opportunity"
     if seed_source == "human_confirmed_product_fact":
         return "human_confirmed_fact_root_expansion"
+    if seed_source == "image_title_same_product_lexicon":
+        return "same_product_lexicon_root_expansion"
     if seed_source == "title_cross_check":
         return "title_cross_check_root_expansion"
     if seed_source == "image_title_first_instinct":
@@ -7466,6 +8875,8 @@ def _query_source_channels(candidate: SearchKeywordCandidate) -> list[str]:
         candidate_source = str(source.get("candidate_source") or "")
         if _is_platform_root_expansion_source(candidate_source):
             channel = "takealot_root_expansion"
+        elif candidate_source == "same_product_lexicon":
+            channel = "same_product_lexicon_direct"
         elif candidate_source in {"image_precise", "image_title_fused_precise"}:
             channel = "model_south_african_direct"
         elif candidate_source == "seller_title_complete_phrase":
@@ -7491,6 +8902,8 @@ def _query_source_channel(candidate: SearchKeywordCandidate) -> str:
         return "takealot_root_expansion"
     if "seller_title_complete_phrase" in channels:
         return "seller_title_complete_phrase"
+    if "same_product_lexicon_direct" in channels:
+        return "same_product_lexicon_direct"
     if "model_south_african_direct" in channels:
         return "model_south_african_direct"
     if "title_verified_parameter" in channels:
@@ -9024,6 +10437,20 @@ def _build_validated_identity_title_suggestion(
     )
 
 
+def _title_has_redundant_identity_prefix(source_title: str, keyword: str) -> bool:
+    """Detect a duplicated product identity before the validated title phrase."""
+
+    source_tokens = _identity_term_tokens(source_title)
+    keyword_tokens = _identity_term_tokens(keyword)
+    if len(keyword_tokens) < 2 or len(source_tokens) <= len(keyword_tokens):
+        return False
+    for start in range(len(source_tokens) - len(keyword_tokens) + 1):
+        if source_tokens[start : start + len(keyword_tokens)] != keyword_tokens:
+            continue
+        return bool(set(source_tokens[:start]) & set(keyword_tokens))
+    return False
+
+
 def _build_title_strategies(
     *,
     source_title: str,
@@ -9037,10 +10464,11 @@ def _build_title_strategies(
 ) -> list[dict[str, Any]]:
     """Return three evidence-bounded title tactics with stable API keys."""
     supported_claim_source = evidence_source_title or source_title
-    safe_accepted_keywords = _title_supported_keywords(
+    source_supported_accepted_keywords = _title_supported_keywords(
         accepted_keywords,
         supported_claim_source,
     )
+    safe_accepted_keywords = list(source_supported_accepted_keywords)
     validated_core_keys = {
         keyword.casefold() for keyword in (validated_core_keywords or [])
     }
@@ -9052,21 +10480,36 @@ def _build_title_strategies(
         ):
             safe_accepted_keywords.append(keyword)
     validated_but_unsupported = bool(accepted_keywords and not safe_accepted_keywords)
-    identity_rewrite_keyword = next(
+    identity_rewrite_keyword = (
+        None
+        if source_supported_accepted_keywords
+        else next(
+            (
+                keyword
+                for keyword in safe_accepted_keywords
+                if not _title_supported_keywords([keyword], supported_claim_source)
+            ),
+            None,
+        )
+    )
+    redundant_supported_identity_keyword = next(
         (
             keyword
-            for keyword in safe_accepted_keywords
-            if not _title_supported_keywords([keyword], supported_claim_source)
+            for keyword in source_supported_accepted_keywords
+            if _title_has_redundant_identity_prefix(source_title, keyword)
         ),
         None,
+    )
+    core_identity_keyword = (
+        identity_rewrite_keyword or redundant_supported_identity_keyword
     )
     core_title = (
         _build_validated_identity_title_suggestion(
             source_title,
-            identity_rewrite_keyword,
+            core_identity_keyword,
             decision_parameter_values=decision_parameter_values,
         )
-        if identity_rewrite_keyword
+        if core_identity_keyword
         else _build_title_suggestion(
             source_title,
             safe_accepted_keywords,
@@ -9077,6 +10520,12 @@ def _build_title_strategies(
         hot_term_keywords,
         supported_claim_source,
     )
+    safe_hot_keys = {keyword.casefold() for keyword in safe_hot_keywords}
+    for keyword in hot_term_keywords:
+        key = keyword.casefold()
+        if key in validated_core_keys and key not in safe_hot_keys:
+            safe_hot_keywords.append(keyword)
+            safe_hot_keys.add(key)
     distinct_hot_keywords: list[str] = []
     seen_hot_phrases: set[tuple[str, ...]] = set()
     for keyword in safe_hot_keywords:
@@ -9087,11 +10536,23 @@ def _build_title_strategies(
             continue
         seen_hot_phrases.add(canonical_phrase)
         distinct_hot_keywords.append(keyword)
-    _, mergeable_hot_keywords = _merge_hot_term_keywords(distinct_hot_keywords)
-    hot_title = _build_hot_term_title_suggestion(
-        source_title,
-        mergeable_hot_keywords,
-        decision_parameter_values=decision_parameter_values,
+    merged_hot_tokens, mergeable_hot_keywords = _merge_hot_term_keywords(
+        distinct_hot_keywords
+    )
+    merged_hot_phrase = " ".join(merged_hot_tokens)
+    hot_title = (
+        _build_validated_identity_title_suggestion(
+            source_title,
+            merged_hot_phrase,
+            decision_parameter_values=decision_parameter_values,
+        )
+        if merged_hot_phrase
+        and not _title_supported_keywords([merged_hot_phrase], supported_claim_source)
+        else _build_hot_term_title_suggestion(
+            source_title,
+            mergeable_hot_keywords,
+            decision_parameter_values=decision_parameter_values,
+        )
     )
     safe_opportunity_keywords = [
         keyword
@@ -9109,7 +10570,7 @@ def _build_title_strategies(
     )
     core_available = bool(safe_accepted_keywords)
     hot_available = bool(
-        len(mergeable_hot_keywords) >= 2
+        mergeable_hot_keywords
         and hot_title
         and hot_title.casefold() != core_title.casefold()
     )
@@ -9167,8 +10628,9 @@ def _build_title_strategies(
             "available": core_available,
             "explanation": (
                 "优先把已知长尾直接验证，或证据最明确且通过完整首页同类验证的词组连续前置；"
-                "当当前标题商品名与图文识别冲突时，仅允许S级同品词及完整首页同品多数共同支持的"
-                "商品身份词替换原商品名；"
+                "证据词已获当前标题支持时，成稿必须原样包含该词，不得被另一模型身份词替换；"
+                "当前标题商品名与图文识别冲突时，仅允许S级同品词及首页同需求竞品密度、"
+                "平台供给规模共同支持的商品身份词替换原商品名；"
                 "商品类型在前、功能卖点居中；运营逐项确认为决策参数且通过同商品族"
                 "搜索页验证的规格可以前置，"
                 "未确认或确认为非决策参数的功率、尺寸和防护等级等规格统一放在末尾；"
@@ -9190,13 +10652,13 @@ def _build_title_strategies(
             "title": hot_title if hot_available else None,
             "available": hot_available,
             "explanation": (
-                "合并已通过相关性验证且真实出现在 Takealot 完整根词扩展中的类目表达，"
-                "优先覆盖不同完整根词入口，不足时才使用同根的其他平台扩展；"
+                "采用已通过相关性验证且真实出现在 Takealot 完整根词扩展中的类目表达；"
+                "一个与连续词组版不同的安全表达即可形成覆盖版，多个表达再优先跨根词自然合并；"
                 "根词内扩展顺序不是搜索量，修改后仍需复采。"
                 if hot_available
                 else (
-                    "本轮虽有类目查询通过，但没有至少两个既获当前标题支持、又来自平台根词扩展且"
-                    "可自然合并的不同表达，因此不生成热词覆盖版。"
+                    "本轮虽有类目查询通过，但没有可安全写入标题、来自真实平台根词扩展且"
+                    "与连续词组版不同的类目表达，因此不生成热词覆盖版。"
                     if accepted_keywords
                     else "本轮没有形成与完整连续词组版不同，且同时满足标题支持、相关性通过和平台根词扩展证据的类目词版本。"
                 )
@@ -9679,6 +11141,23 @@ def _analysis_history_item(
     )
     if not isinstance(recognition, Mapping):
         recognition = {}
+    raw_failure_audit = (
+        vision.get("failure_audit", {}) if isinstance(vision, Mapping) else {}
+    )
+    failure_audit = (
+        {
+            key: raw_failure_audit[key]
+            for key in (
+                "stage",
+                "summary",
+                "validation_errors",
+                "normalization",
+            )
+            if key in raw_failure_audit
+        }
+        if isinstance(raw_failure_audit, Mapping)
+        else {}
+    )
     raw_title_score = (
         variant_review.get("title_score", {})
         if isinstance(variant_review, Mapping)
@@ -9715,6 +11194,7 @@ def _analysis_history_item(
         "created_at": analysis.created_at.isoformat(),
         "completed_at": analysis.completed_at.isoformat() if analysis.completed_at else None,
         "error": analysis.error,
+        "failure_audit": failure_audit or None,
         "vision_stage_completed": bool(
             isinstance(vision, Mapping) and vision.get("vision_stage_completed") is True
         ),
@@ -10185,6 +11665,8 @@ def _validated_chat_profile(
                 normalized.append(candidate)
         raw[field] = normalized
     raw.setdefault("same_product_aliases", [])
+    if profile_type is FusionVisionProfile:
+        raw, _ = _normalize_fusion_payload(raw)
     return profile_type.model_validate(raw)
 
 
@@ -10228,15 +11710,25 @@ def _thumbnail_data_url(
     settings: SearchRankingRuntimeSettings,
     image_url: str,
 ) -> str:
+    path = _thumbnail_path(settings, image_url)
+    try:
+        encoded = base64.b64encode(path.read_bytes()).decode("ascii")
+    except OSError as exc:
+        raise SearchRankingProviderError("商品主图暂时无法读取，未调用多模态模型") from exc
+    return f"data:image/jpeg;base64,{encoded}"
+
+
+def _thumbnail_path(
+    settings: SearchRankingRuntimeSettings,
+    image_url: str,
+) -> Path:
     cache = ProductThumbnailCache(settings.project_root)
     try:
-        path = cache.thumbnail_path(image_url, settings.image_max_dimension)
-        encoded = base64.b64encode(path.read_bytes()).decode("ascii")
+        return cache.thumbnail_path(image_url, settings.image_max_dimension).resolve()
     except (ProductImageInputError, ProductImageUnavailableError, OSError) as exc:
         raise SearchRankingProviderError("商品主图暂时无法读取，未调用多模态模型") from exc
     finally:
         cache.close()
-    return f"data:image/jpeg;base64,{encoded}"
 
 
 def _normalized_vision_usage(body: Any) -> dict[str, int]:
@@ -10365,8 +11857,16 @@ or UK marketplace vocabulary. Explicitly return market_context="South Africa",
 language_variant="South African English", and shopper_context="South African local customer
 habits". This is a mandatory localization context, not measured platform search demand.
 
-Return the localized shopper wording in four deliberately different groups:
-1. keywords: 6-10 concise, natural search queries a South African shopper would realistically
+Return the localized shopper wording in six deliberately different groups:
+1. product_type_terms and same_product_aliases together form the same-product lexicon.
+   product_type_terms must name the exact physical product type; same_product_aliases must be
+   other concise names for that exact same physical product, not uses, accessories,
+   complements, or merely similar products. Prefer natural 2-4 word buyer queries such as
+   "cat storage box", "enclosed litter box", and "covered cat tray". The server searches
+   eligible lexicon phrases before ordinary keywords and also submits the first four as
+   complete Takealot expansion roots. Never use a generic one-word identity such as "box", "case",
+   "bar", "light", "stand", or "device".
+2. keywords: 6-10 additional concise, natural search queries a South African shopper would realistically
    type. Every query must contain 2-4 meaningful words, at least four queries must contain no
    more than 3 words, and no query may exceed 4 words. Lead with the common exact product type,
    then cover distinct high-confidence synonyms or essential use intent. Prefer compact forms
@@ -10374,7 +11874,7 @@ Return the localized shopper wording in four deliberately different groups:
    Do not write SEO-title fragments, descriptive sentences, colours, specifications, or chained
    "with"/"and" feature clauses unless that word is essential to identify the product. Avoid
    near duplicates.
-2. autocomplete_seeds: 6-10 distinct complete shopper roots of 1-5 meaningful words. A root
+3. autocomplete_seeds: 6-10 distinct complete shopper roots of 1-5 meaningful words. A root
    may be a single word or a natural product phrase such as "lazy sofa", "floor chair", or
    "l shaped desk". Prefer the shortest phrase that preserves the intended product identity;
    never collapse a known product phrase to only an ambiguous modifier such as "lazy",
@@ -10383,14 +11883,29 @@ Return the localized shopper wording in four deliberately different groups:
    entry instincts. The platform's raw ordered expansions are not automatically selected:
    the server retains only same-product identity or a structured adjacent product family,
    and may use a related platform expansion as one additional phrase root.
-3. same_product_aliases: 2-8 concise names for the exact same physical product, not uses,
-   accessories, complements, or merely similar products. Include direct marketplace synonyms
-   such as sofa/couch only when the image-title evidence supports that identity. Never use a
-   generic one-word alias such as "box", "case", "bar", "light", "stand", or "device".
-4. opportunity_seeds: 1-4 closely adjacent complete roots under the same 1-5 word rule.
+4. distinctive_terms: visible differentiators only. These are not automatically same-product
+   names or direct search queries.
+5. same_demand_product_terms: 4-12 concise product-family names for real substitutes a
+   shopper could compare because they solve the same primary buyer need, even when their
+   construction, material, or exact physical form differs. This group is deliberately broader
+   than the exact same-product lexicon. Include the important substitute families likely to
+   appear on a marketplace result page; do not include accessories, food or consumable storage,
+   transport-only products, decorative lookalikes, or items that merely share one generic noun.
+   A family must not be repeated from product_type_terms or same_product_aliases. Do not fill
+   this group with feature or size variants of the exact product (for example "large litter
+   tray", "top-entry litter box", or "self-cleaning litter box" when the exact product is
+   already a litter box). Name genuinely different comparison families instead: for an enclosed
+   cat toilet/house these may include "litter box enclosure", "cat house with litter box", or
+   "cat cage with litter box" when they solve the same toileting/privacy job. The server counts
+   this group separately from exact same-product results and never treats the terms themselves as
+   measured search demand.
+6. opportunity_seeds: 1-4 closely adjacent complete roots under the same 1-5 word rule.
    Every item must also contain buyer_job (the shared outcome in plain English), one or more
    alternative_product_terms naming different product families that can fulfil that job, and
-   optional excluded_product_terms for complements or common irrelevant branches. Do not put
+   optional excluded_product_terms only for complements or genuinely irrelevant branches. Do
+   not exclude a different product family merely because it has another material or form when
+   it still solves the same primary buyer job; put that family in same_demand_product_terms.
+   Do not put
    an exact same-product alias into this group. The server will still validate the actual first
    page and can reject this hypothesis; source priority never decides S/A relation grade.
 

@@ -13,6 +13,7 @@ import {
   fetchSearchRankingDetail,
   fetchSearchRankingProducts,
   revokeSearchRankingProductFact,
+  retryFailedSearchRankingBatch,
   restartSearchRankingBatch,
   startSearchRankingBatch,
 } from "../api";
@@ -35,6 +36,7 @@ import type {
   SearchRankingListPayload,
   SearchRankingProduct,
   SearchRankingDecisionParameterProfile,
+  SearchRankingFirstPageResultClassification,
   SearchRankingProductFactRecord,
   SearchRankingProductFactType,
   SearchRankingRootSource,
@@ -72,7 +74,9 @@ const rootExpansionLibrarySearch = ref("");
 const rootExpansionLibraryLoading = ref(false);
 const batchPreviewPayload = ref<SearchRankingBatchPreviewPayload | null>(null);
 const batchLoading = ref(false);
-const batchAction = ref<"start" | "pause" | "resume" | "restart" | "stop" | "">("");
+const batchAction = ref<
+  "start" | "pause" | "resume" | "retry_failed" | "restart" | "stop" | ""
+>("");
 const factDrafts = ref<Array<{
   fact_type: SearchRankingProductFactType;
   fact_term: string;
@@ -222,6 +226,7 @@ const contextualRootExpansionSummary = computed(() => {
   return { eligible, rejected, phraseRoots, followupRoots };
 });
 type QuerySourceChannel =
+  | "same_product_lexicon_direct"
   | "takealot_root_expansion"
   | "takealot_autocomplete_path"
   | "model_south_african_direct"
@@ -246,6 +251,45 @@ const modelDirectKeywords = computed(() =>
     hasQuerySourceChannel(item, "model_south_african_direct"),
   ) ?? [],
 );
+const sameProductLexiconDirectKeywords = computed(() =>
+  analysis.value?.keywords.filter((item) =>
+    hasQuerySourceChannel(item, "same_product_lexicon_direct"),
+  ) ?? [],
+);
+const sameProductLexicon = computed(() => {
+  const current = analysis.value;
+  if (!current) return null;
+  if (current.profile.same_product_lexicon) return current.profile.same_product_lexicon;
+  const seen = new Set<string>();
+  const terms = [
+    ...(current.profile.product_type_terms ?? []),
+    ...(current.profile.same_product_aliases ?? []),
+  ];
+  const entries = terms.flatMap((rawTerm) => {
+    const term = rawTerm.replace(/\s+/g, " ").trim();
+    const key = term.toLocaleLowerCase();
+    const wordCount = term.split(/\s+/).filter(Boolean).length;
+    if (!term || seen.has(key) || wordCount < 2 || wordCount > 4) return [];
+    seen.add(key);
+    return [{
+      term,
+      sources: ["historical_profile_term" as const],
+      word_count: wordCount,
+      direct_query_eligible: true as const,
+    }];
+  });
+  return {
+    policy_version: "historical-profile-projection" as const,
+    selection_policy: "historical_profile_projection",
+    search_use: "priority_direct_query_and_complete_root_expansion" as const,
+    direct_query_limit: detail.value?.status.query_source_targets.model_south_african_direct ?? 6,
+    entries,
+    excluded: [],
+  };
+});
+const sameProductLexiconDirectKeys = computed(() => new Set(
+  sameProductLexiconDirectKeywords.value.map((item) => item.keyword.toLocaleLowerCase()),
+));
 const sellerTitleDirectKeywords = computed(() =>
   analysis.value?.keywords.filter((item) =>
     hasQuerySourceChannel(item, "seller_title_complete_phrase"),
@@ -466,6 +510,13 @@ async function runBatchControl(action: "pause" | "resume" | "stop") {
   if (action === "stop" && !window.confirm("确认保存进度并退出运行？当前商品族会先安全结束，之后可从断点继续，已处理商品族不会重跑。")) {
     return;
   }
+  if (
+    action === "resume"
+    && batchState.value?.can_retry_failed_target
+    && !window.confirm("确认跳过当前失败商品，只继续后面的未完成商品？该失败商品不会自动补做。")
+  ) {
+    return;
+  }
   batchAction.value = action;
   error.value = "";
   try {
@@ -474,6 +525,33 @@ async function runBatchControl(action: "pause" | "resume" | "stop") {
     scheduleBatchPoll();
   } catch (caught) {
     error.value = errorMessage(caught, "批次控制失败");
+  } finally {
+    batchAction.value = "";
+  }
+}
+
+async function retryFailedBatch() {
+  if (!props.canOperate) {
+    props.onPermissionDenied?.("当前账号不能重试搜索定位失败商品");
+    return;
+  }
+  const failed = batchState.value?.retry_failed_target;
+  if (!failed) return;
+  const accepted = window.confirm([
+    `确认只重试第 ${failed.index} 个失败商品：${failed.store_name} · PLID${failed.productline_id || "—"}？`,
+    "前面已成功的商品不会重跑；本次失败尝试已经产生的供应商 Token 与费用不会撤销。",
+    `重试成功后将继续后续任务，共 ${batchState.value?.retry_remaining_count ?? 0} 个商品待处理。`,
+  ].join("\n\n"));
+  if (!accepted) return;
+  batchAction.value = "retry_failed";
+  error.value = "";
+  try {
+    const payload = await retryFailedSearchRankingBatch();
+    if (batchPreviewPayload.value) batchPreviewPayload.value.batch = payload.batch;
+    scheduleBatchPoll();
+  } catch (caught) {
+    error.value = errorMessage(caught, "失败商品未能重新进入队列");
+    await loadBatchPreview();
   } finally {
     batchAction.value = "";
   }
@@ -566,7 +644,7 @@ async function runAnalysis() {
     return;
   }
   if (!detail.value?.status.configured) {
-    error.value = "服务端尚未配置 DASHSCOPE_API_KEY 或 ARK_API_KEY，未发起任何模型调用";
+    error.value = "未配置模型服务，未发起任何调用";
     return;
   }
   analyzing.value = true;
@@ -897,9 +975,9 @@ function strategyLabel(item: SearchRankingKeywordResult) {
 
 function semanticGradeLabel(item: SearchRankingKeywordResult) {
   const grade = item.validation_evidence.semantic_relation_grade;
-  if (grade === "S") return "S · 同一商品/直接别名";
+  if (grade === "S") return "S · 同需求竞品充足且供给不过窄";
   if (grade === "A") return "A · 同一任务的替代商品";
-  if (grade === "C/I") return "C/I · 互补品或无关结果";
+  if (grade === "C/I") return "C/I · 同需求竞品不足或供给过窄";
   return "未判级";
 }
 
@@ -908,10 +986,55 @@ function semanticResultCountLabel(item: SearchRankingKeywordResult) {
   const evaluated = evidence.semantic_relation_evaluated_result_count ?? 0;
   if (!evaluated) return "未验证";
   return [
-    `S ${evidence.semantic_relation_same_product_result_count ?? 0}`,
-    `A ${evidence.semantic_relation_adjacent_result_count ?? 0}`,
-    `C/I ${evidence.semantic_relation_rejected_result_count ?? 0}`,
+    `完全同款 ${evidence.semantic_relation_same_product_result_count ?? 0}`,
+    `同需求竞品 ${evidence.semantic_relation_same_demand_result_count ?? evidence.semantic_relation_adjacent_result_count ?? 0}`,
+    `无关 ${evidence.semantic_relation_rejected_result_count ?? 0}`,
   ].join(" / ");
+}
+
+function coreSupplyGateLabel(item: SearchRankingKeywordResult) {
+  if (!hasFirstPageValidation(item)) return "未验证";
+  const minimum = item.validation_evidence.semantic_relation_core_min_platform_results
+    ?? item.validation_evidence.core_min_platform_results
+    ?? 36;
+  if (item.total_num_found === null || item.total_num_found === undefined) {
+    return "平台未返回供给总数";
+  }
+  return item.total_num_found >= minimum
+    ? `通过（${item.total_num_found} ≥ ${minimum}）`
+    : `未通过（${item.total_num_found} < ${minimum}，组合过窄）`;
+}
+
+function firstPageAuditClassLabel(item: SearchRankingFirstPageResultClassification) {
+  if (item.is_target) return "目标商品";
+  if (item.classification === "direct_same_product") return "完全同款";
+  if (item.classification === "same_demand_competitor") return "同需求竞品";
+  if (item.classification === "adjacent_or_ambiguous") return "历史相邻/有冲突";
+  return "无关商品";
+}
+
+function firstPageAuditReasonLabel(item: SearchRankingFirstPageResultClassification) {
+  return {
+    target_product: "目标 PLID 本身",
+    source_title_identity_signature: "命中当前商品至少3词的同款标题签名",
+    same_product_identity_with_different_form: "商品身份相同但形态不同，计入同需求竞品",
+    same_demand_product_family: "命中可满足同一核心需求的替代商品族",
+    same_demand_product_family_in_subtitle: "副标题命中同需求替代商品族",
+    conflicting_product_family_in_title: "标题命中冲突商品族，不能算直接竞品",
+    ordered_same_product_name_or_alias: "标题包含完整有序同品名或直接别名",
+    identity_tokens_scattered_not_direct_proof: "只有分散词元重合，不足以证明同品",
+    conflicting_product_family_in_subtitle: "平台副标题显示为另一商品族",
+    no_complete_same_product_identity: "没有完整同品身份短语",
+  }[item.reason];
+}
+
+function firstPageAuditImageUrl(item: SearchRankingFirstPageResultClassification) {
+  if (!item.image_url || failedImages.value.has(item.image_url)) return "";
+  return productThumbnailUrl(
+    item.image_url,
+    PRODUCT_IMAGE_SIZE.list,
+    selectedProduct.value?.store_code,
+  );
 }
 
 function sourceChannelLabel(item: SearchRankingKeywordResult) {
@@ -923,6 +1046,7 @@ function sourceChannelLabel(item: SearchRankingKeywordResult) {
   ]);
   const hasPlatformExpansion = hasQuerySourceChannel(item, "takealot_root_expansion")
     || hasQuerySourceChannel(item, "takealot_autocomplete_path");
+  const hasLexiconDirect = hasQuerySourceChannel(item, "same_product_lexicon_direct");
   const hasModelDirect = hasQuerySourceChannel(item, "model_south_african_direct");
   const hasSellerTitleDirect = hasQuerySourceChannel(
     item,
@@ -935,12 +1059,14 @@ function sourceChannelLabel(item: SearchRankingKeywordResult) {
   );
   if (hasPlatformExpansion && hasHumanParameter) return "平台根词扩展 + 人工决策参数";
   if (hasPlatformExpansion && hasTitleParameter) return "平台根词扩展 + 标题确认参数";
+  if (hasPlatformExpansion && hasLexiconDirect) return "平台根词扩展 + 同品词库";
   if (hasPlatformExpansion && hasModelDirect) return "平台根词扩展 + 南非模型";
   if (hasPlatformExpansion && hasSellerTitleDirect) return "平台根词扩展 + 主标题直验";
   if (hasSellerTitleDirect && hasModelDirect) return "主标题直验 + 南非模型";
   const channel = item.validation_evidence.query_source_channel;
   if (channel === "takealot_root_expansion") return "平台根词扩展词";
   if (channel === "takealot_autocomplete_path") return "历史补全路径词（旧口径）";
+  if (channel === "same_product_lexicon_direct") return "同品词库·优先直搜";
   if (channel === "model_south_african_direct") {
     return journeyTypes.has("concise_direct")
       ? "图文融合·南非精简搜索词"
@@ -956,12 +1082,27 @@ function sourceChannelLabel(item: SearchRankingKeywordResult) {
 function rootSourceLabel(source: SearchRankingRootSource | string | null | undefined) {
   return {
     human_confirmed_product_fact: "人工确认商品事实",
+    image_title_same_product_lexicon: "图文融合同品词库",
     image_title_first_instinct: "图文融合模型预测",
     title_word_root: "主标题确定性拆词",
     result_page_learning: "搜索结果页反向学习",
     image_title_need_state: "相邻需求模型词根",
     title_cross_check: "图题交叉验证词",
   }[String(source ?? "")] ?? "历史来源";
+}
+
+function sameProductLexiconSourceLabel(source: string) {
+  return {
+    human_confirmed_product_fact: "人工确认事实",
+    seller_title_identity_phrase: "图题支持的当前标题身份词",
+    fusion_product_type_terms: "图文融合商品类型",
+    fusion_same_product_aliases: "图文融合同品别名",
+    historical_profile_term: "历史识别词",
+  }[source] ?? "来源待复核";
+}
+
+function sameProductLexiconEntryWasSearched(term: string) {
+  return sameProductLexiconDirectKeys.value.has(term.toLocaleLowerCase());
 }
 
 function sourceLabel(item: SearchRankingKeywordResult) {
@@ -984,6 +1125,9 @@ function sourceLabel(item: SearchRankingKeywordResult) {
   ]);
   if (journeyTypes.has("title_complete_phrase_direct")) {
     return `${recoveryPrefix}主标题确定性拆出的完整商品词组；Takealot 未返回可采用补全词，因此占用既有核心查询位直接验证完整搜索页，不视为平台热词${resampleSuffix}`;
+  }
+  if (journeyTypes.has("same_product_lexicon_direct")) {
+    return `${recoveryPrefix}来自图文融合 product_type_terms、same_product_aliases 或当前主图已采用的人工确认商品事实；作为同品词库精准词优先直接搜索${resampleSuffix}`;
   }
   if (journeyTypes.has("human_confirmed_decision_parameter")) {
     return `运营已将当前标题中的该规格确认为购买决策参数；参数值不是模型猜测，只有通过同商品族完整搜索页后才可前置${resampleSuffix}`;
@@ -1016,6 +1160,7 @@ function sourceLabel(item: SearchRankingKeywordResult) {
   if (
     journeyTypes.has("platform_root_expansion")
     || journeyTypes.has("human_confirmed_fact_root_expansion")
+    || journeyTypes.has("same_product_lexicon_root_expansion")
     || journeyTypes.has("title_cross_check_root_expansion")
     || journeyTypes.has("model_fusion_root_expansion")
     || journeyTypes.has("title_root_expansion")
@@ -1137,6 +1282,7 @@ function providerLabel(provider: string) {
   const labels: Record<string, string> = {
     qwen: "千问",
     doubao: "豆包",
+    codex_cli: "Codex CLI / Terra",
     openai: "OpenAI（历史）",
   };
   return labels[provider] ?? provider;
@@ -1166,6 +1312,7 @@ function batchStatusLabel(status: SearchRankingBatchStatusValue | null | undefin
     paused_after_error: "遇错暂停，未自动重试",
     stopping: "当前商品族结束后保存进度",
     stopped: "已停止，可继续断点",
+    stopped_quota_limit: "历史 Codex 批次曾因额度停止",
     interrupted: "ERP 重启中断，待人工确认",
     completed: "全部完成",
   };
@@ -1183,14 +1330,10 @@ function errorMessage(caught: unknown, fallback: string) {
       <div class="method-banner-copy">
         <p class="method-eyebrow">IMAGE → TITLE → PLATFORM</p>
         <h2>图文融合搜索定位</h2>
-        <span class="method-intro">
-          主图独立识别，标题参与融合，候选再用 Takealot 实时结果验证。视觉事实只取自图片；地域语境不补造不可见事实。
-        </span>
         <div v-if="listPayload" class="method-context" aria-label="模型预测语境">
           <span>
             {{ listPayload.status.model_market_context }} · {{ listPayload.status.model_language_variant }} · 本地客户语境
           </span>
-          <span>普通查看只读本地数据</span>
         </div>
       </div>
 
@@ -1233,38 +1376,13 @@ function errorMessage(caught: unknown, fallback: string) {
           </div>
         </dl>
 
-        <details class="method-details">
-          <summary>
-            <span>词根与平台扩展规则</span>
-            <small>查看来源优先级与入选口径</small>
-          </summary>
-          <div class="method-detail-content">
-            <article>
-              <strong>平台扩展</strong>
-              <span>
-                原始返回不直接入选；仅保留同品身份或结构化相邻商品族，最多
-                {{ listPayload.status.root_expansion_followup_root_limit }} 个可继续作为词组词根。
-              </span>
-            </article>
-            <article>
-              <strong>来源优先级</strong>
-              <span>
-                {{ listPayload.status.root_source_priority.map((source, index) => `${index + 1}. ${rootSourceLabel(source)}`).join(" → ") }}
-              </span>
-            </article>
-            <span class="method-detail-note">
-              主标题根词保留最低覆盖；第4级需先取得真实搜索结果页。地域语境不代表平台实测搜索量。
-            </span>
-          </div>
-        </details>
       </div>
     </section>
 
     <p v-if="eligibility" class="eligibility-note">
-      当前授权 Offer {{ eligibility.current_offer_count }} 条，严格在售 {{ eligibility.eligible_count }} 条；
-      {{ eligibility.excluded_count }} 条已在模型调用前排除。最近完整刷新：
-      {{ eligibility.latest_capture_at ? formatChinaDateTime(eligibility.latest_capture_at) : "暂无" }}，
-      有效期 {{ eligibility.max_age_hours }} 小时。
+      可分析 {{ eligibility.eligible_count }} / {{ eligibility.current_offer_count }} 个 · 最近刷新
+      {{ eligibility.latest_capture_at ? formatChinaDateTime(eligibility.latest_capture_at) : "暂无" }} ·
+      有效 {{ eligibility.max_age_hours }} 小时
     </p>
 
     <section class="batch-panel" aria-labelledby="search-ranking-batch-title">
@@ -1383,12 +1501,30 @@ function errorMessage(caught: unknown, fallback: string) {
             {{ batchAction === "pause" ? "正在请求暂停…" : "当前商品族后暂停" }}
           </button>
           <button
-            v-if="batchState?.can_resume"
+            v-if="batchState?.can_retry_failed_target"
             class="batch-start-button"
+            :disabled="batchAction !== ''"
+            @click="retryFailedBatch"
+          >
+            {{
+              batchAction === "retry_failed"
+                ? "正在重试失败商品…"
+                : `重试失败商品并继续（共 ${batchState.retry_remaining_count ?? 0} 个）`
+            }}
+          </button>
+          <button
+            v-if="batchState?.can_resume"
+            :class="{ 'batch-start-button': !batchState.can_retry_failed_target }"
             :disabled="batchAction !== ''"
             @click="runBatchControl('resume')"
           >
-            {{ batchAction === "resume" ? "正在继续…" : `继续未完成任务（剩余 ${batchState.remaining_count ?? 0}）` }}
+            {{
+              batchAction === "resume"
+                ? "正在继续…"
+                : batchState.can_retry_failed_target
+                  ? `跳过失败商品，继续剩余 ${batchState.remaining_count ?? 0} 个`
+                  : `继续未完成任务（剩余 ${batchState.remaining_count ?? 0}）`
+            }}
           </button>
           <button
             v-if="batchState?.can_stop"
@@ -1407,10 +1543,7 @@ function errorMessage(caught: unknown, fallback: string) {
           </button>
         </div>
         <p class="batch-policy-note">
-          同一店铺内相同 PLID 的变体合并为一个商品族，只选一个代表 Offer 走完整链路。启动前会重新核对同一快照。
-          运行中全局最大并发为 1，补全与搜索页公开请求随机间隔
-          {{ batchPreviewPayload?.policy.public_request_min_interval_seconds }}–{{ batchPreviewPayload?.policy.public_request_max_interval_seconds }} 秒；
-          不调用倒搜、不自动重试，网络或供应商错误后暂停等待人工决定。费用按当前主模型价目与本机历史 Token 推算，实际账单以供应商为准。
+          单批串行；遇错暂停，不自动重试。费用以供应商账单为准。
         </p>
       </template>
     </section>
@@ -1572,29 +1705,25 @@ function errorMessage(caught: unknown, fallback: string) {
           </section>
 
           <p v-if="analyzing" class="running-note">
-            当前商品族只走一次链路：模型同时读取共同主体标题、代表标题和各 Offer 的标题变体参数，
-            用代表 Offer 主图做隔离交叉验证，再生成 2–4 词的精简搜索词，并把标题有效词和模型根词逐个提交平台扩展；
-            颜色、尺寸、容量等差异值始终留在各自 Offer，不会互相套用。
-            所有根词扩展和搜索页公开请求共用间隔。
+            正在分析整个商品族，请勿重复提交。
           </p>
           <p v-if="analysis?.variant_projection?.applied" class="variant-projection-note">
-            当前显示的是 {{ selectedProduct.sku || selectedProduct.offer_id }} 的独立标题评分与建议；
-            图片识别、平台根词扩展和搜索页排名来自商品族代表 Offer 的同一次链路，没有再次调用模型或平台搜索。
+            当前显示 {{ selectedProduct.sku || selectedProduct.offer_id }} 的独立标题评分与建议。
           </p>
           <p
             v-if="analysis?.variant_projection && !analysis.variant_projection.family_snapshot_current"
             class="attempt-note"
           >
-            当前商品族的变体成员、标题、参数或主图已不同于分析快照。旧证据仍保留审计，但请重新分析商品族后再采用标题建议。
+            商品族已变化，请重新分析后再采用建议。
           </p>
           <p
             v-if="analysis?.variant_projection && !analysis.variant_projection.decision_parameter_confirmation_current"
             class="attempt-note"
           >
-            当前变体的决策参数人工确认晚于本次分析；新确认已本地留痕，但尚未用平台搜索重新验证，因此旧标题建议不会直接套用新参数。
+            决策参数已更新，请重新分析后再采用建议。
           </p>
           <p v-if="detail && !detail.status.configured" class="config-note">
-            当前仅可查看历史结果。服务端未配置 DASHSCOPE_API_KEY / ARK_API_KEY，点击时不会产生费用或外部请求。
+            未配置模型服务，仅可查看历史结果。
           </p>
           <p
             v-if="detail?.latest_attempt && detail.latest_attempt.status !== 'completed'"
@@ -1729,7 +1858,8 @@ function errorMessage(caught: unknown, fallback: string) {
                 <h3>{{ analysis.usage.total_tokens ?? "—" }}</h3>
                 <span>
                   输入 {{ analysis.usage.input_tokens ?? "—" }} · 输出 {{ analysis.usage.output_tokens ?? "—" }} tokens ·
-                  {{ costLabel(analysis.estimated_cost_cny) }}（按 {{ detail?.status.pricing_snapshot_date }} 配置单价）
+                  {{ costLabel(analysis.estimated_cost_cny) }}
+                  （按 {{ detail?.status.pricing_snapshot_date }} 配置单价）
                 </span>
               </article>
             </section>
@@ -1821,6 +1951,69 @@ function errorMessage(caught: unknown, fallback: string) {
               </div>
             </section>
 
+            <section
+              v-if="sameProductLexicon?.entries.length"
+              class="same-product-lexicon-section"
+            >
+              <div class="section-heading">
+                <div>
+                  <p>SAME-PRODUCT LEXICON · SEARCH FIRST</p>
+                  <h3>同品词库</h3>
+                </div>
+                <span>
+                  {{ sameProductLexicon.entries.length }} 个精准词 ·
+                  {{ sameProductLexiconDirectKeywords.length }} 个已进入本轮直接搜索
+                </span>
+              </div>
+              <p
+                v-if="sameProductLexicon.policy_version === 'historical-profile-projection'"
+                class="same-product-lexicon-history"
+              >
+                历史投影；重新分析后才会实际搜索。
+              </p>
+              <div class="same-product-lexicon-grid">
+                <article
+                  v-for="entry in sameProductLexicon.entries"
+                  :key="entry.term"
+                  :class="{ searched: sameProductLexiconEntryWasSearched(entry.term) }"
+                >
+                  <strong>{{ entry.term }}</strong>
+                  <span>{{ entry.sources.map(sameProductLexiconSourceLabel).join(" + ") }}</span>
+                  <em v-if="sameProductLexiconEntryWasSearched(entry.term)">已进入本轮直接搜索</em>
+                  <em v-else-if="sameProductLexicon.policy_version === 'historical-profile-projection'">重新分析后启用</em>
+                  <em v-else>已入词库；受6个直搜位上限约束</em>
+                </article>
+              </div>
+              <details v-if="sameProductLexicon.excluded.length" class="same-product-lexicon-excluded">
+                <summary>{{ sameProductLexicon.excluded.length }} 个身份表达未进入精准词库</summary>
+                <span>
+                  {{ sameProductLexicon.excluded.map((entry) => `${entry.term}（${entry.word_count}词）`).join(" / ") }}
+                </span>
+              </details>
+            </section>
+
+            <section
+              v-if="analysis.profile.same_demand_product_terms?.length"
+              class="same-demand-lexicon-section"
+            >
+              <div class="section-heading">
+                <div>
+                  <p>SAME-DEMAND COMPETITOR FAMILIES · PAGE AUDIT ONLY</p>
+                  <h3>同需求竞品词库</h3>
+                </div>
+                <span>{{ analysis.profile.same_demand_product_terms.length }} 个替代商品族</span>
+              </div>
+              <p>
+                用于逐条判断搜索页里满足同一核心需求的竞品；它们与完全同款分开统计，且不会因为进入该词库就自动成为推荐搜索词。
+              </p>
+              <div class="same-demand-lexicon-terms">
+                <span
+                  v-for="term in analysis.profile.same_demand_product_terms"
+                  :key="term"
+                >{{ term }}</span>
+              </div>
+            </section>
+
             <section class="keyword-section">
               <div class="section-heading">
                 <div><p>PLATFORM-EVIDENCED QUERY STRATEGY</p><h3>搜索词策略与自然位置</h3></div>
@@ -1832,6 +2025,7 @@ function errorMessage(caught: unknown, fallback: string) {
                 </span>
                 <small>
                   证据覆盖：{{ platformExpansionKeywords.length }} 个含平台根词扩展 ·
+                  {{ sameProductLexiconDirectKeywords.length }} 个含同品词库优先直搜 ·
                   {{ modelDirectKeywords.length }} 个含图文融合南非直接搜索词 ·
                   {{ sellerTitleDirectKeywords.length }} 个含主标题完整词组直验 ·
                   {{ titleParameterKeywords.length }} 个含标题确认参数（同词可同时属于多类）
@@ -1924,10 +2118,10 @@ function errorMessage(caught: unknown, fallback: string) {
                   </div>
                   <dl>
                     <div><dt>语义关系等级</dt><dd>{{ semanticGradeLabel(item) }}</dd></div>
-                    <div><dt>首页 S/A/C+I 结果</dt><dd>{{ semanticResultCountLabel(item) }}</dd></div>
-                    <div><dt>S级同品占比</dt><dd>{{ sameTypeRatioLabel(item) }}</dd></div>
+                    <div><dt>首页完全同款/同需求竞品/无关</dt><dd>{{ semanticResultCountLabel(item) }}</dd></div>
+                    <div><dt>首页同需求竞品覆盖率</dt><dd>{{ sameTypeRatioLabel(item) }}</dd></div>
                     <div>
-                      <dt>首页S级同品命中</dt>
+                      <dt>首页核心竞品命中</dt>
                       <dd>
                         <template v-if="hasFirstPageValidation(item)">
                           {{ item.validation_evidence.matched_first_page_results ?? item.validation_evidence.matched_top_results ?? 0 }} /
@@ -1937,23 +2131,69 @@ function errorMessage(caught: unknown, fallback: string) {
                       </dd>
                     </div>
                     <div><dt>平台返回商品数（供给规模）</dt><dd>{{ item.total_num_found ?? "—" }}</dd></div>
+                    <div><dt>核心词供给门槛</dt><dd>{{ coreSupplyGateLabel(item) }}</dd></div>
                     <div><dt>采集时间</dt><dd>{{ formatChinaDateTime(item.observed_at) }}</dd></div>
                   </dl>
+                  <details
+                    v-if="item.validation_evidence.first_page_result_classifications?.length"
+                    class="first-page-result-audit"
+                  >
+                    <summary>
+                      逐条核对首页 {{ item.validation_evidence.first_page_result_classifications.length }} 个自然商品
+                      · 完全同款 {{ item.validation_evidence.direct_competitor_count_first_page ?? 0 }} 个
+                      · 同需求竞品 {{ item.validation_evidence.same_demand_competitor_count_first_page ?? 0 }} 个
+                      · 扣除目标后核心竞品 {{ item.validation_evidence.core_competitor_count_excluding_target_first_page ?? item.validation_evidence.direct_competitor_count_excluding_target_first_page ?? 0 }} 个
+                    </summary>
+                    <p>
+                      覆盖率只使用下列已逐条检查的自然商品；平台返回总数作为“组合是否过窄”的供给门槛，不能当作搜索量。
+                      该总数是采集时的平台快照，可能随平台实验、时段或索引更新变化。
+                    </p>
+                    <div class="first-page-result-list">
+                      <article
+                        v-for="result in item.validation_evidence.first_page_result_classifications"
+                        :key="`${item.id}-${result.organic_position}-${result.plid}`"
+                        :class="result.classification"
+                      >
+                        <img
+                          v-if="firstPageAuditImageUrl(result)"
+                          :src="firstPageAuditImageUrl(result)"
+                          :alt="result.title"
+                          width="64"
+                          height="64"
+                          loading="lazy"
+                          decoding="async"
+                          @error="markImageFailed(result.image_url)"
+                        />
+                        <div v-else class="first-page-result-image-placeholder">暂无图片</div>
+                        <div>
+                          <header>
+                            <b>#{{ result.organic_position }} · {{ firstPageAuditClassLabel(result) }}</b>
+                            <span>PLID{{ result.plid || "—" }}</span>
+                            <em>{{ firstPageAuditReasonLabel(result) }}</em>
+                          </header>
+                          <a
+                            v-if="result.url"
+                            :href="result.url"
+                            target="_blank"
+                            rel="noreferrer"
+                          >{{ result.title }}</a>
+                          <strong v-else>{{ result.title }}</strong>
+                          <small v-if="result.subtitle">{{ result.subtitle }}</small>
+                          <small v-if="result.matched_exclusion_terms.length">
+                            冲突词：{{ result.matched_exclusion_terms.join("、") }}
+                          </small>
+                          <small v-if="result.matched_same_demand_terms?.length">
+                            同需求词：{{ result.matched_same_demand_terms.join("、") }}
+                          </small>
+                        </div>
+                      </article>
+                    </div>
+                  </details>
                   <small v-if="!hasFirstPageValidation(item)">
-                    本项未请求 Takealot 搜索页，因此没有首页同类率；“未验证”不能解释为 0%。
+                    未验证，不等于 0%。
                   </small>
                 </article>
               </div>
-              <p class="position-notice">
-                本轮最多验证 {{ detail?.status.search_query_attempt_limit ?? 14 }} 个图文融合搜索词，
-                其中 2–4 词的精简直接搜索词 {{ detail?.status.query_source_targets.model_south_african_direct ?? 6 }} 个
-                （至少4个不超过3词）、
-                词根相关核心位 {{ detail?.status.query_source_targets.root_related_core_total ?? 6 }} 个；
-                平台根词扩展最多占满这些位置，若补全为空或全部无关，主标题完整词组直验最多占
-                {{ detail?.status.query_source_targets.seller_title_complete_phrase_max ?? 1 }} 个，二者不叠加扩容。
-                实际公开请求 {{ analysis.shopper_journey?.public_request_count ?? 0 }} 次，均按 3–5 秒严格串行；
-                同一根词下的扩展顺序不是搜索量，自然位只统计非赞助 product_views，并会随时间、地区、库存与价格变化。
-              </p>
             </section>
 
             <section v-if="analysis.title_score" class="title-score-section">
@@ -1961,9 +2201,6 @@ function errorMessage(caught: unknown, fallback: string) {
                 <div><p>EVIDENCE-BASED TITLE QUALITY</p><h3>现有主标题质量评分</h3></div>
                 <strong>{{ analysis.title_score.score }} / 100 · {{ analysis.title_score.label }}</strong>
               </div>
-              <p class="position-notice">
-                只评价当前主标题文字与固定商品/搜索证据的匹配；自然排名、首页同类占比、竞争数、价格、库存、广告位和平台扩展顺序均不计分。
-              </p>
               <p v-if="!analysis.title_score.current_title_match" class="comparison-warning">
                 当前 Offer 标题已变化；该分数只对应分析时标题，重新分析后才会进入列表评分筛选。
               </p>
@@ -2040,10 +2277,7 @@ function errorMessage(caught: unknown, fallback: string) {
                 </article>
               </div>
               <p class="title-format-note">
-                建议标题统一仅保留字母、数字和空格；商品类型与相关关键词前置，功能卖点居中，
-                功率、电压、容量、尺寸、重量、数量及防护等级等明确规格参数默认后置。
-                只有运营在上方逐项确认为决策参数，并且带该参数的同商品族搜索词通过实时搜索页验证后，才可适度前置；
-                系统建议只用于提醒核对，不能代替人工判断。300W、IP66 等未确认或验证未通过时仍保持后置。
+                商品类型优先，规格参数默认后置。
               </p>
               <article
                 v-if="analysis.title_validation?.matched_strategy || analysis.title_validation?.matched_suggestion"
@@ -2080,8 +2314,7 @@ function errorMessage(caught: unknown, fallback: string) {
                 因此本轮只报告证据不足，不判断标题已带来前移。
               </p>
               <p class="causality-note">
-                不作“修改后一定前移”的虚假保证：建议默认标记为待验证。只有检测到标题确实改成建议文本，且再次采集该打法的相同证据词后，
-                才会显示实际前移/后移；即使前移也只是观察结果，不能单独证明因果。
+                标题建议需复采验证；排名变化不等同因果。
               </p>
             </section>
 
@@ -2171,8 +2404,7 @@ function errorMessage(caught: unknown, fallback: string) {
           <strong>{{ factRecommendation.reason }}</strong>
         </article>
         <p class="fact-confirm-hint">
-          填写会被南非站内搜索使用的英文短语，例如购买类型 <b>compressed sofa</b>；若只是不可见的工艺或出货状态，
-          请另选“结构形态”并填写 <b>vacuum compressed</b>。每条最多 6 个词，不要标点；只确认你能从供应商资料或实物确定的事实。
+          填写最多 6 词的英文商品事实；只填写你能确认的内容。
         </p>
         <div class="fact-draft-list">
           <div v-for="(fact, index) in factDrafts" :key="index" class="fact-draft-row">
@@ -2192,11 +2424,6 @@ function errorMessage(caught: unknown, fallback: string) {
         <button v-if="factDrafts.length < 6" type="button" class="fact-add-button" :disabled="factSaving" @click="addFactDraft">
           添加另一条事实
         </button>
-        <ul>
-          <li>确认后写入当前 PLID 的商品事实档案，记录确认人、时间、当时标题与主图；不会调用外部图搜图服务。</li>
-          <li>系统会重新读取 Takealot 根词扩展与搜索页，只有相关性和位置门槛通过后才形成标题建议。</li>
-          <li>人工事实不等于排名保证；修改标题后仍必须同词复采，报告实际前移、持平或后移。</li>
-        </ul>
         <p v-if="factModalError" class="fact-modal-error" role="alert">{{ factModalError }}</p>
         <div class="fact-modal-actions">
           <button type="button" :disabled="factSaving" @click="closeProductFactConfirmation">取消</button>
@@ -2219,7 +2446,7 @@ function errorMessage(caught: unknown, fallback: string) {
           <strong>{{ factRevocationTarget.fact_term }}</strong>
         </article>
         <textarea v-model="factRevocationReason" maxlength="500" placeholder="填写停用原因，例如供应商资料已更正" />
-        <p class="fact-confirm-hint">记录会保留在档案中；现有分析仍是历史快照，请随后重新验证定位。</p>
+        <p class="fact-confirm-hint">停用后请重新验证。</p>
         <div class="fact-modal-actions">
           <button type="button" @click="factRevocationTarget = null">取消</button>
           <button type="button" class="primary" :disabled="factSaving" @click="confirmFactRevocation">确认停用并留痕</button>
@@ -2235,7 +2462,6 @@ function errorMessage(caught: unknown, fallback: string) {
 .method-eyebrow, .section-heading p, .rail-title p, .first-run p { margin: 0 0 5px; color: #64746a; font-size: 11px; font-weight: 800; letter-spacing: .14em; }
 .method-banner h2, .section-heading h3, .rail-title h3, .first-run h3 { margin: 0; }
 .method-banner-copy { min-width: 0; padding-top: 3px; }
-.method-intro { display: block; max-width: 620px; margin-top: 10px; color: #536158; line-height: 1.7; }
 .method-context { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 15px; }
 .method-context span { padding: 6px 9px; border: 1px solid rgba(117, 139, 124, .28); border-radius: 999px; color: #4d6256; background: rgba(255, 255, 255, .55); font-size: 11px; font-weight: 750; }
 .method-overview { display: grid; min-width: 0; gap: 11px; }
@@ -2250,13 +2476,6 @@ function errorMessage(caught: unknown, fallback: string) {
 .method-guardrail-grid dd { display: grid; gap: 2px; min-width: 0; }
 .method-guardrail-grid dd strong { color: #2d503e; font-size: 13px; }
 .method-guardrail-grid dd span { color: #66736b; font-size: 11px; font-weight: 600; line-height: 1.4; }
-.method-details { border-top: 1px solid rgba(108, 130, 114, .28); }
-.method-details summary { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 10px 2px 0; color: #40584a; cursor: pointer; font-size: 12px; font-weight: 800; }
-.method-details summary small { color: #738078; font-weight: 600; }
-.method-detail-content { display: grid; gap: 10px; padding: 11px 2px 2px; }
-.method-detail-content article { display: grid; grid-template-columns: 86px minmax(0, 1fr); gap: 12px; color: #59675e; font-size: 12px; line-height: 1.55; }
-.method-detail-content article strong { color: #354c3f; }
-.method-detail-note { padding-top: 8px; border-top: 1px dashed rgba(108, 130, 114, .3); color: #6c776f; font-size: 11px; line-height: 1.55; }
 dt { color: #738078; font-size: 12px; } dd { margin: 0; font-weight: 750; }
 .error-banner, .config-note, .attempt-note, .running-note, .variant-projection-note { margin: 0; padding: 12px 16px; border-radius: 10px; }
 .error-banner { color: #8e2f25; background: #fff0ed; border: 1px solid #efc2bb; }
@@ -2418,6 +2637,22 @@ dt { color: #738078; font-size: 12px; } dd { margin: 0; font-weight: 750; }
 .root-expansion-list { grid-column: 1 / -1; display: grid; gap: 5px; padding-top: 5px; border-top: 1px dashed #d5dfd8; }
 .root-expansion-list p { margin: 0; color: #43564b; font-size: 12px; line-height: 1.55; }
 .root-expansion-list b { display: inline-block; min-width: 58px; color: #315e49; }
+.same-product-lexicon-section { display: grid; gap: 14px; padding: 20px; border: 1px solid #b8d2c2; border-radius: 14px; background: linear-gradient(145deg, #f9fdfb, #e8f4ec); }
+.same-product-lexicon-history { margin: 0; color: #53665b; font-size: 12px; line-height: 1.72; }
+.same-product-lexicon-history { padding: 9px 11px; border-left: 3px solid #9b762f; border-radius: 6px; color: #765c2d; background: #fff8e8; }
+.same-product-lexicon-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 9px; }
+.same-product-lexicon-grid article { display: grid; gap: 5px; padding: 12px; border: 1px solid #ccdbd2; border-radius: 10px; background: rgba(255, 255, 255, .82); }
+.same-product-lexicon-grid article.searched { border-color: #5c9877; box-shadow: inset 3px 0 #35765a; }
+.same-product-lexicon-grid strong { color: #214f3b; font-size: 15px; }
+.same-product-lexicon-grid span { color: #65766c; font-size: 11px; line-height: 1.45; }
+.same-product-lexicon-grid em { width: fit-content; padding: 3px 7px; border-radius: 999px; color: #6e643f; background: #eee9d8; font-size: 10px; font-style: normal; font-weight: 800; }
+.same-product-lexicon-grid article.searched em { color: #245a42; background: #dceee3; }
+.same-product-lexicon-excluded { color: #6b766f; font-size: 11px; line-height: 1.6; }
+.same-product-lexicon-excluded summary { color: #6e5930; font-weight: 800; cursor: pointer; }
+.same-demand-lexicon-section { display: grid; gap: 12px; padding: 18px 20px; border: 1px solid #b8d4df; border-radius: 14px; background: linear-gradient(145deg, #f9fcfd, #eaf5f9); }
+.same-demand-lexicon-section > p { margin: 0; color: #4e6670; font-size: 12px; line-height: 1.7; }
+.same-demand-lexicon-terms { display: flex; flex-wrap: wrap; gap: 7px; }
+.same-demand-lexicon-terms span { padding: 5px 9px; border-radius: 999px; color: #285d72; background: #dceef5; font-size: 11px; font-weight: 800; }
 .keyword-section, .title-review, .title-score-section, .history-section { display: grid; gap: 16px; }
 .title-score-overview { display: flex; flex-wrap: wrap; gap: 8px; }
 .title-score-overview span { padding: 7px 10px; border-radius: 999px; color: #315a46; background: #e8f1eb; font-size: 12px; font-weight: 800; }
@@ -2456,6 +2691,24 @@ dt { color: #738078; font-size: 12px; } dd { margin: 0; font-weight: 750; }
 .query-path { color: #7a6a4b; font-weight: 650; }
 .keyword-main > strong { color: #235c45; white-space: nowrap; }.keyword-position { display: grid; gap: 4px; text-align: right; }.keyword-position > span { color: #194f3a; font-size: 15px; font-weight: 850; }.keyword-position > small { color: #65746b; font-size: 12px; font-weight: 700; }.keyword-card dl { display: flex; gap: 28px; margin: 14px 0 8px; }.keyword-card dl div { display: grid; gap: 3px; }
 .keyword-card p { margin: 7px 0; color: #4e5c53; }.keyword-card small, .position-notice, .causality-note { color: #6e7a72; line-height: 1.6; }
+.first-page-result-audit { margin-top: 13px; padding: 11px 12px; border: 1px solid #d4dfd8; border-radius: 9px; background: rgba(255, 255, 255, .76); }
+.first-page-result-audit > summary { color: #315d49; font-size: 12px; font-weight: 850; cursor: pointer; }
+.first-page-result-list { display: grid; gap: 7px; margin-top: 11px; }
+.first-page-result-list > article { display: grid; grid-template-columns: 62px minmax(0, 1fr); gap: 10px; min-width: 0; padding: 9px; border-left: 3px solid #a2aea7; border-radius: 7px; background: #f7f9f8; }
+.first-page-result-list > article.direct_same_product { border-left-color: #35765a; background: #f0f7f3; }
+.first-page-result-list > article.same_demand_competitor { border-left-color: #34708b; background: #eef7fb; }
+.first-page-result-list > article.adjacent_or_ambiguous { border-left-color: #a47a2d; background: #fff9ec; }
+.first-page-result-list img, .first-page-result-image-placeholder { width: 62px; height: 62px; border-radius: 7px; object-fit: contain; background: #fff; }
+.first-page-result-image-placeholder { display: grid; place-items: center; color: #89938d; font-size: 10px; text-align: center; }
+.first-page-result-list header { display: flex; align-items: baseline; flex-wrap: wrap; gap: 6px; }
+.first-page-result-list header b { color: #66736b; font-size: 11px; }
+.first-page-result-list header em { padding: 2px 6px; border-radius: 999px; color: #fff; background: #78867d; font-size: 10px; font-style: normal; font-weight: 850; }
+.first-page-result-list article.direct_same_product header em { background: #35765a; }
+.first-page-result-list article.same_demand_competitor header em { background: #34708b; }
+.first-page-result-list article.adjacent_or_ambiguous header em { background: #98712b; }
+.first-page-result-list header small { color: #78847d; }
+.first-page-result-list a, .first-page-result-list strong { display: block; margin-top: 3px; color: #214f3b; line-height: 1.45; overflow-wrap: anywhere; }
+.first-page-result-list p { margin: 3px 0 0; color: #627168; font-size: 11px; line-height: 1.5; }
 .position-notice, .causality-note { margin: 0; padding: 12px 14px; border-radius: 9px; background: #f3f5f3; font-size: 12px; }
 .current-title-panel { display: grid; gap: 7px; padding: 14px 16px; border: 1px solid #dbe2dd; border-radius: 11px; background: #f7f9f7; }
 .current-title-panel p { margin: 0; color: #748078; font-size: 11px; font-weight: 800; letter-spacing: .08em; text-transform: uppercase; }
@@ -2492,7 +2745,7 @@ dt { color: #738078; font-size: 12px; } dd { margin: 0; font-weight: 750; }
 .comparison-warning { padding: 10px 13px; border-left: 3px solid #a66a2d; color: #75502d; background: #fff8ef; font-size: 12px; }
 .title-review > p { margin: 0; line-height: 1.7; }.movement-list, .history-list { display: flex; flex-wrap: wrap; gap: 8px; }.movement-list span, .history-list span { padding: 7px 10px; border-radius: 999px; background: #e8f1eb; color: #315a46; font-size: 12px; }
 .first-run { text-align: center; padding: 70px 20px !important; }.first-run span, .empty-state, .detail-loading { color: #748077; }
-@media (max-width: 1050px) { .ranking-layout { grid-template-columns: 1fr; }.product-rail { position: static; max-height: 420px; }.method-banner { grid-template-columns: 1fr; }.batch-metrics, .title-score-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }.product-hero { grid-template-columns: 90px minmax(0, 1fr); }.analyze-button { grid-column: 1 / -1; }.identity-grid { grid-template-columns: 1fr; }.autocomplete-table-head, .autocomplete-phrase-table article { grid-template-columns: minmax(190px, 1fr) 110px 110px 150px; } }
+@media (max-width: 1050px) { .ranking-layout { grid-template-columns: 1fr; }.product-rail { position: static; max-height: 420px; }.method-banner { grid-template-columns: 1fr; }.batch-metrics, .title-score-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }.product-hero { grid-template-columns: 90px minmax(0, 1fr); }.analyze-button { grid-column: 1 / -1; }.identity-grid, .same-product-lexicon-grid { grid-template-columns: 1fr; }.autocomplete-table-head, .autocomplete-phrase-table article { grid-template-columns: minmax(190px, 1fr) 110px 110px 150px; } }
 @media (max-width: 780px) { .method-guardrail-grid { grid-template-columns: 1fr; }.title-strategy-grid, .product-fact-grid, .decision-parameter-grid { grid-template-columns: 1fr; }.decision-parameter-choice { grid-template-columns: 1fr; }.suggested-title { min-height: 0; }.fact-draft-row { grid-template-columns: 1fr; }.autocomplete-library-heading { align-items: stretch; flex-direction: column; }.autocomplete-table-head { display: none; }.autocomplete-phrase-table article { grid-template-columns: 1fr 1fr; }.autocomplete-phrase-table article strong { grid-column: 1 / -1; } }
-@media (max-width: 650px) { .method-banner { padding: 18px; }.method-model-route { grid-template-columns: 1fr; }.method-model-arrow { display: none; }.method-details summary { align-items: flex-start; flex-direction: column; gap: 3px; }.method-detail-content article { grid-template-columns: 1fr; gap: 3px; }.batch-heading, .batch-progress-copy { flex-direction: column; }.batch-metrics, .batch-store-detail > div { grid-template-columns: 1fr; }.product-hero { grid-template-columns: 1fr; }.keyword-main { flex-direction: column; }.keyword-position { text-align: left; }.keyword-card dl { flex-wrap: wrap; }.fact-modal-actions { flex-direction: column-reverse; }.fact-modal-actions button { width: 100%; } }
+@media (max-width: 650px) { .method-banner { padding: 18px; }.method-model-route { grid-template-columns: 1fr; }.method-model-arrow { display: none; }.batch-heading, .batch-progress-copy { flex-direction: column; }.batch-metrics, .batch-store-detail > div { grid-template-columns: 1fr; }.product-hero { grid-template-columns: 1fr; }.keyword-main { flex-direction: column; }.keyword-position { text-align: left; }.keyword-card dl { flex-wrap: wrap; }.first-page-result-list > article { grid-template-columns: 48px minmax(0, 1fr); }.first-page-result-list img, .first-page-result-image-placeholder { width: 48px; height: 48px; }.fact-modal-actions { flex-direction: column-reverse; }.fact-modal-actions button { width: 100%; } }
 </style>

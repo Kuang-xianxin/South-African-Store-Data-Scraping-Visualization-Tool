@@ -534,7 +534,8 @@ def _exchange_rate_payload(
         "source": RATE_SOURCE,
         "status": status,
         "message": (
-            "汇率刷新失败，使用本进程最近一次成功缓存；仅用于利润估算。"
+            "最新汇率请求失败，使用最近一次成功缓存；"
+            "最近成功时间见汇率证据，仅用于利润估算。"
             if quote.stale
             else "按最新发布的机构参考汇率换算，仅供利润估算，非交易结算价。"
         ),

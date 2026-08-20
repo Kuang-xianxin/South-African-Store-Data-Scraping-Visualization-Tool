@@ -41,7 +41,22 @@ test("rapid scope changes abort and reject stale responses", () => {
   );
   assert.match(
     overviewLoaderSource,
-    /storeRequestId === ownStoreRequestId[\s\S]*ownStoreScopeStillCurrent\(requestScope, requestStoreCode\)/,
+    /\+\+ownStoreRequestId[\s\S]*ownStoreAbortController\?\.abort\(\)[\s\S]*void loadOwnStoreScope\(\)/,
+  );
+});
+
+test("full refresh returns the invariant true-competitor partition first", () => {
+  assert.match(
+    overviewLoaderSource,
+    /fetchCompetitors\([\s\S]*controller\.signal,[\s\S]*false,[\s\S]*\)/,
+  );
+  assert.match(
+    apiSource,
+    /if \(!includeOwnStore\) query\.set\("include_own_store", "false"\)/,
+  );
+  assert.match(
+    overviewLoaderSource,
+    /competitors\.value = overview\.items[\s\S]*void loadOwnStoreScope\(\)/,
   );
 });
 
@@ -51,7 +66,7 @@ test("scope responses are cached and switching shows an explicit loading state",
   assert.match(scopeLoaderSource, /if \(cachedOverview && cachedTargets\)/);
   assert.match(scopeLoaderSource, /cacheScopeValue\(ownStoreOverviewCache/);
   assert.match(scopeLoaderSource, /cacheScopeValue\(storeTargetCache/);
-  assert.match(pageSource, /v-if="ownStoreScopeLoading"[\s\S]*正在切换店铺范围/);
+  assert.match(pageSource, /v-if="ownStoreScopeLoading"[\s\S]*正在读取自有店铺数据/);
   assert.match(overviewLoaderSource, /ownStoreOverviewCache\.clear\(\)/);
   assert.match(
     pageSource,

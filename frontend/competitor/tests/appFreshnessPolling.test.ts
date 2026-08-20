@@ -31,6 +31,27 @@ test("freshness updates immediately when the page becomes visible again", () => 
   );
 });
 
+test("refresh status polls quickly only while a refresh is active", () => {
+  assert.match(appSource, /const refreshStatusActivePollIntervalMs = 2_000/);
+  assert.match(appSource, /const refreshStatusIdlePollIntervalMs = 15_000/);
+  assert.match(
+    appSource,
+    /const delay = refreshStatus\.value\.in_progress\s+\? refreshStatusActivePollIntervalMs\s+: refreshStatusIdlePollIntervalMs/,
+  );
+  assert.match(
+    appSource,
+    /refreshStatusTimer = window\.setTimeout\(\(\) => \{\s+refreshStatusTimer = null;\s+void loadRefreshStatus\(\);\s+\}, delay\)/,
+  );
+  assert.match(
+    appSource,
+    /if \(refreshStatusTimer !== null\) window\.clearTimeout\(refreshStatusTimer\)/,
+  );
+  assert.doesNotMatch(
+    appSource,
+    /setInterval\(\(\) => void loadRefreshStatus\(\), 2_000\)/,
+  );
+});
+
 test("a transient freshness request failure preserves the last known timestamps", () => {
   const loadFreshnessBlock = appSource.slice(
     appSource.indexOf("async function loadFreshness"),

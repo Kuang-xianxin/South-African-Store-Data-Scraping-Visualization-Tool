@@ -24,6 +24,13 @@ test("thumbnail URLs carry the active store for native image requests", async (t
   assert.equal(thumbnail.searchParams.get("size"), "640");
   assert.equal(thumbnail.searchParams.get("store_code"), "store-03");
 
+  const rowScopedThumbnail = new URL(
+    productThumbnailUrl(source, PRODUCT_IMAGE_SIZE.list, " Store-05 "),
+    "http://erp.local",
+  );
+  assert.equal(rowScopedThumbnail.searchParams.get("size"), "192");
+  assert.equal(rowScopedThumbnail.searchParams.get("store_code"), "store-05");
+
   setActiveStoreCode("current");
   assert.equal(productThumbnailUrl(""), "");
   assert.equal(productThumbnailUrl(null), "");

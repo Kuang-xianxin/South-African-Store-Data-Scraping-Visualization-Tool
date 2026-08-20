@@ -14,6 +14,7 @@ test("product detail shows converted ZAR cost with rate evidence", () => {
   assert.match(pageSource, /1人民币=/);
   assert.match(pageSource, /汇率日/);
   assert.match(pageSource, /formatChinaDateTime\(detail\.cost_conversion\.fetched_at\)/);
+  assert.match(pageSource, /最近成功于/);
   assert.match(pageSource, /detail\.cost_conversion\.message/);
 });
 

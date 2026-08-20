@@ -3,12 +3,14 @@ import { computed, ref, watch } from "vue";
 
 import {
   OWN_STORE_SALES_CHART,
+  aggregateOwnStoreSalesPoints,
   buildOwnStoreSalesChart,
   filterOwnStoreSalesPoints,
   getOwnStoreSalesDateBounds,
+  getOwnStoreSalesRecentRange,
   nearestOwnStoreSalesPointIndex,
 } from "../ownStoreSalesChart";
-import type { OwnStoreSalesSeries } from "../types";
+import type { OwnStoreSalesPoint, OwnStoreSalesSeries } from "../types";
 
 const props = defineProps<{
   series: OwnStoreSalesSeries[];
@@ -90,11 +92,16 @@ const filteredPoints = computed(() => {
     rangeEnd.value,
   );
 });
+const aggregatedPoints = computed(() =>
+  aggregateOwnStoreSalesPoints(filteredPoints.value),
+);
+const displayBuckets = computed(() => aggregatedPoints.value.buckets);
+const granularity = computed(() => aggregatedPoints.value.granularity);
 const geometry = computed(() =>
-  buildOwnStoreSalesChart(filteredPoints.value),
+  buildOwnStoreSalesChart(displayBuckets.value),
 );
 const activePoint = computed(
-  () => filteredPoints.value[activeIndex.value] ?? null,
+  () => displayBuckets.value[activeIndex.value] ?? null,
 );
 const activeChartPoint = computed(
   () => geometry.value.points[activeIndex.value] ?? null,
@@ -102,6 +109,10 @@ const activeChartPoint = computed(
 const visibleBars = computed(() =>
   geometry.value.points.filter((point) => point.barHeight !== null),
 );
+const missingBarMarkers = computed(() =>
+  geometry.value.points.filter((point) => point.units === null),
+);
+const showBarValueLabels = computed(() => displayBuckets.value.length <= 24);
 const isFullRange = computed(
   () =>
     rangeStart.value === availableStart.value &&
@@ -109,27 +120,80 @@ const isFullRange = computed(
 );
 const rangeSummary = computed(() => {
   const points = filteredPoints.value;
+  const knownPoints = points.filter(
+    (point): point is OwnStoreSalesPoint & { ordered_units: number } =>
+      point.ordered_units !== null,
+  );
+  const verifiedPoints = points.filter(
+    (point): point is OwnStoreSalesPoint & { ordered_units: number } =>
+      point.data_status === "verified" && point.ordered_units !== null,
+  );
+  const peakPoint = verifiedPoints.reduce<(typeof verifiedPoints)[number] | null>(
+    (peak, point) =>
+      !peak || point.ordered_units > peak.ordered_units ? point : peak,
+    null,
+  );
   return {
     totalDays: points.length,
-    coveredDays: points.filter((point) => point.data_status === "verified").length,
+    coveredDays: verifiedPoints.length,
     partialDays: points.filter((point) => point.data_status === "partial").length,
     missingDays: points.filter((point) => point.data_status === "missing").length,
-    orderedUnits: points.reduce(
-      (total, point) => total + (point.ordered_units ?? 0),
-      0,
-    ),
+    orderedUnits: knownPoints.length
+      ? knownPoints.reduce((total, point) => total + point.ordered_units, 0)
+      : null,
+    peakDate: peakPoint?.date ?? null,
+    peakUnits: peakPoint?.ordered_units ?? null,
+    salesDays: knownPoints.length
+      ? knownPoints.filter((point) => point.ordered_units > 0).length
+      : null,
+    verifiedAverageUnits: verifiedPoints.length
+      ? verifiedPoints.reduce((total, point) => total + point.ordered_units, 0)
+        / verifiedPoints.length
+      : null,
   };
+});
+const plotMessage = computed<{
+  detail: string;
+  title: string;
+  tone: "missing" | "zero";
+} | null>(() => {
+  if (!displayBuckets.value.length) return null;
+  const knownBuckets = displayBuckets.value.filter((point) => point.units !== null);
+  const evidence = [
+    `完整 ${rangeSummary.value.coveredDays} 天`,
+    rangeSummary.value.partialDays
+      ? `截至采集 ${rangeSummary.value.partialDays} 天`
+      : "",
+    rangeSummary.value.missingDays
+      ? `缺失 ${rangeSummary.value.missingDays} 天`
+      : "",
+  ].filter(Boolean).join(" · ");
+  if (!knownBuckets.length) {
+    return {
+      detail: `${evidence} · 缺失不会按 0 件补齐`,
+      title: "所选区间暂无 Seller Sales 覆盖",
+      tone: "missing",
+    };
+  }
+  if (knownBuckets.every((point) => point.units === 0)) {
+    return {
+      detail: evidence,
+      title: "已覆盖日期均为 0 件",
+      tone: "zero",
+    };
+  }
+  return null;
 });
 
 watch(
-  filteredPoints,
+  displayBuckets,
   (points) => {
     if (!points.length) {
       activeIndex.value = 0;
       return;
     }
     const lastVerified = points.findLastIndex(
-      (point) => point.ordered_units !== null,
+      (point) => point.units !== null,
     );
     activeIndex.value = lastVerified >= 0 ? lastVerified : points.length - 1;
   },
@@ -142,12 +206,12 @@ function handlePointer(event: PointerEvent) {
   activeIndex.value = nearestOwnStoreSalesPointIndex(
     event.clientX - bounds.left,
     bounds.width,
-    filteredPoints.value.length,
+    displayBuckets.value.length,
   );
 }
 
 function stepPoint(delta: number) {
-  const count = filteredPoints.value.length;
+  const count = displayBuckets.value.length;
   if (!count) return;
   activeIndex.value = Math.max(0, Math.min(count - 1, activeIndex.value + delta));
 }
@@ -184,6 +248,19 @@ function resetDateRange() {
   rangeEnd.value = availableRange.value.end;
 }
 
+function setRecentRange(dayCount: number) {
+  if (!availableRange.value) return;
+  const recent = getOwnStoreSalesRecentRange(availableRange.value, dayCount);
+  rangeStart.value = recent.start;
+  rangeEnd.value = recent.end;
+}
+
+function isRecentRange(dayCount: number): boolean {
+  if (!availableRange.value) return false;
+  const recent = getOwnStoreSalesRecentRange(availableRange.value, dayCount);
+  return rangeStart.value === recent.start && rangeEnd.value === recent.end;
+}
+
 function clampDate(value: string, minimum: string, maximum: string): string {
   if (value < minimum) return minimum;
   if (value > maximum) return maximum;
@@ -192,6 +269,24 @@ function clampDate(value: string, minimum: string, maximum: string): string {
 
 function number(value: number | null): string {
   return value === null ? "—" : new Intl.NumberFormat("zh-CN").format(value);
+}
+
+function decimal(value: number | null): string {
+  if (value === null) return "—";
+  return new Intl.NumberFormat("zh-CN", { maximumFractionDigits: 1 }).format(value);
+}
+
+function granularityLabel(): string {
+  if (granularity.value === "week") return "按周汇总";
+  if (granularity.value === "month") return "按月汇总";
+  return "按日展示";
+}
+
+function activePeriodLabel(): string {
+  if (!activePoint.value) return "—";
+  return activePoint.value.startDate === activePoint.value.endDate
+    ? activePoint.value.startDate
+    : `${activePoint.value.startDate} 至 ${activePoint.value.endDate}`;
 }
 </script>
 
@@ -246,7 +341,24 @@ function number(value: number | null): string {
 
       <div v-if="availableRange" class="own-sales-range">
         <div class="own-sales-range-controls">
-          <strong>显示区间（北京时间）</strong>
+          <strong>图表范围（北京时间）</strong>
+          <div class="own-sales-range-presets" role="group" aria-label="销量图快捷日期范围">
+            <button
+              type="button"
+              :class="{ selected: isRecentRange(30) && !isFullRange }"
+              @click="setRecentRange(30)"
+            >近30天</button>
+            <button
+              type="button"
+              :class="{ selected: isRecentRange(90) && !isFullRange }"
+              @click="setRecentRange(90)"
+            >近90天</button>
+            <button
+              type="button"
+              :class="{ selected: isFullRange }"
+              @click="resetDateRange"
+            >全部日期</button>
+          </div>
           <label>
             <span>开始日期</span>
             <input
@@ -270,12 +382,29 @@ function number(value: number | null): string {
               @input="updateRangeEnd"
             />
           </label>
-          <button type="button" :disabled="isFullRange" @click="resetDateRange">
-            全部日期
-          </button>
+        </div>
+        <div class="own-sales-range-insights">
+          <div :class="{ warning: rangeSummary.partialDays || rangeSummary.missingDays }">
+            <small>{{ rangeSummary.partialDays || rangeSummary.missingDays ? "区间已有销量" : "区间销量" }}</small>
+            <strong>{{ number(rangeSummary.orderedUnits) }}<template v-if="rangeSummary.orderedUnits !== null"> 件</template></strong>
+          </div>
+          <div>
+            <small>完整日均</small>
+            <strong>{{ decimal(rangeSummary.verifiedAverageUnits) }} 件</strong>
+          </div>
+          <div>
+            <small>有销量记录</small>
+            <strong>{{ number(rangeSummary.salesDays) }}<template v-if="rangeSummary.salesDays !== null"> 天</template></strong>
+          </div>
+          <div>
+            <small>最高完整单日</small>
+            <strong>{{ number(rangeSummary.peakUnits) }}<template v-if="rangeSummary.peakUnits !== null"> 件</template></strong>
+            <span v-if="rangeSummary.peakDate">{{ rangeSummary.peakDate }}</span>
+          </div>
         </div>
         <p class="own-sales-range-status" aria-live="polite">
           <span>条形图显示 {{ rangeStart }} 至 {{ rangeEnd }}</span>
+          <span>{{ granularityLabel() }} · {{ displayBuckets.length }} 根柱</span>
           <span>{{ rangeSummary.totalDays }} 个自然日</span>
           <span>完整 {{ rangeSummary.coveredDays }} 天</span>
           <span v-if="rangeSummary.partialDays" class="partial">
@@ -284,13 +413,12 @@ function number(value: number | null): string {
           <span v-if="rangeSummary.missingDays" class="missing">
             缺失 {{ rangeSummary.missingDays }} 天
           </span>
-          <span>已覆盖下单 {{ number(rangeSummary.orderedUnits) }} 件</span>
         </p>
         <p
-          v-if="rangeSummary.partialDays || rangeSummary.missingDays"
+          v-if="granularity !== 'day' || rangeSummary.partialDays || rangeSummary.missingDays"
           class="own-sales-range-note"
         >
-          区间件数只汇总已有 Seller Sales 值；截至采集或缺失日期不代表完整自然日销量。
+          橙色柱为已有小计；缺失日期不补 0。
         </p>
       </div>
 
@@ -298,46 +426,58 @@ function number(value: number | null): string {
         v-if="filteredPoints.length"
         class="own-sales-chart"
         tabindex="0"
-        :aria-label="`自有商品日销量条形图，当前显示 ${rangeStart} 至 ${rangeEnd}，使用左右方向键切换国内日期`"
+        :aria-label="`自有商品销量条形图，当前显示 ${rangeStart} 至 ${rangeEnd}，${granularityLabel()}，使用左右方向键切换柱子`"
         @keydown.left.prevent="stepPoint(-1)"
         @keydown.right.prevent="stepPoint(1)"
       >
         <div v-if="activePoint" class="own-sales-readout" aria-live="polite">
           <div>
-            <small>国内日期</small>
-            <strong>{{ activePoint.date }}</strong>
+            <small>{{ granularity === "day" ? "国内日期" : "国内日期范围" }}</small>
+            <strong>{{ activePeriodLabel() }}</strong>
+            <span>{{ granularityLabel() }}</span>
           </div>
-          <div :class="{ missing: activePoint.ordered_units === null }">
-            <small>实际下单件数</small>
+          <div :class="{ missing: activePoint.units === null || activePoint.status === 'partial' }">
+            <small>{{ activePoint.status === "verified" ? "完整下单件数" : "已有下单件数" }}</small>
             <strong>
               {{
-                activePoint.ordered_units === null
+                activePoint.units === null
                   ? "未覆盖"
-                  : activePoint.data_status === "partial"
-                    ? `${number(activePoint.ordered_units)} 件（截至采集）`
-                    : `${number(activePoint.ordered_units)} 件`
+                  : activePoint.status === "partial"
+                    ? `${number(activePoint.units)} 件（周期不完整）`
+                    : `${number(activePoint.units)} 件`
               }}
             </strong>
+            <span v-if="activePoint.units !== null">
+              {{ activePoint.salesDays }} 个有销量日
+            </span>
           </div>
           <div>
-            <small>来源</small>
+            <small>覆盖证据</small>
             <strong>
-              {{
-                activePoint.ordered_units === null
-                  ? "缺少 /sales 覆盖证据"
-                  : activePoint.data_status === "partial"
-                    ? "Seller Sales /sales · 日内截至最新采集"
-                    : "Seller Sales /sales · 完整自然日"
-              }}
+              完整 {{ activePoint.verifiedDays }} 天
+              · 截至采集 {{ activePoint.partialDays }} 天
+              · 缺失 {{ activePoint.missingDays }} 天
             </strong>
-            <span v-if="activePoint.revision_count">含 {{ activePoint.revision_count }} 次日终基线后修订</span>
+            <span>Seller Sales /sales</span>
+            <span v-if="activePoint.revisionCount">含 {{ activePoint.revisionCount }} 次日终基线后修订</span>
           </div>
+        </div>
+
+        <div class="own-sales-chart-meta">
+          <div class="own-sales-legend" aria-label="销量条形图图例">
+            <strong>图例</strong>
+            <span><i class="complete" aria-hidden="true"></i>完整日 / 周期</span>
+            <span><i class="partial" aria-hidden="true"></i>截至采集 / 周期不完整</span>
+            <span><i class="zero" aria-hidden="true"></i>完整 0 件基线</span>
+            <span><i class="missing" aria-hidden="true">×</i>缺失，不补 0</span>
+          </div>
+          <span class="own-sales-chart-hint">移动鼠标或使用 ← → 逐柱查点</span>
         </div>
 
         <svg
           :viewBox="`0 0 ${OWN_STORE_SALES_CHART.width} ${OWN_STORE_SALES_CHART.height}`"
           role="img"
-          aria-label="按北京时间自然日归属的实际下单件数条形图"
+          :aria-label="`按北京时间归属并${granularityLabel()}的实际下单件数条形图`"
           @pointermove="handlePointer"
         >
           <rect
@@ -345,12 +485,33 @@ function number(value: number | null): string {
             x="4"
             y="8"
             :width="OWN_STORE_SALES_CHART.width - 8"
-            height="226"
+            height="204"
             rx="10"
+          />
+          <rect
+            v-if="activeChartPoint"
+            class="own-sales-active-band"
+            :class="{ warning: activePoint?.status !== 'verified' }"
+            :x="activeChartPoint.focusX"
+            :y="OWN_STORE_SALES_CHART.plotTop - 6"
+            :width="activeChartPoint.focusWidth"
+            :height="OWN_STORE_SALES_CHART.plotBottom - OWN_STORE_SALES_CHART.plotTop + 12"
+            rx="7"
+          />
+          <line
+            v-for="(tick, index) in geometry.xTicks"
+            :key="`x-grid:${index}`"
+            class="own-sales-grid vertical"
+            :x1="tick.x"
+            :x2="tick.x"
+            :y1="OWN_STORE_SALES_CHART.plotTop"
+            :y2="OWN_STORE_SALES_CHART.plotBottom"
+            vector-effect="non-scaling-stroke"
           />
           <g v-for="tick in geometry.yTicks" :key="`y:${tick.value}`">
             <line
               class="own-sales-grid"
+              :class="{ baseline: tick.value === 0 }"
               :x1="OWN_STORE_SALES_CHART.plotLeft"
               :x2="OWN_STORE_SALES_CHART.plotRight"
               :y1="tick.y"
@@ -364,7 +525,21 @@ function number(value: number | null): string {
               text-anchor="end"
             >{{ tick.label }}</text>
           </g>
-          <text class="own-sales-axis-title" x="8" y="24">件</text>
+          <text class="own-sales-axis-title" x="10" y="22">下单件数（整数）</text>
+          <g
+            v-if="plotMessage"
+            class="own-sales-plot-message"
+            :class="plotMessage.tone"
+            aria-hidden="true"
+          >
+            <rect x="382" y="66" width="480" height="72" rx="12" />
+            <text class="title" x="622" y="94" text-anchor="middle">
+              {{ plotMessage.title }}
+            </text>
+            <text class="detail" x="622" y="119" text-anchor="middle">
+              {{ plotMessage.detail }}
+            </text>
+          </g>
           <rect
             v-for="point in visibleBars"
             :key="`bar:${point.index}`"
@@ -381,10 +556,29 @@ function number(value: number | null): string {
             rx="1.5"
             vector-effect="non-scaling-stroke"
           />
+          <template v-if="showBarValueLabels">
+            <text
+              v-for="point in visibleBars.filter((item) => (item.units ?? 0) > 0)"
+              :key="`bar-label:${point.index}`"
+              class="own-sales-bar-label"
+              :class="{ partial: point.status === 'partial' }"
+              :x="point.x"
+              :y="Math.max(OWN_STORE_SALES_CHART.plotTop + 11, (point.barY ?? OWN_STORE_SALES_CHART.plotBottom) - 6)"
+              text-anchor="middle"
+            >{{ number(point.units) }}</text>
+          </template>
+          <text
+            v-for="point in missingBarMarkers"
+            :key="`missing:${point.index}`"
+            class="own-sales-missing-marker"
+            :x="point.x"
+            :y="OWN_STORE_SALES_CHART.plotBottom - 6"
+            text-anchor="middle"
+          >×</text>
           <line
             v-if="activeChartPoint"
             class="own-sales-cursor"
-            :class="{ missing: activePoint?.ordered_units === null || activePoint?.data_status === 'partial' }"
+            :class="{ missing: activePoint?.units === null || activePoint?.status === 'partial' }"
             :x1="activeChartPoint.x"
             :x2="activeChartPoint.x"
             :y1="OWN_STORE_SALES_CHART.plotTop"
@@ -396,13 +590,10 @@ function number(value: number | null): string {
             :key="`x:${index}`"
             class="own-sales-time"
             :x="tick.x"
-            y="250"
+            y="228"
             :text-anchor="tick.anchor"
           >{{ tick.label }}</text>
         </svg>
-        <p>
-          订单按北京时间重新归入国内自然日；完整的 0 件只在该国内日结束后，跨到的 Seller Sales 源日期均已成功复核时以基线细柱显示。今天等未结束日期标为“截至采集”；缺失日期不绘制条形柱，不按 0 补齐，也不使用库存下降反推销量。
-        </p>
       </div>
       <div v-else class="own-sales-empty">
         {{
@@ -520,6 +711,14 @@ function number(value: number | null): string {
   font-size: 0.68rem;
 }
 
+.own-sales-range-presets {
+  display: inline-flex;
+  gap: 4px;
+  padding: 3px;
+  border-radius: 9px;
+  background: rgba(30, 105, 81, 0.08);
+}
+
 .own-sales-range-controls input,
 .own-sales-range-controls button {
   min-height: 34px;
@@ -536,17 +735,20 @@ function number(value: number | null): string {
 }
 
 .own-sales-range-controls button {
-  padding: 6px 12px;
-  background: #e8f4ef;
+  padding: 6px 10px;
+  border-color: transparent;
+  background: transparent;
   color: #1c684f;
   cursor: pointer;
   font-size: 0.76rem;
   font-weight: 700;
 }
 
-.own-sales-range-controls button:disabled {
-  cursor: default;
-  opacity: 0.5;
+.own-sales-range-controls button.selected {
+  border-color: rgba(24, 100, 75, 0.28);
+  background: #fff;
+  box-shadow: 0 1px 3px rgba(20, 72, 56, 0.12);
+  color: #124b39;
 }
 
 .own-sales-range-separator {
@@ -579,6 +781,44 @@ function number(value: number | null): string {
 .own-sales-range-status .missing,
 .own-sales-range-note {
   color: #9a582d;
+}
+
+.own-sales-range-insights {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 6px;
+  margin-top: 9px;
+}
+
+.own-sales-range-insights > div {
+  display: flex;
+  min-width: 0;
+  align-items: baseline;
+  gap: 5px;
+  padding: 7px 9px;
+  border: 1px solid rgba(31, 103, 80, 0.12);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.72);
+}
+
+.own-sales-range-insights > div.warning {
+  border-color: rgba(181, 106, 51, 0.24);
+  background: rgba(255, 247, 238, 0.88);
+}
+
+.own-sales-range-insights small,
+.own-sales-range-insights span {
+  color: #687b74;
+  font-size: 0.66rem;
+  white-space: nowrap;
+}
+
+.own-sales-range-insights strong {
+  overflow: hidden;
+  color: #173b30;
+  font-size: 0.82rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .own-sales-summary > div,
@@ -619,6 +859,71 @@ function number(value: number | null): string {
   font-size: 0.68rem;
 }
 
+.own-sales-chart-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px 16px;
+  margin: 1px 4px 5px;
+  color: #61766e;
+  font-size: 0.68rem;
+}
+
+.own-sales-legend {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 5px 13px;
+}
+
+.own-sales-legend strong {
+  color: #274b3f;
+  font-size: 0.69rem;
+}
+
+.own-sales-legend > span {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  white-space: nowrap;
+}
+
+.own-sales-legend i {
+  display: inline-flex;
+  width: 11px;
+  height: 8px;
+  align-items: center;
+  justify-content: center;
+  border-radius: 2px;
+  font-style: normal;
+  line-height: 1;
+}
+
+.own-sales-legend i.complete {
+  background: #1d7257;
+}
+
+.own-sales-legend i.partial {
+  background: #c7842d;
+}
+
+.own-sales-legend i.zero {
+  height: 3px;
+  border-radius: 99px;
+  background: #3f856e;
+}
+
+.own-sales-legend i.missing {
+  height: 11px;
+  color: #a05f2d;
+  font-size: 13px;
+  font-weight: 900;
+}
+
+.own-sales-chart-hint {
+  white-space: nowrap;
+}
+
 .own-sales-chart {
   width: 100%;
   outline: none;
@@ -641,9 +946,30 @@ function number(value: number | null): string {
   stroke: rgba(31, 103, 80, 0.14);
 }
 
+.own-sales-active-band {
+  fill: rgba(25, 104, 79, 0.065);
+  stroke: rgba(25, 104, 79, 0.13);
+  stroke-width: 1;
+}
+
+.own-sales-active-band.warning {
+  fill: rgba(193, 119, 38, 0.075);
+  stroke: rgba(166, 91, 28, 0.16);
+}
+
 .own-sales-grid {
-  stroke: rgba(37, 86, 70, 0.14);
+  stroke: rgba(37, 86, 70, 0.16);
   stroke-dasharray: 2 3;
+}
+
+.own-sales-grid.vertical {
+  stroke: rgba(37, 86, 70, 0.08);
+  stroke-dasharray: 2 5;
+}
+
+.own-sales-grid.baseline {
+  stroke: rgba(28, 84, 65, 0.42);
+  stroke-dasharray: none;
 }
 
 .own-sales-axis,
@@ -654,7 +980,35 @@ function number(value: number | null): string {
 }
 
 .own-sales-axis-title {
+  fill: #355e50;
   font-weight: 800;
+}
+
+.own-sales-plot-message rect {
+  fill: rgba(255, 255, 255, 0.84);
+  stroke: rgba(34, 104, 81, 0.18);
+}
+
+.own-sales-plot-message .title {
+  fill: #1e5f4a;
+  font-size: 15px;
+  font-weight: 850;
+}
+
+.own-sales-plot-message .detail {
+  fill: #61766e;
+  font-size: 11px;
+  font-weight: 650;
+}
+
+.own-sales-plot-message.missing rect {
+  fill: rgba(255, 248, 239, 0.9);
+  stroke: rgba(178, 99, 38, 0.22);
+}
+
+.own-sales-plot-message.missing .title,
+.own-sales-plot-message.missing .detail {
+  fill: #985a2e;
 }
 
 .own-sales-bar {
@@ -664,7 +1018,7 @@ function number(value: number | null): string {
 }
 
 .own-sales-bar.zero {
-  fill: rgba(29, 114, 87, 0.58);
+  fill: rgba(29, 114, 87, 0.72);
   stroke: none;
 }
 
@@ -674,13 +1028,33 @@ function number(value: number | null): string {
 }
 
 .own-sales-bar.active {
-  fill: #b65432;
-  stroke: #73311f;
-  stroke-width: 1.6;
+  stroke: #173f33;
+  stroke-width: 2;
+}
+
+.own-sales-bar.partial.active {
+  stroke: #744217;
+}
+
+.own-sales-bar-label,
+.own-sales-missing-marker {
+  fill: #1b5f49;
+  font-size: 10px;
+  font-weight: 800;
+  pointer-events: none;
+}
+
+.own-sales-bar-label.partial,
+.own-sales-missing-marker {
+  fill: #a05f2d;
+}
+
+.own-sales-missing-marker {
+  font-size: 14px;
 }
 
 .own-sales-cursor {
-  stroke: rgba(23, 65, 51, 0.55);
+  stroke: rgba(23, 65, 51, 0.48);
   stroke-dasharray: 4 4;
 }
 
@@ -709,7 +1083,8 @@ function number(value: number | null): string {
   }
 
   .own-sales-summary,
-  .own-sales-readout {
+  .own-sales-readout,
+  .own-sales-range-insights {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
@@ -725,6 +1100,14 @@ function number(value: number | null): string {
     flex-basis: 100%;
   }
 
+  .own-sales-range-presets {
+    flex-basis: 100%;
+  }
+
+  .own-sales-range-presets button {
+    flex: 1 1 0;
+  }
+
   .own-sales-range-controls label {
     flex: 1 1 140px;
   }
@@ -735,6 +1118,15 @@ function number(value: number | null): string {
 
   .own-sales-range-separator {
     display: none;
+  }
+
+  .own-sales-chart-meta {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .own-sales-chart-hint {
+    white-space: normal;
   }
 }
 </style>

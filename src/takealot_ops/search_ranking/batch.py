@@ -35,7 +35,7 @@ from takealot_ops.storage.store_context import store_scope
 
 
 LOGGER = logging.getLogger(__name__)
-BATCH_SCHEMA_VERSION = 3
+BATCH_SCHEMA_VERSION = 4
 ACTIVE_BATCH_STATUSES = frozenset({"queued", "running", "pausing", "stopping"})
 PAUSED_BATCH_STATUSES = frozenset({"paused", "paused_after_error", "interrupted"})
 RESUMABLE_BATCH_STATUSES = PAUSED_BATCH_STATUSES | {"stopped"}
@@ -65,7 +65,6 @@ class _BatchSearchRankingService(Protocol):
     def detail_payload(self, offer_id: str) -> dict[str, Any] | None: ...
 
     async def analyze_offer(self, offer_id: str) -> dict[str, Any]: ...
-
 
 def _utcnow() -> datetime:
     return datetime.now(UTC)
@@ -394,6 +393,13 @@ class SearchRankingBatchController:
             if not self._state:
                 return None
             state = json.loads(json.dumps(self._state, ensure_ascii=False))
+            retryable_failed = self._retryable_failed_result_locked()
+            retryable_failed = (
+                json.loads(json.dumps(retryable_failed, ensure_ascii=False))
+                if retryable_failed is not None
+                else None
+            )
+            task_is_idle = self._task is None or self._task.done()
         batch_codes = {str(item.get("code") or "") for item in state.get("stores", [])}
         authorized = bool(
             actor_is_admin
@@ -449,14 +455,21 @@ class SearchRankingBatchController:
             "can_resume": bool(
                 state.get("status") in RESUMABLE_BATCH_STATUSES
                 and next_index < len(targets)
-                and (self._task is None or self._task.done())
+                and task_is_idle
+            ),
+            "can_retry_failed_target": bool(retryable_failed and task_is_idle),
+            "retry_failed_target": retryable_failed,
+            "retry_remaining_count": (
+                max(0, len(targets) - (_integer(retryable_failed["index"]) - 1))
+                if retryable_failed
+                else None
             ),
             "can_stop": state.get("status") in ACTIVE_BATCH_STATUSES
             or state.get("status") in PAUSED_BATCH_STATUSES,
             "can_restart": bool(
                 state.get("status")
                 and state.get("status") not in ACTIVE_BATCH_STATUSES
-                and (self._task is None or self._task.done())
+                and task_is_idle
             ),
         }
 
@@ -544,6 +557,8 @@ class SearchRankingBatchController:
                 },
                 "store_progress": store_progress,
                 "results": [],
+                "retry_history": [],
+                "retryable_failed_index": None,
                 "last_error": None,
                 "pause_requested": False,
                 "stop_requested": False,
@@ -620,6 +635,7 @@ class SearchRankingBatchController:
             self._state["pause_requested"] = False
             self._state["stop_requested"] = False
             self._state["last_error"] = None
+            self._state["retryable_failed_index"] = None
             self._state["status"] = "queued"
             self._state["finished_at"] = None
             self._state["updated_at"] = _iso_now()
@@ -627,6 +643,59 @@ class SearchRankingBatchController:
             self._task = asyncio.create_task(
                 self._run_batch(),
                 name=f"search-ranking-batch-{self._state['batch_id']}-resume",
+            )
+
+    def retry_failed(
+        self,
+        *,
+        actor_username: str,
+        actor_is_admin: bool,
+    ) -> None:
+        """Explicitly rewind only the most recent provider-failed target."""
+
+        with self._state_lock:
+            self._require_controller_locked(actor_username, actor_is_admin)
+            if self._task is not None and not self._task.done():
+                raise SearchRankingBatchConflictError("当前商品仍在收尾，请稍后再重试")
+            failed_result = self._retryable_failed_result_locked()
+            if failed_result is None:
+                raise SearchRankingBatchConflictError("当前没有可定点重试的失败商品")
+
+            retry_index = _integer(failed_result.get("index")) - 1
+            results = self._state.get("results")
+            if not isinstance(results, list) or not results:
+                raise SearchRankingBatchConflictError("失败商品记录不完整，不能安全回退")
+            archived = dict(results.pop())
+            archived["retry_requested_at"] = _iso_now()
+            archived["retry_requested_by"] = actor_username
+            self._state.setdefault("retry_history", []).append(archived)
+
+            self._state["failed_count"] = max(
+                0,
+                _integer(self._state.get("failed_count")) - 1,
+            )
+            store_progress = self._state.get("store_progress")
+            if isinstance(store_progress, dict):
+                store_row = store_progress.get(str(failed_result.get("store_code") or ""))
+                if isinstance(store_row, dict):
+                    store_row["failed_count"] = max(
+                        0,
+                        _integer(store_row.get("failed_count")) - 1,
+                    )
+
+            self._state["next_index"] = retry_index
+            self._state["retryable_failed_index"] = None
+            self._state["pause_requested"] = False
+            self._state["stop_requested"] = False
+            self._state["last_error"] = None
+            self._state["current_target"] = None
+            self._state["status"] = "queued"
+            self._state["finished_at"] = None
+            self._state["updated_at"] = _iso_now()
+            self._persist_state()
+            self._task = asyncio.create_task(
+                self._run_batch(),
+                name=f"search-ranking-batch-{self._state['batch_id']}-retry-{retry_index + 1}",
             )
 
     def stop(
@@ -932,6 +1001,8 @@ class SearchRankingBatchController:
             },
             "estimated_cost": {
                 "currency": "CNY",
+                "pricing_mode": "api_unit_price",
+                "cost_estimate_applicable": True,
                 "base_cny": round(base_cost_per_fresh * fresh_count, 2),
                 "typical_low_cny": round(typical_low, 2),
                 "typical_high_cny": round(typical_high, 2),
@@ -1086,6 +1157,7 @@ class SearchRankingBatchController:
                         if pause_after_result:
                             self._state["status"] = "paused_after_error"
                             self._state["last_error"] = message
+                            self._state["retryable_failed_index"] = index
                         self._persist_state()
                         if pause_after_result:
                             return
@@ -1116,6 +1188,10 @@ class SearchRankingBatchController:
         self._state[count_key] = _integer(self._state.get(count_key)) + 1
         store_progress = self._state["store_progress"][result["store_code"]]
         store_progress[count_key] = _integer(store_progress.get(count_key)) + 1
+        self._record_usage_only_locked(result)
+        self._state.setdefault("results", []).append(dict(result))
+
+    def _record_usage_only_locked(self, result: Mapping[str, Any]) -> None:
         raw_usage = result.get("usage")
         usage: Mapping[str, Any] = raw_usage if isinstance(raw_usage, Mapping) else {}
         totals = self._state["usage"]
@@ -1130,7 +1206,6 @@ class SearchRankingBatchController:
             + _number(result.get("estimated_cost_cny")),
             6,
         )
-        self._state.setdefault("results", []).append(dict(result))
 
     def _accounting_detail_for_failed_target(
         self,
@@ -1216,7 +1291,46 @@ class SearchRankingBatchController:
             or (self._task is not None and not self._task.done())
         )
 
+    def _retryable_failed_result_locked(self) -> dict[str, Any] | None:
+        if self._state.get("status") not in {"paused_after_error", "stopped"}:
+            return None
+        results = self._state.get("results")
+        targets = self._state.get("targets")
+        if not isinstance(results, list) or not results or not isinstance(targets, list):
+            return None
+        candidate = results[-1]
+        if not isinstance(candidate, Mapping) or candidate.get("outcome") != "failed":
+            return None
+
+        result_index = _integer(candidate.get("index"))
+        retry_index_value = self._state.get("retryable_failed_index")
+        retry_index = (
+            _integer(retry_index_value)
+            if retry_index_value is not None
+            else _integer(self._state.get("next_index")) - 1
+        )
+        if (
+            retry_index < 0
+            or retry_index >= len(targets)
+            or result_index != retry_index + 1
+            or _integer(self._state.get("next_index")) != retry_index + 1
+        ):
+            return None
+        target = targets[retry_index]
+        if not isinstance(target, Mapping):
+            return None
+        if (
+            str(candidate.get("store_code") or "")
+            != str(target.get("store_code") or "")
+            or str(candidate.get("offer_id") or "")
+            != str(target.get("offer_id") or "")
+        ):
+            return None
+        return dict(candidate)
+
     def _policy_payload(self) -> dict[str, Any]:
+        primary = self.service.runtime.primary_provider
+        fallback = self.service.runtime.fallback_provider
         return {
             "scope": "all_accessible_active_connected_stores",
             "target_scope": "one_representative_offer_per_store_productline_id",
@@ -1226,6 +1340,13 @@ class SearchRankingBatchController:
             "pause_after_provider_or_network_error": True,
             "reverse_image_search": False,
             "requires_snapshot_confirmation": True,
+            "primary_provider": primary.name,
+            "primary_model": primary.model,
+            "fallback_provider": fallback.name if fallback else None,
+            "fallback_model": fallback.model if fallback else None,
+            "model_fallback_allowed": fallback is not None,
+            "codex_cli_integration_retained": True,
+            "codex_cli_execution_enabled": False,
             "public_request_min_interval_seconds": self.service.runtime.page_delay_seconds,
             "public_request_max_interval_seconds": round(
                 self.service.runtime.page_delay_seconds
@@ -1245,6 +1366,7 @@ class SearchRankingBatchController:
         if not isinstance(payload, dict) or _integer(payload.get("schema_version")) not in {
             1,
             2,
+            3,
             BATCH_SCHEMA_VERSION,
         }:
             LOGGER.error("ignored unsupported search-ranking batch checkpoint")

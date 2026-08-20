@@ -277,11 +277,13 @@ export function fetchCompetitors(
   endDate?: string,
   ownStoreScope: OwnStoreScope = "current",
   signal?: AbortSignal,
+  includeOwnStore = true,
 ): Promise<CompetitorOverview> {
   const query = new URLSearchParams();
   if (startDate) query.set("start_date", startDate);
   if (endDate) query.set("end_date", endDate);
   query.set("own_store_scope", ownStoreScope);
+  if (!includeOwnStore) query.set("include_own_store", "false");
   const suffix = query.size ? `?${query.toString()}` : "";
   return request<CompetitorOverview>(`/api/competitors${suffix}`, { signal });
 }
@@ -553,12 +555,6 @@ export async function updateCompetitorTarget(
     },
   );
   return result.item;
-}
-
-export async function deleteCompetitorTarget(plid: string): Promise<void> {
-  await request(`/api/competitors/targets/${encodeURIComponent(plid)}`, {
-    method: "DELETE",
-  });
 }
 
 export async function prioritizeCompetitorTarget(
@@ -1019,6 +1015,13 @@ export function controlSearchRankingBatch(
 ): Promise<SearchRankingBatchStatusPayload> {
   return request<SearchRankingBatchStatusPayload>(
     `/api/erp/search-ranking/batch/${action}`,
+    { method: "POST" },
+  );
+}
+
+export function retryFailedSearchRankingBatch(): Promise<SearchRankingBatchStatusPayload> {
+  return request<SearchRankingBatchStatusPayload>(
+    "/api/erp/search-ranking/batch/retry-failed",
     { method: "POST" },
   );
 }

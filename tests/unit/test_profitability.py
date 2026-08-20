@@ -179,6 +179,25 @@ def test_unavailable_rate_keeps_cost_but_omits_all_converted_profit() -> None:
     }
 
 
+def test_last_successful_rate_still_builds_profit_and_discloses_its_time() -> None:
+    class _StaleRateService:
+        def latest(self) -> ExchangeRateQuote:
+            return ExchangeRateQuote(
+                rate=Decimal("2"),
+                rate_date=date(2026, 8, 17),
+                fetched_at=datetime(2026, 8, 18, 2, 30, tzinfo=UTC),
+                stale=True,
+            )
+
+    payload = _payload(_offer(), _StaleRateService())
+    item = payload["items"][0]
+
+    assert payload["exchange_rate"]["status"] == "stale"
+    assert payload["exchange_rate"]["fetched_at"] == "2026-08-18T02:30:00+00:00"
+    assert "最近一次成功缓存" in payload["exchange_rate"]["message"]
+    assert item["scenarios"]["current_fee_adjusted"]["profit_rmb"] == 20.0
+
+
 def test_incomplete_fee_sample_never_uses_partial_rows_for_fee_profit() -> None:
     item = _payload(
         _offer(

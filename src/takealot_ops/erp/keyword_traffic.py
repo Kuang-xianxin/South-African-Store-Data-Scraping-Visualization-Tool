@@ -136,15 +136,24 @@ def build_keyword_product_detail(
             .order_by(OfferSnapshot.snapshot_date, OfferSnapshot.id)
         )
     )
-    observed = {row.snapshot_date: row.page_views_30_days for row in all_rows}
+    observations_by_date = {row.snapshot_date: row for row in all_rows}
+    observed = {
+        snapshot_date: row.page_views_30_days
+        for snapshot_date, row in observations_by_date.items()
+    }
     start = as_of - timedelta(days=history_days - 1)
     history: list[dict[str, Any]] = []
     cursor = start
     while cursor <= as_of:
+        snapshot = observations_by_date.get(cursor)
+        source_title = (
+            " ".join(str(snapshot.title or "").split()) if snapshot is not None else ""
+        )
         history.append(
             {
                 "date": cursor.isoformat(),
                 "page_views_30_days": observed.get(cursor),
+                "source_title": source_title or None,
             }
         )
         cursor += timedelta(days=1)

@@ -1,4 +1,5 @@
 export type CompetitorOfferTrendPanelCount = 3 | 4;
+export type CompetitorOfferTrendDensity = "standard" | "standalone-compact";
 
 export interface CompetitorOfferTrendLayout {
   chartHeight: number;
@@ -22,9 +23,15 @@ export const COMPETITOR_OFFER_TREND_HORIZONTAL_LAYOUT = {
 
 export function buildCompetitorOfferTrendLayout(
   panelCount: CompetitorOfferTrendPanelCount,
+  density: CompetitorOfferTrendDensity = "standard",
 ): CompetitorOfferTrendLayout {
-  const panelStride = panelCount === 4 ? 88 : 102;
-  const plotHeight = panelCount === 4 ? 58 : 70;
+  const standaloneCompact = density === "standalone-compact";
+  const panelStride = standaloneCompact
+    ? (panelCount === 4 ? 66 : 78)
+    : (panelCount === 4 ? 88 : 102);
+  const plotHeight = standaloneCompact
+    ? (panelCount === 4 ? 42 : 52)
+    : (panelCount === 4 ? 58 : 70);
   const chartHeight = 40 + panelCount * panelStride;
 
   return {

@@ -205,9 +205,13 @@ def test_missing_traffic_stays_missing_after_automatic_change() -> None:
         )
 
     assert payload is not None
-    history = {row["date"]: row["page_views_30_days"] for row in payload["history"]}
-    assert history[(change_day + timedelta(days=1)).isoformat()] is None
-    assert history[(change_day + timedelta(days=2)).isoformat()] is None
+    history = {row["date"]: row for row in payload["history"]}
+    missing_traffic_day = history[(change_day + timedelta(days=1)).isoformat()]
+    missing_snapshot_day = history[(change_day + timedelta(days=2)).isoformat()]
+    assert missing_traffic_day["page_views_30_days"] is None
+    assert missing_traffic_day["source_title"] == "Memory Foam Queen Mattress"
+    assert missing_snapshot_day["page_views_30_days"] is None
+    assert missing_snapshot_day["source_title"] is None
     comparison = payload["events"][1]["comparison"]
     assert comparison["traffic_direction"] == "unavailable"
     assert comparison["traffic_delta"] is None

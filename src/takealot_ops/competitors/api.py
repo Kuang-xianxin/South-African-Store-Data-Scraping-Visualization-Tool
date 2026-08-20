@@ -6,7 +6,7 @@ import asyncio
 import hashlib
 import random
 import re
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any, Literal
 from urllib.parse import parse_qsl, urlencode, urlsplit
@@ -53,11 +53,38 @@ class CompetitorPageValidationError(RuntimeError):
 
 
 ProductPageState = Literal["product", "not-found", "uncertain"]
+PageValidationDiagnostic = Callable[[str], None]
+PRODUCT_PAGE_VALIDATION_ATTEMPTS = 7
+PRODUCT_PAGE_VALIDATION_POLL_MS = 2_000
 
 
 def _is_retryable_takealot_status(status: int) -> bool:
     """Classify temporary edge/network responses that may recover with the VPN."""
     return status in {403, 429} or status >= 500
+
+
+def _is_matching_listing_response_url(
+    response_url: str,
+    *,
+    expected_qsearch: str | None = None,
+) -> bool:
+    """Accept only the public product payload belonging to the requested search."""
+    parsed = urlsplit(response_url)
+    if (
+        parsed.scheme != "https"
+        or parsed.hostname != "api.takealot.com"
+        or "/searches/products," not in parsed.path
+    ):
+        return False
+    if expected_qsearch is None:
+        return True
+    response_query = dict(parse_qsl(parsed.query, keep_blank_values=True)).get(
+        "qsearch",
+        "",
+    )
+    return " ".join(response_query.casefold().split()) == " ".join(
+        expected_qsearch.casefold().split()
+    )
 
 
 def extract_plid(value: str) -> str:
@@ -221,21 +248,25 @@ class CompetitorPublicClient:
     async def confirm_product_page_absent(
         self,
         target_url: str,
-        control_url: str,
-    ) -> None:
-        """Cross-check one 404 against a recently successful control product.
+        control_products: str | Sequence[tuple[str, str]],
+        *,
+        diagnostic_callback: PageValidationDiagnostic | None = None,
+    ) -> str:
+        """Cross-check one 404 against recently successful control products.
 
         Returning normally means the target page explicitly renders Takealot's
-        not-found state while the control page renders product-specific content.
+        not-found state while one control page renders product-specific content;
+        the returned value is the PLID of that verified control product.
         Ambiguous rendered content is kept separate from real connectivity
         failures so it cannot trip the batch network circuit breaker.
         """
-        target_state = await self._product_page_state(target_url)
-        control_state = await self._product_page_state(control_url)
-        if control_state != "product":
-            raise CompetitorPageValidationError(
-                "正常对照商品页未能稳定识别；网络可以访问，但本次复核结果不确定，已保留重试"
-            )
+        target_plid = _optional_plid(target_url)
+        target_state = await self._product_page_state(
+            target_url,
+            role="target",
+            plid=target_plid,
+            diagnostic_callback=diagnostic_callback,
+        )
         if target_state == "product":
             raise CompetitorPageValidationError(
                 "目标商品页仍可打开，但公开数据接口暂时返回 404；已保留重试"
@@ -244,6 +275,44 @@ class CompetitorPublicClient:
             raise CompetitorPageValidationError(
                 "目标商品页未能稳定识别；网络可以访问，但本次复核结果不确定，已保留重试"
             )
+
+        controls = (
+            ((_optional_plid(control_products), control_products),)
+            if isinstance(control_products, str)
+            else tuple(control_products)
+        )
+        first_network_error: CompetitorNetworkError | None = None
+        saw_non_network_response = False
+        for control_plid, control_url in controls:
+            try:
+                control_state = await self._product_page_state(
+                    control_url,
+                    role="control",
+                    plid=control_plid,
+                    diagnostic_callback=diagnostic_callback,
+                )
+            except CompetitorNetworkError as exc:
+                if first_network_error is None:
+                    first_network_error = exc
+                continue
+            saw_non_network_response = True
+            if control_state == "product":
+                verified_plid = control_plid or _optional_plid(control_url)
+                _emit_page_validation_diagnostic(
+                    diagnostic_callback,
+                    (
+                        "page_validation outcome=confirmed "
+                        f"target_plid={target_plid or '-'} "
+                        f"control_plid={verified_plid or '-'}"
+                    ),
+                )
+                return verified_plid
+
+        if first_network_error is not None and not saw_non_network_response:
+            raise first_network_error
+        raise CompetitorPageValidationError(
+            "最近的正常对照商品页均未能稳定识别；网络可以访问，但本次复核结果不确定，已保留重试"
+        )
 
     async def fetch_product(self, url: str) -> CompetitorProduct:
         plid = extract_plid(url)
@@ -430,12 +499,15 @@ class CompetitorPublicClient:
         if not query or len(query) > 200:
             raise ValueError("搜索词必须为1到200个字符")
         return await self.fetch_listing_first_page(
-            f"https://www.takealot.com/all?{urlencode({'qsearch': query})}"
+            f"https://www.takealot.com/all?{urlencode({'qsearch': query})}",
+            expected_qsearch=query,
         )
 
     async def fetch_listing_first_page(
         self,
         source_url: str,
+        *,
+        expected_qsearch: str | None = None,
     ) -> tuple[str, dict[str, Any]]:
         """Capture one safe Takealot seller/category/search listing response."""
         parsed = urlsplit(source_url)
@@ -468,7 +540,10 @@ class CompetitorPublicClient:
                     captured.set_exception(exc)
 
         def on_response(response: Any) -> None:
-            if "/searches/products," not in response.url or captured.done():
+            if captured.done() or not _is_matching_listing_response_url(
+                response.url,
+                expected_qsearch=expected_qsearch,
+            ):
                 return
             task = asyncio.create_task(capture(response))
             tasks.add(task)
@@ -558,7 +633,14 @@ class CompetitorPublicClient:
         """Sleep for a random duration to avoid triggering bot detection."""
         await asyncio.sleep(random.uniform(min_s, max_s))
 
-    async def _product_page_state(self, url: str) -> ProductPageState:
+    async def _product_page_state(
+        self,
+        url: str,
+        *,
+        role: str = "page",
+        plid: str | None = None,
+        diagnostic_callback: PageValidationDiagnostic | None = None,
+    ) -> ProductPageState:
         page = self._page
         if page is None:
             raise RuntimeError("竞品浏览器尚未启动")
@@ -571,33 +653,111 @@ class CompetitorPublicClient:
         except asyncio.CancelledError:
             raise
         except Exception as exc:
+            _emit_product_page_observation(
+                diagnostic_callback,
+                role=role,
+                plid=plid,
+                state="uncertain",
+                status=None,
+                final_url=_page_url(page, url),
+                error=type(exc).__name__,
+            )
             raise CompetitorNetworkError(
                 "Takealot 商品页暂时无法访问；本次按网络问题保留重试"
             ) from exc
-        if response is None or _is_retryable_takealot_status(response.status):
+        if response is None:
+            _emit_product_page_observation(
+                diagnostic_callback,
+                role=role,
+                plid=plid,
+                state="uncertain",
+                status=None,
+                final_url=_page_url(page, url),
+                error="no-response",
+            )
             raise CompetitorNetworkError("Takealot 商品页暂时无法访问；本次按网络问题保留重试")
-        if response.status == 404:
+        status = response.status
+        if _is_retryable_takealot_status(status):
+            _emit_product_page_observation(
+                diagnostic_callback,
+                role=role,
+                plid=plid,
+                state="uncertain",
+                status=status,
+                final_url=_page_url(page, url),
+                error="retryable-status",
+            )
+            raise CompetitorNetworkError("Takealot 商品页暂时无法访问；本次按网络问题保留重试")
+        if status == 404:
+            _emit_product_page_observation(
+                diagnostic_callback,
+                role=role,
+                plid=plid,
+                state="not-found",
+                status=status,
+                final_url=_page_url(page, url),
+            )
             return "not-found"
 
         heading = page.locator("main h1")
-        for attempt in range(3):
+        title = ""
+        headings: list[str] = []
+        generic_shell = False
+        challenge = False
+        for attempt in range(PRODUCT_PAGE_VALIDATION_ATTEMPTS):
             title = _normalized_page_text(await page.title())
             headings = [
                 _normalized_page_text(value)
                 for value in await heading.all_text_contents()
                 if _normalized_page_text(value)
             ]
+            challenge = _is_takealot_challenge(title) or any(
+                _is_takealot_challenge(value) for value in headings
+            )
+            generic_shell = _is_takealot_generic_shell(title, headings)
+            if challenge:
+                _emit_product_page_observation(
+                    diagnostic_callback,
+                    role=role,
+                    plid=plid,
+                    state="uncertain",
+                    status=status,
+                    final_url=_page_url(page, url),
+                    title=title,
+                    headings=headings,
+                    generic_shell=generic_shell,
+                    challenge=True,
+                    error="challenge",
+                )
+                raise CompetitorNetworkError(
+                    "Takealot 商品页触发访问验证；本次按网络问题保留重试"
+                )
             if _is_takealot_not_found(title) or any(
                 _is_takealot_not_found(value) for value in headings
             ):
-                return "not-found"
-            if any(not _is_takealot_not_found(value) for value in headings):
-                return "product"
-            if _is_takealot_product_title(title):
-                return "product"
-            if attempt < 2:
-                await page.wait_for_timeout(2_000)
-        return "uncertain"
+                state: ProductPageState = "not-found"
+                break
+            if not generic_shell and (headings or _is_takealot_product_title(title)):
+                state = "product"
+                break
+            if attempt < PRODUCT_PAGE_VALIDATION_ATTEMPTS - 1:
+                await page.wait_for_timeout(PRODUCT_PAGE_VALIDATION_POLL_MS)
+        else:
+            state = "uncertain"
+
+        _emit_product_page_observation(
+            diagnostic_callback,
+            role=role,
+            plid=plid,
+            state=state,
+            status=status,
+            final_url=_page_url(page, url),
+            title=title,
+            headings=headings,
+            generic_shell=generic_shell,
+            challenge=challenge,
+        )
+        return state
 
     async def _get_json(self, url: str, *, retries: int = 3) -> dict[str, Any]:
         """Fetch JSON by navigating the browser to the API URL.
@@ -664,12 +824,85 @@ def _normalized_page_text(value: str) -> str:
     return " ".join(value.casefold().split())
 
 
+def _optional_plid(value: str) -> str:
+    match = PLID_PATTERN.search(value)
+    return match.group(1) if match is not None else ""
+
+
+def _page_url(page: Page, fallback: str) -> str:
+    current = getattr(page, "url", "")
+    return current if isinstance(current, str) and current else fallback
+
+
+def _is_takealot_challenge(value: str) -> bool:
+    return any(
+        marker in value
+        for marker in (
+            "just a moment",
+            "checking your browser",
+            "cloudflare",
+            "verify you are human",
+        )
+    )
+
+
+def _is_takealot_generic_shell(title: str, headings: Sequence[str]) -> bool:
+    return not headings and (
+        "takealot.com: online shopping" in title
+        or "sa's leading online store" in title
+        or title in {"takealot.com", "takealot"}
+    )
+
+
+def _emit_page_validation_diagnostic(
+    callback: PageValidationDiagnostic | None,
+    message: str,
+) -> None:
+    if callback is None:
+        return
+    try:
+        callback(message)
+    except Exception:
+        # Diagnostics must never alter the conservative validation result.
+        pass
+
+
+def _emit_product_page_observation(
+    callback: PageValidationDiagnostic | None,
+    *,
+    role: str,
+    plid: str | None,
+    state: ProductPageState,
+    status: int | None,
+    final_url: str,
+    title: str = "",
+    headings: Sequence[str] = (),
+    generic_shell: bool = False,
+    challenge: bool = False,
+    error: str = "",
+) -> None:
+    clean_title = " ".join(title.split())[:240]
+    clean_heading = " | ".join(" ".join(value.split()) for value in headings)[:240]
+    clean_url = " ".join(final_url.split())[:500]
+    clean_error = " ".join(error.split())[:120]
+    _emit_page_validation_diagnostic(
+        callback,
+        (
+            f"page_validation role={role} plid={plid or '-'} state={state} "
+            f"status={status if status is not None else '-'} "
+            f"final_url={clean_url or '-'} title={clean_title!r} h1={clean_heading!r} "
+            f"generic_shell={str(generic_shell).lower()} "
+            f"challenge={str(challenge).lower()} error={clean_error or '-'}"
+        ),
+    )
+
+
 def _is_takealot_not_found(value: str) -> bool:
     return "404" in value and ("page not found" in value or "not found" in value)
 
 
 def _is_takealot_product_title(value: str) -> bool:
-    return "| shop today." in value and "| takealot.com" in value
+    return "| takealot.com" in value and not _is_takealot_generic_shell(value, ())
 
 
 def _offer_record(

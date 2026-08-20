@@ -70,10 +70,8 @@ test("all-store visibility keeps an independent multi-select operating assignmen
     usersSource,
     /<div v-if="!user\.all_stores" class="store-checkbox-grid">/,
   );
-  assert.match(
-    usersSource,
-    /开启全部查看后，未勾选店铺仍可单店查看但不进入该合并项/,
-  );
+  assert.match(usersSource, /<strong>运营店铺授权（可多选）<\/strong>/);
+  assert.match(usersSource, /负责 \{\{ user\.assigned_store_ids\.length \}\} 个店铺/);
 });
 
 test("multi-store APIs carry an explicit operating scope", () => {

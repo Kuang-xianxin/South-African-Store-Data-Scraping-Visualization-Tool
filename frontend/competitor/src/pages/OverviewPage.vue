@@ -12,6 +12,11 @@ import {
   floatingChartTooltipStyle,
   type FloatingChartTooltipPosition,
 } from "../floatingChartTooltip";
+import {
+  revenuePeriodLabels,
+  summarizeRevenuePeriod,
+  type RevenuePeriodSummary,
+} from "../overviewRevenue";
 import { formatChinaDateTime } from "../time";
 import type {
   MultiStoreRevenuePoint,
@@ -200,6 +205,26 @@ const storeTotals = computed(() => ({
   stockouts: aggregateKpi("stockout_products", true),
 }));
 
+const periodRevenueLabels = computed(() =>
+  revenuePeriodLabels(props.rangeStart, props.rangeEnd),
+);
+const multiStorePeriodRevenue = computed(() =>
+  summarizeRevenuePeriod(
+    (storeData.value?.sales_revenue_series ?? []).map((point) => ({
+      amount: point.total_ordered_revenue,
+      partial: point.missing_store_count > 0,
+      pending: point.data_status === "pending",
+    })),
+  ),
+);
+const singleStorePeriodRevenue = computed(() =>
+  summarizeRevenuePeriod(
+    (data.value?.sales_series ?? []).map((point) => ({
+      amount: point.ordered_revenue,
+    })),
+  ),
+);
+
 const REVENUE_WIDTH = 760;
 const REVENUE_HEIGHT = 250;
 const REVENUE_LEFT = 76;
@@ -378,6 +403,21 @@ async function load() {
 
 function coverageLabel(coverage: number, total: number) {
   return coverage === total ? `${total} 家完整` : `已返回 ${coverage}/${total} 家`;
+}
+
+function periodRevenueCoverage(summary: RevenuePeriodSummary) {
+  if (!summary.knownDayCount) return "暂无已返回销售额业务日";
+  const details = [`${summary.knownDayCount} 个已有销售额业务日`];
+  if (summary.partialDayCount) details.push(`${summary.partialDayCount} 日为部分店铺合计`);
+  if (summary.pendingDayCount) details.push(`${summary.pendingDayCount} 日待核验`);
+  if (summary.missingDayCount) details.push(`${summary.missingDayCount} 日无金额`);
+  return details.join(" · ");
+}
+
+function periodRevenueAverageBasis(summary: RevenuePeriodSummary) {
+  return summary.knownDayCount
+    ? `总额 ÷ ${summary.knownDayCount} 个已有销售额业务日；缺失不补 0`
+    : "暂无可计算日均的销售额数据";
 }
 
 function offerCoverage(coverage: number, total: number) {
@@ -604,14 +644,6 @@ function trafficPointTitle(point: StoreTrafficPoint) {
         </p>
         <h2>{{ allStoresSelected ? `${multiStoreLabel}经营总览` : `${currentStoreName} 经营总览` }}</h2>
       </div>
-      <p v-if="allStoresSelected">
-        数据范围 {{ rangeStart }} 至 {{ rangeEnd }} · 汇总{{ multiStoreLabel }}中已启用且已接入的店铺 ·
-        各店按自身最新可用指标日展示
-      </p>
-      <p v-else>
-        数据范围 {{ rangeStart }} 至 {{ rangeEnd }} · 最新可用指标日 {{ data?.latest_metric_date || "暂无" }} ·
-        下单件数为主销售口径
-      </p>
     </div>
 
     <section v-if="allStoresSelected" class="erp-panel multi-store-panel">
@@ -638,7 +670,6 @@ function trafficPointTitle(point: StoreTrafficPoint) {
           <div>
             <span>全盘健康定位</span>
             <strong>{{ overallHealthText }}</strong>
-            <small>按缺货和数据完整性直接判断；数据异常暂不在 ERP 前端展示</small>
           </div>
           <dl>
             <div>
@@ -679,6 +710,19 @@ function trafficPointTitle(point: StoreTrafficPoint) {
           </article>
         </div>
 
+        <div class="multi-total-grid revenue-period-grid">
+          <article class="multi-total-primary">
+            <span>{{ periodRevenueLabels.total }}</span>
+            <strong>{{ currency(multiStorePeriodRevenue.total) }}</strong>
+            <small>{{ periodRevenueCoverage(multiStorePeriodRevenue) }}</small>
+          </article>
+          <article>
+            <span>{{ periodRevenueLabels.dailyAverage }}</span>
+            <strong>{{ currency(multiStorePeriodRevenue.dailyAverage) }}</strong>
+            <small>{{ periodRevenueAverageBasis(multiStorePeriodRevenue) }}</small>
+          </article>
+        </div>
+
         <section class="revenue-command" aria-labelledby="multi-store-revenue-title">
           <div class="logistics-command-heading revenue-heading">
             <div>
@@ -690,13 +734,6 @@ function trafficPointTitle(point: StoreTrafficPoint) {
               {{ storeData.sales_revenue_completed_through }}
             </span>
           </div>
-          <p class="revenue-definition">
-            每个点汇总{{ multiStoreLabel }}中已接入店铺的 <code>ordered_revenue</code>。
-            只要至少一家店返回该业务日金额，就绘制已有店铺合计并标注覆盖数；缺失店铺不补 0，
-            没有任何店铺返回金额时才保留断点。
-            当前仍在进行的 SAST 业务日不进入折线；今天的 Sales 拉取会先修订昨天及更早日期，
-            等该 SAST 日结束后才作为完整历史日展示。
-          </p>
           <div
             v-if="storeData.sales_reconciliation.pending_store_count"
             class="sales-reconciliation-alert pending"
@@ -706,10 +743,8 @@ function trafficPointTitle(point: StoreTrafficPoint) {
               周期末失败后仍有 {{ storeData.sales_reconciliation.pending_store_count }} 家店待新 Sales 批次核验
             </strong>
             <span>
-              业务日 {{ storeData.sales_reconciliation.period_end_business_date || "未记录" }} 共
-              {{ storeData.sales_reconciliation.failed_store_count }} 家周期末失败；
-              {{ storeData.sales_reconciliation.recovered_store_count }} 家已由后续成功批次恢复。
-              待核验区间以橙色虚线显示，不再伪装成正常绿线。
+              {{ storeData.sales_reconciliation.failed_store_count }} 家失败，
+              {{ storeData.sales_reconciliation.recovered_store_count }} 家已恢复。未核验区间以橙色显示。
             </span>
           </div>
           <div
@@ -717,19 +752,13 @@ function trafficPointTitle(point: StoreTrafficPoint) {
             class="sales-reconciliation-alert recovered"
           >
             <strong>周期末失败事实已保留，后续 Sales 批次已完成数值核验</strong>
-            <span>
-              原失败记录没有改写；业务日结束后的正式基线若再次变化，前后值与来源批次均保存在下方审计记录中。
-            </span>
           </div>
           <div
             v-if="storeData.sales_reconciliation.revision_count"
             class="sales-reconciliation-alert revised"
           >
             <strong>已记录 {{ storeData.sales_reconciliation.revision_count }} 条日终后销售额历史修订</strong>
-            <span>
-              最近修订：{{ formatChinaDateTime(storeData.sales_reconciliation.latest_revision_at) }}。
-              蓝色折线/点只表示该业务日在日终正式基线建立后又被 Sales 数据纠偏。
-            </span>
+            <span>最近修订：{{ formatChinaDateTime(storeData.sales_reconciliation.latest_revision_at) }}</span>
           </div>
           <div v-if="!storeData.sales_revenue_series.length" class="state-card slim">
             暂无跨店销售额趋势数据。
@@ -1200,13 +1229,6 @@ function trafficPointTitle(point: StoreTrafficPoint) {
             >进入该店明细</button>
           </article>
         </div>
-        <p class="multi-store-definition">
-          店铺按“需关注 → 数据待补 → 当前正常”排序；状态只使用异常、缺货和数据完整性信号，
-          不代表平台官方评级。“最新日”按每家店自身的最新可用指标日，不强行对齐日期。
-          负责运营来自该店获授权、启用且拥有店铺查看权限的非管理员账号。周期末浏览量仅汇总接口已返回的商品
-          <code>page_views_30_days</code>；缺失商品不补 0。周期末失败但同日另有成功采集时仅显示参考值，
-          它不是正式周期末数据、当天浏览量或独立访客数。
-        </p>
       </template>
     </section>
 
@@ -1241,6 +1263,19 @@ function trafficPointTitle(point: StoreTrafficPoint) {
           <small>自然日窗口</small>
         </article>
       </section>
+
+      <div class="multi-total-grid revenue-period-grid">
+        <article class="multi-total-primary">
+          <span>{{ periodRevenueLabels.total }}</span>
+          <strong>{{ currency(singleStorePeriodRevenue.total) }}</strong>
+          <small>{{ periodRevenueCoverage(singleStorePeriodRevenue) }}</small>
+        </article>
+        <article>
+          <span>{{ periodRevenueLabels.dailyAverage }}</span>
+          <strong>{{ currency(singleStorePeriodRevenue.dailyAverage) }}</strong>
+          <small>{{ periodRevenueAverageBasis(singleStorePeriodRevenue) }}</small>
+        </article>
+      </div>
 
       <section class="overview-grid">
         <article class="erp-panel sales-trend-panel">
@@ -1307,8 +1342,7 @@ function trafficPointTitle(point: StoreTrafficPoint) {
           <span>每日次日 09:00 周期末刷新成功后更新</span>
         </div>
         <p class="traffic-definition">
-          每个点汇总当日接口已返回的商品 <code>page_views_30_days</code>，表示滚动近30天浏览量。
-          缺失商品不补 0，并单独标出覆盖数量；09:00 周期末失败时，以同一北京时间自然日最近一次成功采集画橙色虚线参考，正式周期末数据仍保留失败事实。这不是当天浏览量，也不是独立访客数。
+          橙色虚线为参考值；缺失商品不补 0。
         </p>
         <div v-if="!data.traffic_series.length" class="state-card slim">
           暂无周期末流量快照；下次 09:00 周期末刷新成功后开始记录。
@@ -1640,6 +1674,10 @@ function trafficPointTitle(point: StoreTrafficPoint) {
   margin-bottom: 14px;
 }
 
+.revenue-period-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
 .multi-total-grid article {
   min-width: 0;
   padding: 16px;
@@ -1694,13 +1732,6 @@ function trafficPointTitle(point: StoreTrafficPoint) {
 
 .revenue-heading {
   margin-bottom: 8px;
-}
-
-.revenue-definition {
-  margin: 0 0 12px;
-  color: var(--muted);
-  font-size: 0.7rem;
-  line-height: 1.7;
 }
 
 .sales-reconciliation-alert {
@@ -2315,18 +2346,6 @@ function trafficPointTitle(point: StoreTrafficPoint) {
   border-color: var(--green);
   background: rgba(55, 93, 74, 0.07);
   outline: none;
-}
-
-.multi-store-definition {
-  margin: 14px 0 0;
-  color: var(--muted);
-  font-size: 0.66rem;
-  line-height: 1.65;
-}
-
-.multi-store-definition code {
-  color: var(--green);
-  font-size: 0.63rem;
 }
 
 .selected-store-heading {

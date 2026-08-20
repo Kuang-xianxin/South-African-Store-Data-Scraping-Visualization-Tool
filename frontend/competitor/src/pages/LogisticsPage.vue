@@ -219,9 +219,7 @@ function providerStatus(
   <section class="logistics-page">
     <header class="logistics-hero">
       <div>
-        <p>LOCAL SNAPSHOT / MANUAL + SCHEDULED SYNC</p>
         <h2>长睿仓配与 Takealot 货件总览</h2>
-        <span>打开页面只读本地快照；随店铺定时采集同步，也可人工读取两边接口。</span>
       </div>
       <button type="button" :disabled="loading || refreshing || multiStore" @click="load(true)">
         {{ multiStore ? "全部店铺仅查看快照" : refreshing ? "正在手动同步…" : "手动同步两边接口" }}

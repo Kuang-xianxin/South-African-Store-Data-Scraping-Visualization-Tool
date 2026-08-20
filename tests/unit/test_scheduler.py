@@ -277,6 +277,14 @@ def test_erp_startup_guard_is_idempotent_and_uses_formal_restart_chain() -> None
     assert "$restartMutex.WaitOne" in restart_script
     assert "$restartMutex.ReleaseMutex()" in restart_script
     assert "Push-Location -LiteralPath $projectRoot" in restart_script
+    assert 'Import-UserEnvironmentVariableIfMissing -Name "DASHSCOPE_API_KEY"' in (
+        restart_script
+    )
+    assert 'Import-UserEnvironmentVariableIfMissing -Name "ARK_API_KEY"' in (
+        restart_script
+    )
+    assert "codex-cli 0.147.0" not in restart_script
+    assert "login status" not in restart_script
 
 
 def test_binlog_scheduler_requires_d_drive_and_continuous_restart() -> None:

@@ -428,6 +428,48 @@ async def test_batch_runs_every_target_strictly_serial_and_checkpoints(
 
 
 @pytest.mark.asyncio
+async def test_batch_does_not_invoke_retained_codex_quota_hooks(tmp_path: Path) -> None:
+    class ApiServiceWithForbiddenCodexHooks(_FakeService):
+        async def prepare_model_quota(self) -> dict[str, Any]:
+            raise AssertionError("retained Codex quota preflight must be unreachable")
+
+        def model_quota_status(self) -> dict[str, Any]:
+            raise AssertionError("retained Codex quota status must be unreachable")
+
+    service = ApiServiceWithForbiddenCodexHooks()
+    controller = SearchRankingBatchController(
+        tmp_path,
+        service=service,  # type: ignore[arg-type]
+        analysis_lock=asyncio.Lock(),
+        state_path=tmp_path / "batch.json",
+    )
+    controller._build_preview = lambda stores: _preview(  # type: ignore[method-assign]
+        [_target(1, "current")]
+    )
+
+    controller.start(
+        _stores(),
+        actor_username="tester",
+        actor_display_name="Tester",
+        actor_is_admin=False,
+        snapshot_id="a" * 64,
+    )
+    task = controller._task
+    assert task is not None
+    await task
+
+    status = controller.status_payload(
+        _stores(), actor_username="tester", actor_is_admin=False
+    )
+    assert status is not None
+    assert status["status"] == "completed"
+    assert status["next_index"] == 1
+    assert status["processed_count"] == 1
+    assert "weekly_quota" not in status
+    assert service.calls == [("current", "offer-1")]
+
+
+@pytest.mark.asyncio
 async def test_manual_fact_gap_is_skipped_without_pausing_later_targets(
     tmp_path: Path,
 ) -> None:
@@ -576,6 +618,9 @@ async def test_provider_error_pauses_without_retry_and_resume_skips_failed_targe
     assert paused["failed_count"] == 1
     assert paused["next_index"] == 1
     assert paused["can_resume"] is True
+    assert paused["can_retry_failed_target"] is True
+    assert paused["retry_failed_target"]["offer_id"] == "offer-1"
+    assert paused["retry_remaining_count"] == 2
     assert service.calls == [("current", "offer-1")]
 
     controller.stop(actor_username="tester", actor_is_admin=False)
@@ -585,6 +630,7 @@ async def test_provider_error_pauses_without_retry_and_resume_skips_failed_targe
     assert stopped is not None
     assert stopped["status"] == "stopped"
     assert stopped["can_resume"] is True
+    assert stopped["can_retry_failed_target"] is True
     assert stopped["can_stop"] is False
 
     controller.resume(actor_username="tester", actor_is_admin=False)
@@ -600,6 +646,89 @@ async def test_provider_error_pauses_without_retry_and_resume_skips_failed_targe
     assert completed["completed_count"] == 1
     assert service.calls.count(("current", "offer-1")) == 1
     assert service.calls.count(("store-02", "offer-2")) == 1
+
+
+@pytest.mark.asyncio
+async def test_explicit_failed_target_retry_rewinds_only_that_target_and_keeps_spend(
+    tmp_path: Path,
+) -> None:
+    class FailingFirstAttemptService(_FakeService):
+        def __init__(self) -> None:
+            super().__init__()
+            self.offer_one_attempts = 0
+
+        async def analyze_offer(self, offer_id: str) -> dict[str, Any]:
+            if offer_id == "offer-1":
+                self.offer_one_attempts += 1
+                if self.offer_one_attempts == 1:
+                    self.calls.append((current_store_code(), offer_id))
+                    raise SearchRankingProviderError("provider output invalid")
+            return await super().analyze_offer(offer_id)
+
+        def detail_payload(self, offer_id: str) -> dict[str, Any] | None:
+            if offer_id != "offer-1" or self.offer_one_attempts != 1:
+                return None
+            return {
+                "latest_attempt": {
+                    "id": 92,
+                    "vision_reused": False,
+                    "usage": {
+                        "input_tokens": 80,
+                        "output_tokens": 20,
+                        "total_tokens": 100,
+                    },
+                    "estimated_cost_cny": 0.0,
+                }
+            }
+
+    service = FailingFirstAttemptService()
+    controller = SearchRankingBatchController(
+        tmp_path,
+        service=service,  # type: ignore[arg-type]
+        analysis_lock=asyncio.Lock(),
+        state_path=tmp_path / "batch.json",
+    )
+    targets = [_target(1, "current"), _target(2, "store-02")]
+    controller._build_preview = lambda stores: _preview(targets)  # type: ignore[method-assign]
+    controller.start(
+        _stores(),
+        actor_username="tester",
+        actor_display_name="Tester",
+        actor_is_admin=False,
+        snapshot_id="a" * 64,
+    )
+    first_task = controller._task
+    assert first_task is not None
+    await first_task
+
+    paused = controller.status_payload(
+        _stores(), actor_username="tester", actor_is_admin=False
+    )
+    assert paused is not None
+    assert paused["status"] == "paused_after_error"
+    assert paused["usage"]["total_tokens"] == 100
+
+    controller.retry_failed(actor_username="tester", actor_is_admin=False)
+    retry_task = controller._task
+    assert retry_task is not None
+    await retry_task
+
+    completed = controller.status_payload(
+        _stores(), actor_username="tester", actor_is_admin=False
+    )
+    assert completed is not None
+    assert completed["status"] == "completed"
+    assert completed["completed_count"] == 2
+    assert completed["failed_count"] == 0
+    assert completed["processed_count"] == 2
+    assert completed["usage"]["total_tokens"] == 400
+    assert service.calls == [
+        ("current", "offer-1"),
+        ("current", "offer-1"),
+        ("store-02", "offer-2"),
+    ]
+    assert len(controller._state["retry_history"]) == 1
+    assert controller._state["retry_history"][0]["offer_id"] == "offer-1"
 
 
 def test_v1_checkpoint_compacts_only_unfinished_variant_targets(
@@ -674,7 +803,7 @@ def test_v1_checkpoint_compacts_only_unfinished_variant_targets(
     assert status["deduplicated_pending_variant_count"] == 2
     assert status["can_resume"] is True
     persisted = json.loads(checkpoint.read_text(encoding="utf-8"))
-    assert persisted["schema_version"] == 3
+    assert persisted["schema_version"] == 4
     assert [item["offer_id"] for item in persisted["targets"]] == [
         "offer-1",
         "offer-3",
@@ -735,7 +864,7 @@ def test_v2_checkpoint_backfills_variant_parameters_without_resetting_progress(
     )
 
     persisted = json.loads(checkpoint.read_text(encoding="utf-8"))
-    assert persisted["schema_version"] == 3
+    assert persisted["schema_version"] == 4
     assert persisted["next_index"] == 0
     assert persisted["targets"][0]["shared_family_title"] == (
         "2 Inch 7 Zone Memory Foam"

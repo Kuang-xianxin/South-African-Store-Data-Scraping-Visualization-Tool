@@ -158,8 +158,8 @@ test("competitor workspace keeps dedicated entries and human preview confirmatio
   assert.match(pageSource, /不能使用默认设置代替/);
   assert.match(pageSource, /确认加入 \$\{listingConfirmationCount\} 个去重商品/);
   assert.match(pageSource, /修改数量不会重新扫描 Takealot/);
-  assert.match(pageSource, /先比较两边较差名次、再比较名次总和/);
-  assert.match(pageSource, /价格：从高到低.*价格：从低到高.*互斥/);
+  assert.match(pageSource, /默认优先“评分最高”和“最新上架”/);
+  assert.match(pageSource, /价格高低排序互斥/);
   assert.match(pageSource, /按 PLID 去重/);
 });
 
@@ -174,7 +174,7 @@ test("personal watchlist exposes the full competitor and own-store filter set", 
   assert.match(pageSource, /v-model="personalWatchlistSignalFilter"/);
   assert.match(pageSource, /v-model="personalWatchlistSortDirection"/);
   assert.match(pageSource, /v-model\.number="personalWatchlistPageSize"/);
-  assert.match(pageSource, /const personalWatchlistPageSize = ref\(21\)/);
-  assert.match(pageSource, /const personalWatchlistPageSizeOptions = \[21, 51, 99\] as const/);
+  assert.match(pageSource, /const personalWatchlistPageSize = ref\(3\)/);
+  assert.match(pageSource, /const personalWatchlistPageSizeOptions = \[3, 6, 9, 12, 15, 18, 21, 51, 99\] as const/);
   assert.match(pageSource, /当前个人池分区显示/);
 });

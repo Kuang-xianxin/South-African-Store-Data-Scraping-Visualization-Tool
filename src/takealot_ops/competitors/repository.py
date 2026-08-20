@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
-from sqlalchemy import select
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from takealot_ops.competitors.domain import (
@@ -31,6 +31,7 @@ from takealot_ops.storage.models import (
 
 NOT_FOUND_CONFIRMATION_COUNT = 3
 NOT_FOUND_CONFIRMATION_INTERVAL = timedelta(minutes=10)
+CONTROL_PRODUCT_MAX_AGE = timedelta(days=7)
 
 
 @dataclass(frozen=True)
@@ -184,22 +185,52 @@ class CompetitorRepository:
         exclude_plid: str,
     ) -> tuple[str, str] | None:
         """Return the most recently collected different product as a control."""
-        row = self._session.execute(
+        controls = self.recent_control_products(exclude_plid=exclude_plid, limit=1)
+        return controls[0] if controls else None
+
+    def recent_control_products(
+        self,
+        *,
+        exclude_plid: str,
+        limit: int = 3,
+        collected_after: datetime | None = None,
+    ) -> list[tuple[str, str]]:
+        """Return distinct, recent and currently healthy products as controls."""
+        bounded_limit = max(1, min(10, limit))
+        freshness_cutoff = collected_after or (
+            datetime.now(UTC) - CONTROL_PRODUCT_MAX_AGE
+        )
+        latest_snapshot = (
+            select(
+                CompetitorSnapshot.plid.label("plid"),
+                func.max(CompetitorSnapshot.collected_at).label("collected_at"),
+            )
+            .group_by(CompetitorSnapshot.plid)
+            .subquery()
+        )
+        rows = self._session.execute(
             select(CompetitorTarget.plid, CompetitorTarget.url)
             .join(
-                CompetitorSnapshot,
-                CompetitorSnapshot.plid == CompetitorTarget.plid,
+                latest_snapshot,
+                latest_snapshot.c.plid == CompetitorTarget.plid,
+            )
+            .outerjoin(
+                CompetitorLinkHealth,
+                CompetitorLinkHealth.plid == CompetitorTarget.plid,
             )
             .where(
                 CompetitorTarget.active.is_(True),
                 CompetitorTarget.plid != exclude_plid,
+                latest_snapshot.c.collected_at >= freshness_cutoff,
+                or_(
+                    CompetitorLinkHealth.plid.is_(None),
+                    CompetitorLinkHealth.status == "healthy",
+                ),
             )
-            .order_by(CompetitorSnapshot.collected_at.desc())
-            .limit(1)
-        ).first()
-        if row is None:
-            return None
-        return str(row.plid), str(row.url)
+            .order_by(latest_snapshot.c.collected_at.desc())
+            .limit(bounded_limit)
+        ).all()
+        return [(str(row.plid), str(row.url)) for row in rows]
 
     def is_confirmed_invalid(self, plid: str) -> bool:
         """Return whether prior durable evidence already confirmed this link."""

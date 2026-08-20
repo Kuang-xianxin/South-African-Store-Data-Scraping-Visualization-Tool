@@ -312,7 +312,6 @@ function formatDate(value: string | null) {
           <p class="section-kicker">PERMISSION TEMPLATES</p>
           <h2>权限模板一览</h2>
         </div>
-        <span>模板只用于快速套用，现有账号的权限可继续单独增删</span>
       </div>
 
       <div class="template-grid">
@@ -335,16 +334,6 @@ function formatDate(value: string | null) {
           <p class="section-kicker">STORE ACCESS DIRECTORY</p>
           <h2>店铺权限目录</h2>
         </div>
-        <span>
-          店铺数量不设上限；这里先建立授权对象，新增店铺的数据接入仍需单独配置
-        </span>
-      </div>
-
-      <div class="store-scope-guidance">
-        <strong>建议授权方式</strong>
-        <span>
-          管理员、老板等跨店账号使用“全部店铺（含未来新增）”；普通运营按实际负责店铺逐个勾选，常见为2个，但系统不限制数量。
-        </span>
       </div>
 
       <form class="store-create-form" @submit.prevent="submitStore">
@@ -427,7 +416,6 @@ function formatDate(value: string | null) {
           <p class="section-kicker">CREATE ACCOUNT</p>
           <h2>新建账号</h2>
         </div>
-        <span>新账号先套用模板，创建后可在下方逐项调整权限</span>
       </div>
       <form class="create-account-form" @submit.prevent="submit">
         <label>
@@ -467,15 +455,11 @@ function formatDate(value: string | null) {
             <input v-model="createAllStores" type="checkbox" />
             <span>
               <strong>全部店铺（含未来新增）</strong>
-              <small>只控制可查看范围；下方仍单独勾选该账号负责运营的店铺</small>
             </span>
           </label>
           <div class="permission-heading create-operating-heading">
             <div>
               <strong>运营店铺授权（可多选）</strong>
-              <span>
-                用于顶部“我的运营店铺”合并查看；未开启全部店铺时，勾选项同时也是该账号可查看的范围
-              </span>
             </div>
             <small>已选 {{ createStoreIds.length }} 个</small>
           </div>
@@ -513,7 +497,7 @@ function formatDate(value: string | null) {
           <p class="section-kicker">EXISTING ACCOUNTS</p>
           <h2>现有账号</h2>
         </div>
-        <span>共 {{ users.length }} 个账号 · 权限变更后账号需重新登录</span>
+        <span>{{ users.length }} 个账号 · 修改后重新登录生效</span>
       </div>
 
       <div v-if="loading" class="state-card">正在读取用户列表…</div>
@@ -565,7 +549,7 @@ function formatDate(value: string | null) {
               <strong>
                 {{ user.permissions_customized ? "已单独调整" : "跟随模板" }}
               </strong>
-              <span>套用其他模板会替换当前自定义权限</span>
+              <span>套用会覆盖自定义权限</span>
             </div>
             <div class="account-actions">
               <button
@@ -590,9 +574,6 @@ function formatDate(value: string | null) {
             <div class="permission-heading">
               <div>
                 <strong>账号店铺查看范围</strong>
-                <span>
-                  全部店铺会自动包含以后新增店铺；关闭后仅能查看下方勾选的运营店铺
-                </span>
               </div>
               <small>
                 {{
@@ -616,15 +597,12 @@ function formatDate(value: string | null) {
               />
               <span>
                 <strong>全部店铺（含未来新增）</strong>
-                <small>只扩大查看范围，不会把全部店铺自动算作该账号负责运营</small>
+                <small>仅扩大查看范围</small>
               </span>
             </label>
             <div class="permission-heading operating-store-heading">
               <div>
                 <strong>运营店铺授权（可多选）</strong>
-                <span>
-                  决定顶部“我的运营店铺”合并范围；开启全部查看后，未勾选店铺仍可单店查看但不进入该合并项
-                </span>
               </div>
               <small>负责 {{ user.assigned_store_ids.length }} 个店铺</small>
             </div>

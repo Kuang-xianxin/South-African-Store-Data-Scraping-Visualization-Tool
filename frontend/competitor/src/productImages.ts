@@ -11,6 +11,7 @@ export type ProductImageSize =
 export function productThumbnailUrl(
   source: string | null | undefined,
   size: ProductImageSize = PRODUCT_IMAGE_SIZE.list,
+  storeCode?: string | null,
 ): string {
   const normalized = String(source ?? "").trim();
   if (!normalized) return "";
@@ -18,5 +19,10 @@ export function productThumbnailUrl(
     image_url: normalized,
     size: String(size),
   });
+  const normalizedStoreCode = String(storeCode ?? "").trim().toLowerCase();
+  if (normalizedStoreCode) {
+    query.set("store_code", normalizedStoreCode);
+    return `/api/erp/product-thumbnail?${query.toString()}`;
+  }
   return withStoreContext(`/api/erp/product-thumbnail?${query.toString()}`);
 }

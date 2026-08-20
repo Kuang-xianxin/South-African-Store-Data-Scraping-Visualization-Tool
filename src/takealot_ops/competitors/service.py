@@ -24,6 +24,7 @@ from takealot_ops.competitors.api import (
     CompetitorPublicClient,
     extract_plid,
 )
+from takealot_ops.competitors.batch import configure_collection_logger
 from takealot_ops.competitors.domain import (
     CompetitorOffer,
     CompetitorProduct,
@@ -49,6 +50,7 @@ from takealot_ops.competitors.stock import (
 )
 from takealot_ops.competitors.own_store import (
     ConnectedStoreOffer,
+    ConnectedStoreOfferPoint,
     connected_store_plids,
     load_connected_store_offer_points,
     load_connected_store_offers,
@@ -60,12 +62,10 @@ from takealot_ops.storage.models import (
     CompetitorSnapshot,
     CompetitorTarget,
     CompetitorVariantSnapshot,
-    StoreOfferBaseline,
-    StoreOfferObservation,
 )
 
 
-StoreOfferPoint = StoreOfferBaseline | StoreOfferObservation
+StoreOfferPoint = ConnectedStoreOfferPoint
 
 
 @dataclass(frozen=True)
@@ -202,10 +202,14 @@ class CompetitorCollector:
         self._client = client or CompetitorPublicClient()
         self._owns_client = client is None
         self._progress_callback = progress_callback
+        self._collection_logger = configure_collection_logger(project_root)
 
     def _report_stage(self, stage: str) -> None:
         if self._progress_callback is not None:
             self._progress_callback(stage)
+
+    def _log_page_validation(self, message: str) -> None:
+        self._collection_logger.info(message)
 
     async def close(self) -> None:
         if self._owns_client:
@@ -385,15 +389,17 @@ class CompetitorCollector:
             self._report_stage("正在复核疑似失效链接")
             try:
                 previously_confirmed = self._is_confirmed_invalid(plid)
-                control = None if previously_confirmed else self._latest_control_product(plid)
+                controls = (
+                    [] if previously_confirmed else self._recent_control_products(plid)
+                )
                 control_verified = False
                 control_plid: str | None = None
-                if control is not None:
-                    control_plid, control_url = control
+                if controls:
                     try:
-                        await self._client.confirm_product_page_absent(
+                        control_plid = await self._client.confirm_product_page_absent(
                             url,
-                            control_url,
+                            controls,
+                            diagnostic_callback=self._log_page_validation,
                         )
                     except CompetitorPageValidationError as exc:
                         return CompetitorCollectionResult(
@@ -511,9 +517,12 @@ class CompetitorCollector:
 
         return tuple(offer for offer in product.offers if not is_own_offer(offer))
 
-    def _latest_control_product(self, plid: str) -> tuple[str, str] | None:
+    def _recent_control_products(self, plid: str) -> list[tuple[str, str]]:
         with Session(self._engine) as session:
-            return CompetitorRepository(session).latest_control_product(exclude_plid=plid)
+            return CompetitorRepository(session).recent_control_products(
+                exclude_plid=plid,
+                limit=3,
+            )
 
     def _is_confirmed_invalid(self, plid: str) -> bool:
         with Session(self._engine) as session:
@@ -849,6 +858,7 @@ def load_competitor_dataset(
     plids: set[str] | None = None,
     include_detail_frames: bool = True,
     own_store_only: bool = False,
+    include_store_projection: bool = True,
 ) -> CompetitorDataset:
     """Load competitor views and recompute signals across the selected interval.
 
@@ -857,7 +867,9 @@ def load_competitor_dataset(
     projected, so a single-store view cannot leak or misclassify another store's
     private products. List-only callers can skip detail-only frames, while scope
     switches can request only the private-store partition without rebuilding the
-    invariant true-competitor list.
+    invariant true-competitor list. The main page can likewise omit the private
+    partition so its default true-competitor cards return before the larger Seller
+    API history projection finishes independently.
     """
     if start_date is not None and end_date is not None and start_date > end_date:
         raise ValueError("开始日期不能晚于结束日期")
@@ -931,6 +943,24 @@ def load_competitor_dataset(
             targets = (
                 [] if own_store_only else list(session.scalars(target_statement))
             )
+            if not include_store_projection and not own_store_only:
+                all_store_plids_for_query = {
+                    str(item.offer.productline_id).strip()
+                    for item in connected_store_offers
+                    if str(item.offer.productline_id or "").strip()
+                }
+                true_competitor_plids = {
+                    target.plid for target in targets
+                } - all_store_plids_for_query
+                snapshot_statement = snapshot_statement.where(
+                    CompetitorSnapshot.plid.in_(true_competitor_plids)
+                )
+                review_statement = review_statement.where(
+                    CompetitorReview.plid.in_(true_competitor_plids)
+                )
+                variant_statement = variant_statement.where(
+                    CompetitorVariantSnapshot.plid.in_(true_competitor_plids)
+                )
             should_load_projection_rows = (
                 not own_store_only or bool(selected_store_plids_for_query)
             )
@@ -949,10 +979,14 @@ def load_competitor_dataset(
                 if should_load_projection_rows
                 else []
             )
-            store_baselines = load_connected_store_offer_points(
-                session,
-                plids=normalized_plids,
-                store_codes=own_store_codes,
+            store_baselines = (
+                load_connected_store_offer_points(
+                    session,
+                    plids=normalized_plids,
+                    store_codes=own_store_codes,
+                )
+                if include_store_projection
+                else []
             )
     except SQLAlchemyError:
         return CompetitorDataset(
@@ -981,11 +1015,15 @@ def load_competitor_dataset(
             own_offer_ids_by_plid.setdefault(plid, set()).add(offer_id)
         if sku:
             own_skus_by_plid.setdefault(plid, set()).add(sku)
-    selected_store_offers = [
-        item
-        for item in connected_store_offers
-        if own_store_codes is None or item.store_code in own_store_codes
-    ]
+    selected_store_offers = (
+        [
+            item
+            for item in connected_store_offers
+            if own_store_codes is None or item.store_code in own_store_codes
+        ]
+        if include_store_projection
+        else []
+    )
     selected_store_plids = {
         str(item.offer.productline_id).strip()
         for item in selected_store_offers
@@ -1065,13 +1103,17 @@ def load_competitor_dataset(
         if not own_store_only
         else {}
     )
-    store_follower_timelines = _follower_seller_timelines(
-        store_snapshots,
-        selected_start_date=selected_start_date,
-        selected_end_date=selected_end_date,
-        own_offer_ids_by_plid=own_offer_ids_by_plid,
-        own_skus_by_plid=own_skus_by_plid,
-        not_before_by_plid=own_store_start_dates,
+    store_follower_timelines = (
+        _follower_seller_timelines(
+            store_snapshots,
+            selected_start_date=selected_start_date,
+            selected_end_date=selected_end_date,
+            own_offer_ids_by_plid=own_offer_ids_by_plid,
+            own_skus_by_plid=own_skus_by_plid,
+            not_before_by_plid=own_store_start_dates,
+        )
+        if include_store_projection
+        else {}
     )
 
     latest_by_plid: dict[str, CompetitorSnapshot] = {}

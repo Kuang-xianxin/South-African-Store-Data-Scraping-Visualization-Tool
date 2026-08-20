@@ -430,13 +430,6 @@ function errorMessage(error: unknown, fallback: string) {
       <div>
         <p class="eyebrow">KEYWORD × TRAFFIC MONITOR</p>
         <h2>标题关键词档案，流量结果一眼看清</h2>
-        <span>
-          每次完整 Offer 采集都会归档官方商品标题；发现标题词或词序变化时，系统标记高对比节点，并比较前后的流量水平和趋势速度。
-        </span>
-      </div>
-      <div class="metric-boundary">
-        <strong>口径边界</strong>
-        <p>这是近30天浏览量滚动窗口，不是精确当天流量，也不是独立访客数。</p>
       </div>
     </header>
 
@@ -529,7 +522,6 @@ function errorMessage(error: unknown, fallback: string) {
         <div v-if="loadingDetail" class="workspace-loading">正在整理关键词节点与流量历史…</div>
         <div v-else-if="!detail" class="workspace-empty">
           <strong>选择一个商品开始查看</strong>
-          <span>这里会显示每日近30天浏览量、关键词节点和前后变化结论。</span>
         </div>
         <template v-else>
           <header class="product-focus">
@@ -687,7 +679,7 @@ function errorMessage(error: unknown, fallback: string) {
                   :class="{ active: point.index === activePointIndex }"
                   tabindex="0"
                   role="button"
-                  :aria-label="`${point.date}，近30天浏览量 ${formatNumber(point.page_views_30_days)}`"
+                  :aria-label="`${point.date}，当时主标题 ${point.source_title || '无标题快照'}，近30天浏览量 ${formatNumber(point.page_views_30_days)}`"
                   @pointerenter="setActivePoint(point.index, $event)"
                   @focus="setActivePoint(point.index, $event)"
                   @click="setActivePoint(point.index, $event)"
@@ -722,6 +714,10 @@ function errorMessage(error: unknown, fallback: string) {
                   <span>数据日期</span>
                   <strong>{{ activePoint.date }}</strong>
                 </div>
+                <div class="point-title">
+                  <span>当时主标题</span>
+                  <strong>{{ activePoint.source_title || "—" }}</strong>
+                </div>
                 <div>
                   <span>滚动指标</span>
                   <strong>近30天浏览量 {{ formatNumber(activePoint.page_views_30_days) }}</strong>
@@ -730,7 +726,6 @@ function errorMessage(error: unknown, fallback: string) {
                 <small v-else>这是该日看到的滚动30天值，不是单日浏览量。</small>
               </div>
             </div>
-            <p class="metric-notice">{{ detail.metric_notice }}</p>
           </section>
 
           <section class="event-timeline">
@@ -829,10 +824,6 @@ function errorMessage(error: unknown, fallback: string) {
 .keyword-hero > * { position: relative; z-index: 1; }
 .eyebrow { color: #ffb092; font-size: 0.72rem; font-weight: 800; letter-spacing: 0.16em; margin: 0 0 8px; }
 .keyword-hero h2 { font-size: clamp(1.55rem, 2.4vw, 2.35rem); letter-spacing: -0.04em; margin: 0 0 10px; }
-.keyword-hero > div > span { color: rgba(255, 255, 255, 0.76); display: block; line-height: 1.75; max-width: 760px; }
-.metric-boundary { align-self: center; background: rgba(255, 255, 255, 0.09); border: 1px solid rgba(255, 255, 255, 0.14); border-radius: 16px; padding: 17px 18px; }
-.metric-boundary strong { color: #ffd5c5; display: block; font-size: 0.78rem; letter-spacing: 0.08em; margin-bottom: 6px; }
-.metric-boundary p { color: rgba(255, 255, 255, 0.82); line-height: 1.65; margin: 0; }
 
 .page-message { background: #edf7f2; border: 1px solid #b9e2cf; border-radius: 12px; color: #176c51; margin: 0; padding: 11px 15px; }
 .page-message.error { background: #fff0ee; border-color: #f0b9b3; color: #a43730; }
@@ -946,6 +937,9 @@ function errorMessage(error: unknown, fallback: string) {
 .point-readout { background: rgba(24, 38, 58, 0.96); border: 1px solid rgba(255, 255, 255, 0.12); border-radius: 12px; box-shadow: 0 14px 30px rgba(24, 38, 58, 0.24); color: #fff; display: grid; gap: 8px; left: 0; max-width: min(330px, calc(100vw - 24px)); padding: 12px 14px; pointer-events: none; position: fixed; top: 0; transform: translateY(14px); width: max-content; z-index: 1300; }
 .point-readout.tooltip-align-above { transform: translateY(calc(-100% - 14px)); }
 .point-readout > div { align-items: baseline; display: flex; gap: 12px; justify-content: space-between; }
+.point-readout > .point-title { align-items: flex-start; }
+.point-readout .point-title span { flex: 0 0 auto; }
+.point-readout .point-title strong { line-height: 1.45; max-width: 230px; overflow-wrap: anywhere; }
 .point-readout span, .point-readout small { color: rgba(255, 255, 255, 0.7); font-size: 0.68rem; line-height: 1.5; }
 .point-readout strong { font-size: 0.76rem; text-align: right; }
 .point-readout small { border-top: 1px solid rgba(255, 255, 255, 0.13); padding-top: 7px; }

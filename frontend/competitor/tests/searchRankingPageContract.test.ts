@@ -41,11 +41,8 @@ test("an explicit strategy contract never reuses legacy reasons for unavailable 
   );
 });
 
-test("keeps ordinary specifications at the title tail and gates decision parameters", () => {
-  assert.match(pageSource, /商品类型与相关关键词前置，功能卖点居中/);
-  assert.match(pageSource, /功率、电压、容量、尺寸、重量、数量及防护等级等明确规格参数默认后置/);
-  assert.match(pageSource, /只有运营在上方逐项确认为决策参数/);
-  assert.match(pageSource, /300W、IP66 等未确认或验证未通过时仍保持后置/);
+test("keeps the title ordering rule concise and gates decision parameters", () => {
+  assert.match(pageSource, /商品类型优先，规格参数默认后置/);
   assert.match(typesSource, /"human_confirmed_decision_parameter"/);
   assert.match(typesSource, /same_type_validation_controlled_aliases\?: string\[\];/);
 });
@@ -125,24 +122,43 @@ test("attributes ranking validation to the previously adopted strategy", () => {
 test("keeps one manual product action and adds a confirmed all-store serial batch", () => {
   assert.equal(pageSource.match(/@click="runAnalysis"/g)?.length, 1);
   assert.match(pageSource, /图文融合搜索定位/);
-  assert.match(pageSource, /当前商品族只走一次链路/);
+  assert.match(pageSource, /正在分析整个商品族，请勿重复提交/);
   assert.match(pageSource, /全部授权店铺一键串行分析/);
   assert.match(pageSource, /确认费用并一键启动/);
-  assert.match(pageSource, /全局最大并发为 1/);
+  assert.match(pageSource, /单批串行；遇错暂停，不自动重试/);
   assert.match(apiSource, /\/api\/erp\/search-ranking\/batch\/start/);
   assert.match(apiSource, /\/api\/erp\/search-ranking\/batch\/restart/);
+  assert.match(apiSource, /\/api\/erp\/search-ranking\/batch\/retry-failed/);
   assert.match(typesSource, /max_concurrency: 1;/);
   assert.match(typesSource, /automatic_retry: false;/);
   assert.match(pageSource, /从头重新开始/);
   assert.match(pageSource, /继续未完成任务/);
-  assert.match(pageSource, /同一店铺内相同 PLID 的变体合并为一个商品族/);
+  assert.match(pageSource, /重试失败商品并继续/);
+  assert.match(pageSource, /跳过失败商品，继续剩余/);
+  assert.match(pageSource, /当前实际费用累计可能不完整，请以供应商账单为准/);
   assert.match(pageSource, /旧检查点已合并/);
   assert.match(pageSource, /2_500/);
   assert.match(pageSource, /familyRepresentative.offer_id/);
-  assert.match(pageSource, /颜色、尺寸、容量等差异值始终留在各自 Offer/);
   assert.match(pageSource, /代表图不自动验证这些值/);
   assert.match(pageSource, /variant_projection/);
   assert.match(typesSource, /variant_parameters_visually_verified: false;/);
+});
+
+test("keeps the configured model route without exposing internal integration notes", () => {
+  assert.match(pageSource, /主模型/);
+  assert.match(pageSource, /跨厂商备用/);
+  assert.match(pageSource, /未配置模型服务，仅可查看历史结果/);
+  assert.doesNotMatch(pageSource, /Codex CLI 链路已停用/);
+  assert.doesNotMatch(pageSource, /服务端未配置 DASHSCOPE_API_KEY \/ ARK_API_KEY/);
+  assert.doesNotMatch(pageSource, /Codex 七天额度/);
+  assert.doesNotMatch(pageSource, /固定 gpt-5\.6-terra/);
+  assert.doesNotMatch(pageSource, /无额度数据即停/);
+  assert.match(typesSource, /pricing_mode: "api_unit_price";/);
+  assert.match(typesSource, /transport: "openai_compatible_https";/);
+  assert.match(typesSource, /codex_cli_integration_retained: true;/);
+  assert.match(typesSource, /codex_cli_execution_enabled: false;/);
+  assert.match(typesSource, /model_fallback_allowed: boolean;/);
+  assert.match(typesSource, /"stopped_quota_limit"/);
 });
 
 test("declares request pacing and shopper-journey evidence", () => {
@@ -175,27 +191,21 @@ test("declares request pacing and shopper-journey evidence", () => {
   );
   assert.match(analysisTypeSource, /autocomplete_checks\?: Array/);
   assert.match(analysisTypeSource, /shopper_journey\?: \{/);
-  assert.match(pageSource, /所有根词扩展和搜索页公开请求共用间隔/);
-  assert.match(pageSource, /均按 3–5 秒严格串行/);
-  assert.match(pageSource, /不自动重试/);
+  assert.match(pageSource, /单批串行；遇错暂停，不自动重试/);
+  assert.match(pageSource, /扫描边界/);
+  assert.match(pageSource, /探索预算/);
+  assert.match(pageSource, /请求节流/);
   assert.match(pageSource, /human_confirmed_product_fact: "人工确认商品事实"/);
   assert.match(pageSource, /title_cross_check: "图题交叉验证词"/);
   assert.match(pageSource, /image_title_first_instinct: "图文融合模型预测"/);
   assert.match(pageSource, /title_word_root: "主标题确定性拆词"/);
   assert.match(pageSource, /image_title_need_state: "相邻需求模型词根"/);
   assert.match(pageSource, /result_page_learning: "搜索结果页反向学习"/);
-  assert.match(pageSource, /index \+ 1/);
-  assert.match(pageSource, /主标题根词保留最低覆盖/);
-  assert.match(pageSource, /第4级需先取得真实搜索结果页/);
   assert.match(pageSource, /model_market_context/);
   assert.match(pageSource, /model_language_variant/);
   assert.match(pageSource, /本地客户语境/);
-  assert.match(pageSource, /视觉事实只取自图片/);
-  assert.match(pageSource, /地域语境不补造不可见事实/);
-  assert.match(pageSource, /地域语境不代表平台实测搜索量/);
-  assert.match(pageSource, /原始返回不直接入选/);
-  assert.match(pageSource, /仅保留同品身份或结构化相邻商品族/);
-  assert.match(pageSource, /可继续作为词组词根/);
+  assert.doesNotMatch(pageSource, /视觉事实只取自图片/);
+  assert.doesNotMatch(pageSource, /词根与平台扩展规则/);
   assert.match(
     typesSource,
     /"human_confirmed_product_fact"[\s\S]*"image_title_first_instinct"[\s\S]*"title_word_root"[\s\S]*"result_page_learning"[\s\S]*"image_title_need_state"[\s\S]*"title_cross_check"/,
@@ -209,15 +219,13 @@ test("keeps the search method overview compact while preserving operating bounda
   );
 
   assert.match(methodBannerSource, /IMAGE → TITLE → PLATFORM/);
-  assert.match(methodBannerSource, /主图独立识别，标题参与融合/);
   assert.match(methodBannerSource, /class="method-model-route"/);
   assert.match(methodBannerSource, /class="method-guardrail-grid"/);
-  assert.match(methodBannerSource, /<details class="method-details">/);
-  assert.doesNotMatch(methodBannerSource, /<details class="method-details"[^>]*\sopen/);
+  assert.doesNotMatch(methodBannerSource, /class="method-intro"/);
+  assert.doesNotMatch(methodBannerSource, /<details class="method-details">/);
   assert.match(methodBannerSource, /扫描边界/);
   assert.match(methodBannerSource, /探索预算/);
   assert.match(methodBannerSource, /请求节流/);
-  assert.match(methodBannerSource, /词根与平台扩展规则/);
   assert.doesNotMatch(methodBannerSource, /ISOLATED CROSS-CHECK/);
   assert.doesNotMatch(methodBannerSource, /每个搜索词最多扫描/);
   assert.doesNotMatch(methodBannerSource, /单品探索上限/);
@@ -225,22 +233,40 @@ test("keeps the search method overview compact while preserving operating bounda
   assert.doesNotMatch(methodBannerSource, /自然排名坐标/);
 });
 
-test("separates platform root expansions from South African model-direct queries", () => {
+test("separates same-product lexicon, platform expansions, and model fallback queries", () => {
   assert.match(statusTypeSource, /model_south_african_direct: number;/);
+  assert.match(statusTypeSource, /same_product_lexicon_first: true;/);
   assert.match(statusTypeSource, /takealot_root_expansion: number;/);
   assert.match(statusTypeSource, /seller_title_complete_phrase_max: number;/);
   assert.match(typesSource, /query_source_channel\?:/);
   assert.match(pageSource, /平台根词扩展词/);
+  assert.match(pageSource, /同品词库·优先直搜/);
   assert.match(pageSource, /图文融合·南非精简搜索词/);
   assert.match(pageSource, /主标题完整词组直验/);
   assert.match(pageSource, /平台根词扩展 \+ 南非模型/);
   assert.match(pageSource, /同词可同时属于多类/);
   assert.match(pageSource, /含图文融合南非直接搜索词/);
+  assert.match(pageSource, /含同品词库优先直搜/);
   assert.match(pageSource, /2–4词精简精准词/);
   assert.match(typesSource, /\| "concise_direct"/);
+  assert.match(typesSource, /\| "same_product_lexicon_direct"/);
   assert.match(statusTypeSource, /model_direct_query_policy:/);
   assert.match(statusTypeSource, /preferred_max_words: 3;/);
   assert.match(statusTypeSource, /min_preferred_count: 4;/);
+  assert.match(statusTypeSource, /source_priority: \["same_product_lexicon", "fusion_keywords"\];/);
+});
+
+test("shows the auditable same-product lexicon and searches it before ordinary keywords", () => {
+  assert.match(typesSource, /export interface SearchRankingSameProductLexicon/);
+  assert.match(typesSource, /fusion_product_type_terms/);
+  assert.match(typesSource, /fusion_same_product_aliases/);
+  assert.match(typesSource, /human_confirmed_product_fact/);
+  assert.match(pageSource, /<h3>同品词库<\/h3>/);
+  assert.match(pageSource, /sameProductLexicon\.entries/);
+  assert.match(pageSource, /entry\.sources\.map\(sameProductLexiconSourceLabel\)/);
+  assert.match(pageSource, /已进入本轮直接搜索/);
+  assert.match(pageSource, /历史投影；重新分析后才会实际搜索/);
+  assert.doesNotMatch(pageSource, /普通 <code>keywords<\/code> 只补剩余空位/);
 });
 
 test("shows phrase roots and the per-product platform expansion relevance gate", () => {
@@ -274,9 +300,9 @@ test("uses the expanded fusion query budget with one conditional recovery query"
   assert.match(statusTypeSource, /root_related_core_total: number;/);
   assert.match(analysisTypeSource, /valid_platform_root_target\?: number;/);
   assert.match(analysisTypeSource, /adaptive_recovery_used\?: boolean;/);
-  assert.match(pageSource, /search_query_attempt_limit \?\? 14/);
-  assert.match(pageSource, /model_south_african_direct \?\? 6/);
-  assert.match(pageSource, /seller_title_complete_phrase_max \?\? 1/);
+  assert.match(statusTypeSource, /search_query_attempt_limit: number;/);
+  assert.match(statusTypeSource, /model_south_african_direct: number;/);
+  assert.match(statusTypeSource, /seller_title_complete_phrase_max: number;/);
   assert.match(pageSource, /自适应补救词/);
 });
 
@@ -306,7 +332,27 @@ test("keeps S A and merged C I metrics without repeating verbose evidence in eve
   assert.match(pageSource, /A · 同一任务的替代商品/);
   assert.match(typesSource, /page_validation_status\?: "completed" \| "not_run";/);
   assert.match(pageSource, /function hasFirstPageValidation/);
-  assert.match(pageSource, /没有首页同类率；“未验证”不能解释为 0%/);
+  assert.match(pageSource, /未验证，不等于 0%/);
+});
+
+test("audits exact and same-demand results and rejects narrow-supply S terms", () => {
+  assert.match(typesSource, /export interface SearchRankingFirstPageResultClassification/);
+  assert.match(typesSource, /\| "same_demand_competitor"/);
+  assert.match(typesSource, /semantic_relation_requires_demand_competitor_density_for_s\?: boolean;/);
+  assert.match(typesSource, /semantic_relation_core_min_platform_results\?: number;/);
+  assert.match(typesSource, /first_page_result_classifications\?: SearchRankingFirstPageResultClassification\[\];/);
+  assert.match(typesSource, /exact_identity_and_same_demand_family_page_audit/);
+  assert.match(pageSource, /S · 同需求竞品充足且供给不过窄/);
+  assert.match(pageSource, /C\/I · 同需求竞品不足或供给过窄/);
+  assert.match(pageSource, /逐条核对首页/);
+  assert.match(pageSource, /同需求竞品/);
+  assert.match(pageSource, /同需求竞品词库/);
+  assert.match(pageSource, /不会因为进入该词库就自动成为推荐搜索词/);
+  assert.match(pageSource, /扣除目标后核心竞品/);
+  assert.match(pageSource, /核心词供给门槛/);
+  assert.match(pageSource, /不能当作搜索量/);
+  assert.match(pageSource, /平台实验、时段或索引更新变化/);
+  assert.match(pageSource, /firstPageAuditImageUrl\(result\)/);
 });
 
 test("keeps semantic image-title evidence separate before fusion", () => {
@@ -324,7 +370,7 @@ test("exposes difference and score selectors with evidence-based title details",
   assert.match(pageSource, /交叉验证/);
   assert.match(pageSource, /标题评分/);
   assert.match(pageSource, /现有主标题质量评分/);
-  assert.match(pageSource, /自然排名、首页同类占比、竞争数、价格、库存、广告位和平台扩展顺序均不计分/);
+  assert.match(pageSource, /证据覆盖/);
   assert.match(pageSource, /旧版记录按新版标题质量规则进行的本地换算/);
   assert.match(pageSource, /证据缺失·不计分/);
   assert.match(typesSource, /export interface SearchRankingTitleScoreComponent/);
@@ -339,7 +385,6 @@ test("removes the reverse-search path from the operator contract", () => {
   assert.match(analysisTypeSource, /product_fact_recommendation: SearchRankingProductFactRecommendation;/);
   assert.doesNotMatch(pageSource, /openReverseSearchConfirmation/);
   assert.doesNotMatch(pageSource, /confirmReverseSearch/);
-  assert.match(pageSource, /不调用倒搜/);
   assert.doesNotMatch(apiSource, /reverse-image-search/);
   assert.doesNotMatch(apiSource, /confirmSearchRankingReverseImageSearch/);
   assert.doesNotMatch(typesSource, /SearchRankingReverseImageSearch/);

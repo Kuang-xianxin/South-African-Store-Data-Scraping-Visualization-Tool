@@ -28,9 +28,12 @@ import UsersPage from "./pages/UsersPage.vue";
 import {
   competitorDetailPageHref,
   competitorDetailPlidFromHash,
+  ERP_MODULE_KEYS,
   isErpModuleKey,
   modulePageFromHash,
   modulePageHref,
+  ownStoreDetailPageHref,
+  ownStoreDetailRequestFromHash,
   shouldHandleModulePageClick,
   type ErpModuleKey,
 } from "./moduleNavigation";
@@ -76,6 +79,8 @@ const competitorCheckpointVersion = 9;
 const allStoresSelectorValue = "all-connected-stores";
 const operatingStoresSelectorValue = "my-operating-stores";
 const freshnessPollIntervalMs = 15_000;
+const refreshStatusActivePollIntervalMs = 2_000;
+const refreshStatusIdlePollIntervalMs = 15_000;
 
 const basePages = [
   { key: "overview", label: "经营总览", hint: "今日经营脉搏", mark: "01", permission: "store.view" },
@@ -83,7 +88,7 @@ const basePages = [
   { key: "keyword-traffic", label: "关键词流量", hint: "变更节点与趋势对比", mark: "03", permission: "store.view" },
   { key: "search-ranking", label: "搜索定位", hint: "图片热词与自然排名", mark: "04", permission: "store.view" },
   { key: "quadrants", label: "经营坐标", hint: "流量与下单分布", mark: "05", permission: "store.view" },
-  { key: "anomaly-products", label: "异常商品", hint: "停销、禁售库存与滞销", mark: "06", permission: "store.view" },
+  { key: "anomaly-products", label: "异常商品", hint: "销量、库存、评论与退货", mark: "06", permission: "store.view" },
   { key: "returns", label: "退货管理", hint: "原因、结果与交易", mark: "07", permission: "store.view" },
   { key: "logistics", label: "物流管理", hint: "长睿与平台货件", mark: "08", permission: "store.view" },
   { key: "competitors", label: "竞品雷达", hint: "库存评论与销量", mark: "09", permission: "competitors.view" },
@@ -101,6 +106,8 @@ const authStatus = ref<AuthStatus>({ setup_required: false, bootstrap_allowed: f
 const session = ref<AuthSession | null>(null);
 const selectedStoreId = ref<number | null>(null);
 const selectedStoreScope = ref<OwnStoreScope>("current");
+const initialOwnStoreDetailRequest = ownStoreDetailRequestFromHash(window.location.hash);
+const standaloneOwnStoreDetailRequest = ref(initialOwnStoreDetailRequest);
 const initialCompetitorDetailPlid = competitorDetailPlidFromHash(window.location.hash);
 const competitorDetailRequest = ref({
   plid: initialCompetitorDetailPlid ?? "",
@@ -162,6 +169,21 @@ const canControlCompetitorCollection = computed(
     canCollectCompetitors.value
     && session.value?.user.username.toLowerCase() === "kxx",
 );
+const standaloneOwnStoreDetailKey = computed(() => {
+  const request = standaloneOwnStoreDetailRequest.value;
+  return request ? ownStoreDetailPageHref(request) : "";
+});
+const standaloneOwnStoreDetailName = computed(() => {
+  const request = standaloneOwnStoreDetailRequest.value;
+  if (!request) return "自有链接详情";
+  if (request.scope === "operating") {
+    return `我的运营店铺 · ${operatingConnectedStoreCount.value} 店合并`;
+  }
+  if (request.scope === "all") {
+    return `全部店铺 · ${accessibleConnectedStoreCount.value} 店合并`;
+  }
+  return selectedStore.value?.display_name ?? "当前店铺";
+});
 const refreshCooldownRemaining = computed(() => {
   void refreshClock.value;
   if (!refreshStatus.value.cooldown_until) return 0;
@@ -412,6 +434,16 @@ const activePageProps = computed(() => {
       onPermissionDenied: showPermissionDenied,
     };
   }
+  if (key === "quadrants") {
+    return {
+      ...scopedCommon,
+      rangeStart: dataRangeStart.value,
+      rangeEnd: dataRangeEnd.value,
+      canViewCompetitors: hasPermission("competitors.view"),
+      currentStoreCode: selectedStore.value?.code ?? "",
+      onPermissionDenied: showPermissionDenied,
+    };
+  }
   if (key === "anomaly-products") {
     return {
       ...scopedCommon,
@@ -455,7 +487,6 @@ onMounted(async () => {
   freshnessTimer = window.setInterval(() => {
     if (document.visibilityState === "visible") void loadFreshness();
   }, freshnessPollIntervalMs);
-  refreshStatusTimer = window.setInterval(() => void loadRefreshStatus(), 2_000);
   refreshClockTimer = window.setInterval(() => {
     refreshClock.value = Date.now();
   }, 1_000);
@@ -465,7 +496,7 @@ onBeforeUnmount(() => {
   window.removeEventListener("hashchange", handleModuleHashChange);
   document.removeEventListener("visibilitychange", handleFreshnessVisibilityChange);
   if (freshnessTimer !== null) window.clearInterval(freshnessTimer);
-  if (refreshStatusTimer !== null) window.clearInterval(refreshStatusTimer);
+  if (refreshStatusTimer !== null) window.clearTimeout(refreshStatusTimer);
   if (refreshClockTimer !== null) window.clearInterval(refreshClockTimer);
   if (permissionNoticeTimer !== null) window.clearTimeout(permissionNoticeTimer);
 });
@@ -501,10 +532,26 @@ function openPage(event: MouseEvent, page: (typeof allPages)[number]) {
 }
 
 function handleModuleHashChange() {
+  const requestedOwnStoreDetail = ownStoreDetailRequestFromHash(window.location.hash);
+  standaloneOwnStoreDetailRequest.value = requestedOwnStoreDetail;
   const requestedPage = modulePageFromHash(window.location.hash);
   const requestedDetailPlid = competitorDetailPlidFromHash(window.location.hash);
   if (!requestedPage) {
     syncModuleUrl(currentPage.value);
+    return;
+  }
+  if (requestedOwnStoreDetail) {
+    if (!session.value) {
+      currentPage.value = "competitors";
+      return;
+    }
+    if (!hasPermission("competitors.view")) {
+      standaloneOwnStoreDetailRequest.value = null;
+      showPermissionDenied();
+      syncModuleUrl(currentPage.value);
+      return;
+    }
+    currentPage.value = "competitors";
     return;
   }
   if (requestedPage === currentPage.value) {
@@ -556,11 +603,18 @@ function acceptSession(next: AuthSession) {
   session.value = next;
   setAuthSession(next);
   selectedStoreScope.value = "current";
+  const detailRequest = standaloneOwnStoreDetailRequest.value;
+  const requestedDetailStore = detailRequest?.scope === "current"
+    ? next.user.accessible_stores.find(
+      (store) => store.code === detailRequest.storeCode && store.active && store.data_connected,
+    )
+    : null;
   const currentSelection = next.user.accessible_stores.find(
     (store) => store.id === selectedStoreId.value,
   );
   const nextStore = (
-    currentSelection
+    requestedDetailStore
+    ?? currentSelection
     ?? next.user.accessible_stores.find(
       (store) => store.code === "current" && store.data_connected,
     )
@@ -572,7 +626,12 @@ function acceptSession(next: AuthSession) {
   );
   selectedStoreId.value = nextStore?.id ?? null;
   setActiveStoreCode(nextStore?.code);
-  applyDefaultStoreScope();
+  if (detailRequest) {
+    selectedStoreScope.value = detailRequest.scope;
+    currentPage.value = "competitors";
+  } else {
+    applyDefaultStoreScope();
+  }
   const allowedPage = pages.value.find((page) => page.key === currentPage.value);
   const allowedPageNeedsStore = (
     allowedPage
@@ -588,7 +647,7 @@ function acceptSession(next: AuthSession) {
         || !storeScopedPages.has(page.key as PageKey),
     );
     switchPage((firstUsablePage ?? pages.value[0]).key);
-  } else {
+  } else if (!detailRequest) {
     if (currentPage.value === "competitors" && initialCompetitorDetailPlid) {
       syncCompetitorDetailUrl(initialCompetitorDetailPlid);
     } else {
@@ -606,8 +665,12 @@ function handleExpired() {
   selectedStoreId.value = null;
   selectedStoreScope.value = "current";
   setAuthSession(null);
-  currentPage.value = "overview";
-  syncModuleUrl("overview");
+  if (standaloneOwnStoreDetailRequest.value) {
+    currentPage.value = "competitors";
+  } else {
+    currentPage.value = "overview";
+    syncModuleUrl("overview");
+  }
   refreshStatus.value.can_refresh = false;
   void fetchAuthStatus().then((status) => {
     authStatus.value = status;
@@ -643,12 +706,29 @@ async function loadFreshness() {
 }
 
 async function loadRefreshStatus() {
-  if (!session.value || !canAccessConnectedStore.value) return;
+  if (!session.value || !canAccessConnectedStore.value) {
+    if (refreshStatusTimer !== null) window.clearTimeout(refreshStatusTimer);
+    refreshStatusTimer = null;
+    return;
+  }
   try {
     refreshStatus.value = await fetchRefreshStatus();
   } catch {
     // Keep the last shared status during a short local-service interruption.
+  } finally {
+    scheduleRefreshStatusPoll();
   }
+}
+
+function scheduleRefreshStatusPoll() {
+  if (refreshStatusTimer !== null) window.clearTimeout(refreshStatusTimer);
+  const delay = refreshStatus.value.in_progress
+    ? refreshStatusActivePollIntervalMs
+    : refreshStatusIdlePollIntervalMs;
+  refreshStatusTimer = window.setTimeout(() => {
+    refreshStatusTimer = null;
+    void loadRefreshStatus();
+  }, delay);
 }
 
 async function runRefresh() {
@@ -826,7 +906,6 @@ function localDate() {
       <p>CONNECTION ERROR</p>
       <h1>页面暂时无法加载</h1>
       <span>{{ authError }}</span>
-      <small>后台采集和已有数据不会因此中断。</small>
       <button type="button" @click="retryAuthentication">重新连接</button>
     </div>
   </section>
@@ -835,6 +914,32 @@ function localDate() {
     :status="authStatus"
     @authenticated="acceptSession"
   />
+  <main
+    v-else-if="
+      standaloneOwnStoreDetailRequest
+      && hasPermission('competitors.view')
+    "
+    class="standalone-own-detail-shell"
+  >
+    <CompetitorsPage
+      :key="standaloneOwnStoreDetailKey"
+      detail-only
+      :can-operate="false"
+      :can-control-collection="false"
+      :is-admin="false"
+      :current-username="session.user.username"
+      :current-store-code="selectedStore?.code ?? ''"
+      :current-store-name="standaloneOwnStoreDetailName"
+      :accessible-connected-store-count="accessibleConnectedStoreCount"
+      :operating-connected-store-count="operatingConnectedStoreCount"
+      :own-store-scope="standaloneOwnStoreDetailRequest.scope"
+      :requested-detail-plid="standaloneOwnStoreDetailRequest.plid"
+      :requested-detail-revision="1"
+      :requested-detail-start-date="standaloneOwnStoreDetailRequest.startDate"
+      :requested-detail-end-date="standaloneOwnStoreDetailRequest.endDate"
+      :on-permission-denied="showPermissionDenied"
+    />
+  </main>
   <div v-else class="erp-shell">
     <aside class="erp-sidebar" :class="{ open: mobileNavOpen }">
       <div class="brand">
@@ -1063,8 +1168,8 @@ function localDate() {
           <span>
             {{
               selectedStore
-                ? "当前页面不会复用其他店铺的数据；管理员完成该店铺凭据和采集任务配置后才会开放。"
-                : "经营总览、商品、关键词流量、搜索定位、经营坐标、异常商品、退货管理与物流管理属于店铺数据模块；竞品雷达等公共模块仍可按账号已开放的功能权限正常使用。"
+                ? "完成该店铺数据接入后即可查看。"
+                : "请选择已授权店铺，或进入已开放的公共模块。"
             }}
           </span>
           <button
@@ -1075,7 +1180,8 @@ function localDate() {
             前往用户权限配置
           </button>
         </div>
-        <KeepAlive v-else include="CompetitorsPage">
+        <!-- Keep one live instance for every ERP module during ordinary navigation. -->
+        <KeepAlive v-else :max="ERP_MODULE_KEYS.length">
           <component
             v-if="pages.length"
             :is="pageComponent"

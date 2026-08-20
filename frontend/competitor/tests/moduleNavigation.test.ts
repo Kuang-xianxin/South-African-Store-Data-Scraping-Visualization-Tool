@@ -8,6 +8,9 @@ import {
   ERP_MODULE_KEYS,
   modulePageFromHash,
   modulePageHref,
+  openOwnStoreDetailTab,
+  ownStoreDetailPageHref,
+  ownStoreDetailRequestFromHash,
   shouldHandleModulePageClick,
 } from "../src/moduleNavigation.ts";
 
@@ -26,7 +29,7 @@ test("every ERP module has a stable hash link that restores the same module", ()
   assert.equal(modulePageFromHash(""), null);
 });
 
-test("competitor own-link detail hashes preserve the PLID for a new tab", () => {
+test("legacy competitor detail hashes preserve the PLID", () => {
   const href = competitorDetailPageHref(" 12345678 ");
   assert.equal(modulePageFromHash(href), "competitors");
   assert.equal(competitorDetailPlidFromHash(href), "12345678");
@@ -39,6 +42,78 @@ test("competitor own-link detail hashes preserve the PLID for a new tab", () => 
     competitorDetailPlidFromHash("#module=competitors&detail_plid=not-a-plid"),
     null,
   );
+});
+
+test("standalone own-link detail hashes preserve scope, store and date evidence", () => {
+  const href = ownStoreDetailPageHref({
+    plid: " 12345678 ",
+    scope: "current",
+    storeCode: "store.za-1",
+    startDate: "2026-07-01",
+    endDate: "2026-08-17",
+  });
+  assert.equal(modulePageFromHash(href), "competitors");
+  assert.deepEqual(ownStoreDetailRequestFromHash(href), {
+    plid: "12345678",
+    scope: "current",
+    storeCode: "store.za-1",
+    startDate: "2026-07-01",
+    endDate: "2026-08-17",
+  });
+  assert.deepEqual(
+    ownStoreDetailRequestFromHash(
+      "#module=competitors&own_detail_plid=88&own_store_scope=all&store_code=ignored",
+    ),
+    { plid: "88", scope: "all" },
+  );
+  assert.equal(
+    ownStoreDetailRequestFromHash(
+      "#module=competitors&own_detail_plid=88&own_store_scope=current&start_date=2026-08-18&end_date=2026-08-17",
+    ),
+    null,
+  );
+  assert.equal(
+    ownStoreDetailRequestFromHash(
+      "#module=competitors&own_detail_plid=not-a-plid&own_store_scope=current",
+    ),
+    null,
+  );
+});
+
+test("own-link detail requests a normal browser tab without popup features", () => {
+  const originalWindow = globalThis.window;
+  const opened = { opener: {} };
+  let call: [string, string] | null = null;
+  Object.defineProperty(globalThis, "window", {
+    configurable: true,
+    value: {
+      location: { pathname: "/erp", search: "?mode=local" },
+      open: (href: string, target: string) => {
+        call = [href, target];
+        return opened;
+      },
+    },
+  });
+  try {
+    assert.equal(
+      openOwnStoreDetailTab({ plid: "123", scope: "operating" }),
+      opened,
+    );
+    assert.deepEqual(call, [
+      "/erp?mode=local#module=competitors&own_detail_plid=123&own_store_scope=operating",
+      "_blank",
+    ]);
+    assert.equal(opened.opener, null);
+  } finally {
+    if (originalWindow === undefined) {
+      delete (globalThis as { window?: Window }).window;
+    } else {
+      Object.defineProperty(globalThis, "window", {
+        configurable: true,
+        value: originalWindow,
+      });
+    }
+  }
 });
 
 test("only an unmodified primary click stays inside the current SPA tab", () => {
@@ -66,6 +141,9 @@ test("the sidebar exposes real links while retaining guarded left-click navigati
   assert.match(appSource, /event\.preventDefault\(\);\s+showPermissionDenied\(\)/);
   assert.match(appSource, /window\.addEventListener\("hashchange", handleModuleHashChange\)/);
   assert.match(appSource, /const linkedPage = modulePageFromHash\(window\.location\.hash\)/);
+  assert.match(appSource, /ownStoreDetailRequestFromHash\(window\.location\.hash\)/);
+  assert.match(appSource, /class="standalone-own-detail-shell"/);
+  assert.match(appSource, /:requested-detail-start-date="standaloneOwnStoreDetailRequest\.startDate"/);
   const initialPageSource = appSource.slice(
     appSource.indexOf("function initialPage"),
     appSource.indexOf("function applyDataViewport"),
@@ -78,4 +156,39 @@ test("the sidebar exposes real links while retaining guarded left-click navigati
   assert.doesNotMatch(appSource, /<button\s+v-for="page in allPages"/);
   assert.doesNotMatch(appSource, /DailyReportPage|daily-report|运营日报/);
   assert.doesNotMatch(appSource, /PlatformWarehousePage|platform-warehouse|约平台仓/);
+});
+
+test("ordinary SPA navigation keeps every ERP module instance cached", () => {
+  const componentMapSource = appSource.slice(
+    appSource.indexOf("const pageComponent = computed"),
+    appSource.indexOf("const pageComponentKey = computed"),
+  );
+  const expectedComponents = new Map([
+    ["overview", "OverviewPage"],
+    ["products", "ProductsPage"],
+    ["keyword-traffic", "KeywordTrafficPage"],
+    ["search-ranking", "SearchRankingPage"],
+    ["quadrants", "QuadrantsPage"],
+    ["anomaly-products", "AnomalyProductsPage"],
+    ["returns", "ReturnsPage"],
+    ["logistics", "LogisticsPage"],
+    ["competitors", "CompetitorsPage"],
+    ["users", "UsersPage"],
+  ]);
+
+  assert.deepEqual([...expectedComponents.keys()], [...ERP_MODULE_KEYS]);
+  for (const [moduleKey, componentName] of expectedComponents) {
+    const keyPattern = moduleKey.includes("-") ? `"${moduleKey}"` : moduleKey;
+    assert.match(
+      componentMapSource,
+      new RegExp(`${keyPattern}: ${componentName}`),
+      `${moduleKey} must remain part of the cached dynamic component map`,
+    );
+  }
+
+  assert.match(
+    appSource,
+    /<KeepAlive v-else :max="ERP_MODULE_KEYS\.length">[\s\S]*?:is="pageComponent"[\s\S]*?:key="pageComponentKey"[\s\S]*?<\/KeepAlive>/,
+  );
+  assert.doesNotMatch(appSource, /<KeepAlive[^>]*\binclude=/);
 });

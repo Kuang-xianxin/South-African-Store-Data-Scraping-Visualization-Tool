@@ -1,16 +1,22 @@
 from __future__ import annotations
 
 from datetime import UTC, date, datetime, timedelta
+from pathlib import Path
 
 import pandas as pd
+import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
+from takealot_ops.erp import web as erp_web
 from takealot_ops.erp.anomaly_products import (
     AnomalyProductPayloadCache,
     build_anomaly_product_payload,
     load_cached_anomaly_product_payload,
+    merge_return_anomaly_items,
+    merge_return_coverage,
 )
+from takealot_ops.erp.auth import StoreIdentity
 from takealot_ops.erp.permissions import STORE_VIEW
 from takealot_ops.erp.web import (
     _required_permission,
@@ -52,8 +58,9 @@ def _offer(
     total_stock: int = 5,
     receiving: int = 0,
     on_way: int = 0,
+    captured_at: datetime | None = None,
 ) -> dict[str, object]:
-    return {
+    result: dict[str, object] = {
         "offer_id": offer_id,
         "productline_id": f"PLID-{offer_id}",
         "tsin_id": f"TSIN-{offer_id}",
@@ -70,6 +77,9 @@ def _offer(
         "takealot_stock_in_receiving": receiving,
         "takealot_stock_on_way": on_way,
     }
+    if captured_at is not None:
+        result["captured_at"] = captured_at
+    return result
 
 
 def _metric(offer_id: str, metric_date: date, units: int | None) -> dict[str, object]:
@@ -199,6 +209,313 @@ def test_non_buyable_inventory_statuses_require_sellable_stock_only() -> None:
         "on_way",
     ]
     assert payload["slow_moving"] == []
+
+
+def test_reviews_below_five_are_daily_after_baseline_and_cumulative_quality() -> None:
+    baseline_seen_at = datetime(2026, 8, 13, 8, tzinfo=UTC)
+    daily_seen_at = datetime(2026, 8, 14, 8, tzinfo=UTC)
+    review_rows = [
+        {
+            "plid": "PLID-review",
+            "review_id": f"baseline-{index}",
+            "rating": rating,
+            "title": f"Baseline {index}",
+            "body": f"Existing review {index}",
+            "customer_name": "Existing customer",
+            "review_date": "13 Aug 2026",
+            "first_seen_at": baseline_seen_at,
+            "last_seen_at": daily_seen_at,
+        }
+        for index, rating in enumerate([1, 2, 3, 4, 5, 5, 5, 5, 5], start=1)
+    ]
+    review_rows.append(
+        {
+            "plid": "PLID-review",
+            "review_id": "daily-four-star",
+            "rating": 4,
+            "title": "Not quite right",
+            "body": "The fit is smaller than expected.",
+            "customer_name": "New customer",
+            "review_date": "14 Aug 2026",
+            "first_seen_at": daily_seen_at,
+            "last_seen_at": daily_seen_at,
+        }
+    )
+
+    payload = build_anomaly_product_payload(
+        _dataset([_offer("review")], []),
+        requested_as_of=THROUGH,
+        completed_through=THROUGH,
+        verified_dates=set(),
+        review_rows=review_rows,
+    )
+
+    assert payload["summary"]["daily_bad_reviews"] == 1
+    daily_item = payload["daily_bad_reviews"][0]
+    assert daily_item["new_bad_review_count"] == 1
+    assert daily_item["new_bad_reviews"][0]["rating"] == 4
+    assert daily_item["new_bad_reviews"][0]["body"] == (
+        "The fit is smaller than expected."
+    )
+    assert payload["summary"]["poor_review_quality"] == 1
+    quality_item = payload["poor_review_quality"][0]
+    assert quality_item["bad_review_count"] == 5
+    assert quality_item["review_count"] == 10
+    assert quality_item["bad_review_rate_percentage"] == 50.0
+    assert quality_item["bad_review_rating_counts"] == {
+        "1": 1,
+        "2": 1,
+        "3": 1,
+        "4": 2,
+    }
+    assert payload["review_discovery_through"] == "2026-08-14"
+
+
+def test_pull_timestamps_and_review_discovery_use_beijing_time() -> None:
+    requested_as_of = date(2026, 8, 20)
+    offer_capture = datetime(2026, 8, 19, 17, 1, tzinfo=UTC)
+    review_rows = [
+        {
+            "plid": "PLID-review",
+            "review_id": "baseline",
+            "rating": 5,
+            "first_seen_at": datetime(2026, 8, 19, 15, 30, tzinfo=UTC),
+        },
+        {
+            "plid": "PLID-review",
+            "review_id": "after-china-midnight",
+            "rating": 4,
+            # 2026-08-19 in SAST, but 2026-08-20 in Asia/Shanghai.
+            "first_seen_at": datetime(2026, 8, 19, 16, 30, tzinfo=UTC),
+        },
+    ]
+
+    payload = build_anomaly_product_payload(
+        _dataset([_offer("review", captured_at=offer_capture)], []),
+        requested_as_of=requested_as_of,
+        completed_through=date(2026, 8, 19),
+        verified_dates=set(),
+        review_rows=review_rows,
+        collection_times={
+            "offers_at": offer_capture,
+            "sales_at": "2026-08-20T01:02:00+00:00",
+            "reviews_at": "2026-08-20T01:03:00+00:00",
+            "returns_at": "2026-08-20T02:07:00+00:00",
+        },
+    )
+
+    assert payload["summary"]["daily_bad_reviews"] == 1
+    review = payload["daily_bad_reviews"][0]["new_bad_reviews"][0]
+    assert review["first_seen_on"] == "2026-08-20"
+    assert payload["review_discovery_through"] == "2026-08-20"
+    assert payload["collection_times"] == {
+        "offers_at": "2026-08-19T17:01:00+00:00",
+        "sales_at": "2026-08-20T01:02:00+00:00",
+        "reviews_at": "2026-08-20T01:03:00+00:00",
+        "returns_at": "2026-08-20T02:07:00+00:00",
+        "latest_at": "2026-08-20T02:07:00+00:00",
+    }
+    assert payload["daily_bad_reviews"][0]["offer_collected_at"] == (
+        "2026-08-19T17:01:00+00:00"
+    )
+
+
+def test_return_totals_merge_by_company_sku_before_threshold() -> None:
+    coverage = {
+        "data_status": "collected",
+        "window_start": "2026-07-16",
+        "window_end": "2026-08-14",
+    }
+
+    def return_row(store_suffix: str, quantity: int) -> dict[str, object]:
+        return {
+            "seller_return_id": f"return-{store_suffix}",
+            "offer_id": "return",
+            "tsin_id": "TSIN-return",
+            "sku": f"PLAT-{store_suffix}",
+            "productline_id": "PLID-return",
+            "product_title": "Returned Product",
+            "image_url": None,
+            "company_sku": "COMPANY-RETURN",
+            "company_product_name": "Company Returned Product",
+            "quantity": quantity,
+            "return_date": "2026-08-13",
+            "return_reason": "defective_or_damaged",
+            "return_reason_label": "商品有缺陷或损坏",
+            "customer_comment": "Stopped working.",
+        }
+
+    store_a = build_anomaly_product_payload(
+        _dataset([_offer("return")], []),
+        requested_as_of=THROUGH,
+        completed_through=THROUGH,
+        verified_dates=set(),
+        return_rows=[return_row("A", 3)],
+        return_coverage=coverage,
+    )
+    store_b = build_anomaly_product_payload(
+        _dataset([_offer("return")], []),
+        requested_as_of=THROUGH,
+        completed_through=THROUGH,
+        verified_dates=set(),
+        return_rows=[return_row("B", 2)],
+        return_coverage=coverage,
+    )
+
+    assert store_a["high_returns"] == []
+    assert store_b["high_returns"] == []
+    candidates = []
+    for store_code, payload in (("store-a", store_a), ("store-b", store_b)):
+        candidate = dict(payload["return_product_totals"][0])
+        candidate.update(
+            {
+                "store_code": store_code,
+                "store_name": store_code.upper(),
+            }
+        )
+        candidates.append(candidate)
+    merged = merge_return_anomaly_items(candidates)
+
+    assert len(merged) == 1
+    assert merged[0]["company_sku"] == "COMPANY-RETURN"
+    assert merged[0]["return_units_30_days"] == 5
+    assert merged[0]["return_record_count"] == 2
+    assert merged[0]["affected_platform_sku_count"] == 2
+    assert merged[0]["return_reason_counts"] == [
+        {
+            "reason": "defective_or_damaged",
+            "label": "商品有缺陷或损坏",
+            "units": 5,
+            "records": 2,
+        }
+    ]
+    assert merge_return_coverage(
+        [
+            {**coverage, "store_code": "store-a"},
+            {"data_status": "uncollected", "store_code": "store-b"},
+        ]
+    )["data_status"] == "partial"
+
+
+def test_uncollected_returns_do_not_become_zero_or_anomalies() -> None:
+    payload = build_anomaly_product_payload(
+        _dataset([_offer("return")], []),
+        requested_as_of=THROUGH,
+        completed_through=THROUGH,
+        verified_dates=set(),
+        return_rows=[
+            {
+                "company_sku": "COMPANY-RETURN",
+                "quantity": 99,
+            }
+        ],
+        return_coverage={"data_status": "uncollected"},
+    )
+
+    assert payload["return_product_totals"] == []
+    assert payload["high_returns"] == []
+    assert payload["return_coverage"]["uncollected_is_zero"] is False
+
+
+def test_web_aggregation_deduplicates_reviews_and_combines_return_skus(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(
+        erp_web,
+        "_product_master_records",
+        lambda _root, records, **_kwargs: [dict(record) for record in records],
+    )
+    stores = [
+        StoreIdentity(1, "store-a", "Store A", True, True),
+        StoreIdentity(2, "store-b", "Store B", True, True),
+    ]
+    payloads = []
+    for index, store in enumerate(stores):
+        return_units = 3 if index == 0 else 2
+        payloads.append(
+            (
+                store,
+                {
+                    "data_through": "2026-08-14",
+                    "date_basis": "Africa/Johannesburg",
+                    "collection_times": {
+                        "offers_at": f"2026-08-14T0{index + 1}:00:00+00:00",
+                        "sales_at": f"2026-08-14T0{index + 2}:00:00+00:00",
+                        "reviews_at": None,
+                        "returns_at": None,
+                        "latest_at": f"2026-08-14T0{index + 2}:00:00+00:00",
+                    },
+                    "sales_zero_evidence": "verified_complete_business_days_only",
+                    "rules": {
+                        "slow_day_options": [4, 7],
+                        "high_return_min_units": 5,
+                    },
+                    "sudden_sales_stop": [],
+                    "slow_moving": [],
+                    "stock_status_anomalies": {
+                        "not_buyable": [],
+                        "disabled_by_takealot": [],
+                        "disabled_by_seller": [],
+                    },
+                    "daily_bad_reviews": [
+                        {
+                            **_offer("review"),
+                            "plid": "PLID-review",
+                            "offer_status": "buyable",
+                            "available_stock": 5,
+                            "bad_review_count": 1,
+                            "review_count": 2,
+                            "new_bad_reviews": [
+                                {
+                                    "review_id": "same-review",
+                                    "rating": 4,
+                                    "first_seen_at": "2026-08-14T08:00:00+00:00",
+                                }
+                            ],
+                        }
+                    ],
+                    "poor_review_quality": [],
+                    "review_discovery_through": "2026-08-14",
+                    "return_coverage": {
+                        "data_status": "collected",
+                        "window_start": "2026-07-16",
+                        "window_end": "2026-08-14",
+                    },
+                    "return_product_totals": [
+                        {
+                            **_offer("return"),
+                            "plid": "PLID-return",
+                            "offer_status": "buyable",
+                            "available_stock": 5,
+                            "company_sku": "COMPANY-RETURN",
+                            "return_units_30_days": return_units,
+                            "return_record_count": 1,
+                            "platform_skus": [f"PLAT-{index}"],
+                            "plids": ["PLID-return"],
+                            "return_reason_counts": [],
+                            "recent_returns": [],
+                            "return_data_status": "collected",
+                        }
+                    ],
+                },
+            )
+        )
+
+    result = erp_web._aggregate_anomaly_payloads(
+        tmp_path,
+        payloads,
+        requested_as_of=THROUGH,
+        completed_through=THROUGH,
+        selected_store_scope="all",
+    )
+
+    assert result["summary"]["daily_bad_reviews"] == 1
+    assert result["daily_bad_reviews"][0]["new_bad_review_count"] == 1
+    assert result["summary"]["high_returns"] == 1
+    assert result["high_returns"][0]["return_units_30_days"] == 5
+    assert result["return_coverage"]["data_status"] == "collected"
+    assert result["collection_times"]["latest_at"] == "2026-08-14T03:00:00+00:00"
 
 
 def test_slow_moving_counts_use_actual_consecutive_zero_days() -> None:
@@ -415,6 +732,10 @@ def test_narrow_anomaly_cache_reuses_payload_and_invalidates_after_refresh() -> 
         assert first["stock_status_anomalies"]["not_buyable"][0][
             "inventory_units"
         ] == 2
+        assert first["stock_status_anomalies"]["not_buyable"][0][
+            "offer_collected_at"
+        ] == captured_at.isoformat()
+        assert first["collection_times"]["latest_at"] == captured_at.isoformat()
         assert cache.stats() == {"entries": 1, "hits": 1, "misses": 1}
 
         snapshot = session.get(OfferSnapshot, 1)

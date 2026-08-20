@@ -293,6 +293,7 @@ def test_competitor_detail_requests_only_the_selected_plid(
             "end_date": date(2026, 8, 14),
             "own_store_codes": {"current"},
             "plids": {"101163999"},
+            "engine": app.state.read_engine,
         }
     ]
     assert len(sales_calls) == 1
@@ -501,6 +502,7 @@ def test_personal_watchlist_overview_projects_only_visible_membership_plids(
             "own_store_codes": {"current", "store-02"},
             "plids": {"12345678"},
             "include_detail_frames": False,
+            "engine": app.state.read_engine,
         }
     ]
 
@@ -650,6 +652,9 @@ def test_competitor_radar_returns_automatic_store_targets_and_separate_items(
         )
         competitor_targets = client.get("/api/competitors/targets")
         overview = client.get("/api/competitors")
+        true_competitor_overview = client.get(
+            "/api/competitors?include_own_store=false"
+        )
         all_store_overview = client.get("/api/competitors?own_store_scope=all")
         operating_store_overview = client.get(
             "/api/competitors?own_store_scope=operating"
@@ -768,6 +773,10 @@ def test_competitor_radar_returns_automatic_store_targets_and_separate_items(
         "12345678",
     }
     assert overview.json()["own_follower_events"] == []
+    assert true_competitor_overview.status_code == 200
+    assert true_competitor_overview.json()["items"] == overview.json()["items"]
+    assert true_competitor_overview.json()["store_items"] == []
+    assert true_competitor_overview.json()["own_follower_events"] == []
     assert all_store_overview.status_code == 200
     assert {item["plid"] for item in all_store_overview.json()["store_items"]} == {
         "12345678",
@@ -1705,11 +1714,12 @@ def test_store_summary_compares_only_accessible_connected_stores(
         )
         assert operator.status_code == 200
 
-        loaded_store_codes: list[str] = []
+        loaded_single_store_codes: list[str] = []
+        loaded_store_scopes: list[tuple[str, ...]] = []
 
         def fake_load_dataset(_settings, _as_of):
             store_code = current_store_code()
-            loaded_store_codes.append(store_code)
+            loaded_single_store_codes.append(store_code)
             return store_code
 
         def fake_summary_payload(store_code, as_of, *, start_date=None):
@@ -1767,6 +1777,48 @@ def test_store_summary_compares_only_accessible_connected_stores(
                 }
             ]
 
+        def fake_store_metric_projections(
+            _engine,
+            store_codes,
+            *,
+            as_of,
+            start_date=None,
+        ):
+            loaded_store_scopes.append(tuple(store_codes))
+            return {
+                store_code: fake_summary_payload(
+                    store_code,
+                    as_of,
+                    start_date=start_date,
+                )
+                for store_code in store_codes
+            }
+
+        def fake_store_traffic_series(
+            _engine,
+            store_codes,
+            *,
+            as_of,
+            days=30,
+        ):
+            assert days == 6
+            return {
+                store_code: [
+                    {
+                        "business_date": as_of.isoformat(),
+                        "captured_at": "2026-08-07T01:00:00+00:00",
+                        "status": "success",
+                        "page_views_30_days_total": (
+                            200 if store_code == "current" else 400
+                        ),
+                        "product_count": 4,
+                        "missing_product_count": 0,
+                        "reference": None,
+                    }
+                ]
+                for store_code in store_codes
+            }
+
         monkeypatch.setattr(
             "takealot_ops.erp.web.load_erp_dataset",
             fake_load_dataset,
@@ -1778,6 +1830,14 @@ def test_store_summary_compares_only_accessible_connected_stores(
         monkeypatch.setattr(
             "takealot_ops.erp.web.period_end_traffic_series",
             fake_traffic_series,
+        )
+        monkeypatch.setattr(
+            "takealot_ops.erp.web.load_store_metric_projections",
+            fake_store_metric_projections,
+        )
+        monkeypatch.setattr(
+            "takealot_ops.erp.web.load_store_traffic_series",
+            fake_store_traffic_series,
         )
         with TestClient(app, client=("192.168.1.8", 50001)) as operator_client:
             login = operator_client.post(
@@ -1937,7 +1997,9 @@ def test_store_summary_compares_only_accessible_connected_stores(
         assert single_store_response.json()["operators"][0]["display_name"] == (
             "Summary Operator"
         )
-        assert set(loaded_store_codes) == {"current", "store-02"}
+        assert loaded_single_store_codes == ["current"]
+        assert len(loaded_store_scopes) == 1
+        assert set(loaded_store_scopes[0]) == {"current", "store-02"}
         assert audit_response.status_code == 200
         assert invalid_range_response.status_code == 422
         audit = audit_response.json()
@@ -2253,6 +2315,7 @@ def test_keyword_traffic_routes_detect_title_change(
     assert detail.json()["history"][-1] == {
         "date": "2026-08-03",
         "page_views_30_days": 160,
+        "source_title": "Memory Foam Queen Mattress",
     }
 
 
@@ -3372,10 +3435,6 @@ def test_operator_only_adds_targets_and_manages_personal_watchlist(
                     )
                 },
             ),
-            operator.delete(
-                "/api/competitors/targets/12345678",
-                headers=headers,
-            ),
             operator.post(
                 "/api/competitors/targets/12345678/prioritize",
                 headers=headers,
@@ -3392,12 +3451,20 @@ def test_operator_only_adds_targets_and_manages_personal_watchlist(
             403,
             403,
             403,
-            403,
         ]
         assert all(
             "仅限管理员" in response.json()["detail"]
             for response in restricted_responses
         )
+        delete_rejected = operator.delete(
+            "/api/competitors/targets/12345678",
+            headers=headers,
+        )
+        assert delete_rejected.status_code == 405
+        assert [
+            item["plid"]
+            for item in operator.get("/api/competitors/targets").json()["items"]
+        ] == ["12345678"]
 
 
 def test_collect_auto_adds_and_groups_new_offer_targets_once(
@@ -3530,7 +3597,7 @@ def test_collect_auto_adds_and_groups_new_offer_targets_once(
         assert [item["action"] for item in audits] == ["auto_discover"]
 
 
-def test_competitor_target_crud_audit_and_active_batch_tail(
+def test_competitor_target_add_update_audit_and_active_batch_tail(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -3646,19 +3713,21 @@ def test_competitor_target_crud_audit_and_active_batch_tail(
         )
         assert invalid_host.status_code == 422
 
-        deleted = client.delete(
+        delete_rejected = client.delete(
             "/api/competitors/targets/12345678",
             headers=headers,
         )
-        assert deleted.status_code == 200
-        assert deleted.json()["history_retained"] is True
-        assert client.get("/api/competitors/targets").json()["items"] == []
+        assert delete_rejected.status_code == 405
+        listed_after_delete_attempt = client.get("/api/competitors/targets").json()[
+            "items"
+        ]
+        assert [item["plid"] for item in listed_after_delete_attempt] == ["12345678"]
+        assert listed_after_delete_attempt[0]["url"] == updated_url
 
         audits = client.get("/api/competitors/target-audits")
         assert audits.status_code == 200
         audit_payload = audits.json()
         assert [item["action"] for item in audit_payload["items"]] == [
-            "delete",
             "update",
             "add",
         ]
@@ -3668,7 +3737,7 @@ def test_competitor_target_crud_audit_and_active_batch_tail(
             "/api/competitors/target-audits",
             params={"start_date": available_date, "end_date": available_date},
         )
-        assert len(filtered.json()["items"]) == 3
+        assert len(filtered.json()["items"]) == 2
         first_page = client.get(
             "/api/competitors/target-audits",
             params={
@@ -3687,11 +3756,11 @@ def test_competitor_target_crud_audit_and_active_batch_tail(
                 "page_size": 2,
             },
         ).json()
-        assert first_page["total"] == 3
+        assert first_page["total"] == 2
         assert first_page["page"] == 1
         assert len(first_page["items"]) == 2
         assert second_page["page"] == 2
-        assert len(second_page["items"]) == 1
+        assert second_page["items"] == []
 
 
 def test_competitor_personal_watchlist_is_account_scoped_and_viewer_editable(
@@ -3821,11 +3890,15 @@ def test_competitor_personal_watchlist_is_account_scoped_and_viewer_editable(
                 "/api/competitors/personal-watchlist"
             ).json()["items"]
         ] == ["12345678"]
-        globally_deleted = admin.delete(
+        global_delete_rejected = admin.delete(
             "/api/competitors/targets/12345678",
             headers={"X-CSRF-Token": admin_csrf},
         )
-        assert globally_deleted.status_code == 200
+        assert global_delete_rejected.status_code == 405
+        assert [
+            item["plid"]
+            for item in admin.get("/api/competitors/targets").json()["items"]
+        ] == ["12345678"]
         assert [
             item["plid"]
             for item in admin.get(

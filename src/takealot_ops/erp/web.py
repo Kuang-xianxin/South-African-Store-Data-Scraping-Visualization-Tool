@@ -102,6 +102,9 @@ from takealot_ops.erp.auth import (
 from takealot_ops.erp.anomaly_products import (
     AnomalyProductPayloadCache,
     load_cached_anomaly_product_payload,
+    merge_return_anomaly_items,
+    merge_return_coverage,
+    merge_review_anomaly_items,
 )
 from takealot_ops.erp.coordination import RefreshBusyError, RefreshCoordinator
 from takealot_ops.erp.daily_report import (
@@ -156,6 +159,7 @@ from takealot_ops.erp.product_images import (
     ProductImageUnavailableError,
     ProductThumbnailCache,
 )
+from takealot_ops.erp.read_cache import ReadProjectionCache
 from takealot_ops.erp.returns import (
     filter_return_rows,
     load_offer_returned_30_day_counter,
@@ -173,10 +177,18 @@ from takealot_ops.erp.service import (
     create_read_only_erp_engine,
     frame_records,
     load_erp_dataset,
+    load_quadrant_dataset,
     sqlite_database_path,
 )
+from takealot_ops.erp.store_overview import (
+    load_shared_overseas_inventory,
+    load_store_inventory_projections,
+    load_store_metric_projections,
+    load_store_sales_metric_states,
+    load_store_sales_reconciliations,
+    load_store_traffic_series,
+)
 from takealot_ops.logistics import LogisticsLinkError, LogisticsOverviewService
-from takealot_ops.logistics.snapshots import load_provider_snapshot
 from takealot_ops.metrics.service import DashboardDataset
 from takealot_ops.platform_warehouse import (
     PlatformWarehouseConflictError,
@@ -224,12 +236,9 @@ from takealot_ops.storage.models import (
     CompetitorTarget,
     CompetitorTargetAudit,
     DailyProductMetric,
-    DailyReportRun,
-    DailySalesMetricState,
     ErpStore,
     ErpUser,
     ErpUserStore,
-    OfferCurrent,
     OwnStorePersonalWatchlist,
     PersonalWatchlistLibrary,
     PersonalWatchlistLibraryItem,
@@ -754,51 +763,37 @@ def _empty_store_inventory() -> dict[str, Any]:
     }
 
 
-def _store_inventory_snapshot(engine: Engine) -> dict[str, Any]:
-    """Summarize the current store's local offer inventory snapshot."""
-    with Session(engine) as session:
-        row = session.execute(
-            select(
-                func.count(OfferCurrent.offer_id).label("offer_count"),
-                func.max(OfferCurrent.captured_at).label("captured_at"),
-                func.sum(OfferCurrent.takealot_available_stock).label(
-                    "platform_available_stock"
-                ),
-                func.count(OfferCurrent.takealot_available_stock).label(
-                    "platform_available_coverage"
-                ),
-                func.sum(OfferCurrent.takealot_stock_on_way).label(
-                    "platform_stock_on_way"
-                ),
-                func.count(OfferCurrent.takealot_stock_on_way).label(
-                    "platform_stock_on_way_coverage"
-                ),
-                func.sum(OfferCurrent.takealot_stock_in_receiving).label(
-                    "platform_stock_in_receiving"
-                ),
-                func.count(OfferCurrent.takealot_stock_in_receiving).label(
-                    "platform_stock_in_receiving_coverage"
-                ),
-            )
-        ).mappings().one()
-    captured_at = row["captured_at"]
+def _empty_store_metric_projection() -> dict[str, Any]:
     return {
-        "captured_at": captured_at.isoformat() if captured_at is not None else None,
-        "offer_count": int(row["offer_count"] or 0),
-        "platform_available_stock": _optional_int(row["platform_available_stock"]),
-        "platform_available_coverage": int(
-            row["platform_available_coverage"] or 0
-        ),
-        "platform_stock_on_way": _optional_int(row["platform_stock_on_way"]),
-        "platform_stock_on_way_coverage": int(
-            row["platform_stock_on_way_coverage"] or 0
-        ),
-        "platform_stock_in_receiving": _optional_int(
-            row["platform_stock_in_receiving"]
-        ),
-        "platform_stock_in_receiving_coverage": int(
-            row["platform_stock_in_receiving_coverage"] or 0
-        ),
+        "latest_metric_date": None,
+        "kpis": {
+            "latest_ordered_units": None,
+            "latest_ordered_revenue": None,
+            "seven_day_ordered_units": None,
+            "latest_anomaly_products": 0,
+            "page_views_30_days": None,
+            "median_conversion": None,
+            "selling_products": 0,
+            "stockout_products": 0,
+        },
+        "sales_series": [],
+    }
+
+
+def _empty_store_sales_reconciliation(store: StoreIdentity) -> dict[str, Any]:
+    return {
+        "store_code": store.code,
+        "store_name": store.display_name,
+        "status": "unverified",
+        "period_end_business_date": None,
+        "period_end_status": None,
+        "period_end_captured_at": None,
+        "period_end_failure_reason": None,
+        "latest_sales_verified_at": None,
+        "metric_date_count": 0,
+        "verified_after_failure_count": 0,
+        "revision_count": 0,
+        "latest_revision_at": None,
     }
 
 
@@ -875,46 +870,6 @@ def _empty_overseas_inventory() -> dict[str, Any]:
     }
 
 
-def _shared_overseas_inventory(
-    engine: Engine,
-    stores: Sequence[StoreIdentity],
-) -> dict[str, Any]:
-    """Read the newest accessible W8 snapshot and count that shared warehouse once."""
-    latest: dict[str, Any] | None = None
-    for store in stores:
-        with store_scope(store.code):
-            snapshot = load_provider_snapshot(engine, "w8")
-        if snapshot is None:
-            continue
-        if latest is None or str(snapshot["fetched_at"]) > str(latest["fetched_at"]):
-            latest = snapshot
-    if latest is None:
-        return _empty_overseas_inventory()
-    payload = latest.get("payload")
-    if not isinstance(payload, Mapping) or not payload.get("connected"):
-        return _empty_overseas_inventory()
-    summary = payload.get("summary")
-    if not isinstance(summary, Mapping):
-        return _empty_overseas_inventory()
-    warehouse = payload.get("warehouse")
-    warehouse_name = None
-    if isinstance(warehouse, Mapping):
-        warehouse_name = str(
-            warehouse.get("name") or warehouse.get("code") or ""
-        ).strip() or None
-    return {
-        "snapshot_at": str(latest["fetched_at"]),
-        "warehouse_name": warehouse_name,
-        "stock_total": _optional_int(summary.get("stock_total")),
-        "usable_stock": _optional_int(summary.get("usable_stock")),
-        "locked_stock": _optional_int(summary.get("locked_stock")),
-        "outbound_allocated": _optional_int(summary.get("outbound_allocated")),
-        "transit_stock": _optional_int(summary.get("transit_stock")),
-        "defective_stock": _optional_int(summary.get("defective_stock")),
-        "shared_across_stores": True,
-    }
-
-
 def _aggregate_platform_inventory(
     items: Sequence[Mapping[str, Any]],
 ) -> dict[str, Any]:
@@ -956,191 +911,6 @@ def _aggregate_platform_inventory(
         result[value_field] = sum(known_values) if known_values else None
         result[coverage_field] = coverage
     return result
-
-
-def _store_sales_metric_states(
-    engine: Engine,
-    *,
-    as_of: date,
-    start_date: date | None = None,
-    limit: int = 120,
-) -> dict[str, dict[str, Any]]:
-    """Return store-day totals and provenance for the requested viewport."""
-    with Session(engine) as session:
-        state_statement = (
-            select(DailySalesMetricState)
-            .where(DailySalesMetricState.metric_date <= as_of)
-            .order_by(DailySalesMetricState.metric_date.desc())
-        )
-        if start_date is not None:
-            state_statement = state_statement.where(
-                DailySalesMetricState.metric_date >= start_date
-            )
-        else:
-            state_statement = state_statement.limit(limit)
-        states = session.scalars(state_statement).all()
-        revision_statement = (
-            select(SalesRevenueRevision)
-            .where(SalesRevenueRevision.metric_date <= as_of)
-            .order_by(
-                SalesRevenueRevision.metric_date,
-                SalesRevenueRevision.detected_at,
-                SalesRevenueRevision.id,
-            )
-        )
-        if start_date is not None:
-            revision_statement = revision_statement.where(
-                SalesRevenueRevision.metric_date >= start_date
-            )
-        revision_rows = session.scalars(revision_statement).all()
-    revisions: dict[date, dict[str, Any]] = {}
-    for revision in revision_rows:
-        if not is_closed_day_sales_revision(revision):
-            continue
-        summary = revisions.setdefault(
-            revision.metric_date,
-            {"count": 0, "latest_at": None},
-        )
-        summary["count"] = int(summary["count"]) + 1
-        summary["latest_at"] = revision.detected_at.isoformat()
-    return {
-        state.metric_date.isoformat(): {
-            "source_kind": state.source_kind,
-            "source_run_id": state.source_run_id,
-            "source": dict(state.source_details or {}),
-            "verified_at": (
-                state.verified_at.isoformat() if state.verified_at is not None else None
-            ),
-            "revision_count": revisions.get(state.metric_date, {}).get("count", 0),
-            "latest_revision_at": revisions.get(state.metric_date, {}).get(
-                "latest_at"
-            ),
-        }
-        for state in states
-    }
-
-
-def _store_sales_reconciliation(
-    engine: Engine,
-    *,
-    store: StoreIdentity,
-    as_of: date,
-) -> dict[str, Any]:
-    """Classify whether a later Sales API rebuild recovered the latest period-end run."""
-    range_start = as_of - timedelta(days=29)
-    with Session(engine) as session:
-        period_end = session.scalars(
-            select(DailyReportRun)
-            .where(
-                DailyReportRun.slot == "pre_close",
-                DailyReportRun.business_date <= as_of,
-            )
-            .order_by(
-                DailyReportRun.captured_at.desc(),
-                DailyReportRun.created_at.desc(),
-            )
-            .limit(1)
-        ).first()
-        latest_verified_at = session.scalar(
-            select(func.max(DailySalesMetricState.verified_at)).where(
-                DailySalesMetricState.metric_date >= range_start,
-                DailySalesMetricState.metric_date <= as_of,
-                DailySalesMetricState.source_kind == "takealot_sales_api",
-            )
-        )
-        metric_date_count = int(
-            session.scalar(
-                select(func.count(func.distinct(DailyProductMetric.metric_date))).where(
-                    DailyProductMetric.metric_date >= range_start,
-                    DailyProductMetric.metric_date <= as_of,
-                )
-            )
-            or 0
-        )
-        tracked_metric_date_count = int(
-            session.scalar(
-                select(
-                    func.count(func.distinct(DailySalesMetricState.metric_date))
-                ).where(
-                    DailySalesMetricState.metric_date >= range_start,
-                    DailySalesMetricState.metric_date <= as_of,
-                )
-            )
-            or 0
-        )
-        metric_date_count = max(metric_date_count, tracked_metric_date_count)
-        verified_after_failure_count = 0
-        if period_end is not None and period_end.status == "failed":
-            verified_after_failure_count = int(
-                session.scalar(
-                    select(
-                        func.count(func.distinct(DailySalesMetricState.metric_date))
-                    ).where(
-                        DailySalesMetricState.metric_date >= range_start,
-                        DailySalesMetricState.metric_date <= as_of,
-                        DailySalesMetricState.source_kind == "takealot_sales_api",
-                        DailySalesMetricState.verified_at > period_end.captured_at,
-                    )
-                )
-                or 0
-            )
-        revision_rows = session.scalars(
-            select(SalesRevenueRevision)
-            .where(
-                SalesRevenueRevision.metric_date <= as_of
-            )
-            .order_by(
-                SalesRevenueRevision.detected_at,
-                SalesRevenueRevision.id,
-            )
-        ).all()
-        meaningful_revisions = [
-            row for row in revision_rows if is_closed_day_sales_revision(row)
-        ]
-        revision_total = len(meaningful_revisions)
-        latest_revision_at = (
-            meaningful_revisions[-1].detected_at if meaningful_revisions else None
-        )
-
-    period_end_captured_at = period_end.captured_at if period_end is not None else None
-    if period_end is None:
-        status = "unverified"
-    elif period_end.status != "failed":
-        status = "verified"
-    elif metric_date_count > 0 and verified_after_failure_count == metric_date_count:
-        status = "recovered"
-    else:
-        status = "pending"
-    counts = period_end.counts if period_end is not None else None
-    reason = None
-    if isinstance(counts, Mapping):
-        reason = str(
-            counts.get("final_reason") or counts.get("missing_reason") or ""
-        ).strip() or None
-    return {
-        "store_code": store.code,
-        "store_name": store.display_name,
-        "status": status,
-        "period_end_business_date": (
-            period_end.business_date.isoformat() if period_end is not None else None
-        ),
-        "period_end_status": period_end.status if period_end is not None else None,
-        "period_end_captured_at": (
-            period_end_captured_at.isoformat()
-            if period_end_captured_at is not None
-            else None
-        ),
-        "period_end_failure_reason": reason if period_end is not None and period_end.status == "failed" else None,
-        "latest_sales_verified_at": (
-            latest_verified_at.isoformat() if latest_verified_at is not None else None
-        ),
-        "metric_date_count": metric_date_count,
-        "verified_after_failure_count": verified_after_failure_count,
-        "revision_count": revision_total,
-        "latest_revision_at": (
-            latest_revision_at.isoformat() if latest_revision_at is not None else None
-        ),
-    }
 
 
 def _sales_reconciliation_summary(
@@ -1434,6 +1204,8 @@ def create_app(project_root: Path | None = None) -> FastAPI:
     collection_stop_lock = asyncio.Lock()
     competitor_public_client = _SharedCompetitorPublicClient(max_uses=25)
     database_url = DashboardSettings.from_env(root).database_url
+    read_engine = create_read_only_erp_engine(database_url)
+    read_projection_cache = ReadProjectionCache(ttl_seconds=20.0, max_entries=48)
     collection_registry = CollectionBatchRegistry(
         None
         if database_url.startswith("sqlite")
@@ -1442,7 +1214,9 @@ def create_app(project_root: Path | None = None) -> FastAPI:
     listing_preview_registry = CompetitorListingPreviewRegistry()
     refresh_coordinator = RefreshCoordinator(root)
     product_thumbnails = ProductThumbnailCache(root)
-    cny_zar_rates = CnyZarRateService()
+    cny_zar_rates = CnyZarRateService(
+        cache_path=root / "data" / "runtime-cache" / "exchange-rates" / "cny-zar.json"
+    )
     anomaly_product_cache = AnomalyProductPayloadCache()
     logistics_overview = LogisticsOverviewService(root)
     platform_warehouse = PlatformWarehouseService(root)
@@ -1470,6 +1244,7 @@ def create_app(project_root: Path | None = None) -> FastAPI:
             product_thumbnails.close()
             cny_zar_rates.close()
             auth.close()
+            read_engine.dispose()
 
     app = FastAPI(
         title="Takealot 本地运营 ERP",
@@ -1485,10 +1260,12 @@ def create_app(project_root: Path | None = None) -> FastAPI:
     app.state.anomaly_product_cache = anomaly_product_cache
     app.state.search_ranking_service = search_ranking
     app.state.search_ranking_batch_controller = search_ranking_batch
+    app.state.read_engine = read_engine
+    app.state.read_projection_cache = read_projection_cache
 
     def _control_search_ranking_batch(
         request: Request,
-        action: Literal["pause", "resume", "stop"],
+        action: Literal["pause", "resume", "retry_failed", "stop"],
     ) -> dict[str, Any]:
         controller: SearchRankingBatchController = (
             request.app.state.search_ranking_batch_controller
@@ -1537,6 +1314,19 @@ def create_app(project_root: Path | None = None) -> FastAPI:
                     "当前账号仍可新增链接并管理自己的个人监控池"
                 ),
             )
+
+    @app.middleware("http")
+    async def invalidate_read_cache_after_mutation(
+        request: Request,
+        call_next: Callable[[Request], Awaitable[Response]],
+    ) -> Response:
+        response = await call_next(request)
+        if (
+            request.method not in {"GET", "HEAD", "OPTIONS"}
+            and response.status_code < 400
+        ):
+            read_projection_cache.clear()
+        return response
 
     @app.middleware("http")
     async def enforce_permissions(
@@ -1816,13 +1606,11 @@ def create_app(project_root: Path | None = None) -> FastAPI:
 
     @app.get("/api/erp/freshness")
     def freshness() -> dict[str, str | None]:
-        settings = DashboardSettings.from_env(root)
-        path = sqlite_database_path(settings.database_url)
+        path = sqlite_database_path(database_url)
         if path is not None and not path.exists():
             return {"last_collection_at": None, "latest_metric_date": None}
-        engine = create_read_only_erp_engine(settings.database_url)
         try:
-            with Session(engine) as session:
+            with Session(read_engine) as session:
                 last_collection = session.scalar(
                     select(func.max(CollectionRun.finished_at)).where(
                         CollectionRun.status == "success",
@@ -1832,8 +1620,6 @@ def create_app(project_root: Path | None = None) -> FastAPI:
                 latest_metric = session.scalar(select(func.max(DailyProductMetric.metric_date)))
         except SQLAlchemyError:
             return {"last_collection_at": None, "latest_metric_date": None}
-        finally:
-            engine.dispose()
         return {
             "last_collection_at": (
                 last_collection.isoformat() if last_collection is not None else None
@@ -1903,80 +1689,91 @@ def create_app(project_root: Path | None = None) -> FastAPI:
         """Return a compact comparison for the authorized multi-store scope."""
         if start_date is not None and start_date > as_of:
             raise HTTPException(status_code=422, detail="开始日期不能晚于截止日期")
-        settings = DashboardSettings.from_env(root)
-        completed_sales_through = min(
-            as_of,
-            sast_date(datetime.now(UTC)) - timedelta(days=1),
-        )
         stores = _multi_store_identities_for_request(request, selected_store_scope)
-        items: list[dict[str, Any]] = []
-        revenue_series_by_store: dict[str, Sequence[Mapping[str, Any]]] = {}
-        revenue_states_by_store: dict[str, Mapping[str, Mapping[str, Any]]] = {}
-        sales_reconciliation_by_store: dict[str, Mapping[str, Any]] = {}
-        engine = create_read_only_erp_engine(settings.database_url)
-        try:
+        store_codes = tuple(store.code for store in stores)
+        cache_key = (
+            "store-summaries-v2",
+            store_codes,
+            as_of.isoformat(),
+            start_date.isoformat() if start_date is not None else None,
+        )
+
+        def load_projection() -> dict[str, Any]:
+            completed_sales_through = min(
+                as_of,
+                sast_date(datetime.now(UTC)) - timedelta(days=1),
+            )
             try:
-                operators_by_store = _responsible_users_by_store(engine, stores)
+                operators_by_store = _responsible_users_by_store(read_engine, stores)
             except SQLAlchemyError:
                 operators_by_store = {store.code: [] for store in stores}
+            try:
+                metrics_by_store = load_store_metric_projections(
+                    read_engine,
+                    store_codes,
+                    as_of=as_of,
+                    start_date=start_date,
+                )
+            except SQLAlchemyError:
+                metrics_by_store = {
+                    code: _empty_store_metric_projection() for code in store_codes
+                }
+            try:
+                traffic_by_store = load_store_traffic_series(
+                    read_engine,
+                    store_codes,
+                    as_of=as_of,
+                    days=(as_of - start_date).days + 1 if start_date else 30,
+                )
+            except SQLAlchemyError:
+                traffic_by_store = {code: [] for code in store_codes}
+            try:
+                inventory_by_store = load_store_inventory_projections(
+                    read_engine,
+                    store_codes,
+                )
+            except SQLAlchemyError:
+                inventory_by_store = {
+                    code: _empty_store_inventory() for code in store_codes
+                }
+            try:
+                revenue_states_by_store = load_store_sales_metric_states(
+                    read_engine,
+                    store_codes,
+                    as_of=as_of,
+                    start_date=start_date,
+                )
+            except SQLAlchemyError:
+                revenue_states_by_store = {code: {} for code in store_codes}
+            try:
+                sales_reconciliation_by_store = load_store_sales_reconciliations(
+                    read_engine,
+                    {store.code: store.display_name for store in stores},
+                    as_of=as_of,
+                )
+            except SQLAlchemyError:
+                sales_reconciliation_by_store = {
+                    store.code: _empty_store_sales_reconciliation(store)
+                    for store in stores
+                }
+
+            items: list[dict[str, Any]] = []
+            revenue_series_by_store: dict[str, Sequence[Mapping[str, Any]]] = {}
             for store in stores:
-                with store_scope(store.code):
-                    dataset = load_erp_dataset(settings, as_of)
-                    payload = (
-                        build_summary_payload(
-                            dataset,
-                            as_of,
-                            start_date=start_date,
-                        )
-                        if start_date is not None
-                        else build_summary_payload(dataset, as_of)
-                    )
-                    try:
-                        traffic_series = (
-                            period_end_traffic_series(
-                                engine,
-                                as_of=as_of,
-                                days=(as_of - start_date).days + 1,
-                            )
-                            if start_date is not None
-                            else period_end_traffic_series(engine, as_of=as_of)
-                        )
-                    except SQLAlchemyError:
-                        traffic_series = []
-                    try:
-                        inventory = _store_inventory_snapshot(engine)
-                    except SQLAlchemyError:
-                        inventory = _empty_store_inventory()
-                    try:
-                        revenue_states = _store_sales_metric_states(
-                            engine,
-                            as_of=as_of,
-                            start_date=start_date,
-                        )
-                    except SQLAlchemyError:
-                        revenue_states = {}
-                    try:
-                        sales_reconciliation = _store_sales_reconciliation(
-                            engine,
-                            store=store,
-                            as_of=as_of,
-                        )
-                    except SQLAlchemyError:
-                        sales_reconciliation = {
-                            "store_code": store.code,
-                            "store_name": store.display_name,
-                            "status": "unverified",
-                            "period_end_business_date": None,
-                            "period_end_status": None,
-                            "period_end_captured_at": None,
-                            "period_end_failure_reason": None,
-                            "latest_sales_verified_at": None,
-                            "revision_count": 0,
-                            "latest_revision_at": None,
-                        }
+                payload = metrics_by_store.get(
+                    store.code,
+                    _empty_store_metric_projection(),
+                )
+                traffic_series = traffic_by_store.get(store.code, [])
+                inventory = inventory_by_store.get(
+                    store.code,
+                    _empty_store_inventory(),
+                )
+                sales_reconciliation = sales_reconciliation_by_store.get(
+                    store.code,
+                    _empty_store_sales_reconciliation(store),
+                )
                 revenue_series_by_store[store.code] = payload.get("sales_series", [])
-                revenue_states_by_store[store.code] = revenue_states
-                sales_reconciliation_by_store[store.code] = sales_reconciliation
                 item = {
                     "store_code": store.code,
                     "store_name": store.display_name,
@@ -1999,39 +1796,42 @@ def create_app(project_root: Path | None = None) -> FastAPI:
                 )
             )
             try:
-                overseas_inventory = _shared_overseas_inventory(engine, stores)
+                overseas_inventory = load_shared_overseas_inventory(
+                    read_engine,
+                    store_codes,
+                )
             except SQLAlchemyError:
                 overseas_inventory = _empty_overseas_inventory()
-        finally:
-            engine.dispose()
-        return {
-            "as_of": as_of.isoformat(),
-            "range_start": (
-                start_date.isoformat()
-                if start_date is not None
-                else (as_of - timedelta(days=29)).isoformat()
-            ),
-            "range_end": as_of.isoformat(),
-            "store_count": len(items),
-            "health_summary": _health_rollup(items),
-            "sales_revenue_series": _aggregate_store_revenue_series(
-                revenue_series_by_store,
-                store_states=revenue_states_by_store,
-                reconciliation_by_store=sales_reconciliation_by_store,
-                start_date=start_date,
-                completed_through=completed_sales_through,
-                limit=None if start_date is not None else 30,
-            ),
-            "sales_revenue_completed_through": completed_sales_through.isoformat(),
-            "sales_reconciliation": _sales_reconciliation_summary(
-                tuple(sales_reconciliation_by_store.values())
-            ),
-            "logistics": {
-                "overseas_warehouse": overseas_inventory,
-                "platform_warehouse": _aggregate_platform_inventory(items),
-            },
-            "stores": items,
-        }
+            return {
+                "as_of": as_of.isoformat(),
+                "range_start": (
+                    start_date.isoformat()
+                    if start_date is not None
+                    else (as_of - timedelta(days=29)).isoformat()
+                ),
+                "range_end": as_of.isoformat(),
+                "store_count": len(items),
+                "health_summary": _health_rollup(items),
+                "sales_revenue_series": _aggregate_store_revenue_series(
+                    revenue_series_by_store,
+                    store_states=revenue_states_by_store,
+                    reconciliation_by_store=sales_reconciliation_by_store,
+                    start_date=start_date,
+                    completed_through=completed_sales_through,
+                    limit=None if start_date is not None else 30,
+                ),
+                "sales_revenue_completed_through": completed_sales_through.isoformat(),
+                "sales_reconciliation": _sales_reconciliation_summary(
+                    tuple(sales_reconciliation_by_store.values())
+                ),
+                "logistics": {
+                    "overseas_warehouse": overseas_inventory,
+                    "platform_warehouse": _aggregate_platform_inventory(items),
+                },
+                "stores": items,
+            }
+
+        return read_projection_cache.get_or_load(cache_key, load_projection)
 
     @app.get("/api/erp/summary/stores/sales-revisions")
     def store_sales_revisions(
@@ -2445,6 +2245,10 @@ def create_app(project_root: Path | None = None) -> FastAPI:
     async def resume_search_ranking_batch(request: Request) -> dict[str, Any]:
         return _control_search_ranking_batch(request, "resume")
 
+    @app.post("/api/erp/search-ranking/batch/retry-failed")
+    async def retry_failed_search_ranking_batch(request: Request) -> dict[str, Any]:
+        return _control_search_ranking_batch(request, "retry_failed")
+
     @app.post("/api/erp/search-ranking/batch/stop")
     async def stop_search_ranking_batch(request: Request) -> dict[str, Any]:
         return _control_search_ranking_batch(request, "stop")
@@ -2636,26 +2440,49 @@ def create_app(project_root: Path | None = None) -> FastAPI:
             raise HTTPException(status_code=422, detail="分位数只能是25、50或75")
         settings = DashboardSettings.from_env(root)
         stores = _read_store_identities_for_request(request, selected_store_scope)
-        dataset, offer_scope = _combined_store_dataset(settings, as_of, stores)
-        payload = build_quadrant_payload(dataset, as_of, percentile)
-        scoped_items: list[dict[str, Any]] = []
-        for item in payload.get("items", []):
-            record = dict(item)
-            synthetic_offer_id = str(record.get("offer_id") or "")
-            identity = offer_scope.get(synthetic_offer_id)
-            if identity is not None:
-                store, original_offer_id = identity
-                record["offer_id"] = original_offer_id
-                record = _tag_store_record(record, store)
-            scoped_items.append(record)
-        payload["items"] = _product_master_records(
-            root,
-            scoped_items,
-            as_of_date=as_of,
+        cache_key = (
+            "quadrants-v2",
+            selected_store_scope,
+            tuple(store.code for store in stores),
+            as_of.isoformat(),
+            percentile,
         )
-        payload["store_scope"] = selected_store_scope
-        payload["store_count"] = len(stores)
-        return payload
+
+        def load_projection() -> dict[str, Any]:
+            dataset, offer_scope = _combined_store_dataset(
+                settings,
+                as_of,
+                stores,
+                dataset_loader=lambda configured_settings, requested_as_of: (
+                    load_quadrant_dataset(
+                        configured_settings,
+                        requested_as_of,
+                        engine=read_engine,
+                    )
+                ),
+            )
+            payload = build_quadrant_payload(dataset, as_of, percentile)
+            scoped_items: list[dict[str, Any]] = []
+            for item in payload.get("items", []):
+                record = dict(item)
+                synthetic_offer_id = str(record.get("offer_id") or "")
+                identity = offer_scope.get(synthetic_offer_id)
+                if identity is not None:
+                    store, original_offer_id = identity
+                    record["offer_id"] = original_offer_id
+                    record = _tag_store_record(record, store)
+                scoped_items.append(record)
+            payload["items"] = _product_master_records(
+                root,
+                scoped_items,
+                as_of_date=as_of,
+                engine=read_engine,
+            )
+            payload["store_scope"] = selected_store_scope
+            payload["store_count"] = len(stores)
+            return payload
+
+        return read_projection_cache.get_or_load(cache_key, load_projection)
 
     @app.get("/api/erp/product-thumbnail")
     def product_thumbnail(
@@ -3447,23 +3274,39 @@ def create_app(project_root: Path | None = None) -> FastAPI:
         start_date: date | None = Query(default=None),
         end_date: date | None = Query(default=None),
         own_store_scope: Literal["current", "all", "operating"] = Query(default="current"),
+        include_own_store: bool = Query(default=True),
     ) -> dict[str, object]:
-        dataset = _load_competitor_dataset(
-            root,
-            start_date=start_date,
-            end_date=end_date,
-            own_store_codes=_own_store_codes_for_request(request, own_store_scope),
-            include_detail_frames=False,
+        own_store_codes = _own_store_codes_for_request(request, own_store_scope)
+        cache_key = (
+            "competitors-list-v3",
+            tuple(sorted(own_store_codes)),
+            start_date.isoformat() if start_date else None,
+            end_date.isoformat() if end_date else None,
+            include_own_store,
         )
-        return {
-            "items": frame_records(dataset.current),
-            "store_items": _product_master_competitor_store_records(
+
+        def load_projection() -> dict[str, object]:
+            dataset = _load_competitor_dataset(
                 root,
-                frame_records(dataset.store_current),
-            ),
-            "own_follower_events": dataset.own_follower_events,
-            "date_range": dataset.date_range_payload(),
-        }
+                start_date=start_date,
+                end_date=end_date,
+                own_store_codes=own_store_codes,
+                include_detail_frames=False,
+                include_store_projection=include_own_store,
+                engine=read_engine,
+            )
+            return {
+                "items": frame_records(dataset.current),
+                "store_items": _product_master_competitor_store_records(
+                    root,
+                    frame_records(dataset.store_current),
+                    engine=read_engine,
+                ),
+                "own_follower_events": dataset.own_follower_events,
+                "date_range": dataset.date_range_payload(),
+            }
+
+        return read_projection_cache.get_or_load(cache_key, load_projection)
 
     @app.get("/api/competitors/own-store")
     def own_store_competitors(
@@ -3476,34 +3319,43 @@ def create_app(project_root: Path | None = None) -> FastAPI:
         ),
     ) -> dict[str, object]:
         """Return only the scope-dependent private-store radar partition."""
-        dataset = _load_competitor_dataset(
-            root,
-            start_date=start_date,
-            end_date=end_date,
-            own_store_codes=_own_store_codes_for_request(request, own_store_scope),
-            plids={plid} if plid else None,
-            include_detail_frames=False,
-            own_store_only=True,
+        own_store_codes = _own_store_codes_for_request(request, own_store_scope)
+        cache_key = (
+            "competitors-own-store-v2",
+            tuple(sorted(own_store_codes)),
+            start_date.isoformat() if start_date else None,
+            end_date.isoformat() if end_date else None,
+            plid,
         )
-        return {
-            "store_items": _product_master_competitor_store_records(
+
+        def load_projection() -> dict[str, object]:
+            dataset = _load_competitor_dataset(
                 root,
-                frame_records(dataset.store_current),
-            ),
-            "date_range": dataset.date_range_payload(),
-        }
+                start_date=start_date,
+                end_date=end_date,
+                own_store_codes=own_store_codes,
+                plids={plid} if plid else None,
+                include_detail_frames=False,
+                own_store_only=True,
+                engine=read_engine,
+            )
+            return {
+                "store_items": _product_master_competitor_store_records(
+                    root,
+                    frame_records(dataset.store_current),
+                    engine=read_engine,
+                ),
+                "date_range": dataset.date_range_payload(),
+            }
+
+        return read_projection_cache.get_or_load(cache_key, load_projection)
 
     @app.get("/api/competitors/link-health")
     def competitor_link_health(
         request: Request,
     ) -> dict[str, list[dict[str, Any]]]:
         require_competitor_admin(request)
-        settings = DashboardSettings.from_env(root)
-        engine = create_read_only_erp_engine(settings.database_url)
-        try:
-            return {"items": load_competitor_link_health(engine)}
-        finally:
-            engine.dispose()
+        return {"items": load_competitor_link_health(read_engine)}
 
     @app.get("/api/competitors/batch-status")
     def competitor_batch_status() -> dict[str, object]:
@@ -3669,16 +3521,11 @@ def create_app(project_root: Path | None = None) -> FastAPI:
         """Hydrate personal-pool cards across every store authorized to the account."""
 
         user = request.state.erp_user
-        settings = DashboardSettings.from_env(root)
-        engine = create_read_only_erp_engine(settings.database_url)
-        try:
-            with Session(engine) as session:
-                plids = _personal_watchlist_projection_plids(
-                    session,
-                    user_id=user.id,
-                )
-        finally:
-            engine.dispose()
+        with Session(read_engine) as session:
+            plids = _personal_watchlist_projection_plids(
+                session,
+                user_id=user.id,
+            )
         dataset = _load_competitor_dataset(
             root,
             start_date=start_date,
@@ -3686,12 +3533,14 @@ def create_app(project_root: Path | None = None) -> FastAPI:
             own_store_codes=_own_store_codes_for_request(request, "all"),
             plids=plids,
             include_detail_frames=False,
+            engine=read_engine,
         )
         return {
             "items": frame_records(dataset.current),
             "store_items": _product_master_competitor_store_records(
                 root,
                 frame_records(dataset.store_current),
+                engine=read_engine,
             ),
             "own_follower_events": [],
             "date_range": dataset.date_range_payload(),
@@ -4613,7 +4462,7 @@ def create_app(project_root: Path | None = None) -> FastAPI:
         if normalized_plid != plid:
             raise HTTPException(
                 status_code=422,
-                detail="修改链接不能改变 PLID；请删除旧链接后再新增",
+                detail="修改链接不能改变 PLID；请直接新增另一条监控链接",
             )
         user = request.state.erp_user
         settings = DashboardSettings.from_env(root)
@@ -4653,48 +4502,6 @@ def create_app(project_root: Path | None = None) -> FastAPI:
             user.username,
         )
         return {"item": result}
-
-    @app.delete("/api/competitors/targets/{plid}")
-    def delete_competitor_target(
-        plid: str,
-        request: Request,
-    ) -> dict[str, object]:
-        require_competitor_admin(request)
-        user = request.state.erp_user
-        settings = DashboardSettings.from_env(root)
-        engine = create_engine_for_settings(settings)
-        try:
-            create_schema(engine)
-            now = datetime.now(UTC)
-            with Session(engine) as session:
-                target = session.get(CompetitorTarget, plid)
-                if target is None or not target.active:
-                    raise HTTPException(status_code=404, detail=f"PLID{plid} 不在监控清单中")
-                old_url = target.url
-                target.active = False
-                target.updated_at = now
-                session.add(
-                    _competitor_target_audit(
-                        plid=plid,
-                        action="delete",
-                        old_url=old_url,
-                        new_url=None,
-                        user=user,
-                        changed_at=now,
-                    )
-                )
-                session.commit()
-        finally:
-            engine.dispose()
-        competitor_logger.info(
-            "target_change action=delete plid=%s user=%s",
-            plid,
-            user.username,
-        )
-        return {
-            "ok": True,
-            "history_retained": True,
-        }
 
     @app.post("/api/competitors/targets/{plid}/prioritize")
     def prioritize_competitor_target(
@@ -5003,6 +4810,7 @@ def create_app(project_root: Path | None = None) -> FastAPI:
             end_date=end_date,
             own_store_codes=own_store_codes,
             plids={plid},
+            engine=read_engine,
         )
         history = dataset.history
         reviews = dataset.reviews
@@ -6977,6 +6785,8 @@ def _load_competitor_dataset(
     plids: set[str] | None = None,
     include_detail_frames: bool = True,
     own_store_only: bool = False,
+    include_store_projection: bool = True,
+    engine: Engine | None = None,
 ) -> CompetitorDataset:
     if start_date is not None and end_date is not None and start_date > end_date:
         raise HTTPException(status_code=422, detail="开始日期不能晚于结束日期")
@@ -6991,22 +6801,25 @@ def _load_competitor_dataset(
             selected_start_date=start_date,
             selected_end_date=end_date,
         )
-    engine = create_read_only_erp_engine(settings.database_url)
+    owned_engine = engine is None
+    read_engine = engine or create_read_only_erp_engine(settings.database_url)
     try:
         try:
             return load_competitor_dataset(
-                engine,
+                read_engine,
                 start_date=start_date,
                 end_date=end_date,
                 own_store_codes=own_store_codes,
                 plids=plids,
                 include_detail_frames=include_detail_frames,
                 own_store_only=own_store_only,
+                include_store_projection=include_store_projection,
             )
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
     finally:
-        engine.dispose()
+        if owned_engine:
+            read_engine.dispose()
 
 
 def _product_master_records(
@@ -7015,15 +6828,17 @@ def _product_master_records(
     *,
     sku_field: str = "sku",
     as_of_date: date | None = None,
+    engine: Engine | None = None,
 ) -> list[dict[str, Any]]:
     """Attach global company identity using only the local read-only database."""
     copied = [dict(record) for record in records]
     if not copied:
         return copied
     settings = DashboardSettings.from_env(project_root)
-    engine = create_read_only_erp_engine(settings.database_url)
+    owned_engine = engine is None
+    read_engine = engine or create_read_only_erp_engine(settings.database_url)
     try:
-        with Session(engine) as session:
+        with Session(read_engine) as session:
             return enrich_product_master_records(
                 session,
                 copied,
@@ -7042,12 +6857,15 @@ def _product_master_records(
             )
         return copied
     finally:
-        engine.dispose()
+        if owned_engine:
+            read_engine.dispose()
 
 
 def _product_master_competitor_store_records(
     project_root: Path,
     records: Sequence[Mapping[str, Any]],
+    *,
+    engine: Engine | None = None,
 ) -> list[dict[str, Any]]:
     """Enrich only the own-store identities nested in private-link cards."""
     copied = [dict(record) for record in records]
@@ -7068,6 +6886,7 @@ def _product_master_competitor_store_records(
         project_root,
         nested_records,
         sku_field="SKU",
+        engine=engine,
     )
     for (item_index, field, offer_index), offer in zip(
         nested_locations,
@@ -7476,6 +7295,10 @@ def _combined_store_dataset(
     settings: DashboardSettings,
     as_of: date,
     stores: Sequence[StoreIdentity],
+    *,
+    dataset_loader: Callable[
+        [DashboardSettings, date], DashboardDataset
+    ] = load_erp_dataset,
 ) -> tuple[DashboardDataset, dict[str, tuple[StoreIdentity, str]]]:
     """Combine authorized store frames with collision-proof internal Offer IDs."""
     scoped_datasets: list[DashboardDataset] = []
@@ -7490,7 +7313,7 @@ def _combined_store_dataset(
     )
     for store in stores:
         with store_scope(store.code):
-            dataset = load_erp_dataset(settings, as_of)
+            dataset = dataset_loader(settings, as_of)
         replacements: dict[str, pd.DataFrame] = {}
         for field_name in frame_fields:
             frame = getattr(dataset, field_name).copy()
@@ -7542,6 +7365,10 @@ def _aggregate_anomaly_payloads(
     first_payload = store_payloads[0][1] if store_payloads else {}
     sudden: list[dict[str, Any]] = []
     slow: list[dict[str, Any]] = []
+    daily_bad_reviews: list[dict[str, Any]] = []
+    poor_review_quality: list[dict[str, Any]] = []
+    return_product_totals: list[dict[str, Any]] = []
+    return_coverages: list[dict[str, Any]] = []
     stock_groups: dict[str, list[dict[str, Any]]] = {
         "not_buyable": [],
         "disabled_by_takealot": [],
@@ -7552,6 +7379,34 @@ def _aggregate_anomaly_payloads(
         store_data_through[store.code] = payload.get("data_through")
         sudden.extend(_tag_store_records(payload.get("sudden_sales_stop", []), store))
         slow.extend(_tag_store_records(payload.get("slow_moving", []), store))
+        daily_bad_reviews.extend(
+            _tag_store_records(
+                payload.get("daily_bad_reviews", []),
+                store,
+                identity_fields=("plid",),
+            )
+        )
+        poor_review_quality.extend(
+            _tag_store_records(
+                payload.get("poor_review_quality", []),
+                store,
+                identity_fields=("plid",),
+            )
+        )
+        return_product_totals.extend(
+            _tag_store_records(
+                payload.get(
+                    "return_product_totals",
+                    payload.get("high_returns", []),
+                ),
+                store,
+                identity_fields=("company_sku",),
+            )
+        )
+        coverage = dict(payload.get("return_coverage") or {})
+        coverage["store_code"] = store.code
+        coverage["store_name"] = store.display_name
+        return_coverages.append(coverage)
         raw_groups = payload.get("stock_status_anomalies", {})
         for key in stock_groups:
             stock_groups[key].extend(
@@ -7559,6 +7414,20 @@ def _aggregate_anomaly_payloads(
             )
     sudden = _product_master_records(project_root, sudden, as_of_date=requested_as_of)
     slow = _product_master_records(project_root, slow, as_of_date=requested_as_of)
+    daily_bad_reviews = merge_review_anomaly_items(
+        _product_master_records(
+            project_root,
+            daily_bad_reviews,
+            as_of_date=requested_as_of,
+        )
+    )
+    poor_review_quality = merge_review_anomaly_items(
+        _product_master_records(
+            project_root,
+            poor_review_quality,
+            as_of_date=requested_as_of,
+        )
+    )
     for key, records in stock_groups.items():
         stock_groups[key] = _product_master_records(
             project_root,
@@ -7567,7 +7436,28 @@ def _aggregate_anomaly_payloads(
         )
     rules = dict(first_payload.get("rules") or {})
     slow_options = [int(value) for value in rules.get("slow_day_options", [])]
+    high_returns = merge_return_anomaly_items(
+        return_product_totals,
+        minimum_units=max(1, int(rules.get("high_return_min_units") or 5)),
+    )
+    return_coverage = merge_return_coverage(return_coverages)
     valid_data_dates = [value for value in store_data_through.values() if value]
+    review_discovery_dates = [
+        str(payload.get("review_discovery_through"))
+        for _, payload in store_payloads
+        if payload.get("review_discovery_through")
+    ]
+    collection_times = {
+        field_name: _latest_text(
+            [
+                (payload.get("collection_times") or {}).get(field_name)
+                for _, payload in store_payloads
+                if isinstance(payload.get("collection_times"), Mapping)
+            ]
+        )
+        for field_name in ("offers_at", "sales_at", "reviews_at", "returns_at")
+    }
+    collection_times["latest_at"] = _latest_text(list(collection_times.values()))
     return {
         "requested_as_of": requested_as_of.isoformat(),
         "completed_through": completed_through.isoformat(),
@@ -7576,6 +7466,7 @@ def _aggregate_anomaly_payloads(
         "store_scope": selected_store_scope,
         "store_count": len(store_payloads),
         "date_basis": first_payload.get("date_basis", "Africa/Johannesburg"),
+        "collection_times": collection_times,
         "sales_zero_evidence": first_payload.get(
             "sales_zero_evidence",
             "verified_complete_business_days_only",
@@ -7596,10 +7487,20 @@ def _aggregate_anomaly_payloads(
                 )
                 for days in slow_options
             },
+            "daily_bad_reviews": len(daily_bad_reviews),
+            "poor_review_quality": len(poor_review_quality),
+            "high_returns": len(high_returns),
         },
         "sudden_sales_stop": sudden,
         "stock_status_anomalies": stock_groups,
         "slow_moving": slow,
+        "daily_bad_reviews": daily_bad_reviews,
+        "poor_review_quality": poor_review_quality,
+        "review_discovery_through": (
+            max(review_discovery_dates) if review_discovery_dates else None
+        ),
+        "return_coverage": return_coverage,
+        "high_returns": high_returns,
     }
 
 

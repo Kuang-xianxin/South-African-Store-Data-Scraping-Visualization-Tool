@@ -13,7 +13,6 @@ import {
   deleteCompetitorPersonalWatchlistItem,
   deletePersonalWatchlistLibraryItem,
   deletePersonalWatchlistLibrary,
-  deleteCompetitorTarget,
   fetchCompetitorBatchStatus,
   fetchCompetitorDetail,
   fetchCompetitorLinkHealth,
@@ -103,7 +102,10 @@ import {
   type OwnOfferStockFilter,
 } from "../ownOfferLatestStatus";
 import { PRODUCT_IMAGE_SIZE, productThumbnailUrl } from "../productImages";
-import { modulePageHref } from "../moduleNavigation";
+import {
+  modulePageHref,
+  openOwnStoreDetailTab,
+} from "../moduleNavigation";
 import {
   buildPersonalWatchlistWorkspaceCards,
   filterPersonalWatchlistWorkspaceCards,
@@ -133,8 +135,12 @@ import {
   shouldPreserveActiveCollectionRequest,
 } from "../collectionRunLifecycle";
 import {
+  SHARED_BATCH_CHECKPOINT_YIELD_REASON,
+  activeSharedBatchSupersedesLocalCheckpoint,
   canUpdateVisibleBrowserForBatch,
+  scheduledRetryWaitLabel,
   stoppedScheduledBatchResumeCount,
+  suspendCheckpointForActiveSharedBatch,
 } from "../collectionBatchOptions";
 import type {
   CollectResult,
@@ -180,6 +186,8 @@ const props = defineProps<{
   ownStoreScope?: OwnStoreScope;
   requestedDetailPlid?: string;
   requestedDetailRevision?: number;
+  requestedDetailStartDate?: string;
+  requestedDetailEndDate?: string;
   onPermissionDenied?: () => void;
   detailOnly?: boolean;
 }>();
@@ -193,6 +201,54 @@ interface CollectionQueueItem {
 }
 
 type CompetitorDetailContext = "radar" | "personal_watchlist";
+
+type StandaloneOwnDetailTabId = "offers" | "profit" | "inventory" | "returns" | "reviews";
+
+interface StandaloneOwnDetailTab {
+  id: StandaloneOwnDetailTabId;
+  label: string;
+  description: string;
+  tabId: string;
+  panelId: string;
+}
+
+const standaloneOwnDetailTabs: readonly StandaloneOwnDetailTab[] = [
+  {
+    id: "offers",
+    label: "报价与销量",
+    description: "卖家、趋势、上架销量",
+    tabId: "own-detail-tab-offers",
+    panelId: "own-detail-panel-offers",
+  },
+  {
+    id: "profit",
+    label: "成本利润",
+    description: "成本、毛利、平台直接费用",
+    tabId: "own-detail-tab-profit",
+    panelId: "own-detail-panel-profit",
+  },
+  {
+    id: "inventory",
+    label: "库存",
+    description: "公司 SKU、平台仓、变体",
+    tabId: "own-detail-tab-inventory",
+    panelId: "own-detail-panel-inventory",
+  },
+  {
+    id: "returns",
+    label: "退货",
+    description: "滚动指标、覆盖、明细",
+    tabId: "own-detail-tab-returns",
+    panelId: "own-detail-panel-returns",
+  },
+  {
+    id: "reviews",
+    label: "评论",
+    description: "评价结构、筛选、明细",
+    tabId: "own-detail-tab-reviews",
+    panelId: "own-detail-panel-reviews",
+  },
+];
 
 interface CollectionErrorItem {
   plid: string;
@@ -228,6 +284,7 @@ interface OfferTrendPanelPoint {
 interface RequestedOwnStoreDetailBundle {
   overview: OwnStoreCompetitorOverview;
   detail: CompetitorDetail;
+  personalWatchlist: CompetitorPersonalWatchlistPayload;
 }
 
 interface OfferTrendTitleChangeMarker {
@@ -301,11 +358,14 @@ const personalWatchlistItems = ref<CompetitorPersonalWatchlistItem[]>([]);
 const personalWatchlistSharedItems = ref<PersonalWatchlistSharedItem[]>([]);
 const personalWatchlistPlids = ref<Set<string>>(new Set());
 const personalWatchlistBusyPlid = ref("");
+const personalWatchlistSelectionMode = ref(false);
+const selectedPersonalWatchlistPlids = ref<Set<string>>(new Set());
+const personalWatchlistBulkRemoving = ref(false);
 const personalWatchlistError = ref("");
 const personalWatchlistNotice = ref("");
 const personalWatchlistPage = ref(1);
-const personalWatchlistPageSize = ref(21);
-const personalWatchlistPageSizeOptions = [21, 51, 99] as const;
+const personalWatchlistPageSize = ref(3);
+const personalWatchlistPageSizeOptions = [3, 6, 9, 12, 15, 18, 21, 51, 99] as const;
 const personalWatchlistHighlightPlid = ref("");
 const personalWatchlistLibraries = ref<PersonalWatchlistLibrary[]>([]);
 const personalWatchlistDefaultConfigured = ref(false);
@@ -470,6 +530,11 @@ const detail = shallowRef<CompetitorDetail>({
 const detailModalOpen = ref(false);
 const detailLoading = ref(false);
 const detailError = ref("");
+const activeStandaloneOwnDetailTab = ref<StandaloneOwnDetailTabId>("offers");
+const activeStandaloneOwnDetailTabMeta = computed(
+  () => standaloneOwnDetailTabs.find((tab) => tab.id === activeStandaloneOwnDetailTab.value)
+    ?? standaloneOwnDetailTabs[0]!,
+);
 const competitorDetailCache = new Map<string, CompetitorDetail>();
 const competitorDetailCacheLimit = 24;
 const requestedOwnStoreDetailCache = new Map<string, {
@@ -593,6 +658,12 @@ const competitorDateRange = ref<CompetitorDateRange>({
   selected_start: null,
   selected_end: null,
 });
+const trueCompetitorDateRange = ref<CompetitorDateRange>({
+  available_start: null,
+  available_end: null,
+  selected_start: null,
+  selected_end: null,
+});
 const ownFollowerHistoryStartDate = ref("");
 const ownFollowerHistoryEndDate = ref("");
 const ownFollowerHistoryItems = ref<OwnFollowerHistoryItem[]>([]);
@@ -644,11 +715,24 @@ const showOwnProfitabilityPanel = computed(() =>
   selected.value?.来源 === "own_store"
   && selectedOffer.value?.报价来源 === "seller_api",
 );
+const showOwnProfitabilityShell = computed(() => selected.value?.来源 === "own_store");
 const selectedOwnProfitability = computed(() => {
   if (!showOwnProfitabilityPanel.value || !selectedOffer.value) return null;
   return (detail.value.own_store_profitability?.items ?? []).find(
     (item) => item.offer_key === selectedOffer.value?.报价键,
   ) ?? null;
+});
+const preferredOwnProfitabilityOffer = computed(() => {
+  const profitabilityOfferKeys = new Set(
+    (detail.value.own_store_profitability?.items ?? []).map((item) => item.offer_key),
+  );
+  const ownOffers = selectedComparisonOffers.value.filter(
+    (offer) => offer.报价来源 === "seller_api",
+  );
+  return ownOffers.find((offer) => profitabilityOfferKeys.has(offer.报价键))
+    ?? ownOffers.find((offer) => offer.是否主报价)
+    ?? ownOffers[0]
+    ?? null;
 });
 const selectedOfferLink = computed(
   () => selectedOffer.value?.链接 || selected.value?.链接 || "#",
@@ -718,7 +802,10 @@ const offerTrendPanelCount = computed<CompetitorOfferTrendPanelCount>(
   () => showOwnTrafficPanel.value ? 4 : 3,
 );
 const offerTrendLayout = computed(() =>
-  buildCompetitorOfferTrendLayout(offerTrendPanelCount.value),
+  buildCompetitorOfferTrendLayout(
+    offerTrendPanelCount.value,
+    props.detailOnly ? "standalone-compact" : "standard",
+  ),
 );
 const offerTrendChartHeight = computed(() => offerTrendLayout.value.chartHeight);
 const offerTrendCursorBottom = computed(() => offerTrendLayout.value.cursorBottom);
@@ -1066,6 +1153,18 @@ const pagedPersonalWatchlistCards = computed(() => {
     start + personalWatchlistPageSize.value,
   );
 });
+const selectablePagedPersonalWatchlistCards = computed(() =>
+  pagedPersonalWatchlistCards.value.filter((card) => card.personalMember),
+);
+const selectedPersonalWatchlistCount = computed(() =>
+  selectedPersonalWatchlistPlids.value.size,
+);
+const personalWatchlistPageAllSelected = computed(() => (
+  selectablePagedPersonalWatchlistCards.value.length > 0
+  && selectablePagedPersonalWatchlistCards.value.every(
+    (card) => selectedPersonalWatchlistPlids.value.has(card.plid),
+  )
+));
 const selectedTarget = computed(
   () => targets.value.find((target) => target.plid === selectedPlid.value) ?? null,
 );
@@ -1134,11 +1233,21 @@ const sharedBatchMatchesCheckpoint = computed(
     && Boolean(batchId.value)
     && sharedBatchStatus.value.batch_id === batchId.value,
 );
+const localCheckpointSupersededBySharedBatch = computed(() =>
+  activeSharedBatchSupersedesLocalCheckpoint(
+    batchId.value,
+    sharedBatchStatus.value,
+  ),
+);
 const anotherBatchIsActive = computed(
   () =>
-    sharedBatchStatus.value.active
+    localCheckpointSupersededBySharedBatch.value
     && !collecting.value
-    && !sharedBatchMatchesCheckpoint.value,
+);
+const showLocalCollectionAlert = computed(
+  () =>
+    Boolean(collectionStopReason.value)
+    && !localCheckpointSupersededBySharedBatch.value,
 );
 const sharedBatchOwner = computed(
   () =>
@@ -1226,14 +1335,8 @@ const sharedRetryProgress = computed(() => {
     : `正在自动重试 ${attempt}/${MAX_AUTOMATIC_RETRY_ATTEMPTS}`;
 });
 const collectionAlertTitle = computed(() => {
-  if (sharedBatchStatus.value.active && !collecting.value) {
-    if (sharedBatchStatus.value.source === "scheduled") {
-      return "每日 09:00 自动采集正在运行";
-    }
-    if (sharedBatchMatchesCheckpoint.value) return "正在恢复刷新前的采集任务";
-    return sharedBatchBelongsToCurrentAccount.value
-      ? "本账号另一页面正在采集"
-      : "当前已有竞品采集正在运行";
+  if (sharedBatchMatchesCheckpoint.value && !collecting.value) {
+    return "正在恢复刷新前的采集任务";
   }
   if (autoResumeAt.value) return "网络异常，已安排自动续爬";
   return "本次采集已暂停";
@@ -1605,7 +1708,11 @@ const showCollectionDetails = computed(
     ),
 );
 const activeCollectionStatus = computed(() => {
-  void collectionClock.value;
+  const retryWaitLabel = scheduledRetryWaitLabel(
+    sharedBatchStatus.value,
+    collectionClock.value,
+  );
+  if (!collecting.value && retryWaitLabel) return retryWaitLabel;
   const shared = sharedBatchStatus.value;
   const sharedStage = shared.current_stage?.trim() || "";
   if (!collecting.value && shared.active) {
@@ -1633,6 +1740,9 @@ const activeCollectionStatus = computed(() => {
   return `正在检测第 ${activeIndex.value + 1}/${total.value} 条 · PLID${plid}${stage} · 已等待 ${elapsed} 秒`;
 });
 const activeCollectionHint = computed(() => {
+  if (sharedScheduledRetryWait.value) {
+    return "当前没有商品卡在浏览器中；这是服务端为疑似失效复核和失败任务保留的安全间隔，倒计时结束后会自动继续。";
+  }
   const stage = sharedBatchStatus.value.current_stage ?? "";
   if (
     stage.includes("后台数据")
@@ -1697,9 +1807,58 @@ function cacheScopeValue<T>(cache: Map<string, T>, key: string, value: T): void 
   if (oldestKey !== undefined) cache.delete(oldestKey);
 }
 
+function earlierDate(left: string | null, right: string | null): string | null {
+  if (!left) return right;
+  if (!right) return left;
+  return left <= right ? left : right;
+}
+
+function laterDate(left: string | null, right: string | null): string | null {
+  if (!left) return right;
+  if (!right) return left;
+  return left >= right ? left : right;
+}
+
+function mergedCompetitorDateRange(
+  ownStoreRange: CompetitorDateRange,
+): CompetitorDateRange {
+  const trueRange = trueCompetitorDateRange.value;
+  return {
+    available_start: earlierDate(
+      trueRange.available_start,
+      ownStoreRange.available_start,
+    ),
+    available_end: laterDate(
+      trueRange.available_end,
+      ownStoreRange.available_end,
+    ),
+    selected_start: trueRange.selected_start ?? ownStoreRange.selected_start,
+    selected_end: trueRange.selected_end ?? ownStoreRange.selected_end,
+  };
+}
+
 function applyOwnStoreOverview(overview: OwnStoreCompetitorOverview): void {
   storeCompetitors.value = overview.store_items;
-  competitorDateRange.value = overview.date_range;
+  const mergedRange = mergedCompetitorDateRange(overview.date_range);
+  competitorDateRange.value = mergedRange;
+  if (!appliedStartDate.value && mergedRange.selected_start) {
+    appliedStartDate.value = mergedRange.selected_start;
+  }
+  if (!appliedEndDate.value && mergedRange.selected_end) {
+    appliedEndDate.value = mergedRange.selected_end;
+  }
+  if (!rangeStartDate.value) rangeStartDate.value = appliedStartDate.value;
+  if (!rangeEndDate.value) rangeEndDate.value = appliedEndDate.value;
+  if (!ownFollowerHistoryStartDate.value) {
+    ownFollowerHistoryStartDate.value = (
+      mergedRange.selected_start ?? mergedRange.available_start ?? ""
+    );
+  }
+  if (!ownFollowerHistoryEndDate.value) {
+    ownFollowerHistoryEndDate.value = (
+      mergedRange.selected_end ?? mergedRange.available_end ?? ""
+    );
+  }
 }
 
 function applyStoreTargetPayload(payload: CompetitorStoreTargetPayload): void {
@@ -1958,7 +2117,7 @@ watch(
     personalLibraryDialogOpen,
   ]) => {
     document.body.style.overflow =
-      (detailOpen && detailSelected)
+      (!props.detailOnly && detailOpen && detailSelected)
         || targetManagerOpen
         || targetAuditDialogOpen
         || targetActionDialogOpen
@@ -2120,6 +2279,39 @@ function clearPersonalWatchlistFilters(): void {
   personalWatchlistSignalFilter.value = "全部";
 }
 
+function showStandaloneOwnDetailModule(tabId: StandaloneOwnDetailTabId): boolean {
+  return !props.detailOnly || activeStandaloneOwnDetailTab.value === tabId;
+}
+
+function selectStandaloneOwnDetailTab(tabId: StandaloneOwnDetailTabId): void {
+  activeStandaloneOwnDetailTab.value = tabId;
+}
+
+function handleStandaloneOwnDetailTabKeydown(event: KeyboardEvent, tabIndex: number): void {
+  let nextIndex: number | null = null;
+  if (event.key === "ArrowRight") {
+    nextIndex = (tabIndex + 1) % standaloneOwnDetailTabs.length;
+  } else if (event.key === "ArrowLeft") {
+    nextIndex = (tabIndex - 1 + standaloneOwnDetailTabs.length) % standaloneOwnDetailTabs.length;
+  } else if (event.key === "Home") {
+    nextIndex = 0;
+  } else if (event.key === "End") {
+    nextIndex = standaloneOwnDetailTabs.length - 1;
+  }
+  if (nextIndex === null) return;
+
+  event.preventDefault();
+  const nextTab = standaloneOwnDetailTabs[nextIndex]!;
+  selectStandaloneOwnDetailTab(nextTab.id);
+  const tabList = (event.currentTarget as HTMLElement).closest<HTMLElement>("[role='tablist']");
+  void nextTick(() => {
+    const nextButton = tabList
+      ?.querySelectorAll<HTMLButtonElement>("[role='tab']")
+      .item(nextIndex!);
+    nextButton?.focus();
+  });
+}
+
 async function applyDateRange(): Promise<void> {
   if (!rangeStartDate.value || !rangeEndDate.value) {
     pageError.value = "请选择完整的开始日期和结束日期";
@@ -2165,6 +2357,9 @@ function openProductModal(
   item: CompetitorItem,
   context: CompetitorDetailContext = "radar",
 ) {
+  if (props.detailOnly && item.来源 === "own_store") {
+    activeStandaloneOwnDetailTab.value = "offers";
+  }
   competitorDetailContext.value = context;
   selectedPlid.value = item.plid;
   const offers = comparisonOffers(item);
@@ -2181,6 +2376,32 @@ function openProductModal(
   detailModalOpen.value = true;
 }
 
+function openProductDetail(
+  item: CompetitorItem,
+  context: CompetitorDetailContext = "radar",
+): void {
+  if (item.来源 !== "own_store") {
+    openProductModal(item, context);
+    return;
+  }
+  const requestScope: OwnStoreScope = context === "personal_watchlist"
+    ? "all"
+    : ownStoreScope.value;
+  pageError.value = "";
+  const opened = openOwnStoreDetailTab({
+    plid: item.plid,
+    scope: requestScope,
+    ...(requestScope === "current" && props.currentStoreCode
+      ? { storeCode: props.currentStoreCode }
+      : {}),
+    ...(appliedStartDate.value ? { startDate: appliedStartDate.value } : {}),
+    ...(appliedEndDate.value ? { endDate: appliedEndDate.value } : {}),
+  });
+  if (!opened) {
+    pageError.value = "浏览器阻止了自有链接详情新标签页，请允许此站点打开新标签页后重试。";
+  }
+}
+
 let handledRequestedDetailRevision = 0;
 let requestedDetailRequestId = 0;
 
@@ -2188,16 +2409,32 @@ function requestedOwnStoreDetailCacheKey(
   plid: string,
   scope: OwnStoreScope,
   storeCode: string,
+  startDate: string,
+  endDate: string,
 ): string {
-  return [scope, scope === "current" ? storeCode : "", plid].join("\u001f");
+  return [
+    scope,
+    scope === "current" ? storeCode : "",
+    plid,
+    startDate,
+    endDate,
+  ].join("\u001f");
 }
 
 async function loadRequestedOwnStoreDetail(
   plid: string,
   scope: OwnStoreScope,
   storeCode: string,
+  startDate: string,
+  endDate: string,
 ): Promise<RequestedOwnStoreDetailBundle> {
-  const key = requestedOwnStoreDetailCacheKey(plid, scope, storeCode);
+  const key = requestedOwnStoreDetailCacheKey(
+    plid,
+    scope,
+    storeCode,
+    startDate,
+    endDate,
+  );
   const cached = requestedOwnStoreDetailCache.get(key);
   if (cached && Date.now() - cached.cachedAt <= requestedOwnStoreDetailCacheTtlMs) {
     requestedOwnStoreDetailCache.delete(key);
@@ -2210,9 +2447,25 @@ async function loadRequestedOwnStoreDetail(
   if (existingRequest) return existingRequest;
 
   const request = Promise.all([
-    fetchOwnStoreCompetitors(undefined, undefined, scope, undefined, plid),
-    fetchCompetitorDetail(plid, undefined, undefined, scope),
-  ]).then(([overview, detail]) => ({ overview, detail }));
+    fetchOwnStoreCompetitors(
+      startDate || undefined,
+      endDate || undefined,
+      scope,
+      undefined,
+      plid,
+    ),
+    fetchCompetitorDetail(
+      plid,
+      startDate || undefined,
+      endDate || undefined,
+      scope,
+    ),
+    fetchCompetitorPersonalWatchlist(),
+  ]).then(([overview, detail, personalWatchlist]) => ({
+    overview,
+    detail,
+    personalWatchlist,
+  }));
   requestedOwnStoreDetailRequests.set(key, request);
   try {
     const bundle = await request;
@@ -2230,15 +2483,6 @@ async function loadRequestedOwnStoreDetail(
   }
 }
 
-function prefetchRequestedOwnStoreDetail(plid: string): void {
-  if (!props.detailOnly || !plid) return;
-  const scope = ownStoreScope.value;
-  const storeCode = props.currentStoreCode ?? "";
-  void loadRequestedOwnStoreDetail(plid, scope, storeCode).catch(() => undefined);
-}
-
-defineExpose({ prefetchRequestedOwnStoreDetail });
-
 async function openRequestedOwnStoreDetail(
   revision: number,
   plid: string,
@@ -2246,10 +2490,21 @@ async function openRequestedOwnStoreDetail(
   const requestId = ++requestedDetailRequestId;
   const requestScope = ownStoreScope.value;
   const requestStoreCode = props.currentStoreCode ?? "";
+  const requestStartDate = props.requestedDetailStartDate ?? "";
+  const requestEndDate = props.requestedDetailEndDate ?? "";
   pageError.value = "";
   try {
-    const { overview, detail: prefetchedDetail } =
-      await loadRequestedOwnStoreDetail(plid, requestScope, requestStoreCode);
+    const {
+      overview,
+      detail: prefetchedDetail,
+      personalWatchlist,
+    } = await loadRequestedOwnStoreDetail(
+      plid,
+      requestScope,
+      requestStoreCode,
+      requestStartDate,
+      requestEndDate,
+    );
     if (
       requestId !== requestedDetailRequestId
       || !ownStoreScopeStillCurrent(requestScope, requestStoreCode)
@@ -2264,6 +2519,7 @@ async function openRequestedOwnStoreDetail(
       return;
     }
     applyOwnStoreOverview(overview);
+    applyPersonalWatchlistPayload(personalWatchlist);
     appliedStartDate.value = overview.date_range.selected_start ?? "";
     appliedEndDate.value = overview.date_range.selected_end ?? "";
     rangeStartDate.value = appliedStartDate.value;
@@ -2281,6 +2537,9 @@ async function openRequestedOwnStoreDetail(
     detailLoading.value = false;
     detailError.value = "";
     openProductModal(ownItem);
+    if (props.detailOnly) {
+      document.title = `${ownItem.商品} · PLID${plid} · 自有链接详情`;
+    }
     handledRequestedDetailRevision = revision;
   } catch (error) {
     if (requestId !== requestedDetailRequestId || isAbortError(error)) return;
@@ -2294,6 +2553,8 @@ watch(
     () => props.requestedDetailPlid ?? "",
     ownStoreScope,
     () => props.currentStoreCode ?? "",
+    () => props.requestedDetailStartDate ?? "",
+    () => props.requestedDetailEndDate ?? "",
   ],
   ([revision, plid]) => {
     if (
@@ -2318,9 +2579,26 @@ function closeProductModal() {
   clearPersonalWatchlistFeedback();
 }
 
+function closeDetailView(): void {
+  if (props.detailOnly) {
+    window.close();
+    return;
+  }
+  closeProductModal();
+}
+
+function handleDetailBackdropClick(): void {
+  if (!props.detailOnly) closeProductModal();
+}
+
 function selectCompetitorOffer(offer: CompetitorOfferItem) {
   selectedOfferKey.value = offer.报价键;
   hoveredOfferTrendIndex.value = null;
+}
+
+function selectOwnProfitabilityOffer(): void {
+  if (!preferredOwnProfitabilityOffer.value) return;
+  selectCompetitorOffer(preferredOwnProfitabilityOffer.value);
 }
 
 function selectAdjacentCompetitorOffer(direction: -1 | 1) {
@@ -2429,15 +2707,14 @@ function handleWindowKeydown(event: KeyboardEvent) {
     closeTargetList();
     return;
   }
-  if (detailModalOpen.value) closeProductModal();
+  if (detailModalOpen.value) closeDetailView();
 }
 
 async function loadOverview() {
   ownStoreOverviewCache.clear();
   const requestId = ++overviewRequestId;
-  const storeRequestId = ++ownStoreRequestId;
+  ++ownStoreRequestId;
   const requestScope = ownStoreScope.value;
-  const requestStoreCode = props.currentStoreCode ?? "";
   overviewAbortController?.abort();
   ownStoreAbortController?.abort();
   ownStoreAbortController = null;
@@ -2446,19 +2723,25 @@ async function loadOverview() {
   loading.value = true;
   ownStoreScopeLoading.value = false;
   pageError.value = "";
+  void loadPersonalWatchlistOverview();
+  if (props.isAdmin) {
+    void fetchCompetitorLinkHealth()
+      .then((items) => {
+        if (requestId === overviewRequestId) linkHealth.value = items;
+      })
+      .catch(() => undefined);
+  }
   try {
-    const [overview, healthItems] = await Promise.all([
-      fetchCompetitors(
-        appliedStartDate.value,
-        appliedEndDate.value,
-        requestScope,
-        controller.signal,
-      ),
-      props.isAdmin ? fetchCompetitorLinkHealth() : Promise.resolve([]),
-      loadPersonalWatchlistOverview(),
-    ]);
+    const overview = await fetchCompetitors(
+      appliedStartDate.value,
+      appliedEndDate.value,
+      requestScope,
+      controller.signal,
+      false,
+    );
     if (requestId !== overviewRequestId) return;
     competitors.value = overview.items;
+    trueCompetitorDateRange.value = overview.date_range;
     competitorDateRange.value = overview.date_range;
     if (!appliedStartDate.value && overview.date_range.selected_start) {
       appliedStartDate.value = overview.date_range.selected_start;
@@ -2476,27 +2759,12 @@ async function loadOverview() {
       ownFollowerHistoryEndDate.value =
         overview.date_range.selected_end ?? overview.date_range.available_end ?? "";
     }
-    if (
-      storeRequestId === ownStoreRequestId
-      && ownStoreScopeStillCurrent(requestScope, requestStoreCode)
-    ) {
-      const ownStoreOverview = {
-        store_items: overview.store_items,
-        date_range: overview.date_range,
-      } satisfies OwnStoreCompetitorOverview;
-      applyOwnStoreOverview(ownStoreOverview);
-      cacheScopeValue(
-        ownStoreOverviewCache,
-        ownStoreScopeCacheKey(requestScope, requestStoreCode),
-        ownStoreOverview,
-      );
-    }
-    linkHealth.value = healthItems;
     if (!personalWatchlistCompetitorItems.value.some(
       (item) => item.plid === selectedPlid.value,
     )) {
       selectedPlid.value = personalWatchlistCompetitorItems.value[0]?.plid ?? "";
     }
+    void loadOwnStoreScope();
   } catch (error) {
     if (requestId !== overviewRequestId || isAbortError(error)) return;
     pageError.value = error instanceof Error ? error.message : "读取竞品数据失败";
@@ -2580,6 +2848,7 @@ async function loadSharedBatchStatus() {
   try {
     const status = await fetchCompetitorBatchStatus();
     sharedBatchStatus.value = status;
+    suspendLoadedCollectionCheckpoint(status);
     if (
       status.active
       && canUpdateVisibleBrowserForBatch(
@@ -2591,7 +2860,10 @@ async function loadSharedBatchStatus() {
       withStockProbe.value = status.with_stock_probe;
       visibleBrowser.value = status.visible_browser;
     }
-    const checkpoint = readCollectionCheckpoint();
+    let checkpoint = readCollectionCheckpoint();
+    if (checkpoint) {
+      checkpoint = suspendStoredCollectionCheckpoint(checkpoint, status);
+    }
     if (
       checkpoint
       && checkpoint.version >= collectionCheckpointVersion
@@ -2660,6 +2932,14 @@ function applyPersonalWatchlistPayload(
   personalWatchlistItems.value = payload.items;
   personalWatchlistSharedItems.value = payload.shared_items ?? [];
   personalWatchlistPlids.value = new Set(payload.items.map((item) => item.plid));
+  selectedPersonalWatchlistPlids.value = new Set(
+    [...selectedPersonalWatchlistPlids.value].filter((plid) =>
+      personalWatchlistPlids.value.has(plid),
+    ),
+  );
+  if (!personalWatchlistPlids.value.size) {
+    personalWatchlistSelectionMode.value = false;
+  }
   personalWatchlistLibraries.value = payload.libraries;
   personalWatchlistDefaultConfigured.value = payload.default_library_configured;
   personalWatchlistDefaultLibraryId.value = payload.default_library_id;
@@ -2730,6 +3010,9 @@ function setPersonalWatchlistLocal(
     personalWatchlistItems.value = personalWatchlistItems.value.filter(
       (item) => item.plid !== plid,
     );
+    const nextSelection = new Set(selectedPersonalWatchlistPlids.value);
+    nextSelection.delete(plid);
+    selectedPersonalWatchlistPlids.value = nextSelection;
   }
   personalWatchlistPlids.value = next;
   personalWatchlistLibraries.value = recountPersonalWatchlistLibraries(
@@ -2776,13 +3059,13 @@ function personalWatchlistUnavailableNotice(
 ): string | null {
   const unavailableReason = personalWatchlistUnavailableReason(card);
   if (unavailableReason === "store_access_denied") {
-    return "当前账号未获授权访问该商品所属店铺，因此不显示店铺私有图片、商品名、价格、库存或 Seller API 详情；请联系管理员核对账号店铺权限。共享类型库关系仍保留。";
+    return "无权查看店铺详情。";
   }
   if (unavailableReason === "authorized_store_data_unavailable") {
-    return "已按当前账号全部已授权店铺读取，但暂未返回该自有商品详情；商品可能已不在当前 Offer 数据中。个人监控关系和类型库归类仍保留。";
+    return "店铺详情暂不可用。";
   }
   if (unavailableReason === "shared_details_unavailable") {
-    return "共享类型库仅传递库内 PLID；当前无法确认可显示的商品来源或详情，因此不将它标记为等待首次采集。";
+    return "商品详情暂不可用。";
   }
   return null;
 }
@@ -3163,7 +3446,7 @@ async function focusPersonalWatchlistCard(plid: string): Promise<boolean> {
 
 function openPersonalWatchlistCard(card: PersonalWatchlistWorkspaceCard): void {
   if (card.competitor) {
-    openProductModal(card.competitor, "personal_watchlist");
+    openProductDetail(card.competitor, "personal_watchlist");
     return;
   }
   clearTargetManagerFeedback();
@@ -3189,7 +3472,11 @@ function openPersonalWatchlistCard(card: PersonalWatchlistWorkspaceCard): void {
 async function addSharedCardToPersonalWatchlist(
   card: PersonalWatchlistWorkspaceCard,
 ): Promise<void> {
-  if (card.personalMember || personalWatchlistBusyPlid.value) return;
+  if (
+    card.personalMember
+    || personalWatchlistBusyPlid.value
+    || personalWatchlistBulkRemoving.value
+  ) return;
   if (!personalWatchlistDefaultConfigured.value) {
     promptForPersonalWatchlistDefaultBeforeMembership(card.plid);
     return;
@@ -3211,8 +3498,126 @@ async function addSharedCardToPersonalWatchlist(
   }
 }
 
+function togglePersonalWatchlistSelectionMode(): void {
+  if (personalWatchlistBulkRemoving.value || personalWatchlistBusyPlid.value) return;
+  personalWatchlistSelectionMode.value = !personalWatchlistSelectionMode.value;
+  if (!personalWatchlistSelectionMode.value) clearPersonalWatchlistSelection();
+}
+
+function isPersonalWatchlistCardSelected(plid: string): boolean {
+  return (
+    personalWatchlistSelectionMode.value
+    && selectedPersonalWatchlistPlids.value.has(plid)
+  );
+}
+
+function setPersonalWatchlistCardSelection(plid: string, selected: boolean): void {
+  if (
+    !personalWatchlistSelectionMode.value
+    || !personalWatchlistPlids.value.has(plid)
+  ) return;
+  const next = new Set(selectedPersonalWatchlistPlids.value);
+  if (selected) next.add(plid);
+  else next.delete(plid);
+  selectedPersonalWatchlistPlids.value = next;
+}
+
+function togglePersonalWatchlistCardSelection(plid: string, event: Event): void {
+  const checkbox = event.currentTarget as HTMLInputElement | null;
+  setPersonalWatchlistCardSelection(plid, Boolean(checkbox?.checked));
+}
+
+function toggleCurrentPersonalWatchlistPageSelection(): void {
+  if (!personalWatchlistSelectionMode.value) return;
+  const next = new Set(selectedPersonalWatchlistPlids.value);
+  const shouldSelect = !personalWatchlistPageAllSelected.value;
+  for (const card of selectablePagedPersonalWatchlistCards.value) {
+    if (shouldSelect) next.add(card.plid);
+    else next.delete(card.plid);
+  }
+  selectedPersonalWatchlistPlids.value = next;
+}
+
+function clearPersonalWatchlistSelection(): void {
+  selectedPersonalWatchlistPlids.value = new Set();
+}
+
+async function removeSelectedPersonalWatchlistItems(): Promise<void> {
+  if (
+    !personalWatchlistSelectionMode.value
+    || personalWatchlistBulkRemoving.value
+    || personalWatchlistBusyPlid.value
+  ) return;
+  const selectedPlids = [...selectedPersonalWatchlistPlids.value].filter((plid) =>
+    personalWatchlistPlids.value.has(plid),
+  );
+  if (!selectedPlids.length) {
+    clearPersonalWatchlistSelection();
+    return;
+  }
+  const confirmed = window.confirm(
+    `确定从当前账号的个人监控池删除已选的 ${selectedPlids.length} 个商品吗？\n\n`
+      + "这只会解除当前账号的个人监控关系，不会停止全局监控、每日采集或删除历史记录。",
+  );
+  if (!confirmed) return;
+
+  clearPersonalWatchlistFeedback();
+  personalWatchlistBulkRemoving.value = true;
+  const removedPlids: string[] = [];
+  const failedPlids: string[] = [];
+  try {
+    const concurrency = 8;
+    for (let offset = 0; offset < selectedPlids.length; offset += concurrency) {
+      const batch = selectedPlids.slice(offset, offset + concurrency);
+      const results = await Promise.all(batch.map(async (plid) => {
+        try {
+          await deleteCompetitorPersonalWatchlistItem(plid);
+          return { plid, removed: true } as const;
+        } catch {
+          return { plid, removed: false } as const;
+        }
+      }));
+      for (const result of results) {
+        if (result.removed) removedPlids.push(result.plid);
+        else failedPlids.push(result.plid);
+      }
+    }
+
+    for (const plid of removedPlids) setPersonalWatchlistLocal(plid, false);
+    selectedPersonalWatchlistPlids.value = new Set(failedPlids);
+
+    let refreshError = "";
+    try {
+      await loadPersonalWatchlist();
+    } catch (error) {
+      refreshError = error instanceof Error
+        ? error.message
+        : "个人监控池刷新失败，请稍后重新加载页面";
+    }
+
+    if (removedPlids.length) {
+      personalWatchlistNotice.value = (
+        `已从当前账号的个人监控池删除 ${removedPlids.length} 个商品；`
+        + "全局监控队列、每日采集和历史记录不受影响。"
+      );
+    }
+    const errorMessages: string[] = [];
+    if (failedPlids.length) {
+      errorMessages.push(`${failedPlids.length} 个商品删除失败，失败项已保留勾选，可直接重试`);
+    }
+    if (refreshError) errorMessages.push(`列表刷新失败：${refreshError}`);
+    personalWatchlistError.value = errorMessages.join("；");
+  } catch (error) {
+    personalWatchlistError.value = error instanceof Error
+      ? error.message
+      : "批量删除个人监控池商品失败";
+  } finally {
+    personalWatchlistBulkRemoving.value = false;
+  }
+}
+
 async function removeFromPersonalWatchlist(plid: string): Promise<void> {
-  if (personalWatchlistBusyPlid.value) return;
+  if (personalWatchlistBusyPlid.value || personalWatchlistBulkRemoving.value) return;
   clearPersonalWatchlistFeedback();
   personalWatchlistBusyPlid.value = plid;
   try {
@@ -3232,13 +3637,21 @@ async function removeFromPersonalWatchlist(plid: string): Promise<void> {
 
 async function toggleSelectedPersonalWatchlist(): Promise<void> {
   const item = selected.value;
-  if (!item || personalWatchlistBusyPlid.value) return;
+  if (
+    !item
+    || personalWatchlistBusyPlid.value
+    || personalWatchlistBulkRemoving.value
+  ) return;
   const removing = personalWatchlistPlids.value.has(item.plid);
   if (removing) {
     await removeFromPersonalWatchlist(item.plid);
     return;
   }
   if (!personalWatchlistDefaultConfigured.value) {
+    if (props.detailOnly) {
+      personalWatchlistError.value = "请先回到竞品雷达设置个人监控池的默认类型库，再从详情页加入。";
+      return;
+    }
     closeProductModal();
     promptForPersonalWatchlistDefaultBeforeMembership(item.plid);
     return;
@@ -3247,6 +3660,10 @@ async function toggleSelectedPersonalWatchlist(): Promise<void> {
   personalWatchlistBusyPlid.value = item.plid;
   try {
     await persistPersonalWatchlistAddition(item.plid);
+    if (props.detailOnly) {
+      personalWatchlistNotice.value = `PLID${item.plid} 已加入你的个人监控池。`;
+      return;
+    }
     closeProductModal();
     personalWatchlistNotice.value = `PLID${item.plid} 已加入你的个人监控池并定位到对应卡片。`;
     await focusPersonalWatchlistCard(item.plid);
@@ -3755,34 +4172,6 @@ async function saveTargetEdit(plid: string) {
   }
 }
 
-async function removeTarget(target: CompetitorTargetItem) {
-  if (!props.canOperate) {
-    props.onPermissionDenied?.();
-    return;
-  }
-  if (
-    !window.confirm(
-      `确定从后续监控清单移除 PLID${target.plid} 吗？历史快照与操作记录会保留。`,
-    )
-  ) {
-    return;
-  }
-  clearTargetManagerFeedback();
-  targetManagerBusy.value = target.plid;
-  try {
-    await deleteCompetitorTarget(target.plid);
-    if (editingTargetPlid.value === target.plid) cancelEditTarget();
-    await loadTargets();
-    targetManagerNotice.value =
-      `PLID${target.plid} 已从后续监控移除，历史快照仍保留。`;
-  } catch (error) {
-    targetManagerError.value =
-      error instanceof Error ? error.message : "删除竞品链接失败";
-  } finally {
-    targetManagerBusy.value = "";
-  }
-}
-
 async function prioritizeTarget(
   target: Pick<CompetitorTargetItem, "plid">,
   manualRetry = false,
@@ -4172,11 +4561,54 @@ function persistCollectionCheckpoint() {
         : new Date(autoResumeAt.value).toISOString(),
     clientId: collectionClientId,
   };
+  writeCollectionCheckpoint(checkpoint);
+}
+
+function writeCollectionCheckpoint(checkpoint: CollectionCheckpoint) {
   try {
     localStorage.setItem(collectionCheckpointKey, JSON.stringify(checkpoint));
   } catch {
     // Keep the live in-memory checkpoint when browser storage is unavailable.
   }
+}
+
+function suspendLoadedCollectionCheckpoint(status: CompetitorBatchStatus) {
+  if (
+    !batchUrls.value.length
+    || !activeSharedBatchSupersedesLocalCheckpoint(batchId.value, status)
+  ) {
+    return;
+  }
+  if (
+    !collecting.value
+    && !restoredRunWasActive.value
+    && activeIndex.value === null
+    && activeRequestId.value === null
+    && autoResumeAt.value === null
+    && collectionStopReason.value === SHARED_BATCH_CHECKPOINT_YIELD_REASON
+  ) {
+    return;
+  }
+  clearAutomaticResumeSchedule();
+  restoredRunWasActive.value = false;
+  activeIndex.value = null;
+  activeRequestId.value = null;
+  collectionStopReason.value = SHARED_BATCH_CHECKPOINT_YIELD_REASON;
+  collectionNoticeVersion.value += 1;
+  persistCollectionCheckpoint();
+}
+
+function suspendStoredCollectionCheckpoint(
+  checkpoint: CollectionCheckpoint,
+  status: CompetitorBatchStatus,
+): CollectionCheckpoint {
+  const suspended = suspendCheckpointForActiveSharedBatch(
+    checkpoint,
+    status,
+    new Date().toISOString(),
+  );
+  if (suspended !== checkpoint) writeCollectionCheckpoint(suspended);
+  return suspended;
 }
 
 function readCollectionCheckpoint(): CollectionCheckpoint | null {
@@ -4241,6 +4673,7 @@ async function restoreCollectionCheckpoint(
     sharedBatchStatus.value.active
     && !checkpointMatchesActiveBatch
   ) {
+    suspendStoredCollectionCheckpoint(checkpoint, sharedBatchStatus.value);
     return false;
   }
   if (
@@ -4700,10 +5133,14 @@ async function maybeAutoResumeScheduledCollection() {
     || collecting.value
     || collectionDetachRequested.value
     || autoResumeAt.value === null
-    || Date.now() < autoResumeAt.value
   ) {
     return;
   }
+  if (localCheckpointSupersededBySharedBatch.value) {
+    suspendLoadedCollectionCheckpoint(sharedBatchStatus.value);
+    return;
+  }
+  if (Date.now() < autoResumeAt.value) return;
   if (!pendingResumeCount.value) {
     clearAutomaticResumeSchedule();
     persistCollectionCheckpoint();
@@ -4714,13 +5151,6 @@ async function maybeAutoResumeScheduledCollection() {
     persistCollectionCheckpoint();
     return;
   }
-  if (anotherBatchIsActive.value) {
-    scheduleAutomaticResume(
-      `${sharedBatchOwner.value} 的另一批竞品采集正在占用服务，本轮自动续爬暂缓。`,
-    );
-    return;
-  }
-
   autoResumeAttempting.value = true;
   clearAutomaticResumeSchedule();
   collectionStopReason.value = "网络恢复重试时间已到，正在自动继续失败和未完成链接……";
@@ -5454,9 +5884,6 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
       <div>
         <p class="eyebrow">TAKEALOT MARKET INTELLIGENCE</p>
         <h1>竞品雷达</h1>
-        <p class="hero-copy">
-          把库存、评论与销量信号放在同一条时间线上，让运营先看到变化，再决定动作。
-        </p>
       </div>
       <div class="status-chip">
         <span class="status-dot"></span>
@@ -5474,10 +5901,6 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
         <strong id="personal-watchlist-workspace-title">
           {{ props.currentUsername || "当前账号" }} 的个人监控池
         </strong>
-        <span>
-          商品链接、店铺链接和类目链接使用独立入口。店铺/类目先人工确认价格、排序和数量，
-          多排序结果按 PLID 去重后才加入；真正竞品进入监控队列，自有商品沿用每日全量跟卖巡检。
-        </span>
       </div>
       <div class="personal-watchlist-summary-count" aria-label="当前账号个人监控池商品数量">
         <strong>{{ personalWatchlistPlids.size }}</strong>
@@ -5552,7 +5975,7 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
               <p class="section-kicker">{{ listingSourceType === "seller" ? "SELLER" : "CATEGORY" }} SOURCE</p>
               <strong>{{ listingEntryLabel }}链接筛选</strong>
             </div>
-            <span>先预览，再人工确认加入；预览不会写入监控清单。</span>
+            <span>先预览，确认后加入。</span>
           </div>
           <label class="competitor-listing-url-field">
             <span>{{ listingEntryLabel }}链接</span>
@@ -5644,11 +6067,8 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
             </label>
           </fieldset>
           <p class="method-note competitor-listing-rule-note">
-            数量是最终去重后的总数。默认同时选择“评分最高”和“最新上架”：先取两张榜都靠前的商品，
-            先比较两边较差名次、再比较名次总和；其他所选排序只作后续同分判断，最后按 PLID 去重。
-            “价格：从高到低”和“价格：从低到高”互斥，勾选其中一项会自动取消另一项。
-            首次扫描会冻结最多 1000 个有序候选；之后修改最终数量只截取冻结队列，不重新请求 Takealot。
-            筛选后不超过 20 个时，系统忽略较小数量并纳入全部商品。
+            默认优先“评分最高”和“最新上架”，最终按 PLID 去重；价格高低排序互斥。
+            预览后只调整加入数量；结果不超过 20 个时全部加入。
           </p>
           <button
             class="primary-button competitor-listing-preview-button"
@@ -5688,8 +6108,7 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
             </li>
           </ol>
           <p v-if="listingConfirmationCount > visibleListingPreviewProducts.length" class="method-note">
-            这里只展示前 {{ visibleListingPreviewProducts.length }} 个；确认时将按本次冻结预览加入全部
-            {{ listingConfirmationCount }} 个。
+            确认将加入 {{ listingConfirmationCount }} 个。
           </p>
           <button
             v-if="listingPreview.preview_token"
@@ -5801,7 +6220,6 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
                   </dl>
                   <p class="method-note competitor-listing-operation-sorts">
                     排序：{{ operation.sorts.map(listingSortLabel).join("、") }}。
-                    评分与最新同时选择时，以双榜命中、较差名次、名次总和依次决定优先级。
                   </p>
                   <p
                     v-if="listingOperationDetails[operation.id]?.loading"
@@ -5923,17 +6341,31 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
             <p class="section-kicker">MY PERSONAL WATCHLIST</p>
             <h3 id="personal-watchlist-board-title">个人监控池商品</h3>
           </div>
-          <span v-if="personalWatchlistItems.length || activePersonalWatchlistLibrary">
-            第 {{ personalWatchlistPage }}/{{ personalWatchlistPageCount }} 页 ·
-            <template v-if="activePersonalWatchlistLibrary">
-              {{ activePersonalWatchlistLibrary.name }} 共
-              {{ activePersonalWatchlistLibrary.item_count }} 个
-            </template>
-            <template v-else>
-              显示 {{ filteredPersonalWatchlistCards.length }} / 我的
-              {{ personalWatchlistItems.length }} 个
-            </template>
-          </span>
+          <div
+            v-if="personalWatchlistItems.length || activePersonalWatchlistLibrary"
+            class="personal-watchlist-board-heading-actions"
+          >
+            <span>
+              第 {{ personalWatchlistPage }}/{{ personalWatchlistPageCount }} 页 ·
+              <template v-if="activePersonalWatchlistLibrary">
+                {{ activePersonalWatchlistLibrary.name }} 共
+                {{ activePersonalWatchlistLibrary.item_count }} 个
+              </template>
+              <template v-else>
+                显示 {{ filteredPersonalWatchlistCards.length }} / 我的
+                {{ personalWatchlistItems.length }} 个
+              </template>
+            </span>
+            <button
+              v-if="personalWatchlistItems.length"
+              type="button"
+              class="secondary-button personal-watchlist-selection-toggle"
+              :class="{ 'is-active': personalWatchlistSelectionMode }"
+              :aria-pressed="personalWatchlistSelectionMode"
+              :disabled="personalWatchlistBulkRemoving || Boolean(personalWatchlistBusyPlid)"
+              @click="togglePersonalWatchlistSelectionMode"
+            >{{ personalWatchlistSelectionMode ? "退出多选" : "多选" }}</button>
+          </div>
         </div>
 
         <nav
@@ -6147,11 +6579,58 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
           </div>
         </div>
 
-        <p class="method-note">
-          个人监控池与主列表共用同一次区间重算结果；点击“按区间重算”会重新读取所选北京时间范围，
-          再更新真正竞品和自有链接的周期销售额、补货量、库存变化信号及排序，不会沿用旧区间数值。
-          个人池内店铺详情始终按当前账号全部已授权店铺读取，不受顶部当前查看店铺影响。
-        </p>
+        <div
+          v-if="personalWatchlistSelectionMode && personalWatchlistItems.length"
+          class="personal-watchlist-bulk-toolbar"
+          aria-label="批量管理个人监控池商品"
+        >
+          <div class="personal-watchlist-bulk-copy">
+            <strong>多选删除</strong>
+            <span aria-live="polite">
+              已选 {{ selectedPersonalWatchlistCount }} 个，可跨页勾选
+            </span>
+          </div>
+          <div class="personal-watchlist-bulk-actions">
+            <button
+              type="button"
+              class="secondary-button"
+              :disabled="
+                !selectablePagedPersonalWatchlistCards.length
+                || personalWatchlistBulkRemoving
+                || Boolean(personalWatchlistBusyPlid)
+              "
+              @click="toggleCurrentPersonalWatchlistPageSelection"
+            >
+              {{ personalWatchlistPageAllSelected ? "取消本页选择" : "选择本页" }}
+            </button>
+            <button
+              type="button"
+              class="secondary-button"
+              :disabled="
+                !selectedPersonalWatchlistCount
+                || personalWatchlistBulkRemoving
+                || Boolean(personalWatchlistBusyPlid)
+              "
+              @click="clearPersonalWatchlistSelection"
+            >清空选择</button>
+            <button
+              type="button"
+              class="secondary-button danger personal-watchlist-bulk-delete"
+              :disabled="
+                !selectedPersonalWatchlistCount
+                || personalWatchlistBulkRemoving
+                || Boolean(personalWatchlistBusyPlid)
+              "
+              @click="removeSelectedPersonalWatchlistItems"
+            >
+              {{
+                personalWatchlistBulkRemoving
+                  ? "正在批量删除…"
+                  : `删除所选（${selectedPersonalWatchlistCount}）`
+              }}
+            </button>
+          </div>
+        </div>
 
         <div
           v-if="filteredPersonalWatchlistCards.length"
@@ -6166,6 +6645,7 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
               'has-detail': Boolean(card.competitor),
               'is-shared-card': !card.personalMember,
               'is-highlighted': personalWatchlistHighlightPlid === card.plid,
+              'is-selected': isPersonalWatchlistCardSelected(card.plid),
             }"
             tabindex="-1"
             @click="openPersonalWatchlistCard(card)"
@@ -6195,6 +6675,24 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
             </div>
             <div class="personal-watchlist-product-body">
               <div class="personal-watchlist-product-meta">
+                <label
+                  v-if="personalWatchlistSelectionMode && card.personalMember"
+                  class="personal-watchlist-card-selector"
+                  :class="{ selected: isPersonalWatchlistCardSelected(card.plid) }"
+                  @click.stop
+                >
+                  <input
+                    type="checkbox"
+                    :checked="isPersonalWatchlistCardSelected(card.plid)"
+                    :disabled="
+                      personalWatchlistBulkRemoving
+                      || Boolean(personalWatchlistBusyPlid)
+                    "
+                    :aria-label="`选择 PLID${card.plid}`"
+                    @change.stop="togglePersonalWatchlistCardSelection(card.plid, $event)"
+                  />
+                  <span>选择</span>
+                </label>
                 <span>PLID{{ card.plid }}</span>
                 <strong
                   v-if="personalWatchlistHighlightPlid === card.plid"
@@ -6239,19 +6737,19 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
                 公司 SKU {{ card.competitor.company_skus?.length ? card.competitor.company_skus.join("、") : "未关联" }}
               </p>
               <p v-else-if="personalWatchlistOverviewHydrating">
-                正在优先恢复个人池内已采集的商品、图片、价格和库存，不需要等待整页竞品完成计算。
+                正在恢复商品详情。
               </p>
               <p v-else-if="personalWatchlistUnavailableNotice(card)">
                 {{ personalWatchlistUnavailableNotice(card) }}
               </p>
               <p v-else-if="!card.personalMember">
-                共享库仅传递库内 PLID；当前账号无权读取的店铺私有详情不会显示。
+                共享库商品，详情不可用。
               </p>
               <p v-else-if="card.target">
-                已在个人监控池，且该 PLID 仍在全局采集队列；尚无成功采集快照，首次采集完成后会补齐商品、图片、价格和库存。
+                等待首次采集。
               </p>
               <p v-else>
-                个人归类仍保留；如需恢复全局采集，请重新粘贴原商品链接。
+                未在采集队列，可重新提交链接。
               </p>
               <div v-if="card.competitor" class="personal-watchlist-product-metrics">
                 <span>
@@ -6280,9 +6778,13 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
                   v-if="card.competitor"
                   type="button"
                   class="secondary-button"
-                  @click.stop="openProductModal(card.competitor, 'personal_watchlist')"
+                  @click.stop="openProductDetail(card.competitor, 'personal_watchlist')"
                 >
-                  查看商品详情
+                  {{
+                    card.competitor.来源 === "own_store"
+                      ? "新标签页查看商品详情"
+                      : "查看商品详情"
+                  }}
                 </button>
                 <button
                   v-if="card.personalMember"
@@ -6299,7 +6801,7 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
                   "
                   type="button"
                   class="secondary-button"
-                  :disabled="Boolean(personalWatchlistBusyPlid)"
+                  :disabled="personalWatchlistBulkRemoving || Boolean(personalWatchlistBusyPlid)"
                   @click.stop="addSharedCardToPersonalWatchlist(card)"
                 >加入我的监控池</button>
                 <button
@@ -6309,7 +6811,7 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
                   "
                   type="button"
                   class="secondary-button danger-soft"
-                  :disabled="Boolean(personalWatchlistBusyPlid)"
+                  :disabled="personalWatchlistBulkRemoving || Boolean(personalWatchlistBusyPlid)"
                   @click.stop="removeCardFromActivePersonalWatchlistLibrary(card)"
                 >从此类型库移除</button>
                 <button
@@ -6324,7 +6826,7 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
                   v-if="card.personalMember"
                   type="button"
                   class="secondary-button danger"
-                  :disabled="Boolean(personalWatchlistBusyPlid)"
+                  :disabled="personalWatchlistBulkRemoving || Boolean(personalWatchlistBusyPlid)"
                   @click.stop="removeFromPersonalWatchlist(card.plid)"
                 >
                   {{
@@ -6384,9 +6886,6 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
           <p class="section-kicker">管理员核心工作区</p>
           <h2>全局链接与批次</h2>
         </div>
-        <p class="section-note">
-          个人工作区之外的共享清单、插队、审计和管理员批次控制集中放在这里
-        </p>
       </div>
       <template v-if="targets.length">
         <div class="target-list-panel">
@@ -6566,12 +7065,6 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
                               :disabled="Boolean(targetManagerBusy) || !props.canOperate"
                               @click="beginEditTarget(target)"
                             >修改</button>
-                            <button
-                              class="secondary-button danger"
-                              type="button"
-                              :disabled="Boolean(targetManagerBusy) || !props.canOperate"
-                              @click="removeTarget(target)"
-                            >删除</button>
                           </div>
                         </template>
                         <div
@@ -6698,7 +7191,7 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
         >
           <span>
             <strong>链接操作记录</strong>
-            <small>默认收起，需要时按日期查看用户增删改留痕</small>
+            <small>默认收起，可查看新增、修改及历史删除留痕</small>
           </span>
           <span>打开记录</span>
         </button>
@@ -6719,7 +7212,7 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
               <div>
                 <p class="section-kicker">LINK AUDIT</p>
                 <h2 id="target-audit-modal-title">链接操作记录</h2>
-                <span>按北京时间日期查看用户对监控链接的增删改留痕</span>
+                <span>按北京时间日期查看新增、修改及只读历史删除留痕</span>
               </div>
               <button
                 class="competitor-modal-close"
@@ -6842,17 +7335,6 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
           {{ allStoreTargets.length }} 个 · 本批去重后 {{ unifiedCollectionUrls.length }} 个
         </span>
       </div>
-      <p class="method-note collection-scope-note">
-        每次点击开始都会重新读取最新真正竞品清单，再装入全部有权店铺（管理员当前为六店）的全部
-        自有链接，并按PLID去重后在同一个串行批次中采集；顶栏店铺只影响页面查看范围，不会缩小
-        手动采集范围。两类链接都可插队，断点继续保留原顺序。服务器每天09:00会尝试启动同一个
-        共享串行批次；若触发时或取得采集权前已有批次运行，当天自动批次直接记录跳过，不排队到现有
-        批次结束后补跑。成功取得采集权后才读取全部活跃真正竞品和所有已接入店铺的当前自有PLID；所有账号看到相同进度，
-        kxx可随时停止；停止后不会在当天自动重启，但可显式继续同一服务端断点，复用原批次编号、
-        冻结顺序和既有结果。运行中发现的新链接会追加到队尾；常规队列耗尽后若仍有待重试，服务端会
-        按安全间隔自动续跑最多3轮，达到上限后仍保留原批次并显示“继续待重试”，不会另建新批。
-        自有商品价格与库存使用 Seller API，公开页只识别并探测排除自有Offer后的跟卖报价。
-      </p>
       <div
         v-if="sharedBatchStatus.active"
         class="shared-collection-status"
@@ -6877,9 +7359,6 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
             · 确认失效 {{ retainedConfirmedInvalidCount }}
             · 待续爬 {{ sharedBatchStatus.pending }}
           </span>
-          <small v-if="sharedBatchStatus.failed">
-            未解决数量只在某条链接成功后减少；复探进行中数字可能暂时不变。
-          </small>
           <small v-if="sharedScheduledPause" class="collection-auto-resume-countdown">
             {{ sharedBatchStatus.reason }}
           </small>
@@ -6913,7 +7392,7 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
           <span class="switch"></span>
           <span>
             <strong>匿名购物车库存探测</strong>
-            <small>逐个测试所有变体的当前卖家与 SKU，不进入结算</small>
+            <small>逐变体探测，不结算</small>
           </span>
         </label>
         <label class="switch-row compact">
@@ -6930,7 +7409,7 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
           <span class="switch"></span>
           <span>
             <strong>显示检测浏览器</strong>
-            <small>运行中可切换，从下一条任务链接开始生效</small>
+            <small>下一条生效</small>
           </span>
         </label>
         <button
@@ -6970,11 +7449,9 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
             props.canControlCollection
             && !collecting
             && stoppedScheduledResumeCount === 0
+            && !anotherBatchIsActive
           "
-          :disabled="
-            anotherBatchIsActive
-            || collectionPreparing
-          "
+          :disabled="collectionPreparing"
         >
           {{ collectionPreparing ? "正在核对最新全量清单…" : `开始采集（${unifiedCollectionUrls.length}）` }}
         </button>
@@ -6984,10 +7461,10 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
             && !collecting
             && stoppedScheduledResumeCount === 0
             && pendingResumeCount
+            && !anotherBatchIsActive
           "
           class="primary-button resume-button"
           @click="resumeCollection()"
-          :disabled="anotherBatchIsActive"
         >
           继续失败/未完成（{{ pendingResumeCount }}）
         </button>
@@ -7002,14 +7479,14 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
           v-if="props.canOperate && !props.canControlCollection"
           class="section-note"
         >
-          当前账号可新增链接和插队；批次开始、继续与停止仅限 kxx 账号。
+          批次启停仅限 kxx。
         </p>
         <p v-if="stoppedScheduledResumeCount > 0" class="section-note">
-          将复用当前自动批次断点；不会重新读取清单、创建新批次或重采本批已成功、已确认失效链接。
+          继续原批次待重试项。
         </p>
       </div>
       <div
-        v-if="collectionStopReason"
+        v-if="showLocalCollectionAlert"
         :key="collectionNoticeVersion"
         class="collection-action-alert"
         role="alert"
@@ -7043,9 +7520,6 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
         <span>{{ activeCollectionHint }}</span>
         <span v-if="collectionActivityNotice">{{ collectionActivityNotice }}</span>
       </div>
-      <p v-if="collecting" class="method-note collection-persistence-note">
-        采集正在后台继续；切换到其他页面后再返回，进度和结果仍会保留。
-      </p>
       <div
         v-if="hasDisplayedBatchProgress"
         class="result-strip"
@@ -7292,8 +7766,7 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
           </table>
         </div>
         <p class="method-note">
-          单次 404 不会删除链接。只有目标商品页为空、同一浏览器中的已知正常商品可打开，且至少间隔
-          10 分钟累计 3 次，才会确认失效；确认失效只在当前断点续爬中自动跳过，重新点击“开始采集”仍可人工复核。
+          至少间隔 10 分钟，连续 3 次有效复核后确认失效。
         </p>
       </div>
     </section>
@@ -7394,7 +7867,7 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
                 <span v-if="!personalWatchlistDefaultConfigured">首次新增前必须先选择一次</span>
               </div>
               <p class="method-note">
-                可选择本人创建的类型库，或共享给我且标记为“可编辑”的类型库；只读共享库不能作为默认归类。
+                默认归类可选自建库或可编辑共享库。
               </p>
               <div class="personal-watchlist-library-options default-options">
                 <label>
@@ -7763,14 +8236,6 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
                     >
                       修改链接
                     </button>
-                    <button
-                      class="secondary-button danger"
-                      type="button"
-                      :disabled="Boolean(targetManagerBusy) || !props.canOperate"
-                      @click="removeTarget(targetActionTarget)"
-                    >
-                      删除链接
-                    </button>
                   </div>
                 </template>
               </template>
@@ -8041,7 +8506,6 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
                 <h4 id="own-follower-history-title">六店自有链接跟卖发现记录</h4>
               </div>
               <div class="own-follower-history-heading-actions">
-                <span>按北京时间自然日 · 以系统保存的公开页快照为准</span>
                 <button
                   type="button"
                   class="quiet-button own-follower-history-toggle"
@@ -8082,10 +8546,6 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
               </form>
               <p v-if="ownFollowerHistoryError" class="inline-error" role="alert">
                 {{ ownFollowerHistoryError }}
-              </p>
-              <p v-if="!ownFollowerHistoryLoaded && !ownFollowerHistoryLoading" class="method-note">
-                选择日期后查询：即使某个跟卖卖家后来消失，只要区间内曾在快照中出现，仍会列出具体发现日期。
-                “新增跟卖卖家”表示系统首次观察日期落在所选区间，不代表卖家实际开始跟卖的绝对时间。
               </p>
               <div v-else-if="ownFollowerHistoryLoading" class="empty-state compact-empty-state">
                 正在读取六店历史快照…
@@ -8132,8 +8592,8 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
             v-if="ownStoreScopeLoading"
             class="empty-state competitor-filter-empty"
           >
-            <strong>正在切换店铺范围</strong>
-            <span>正在读取所选店铺商品；较早请求的结果不会覆盖当前选择。</span>
+            <strong>正在读取自有店铺数据</strong>
+            <span>真正竞品已可先查看；较早请求的结果不会覆盖当前店铺范围。</span>
           </div>
           <div
             v-else-if="!filteredStoreCompetitors.length"
@@ -8156,11 +8616,10 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
               :class="{ selected: selectedPlid === item.plid }"
               tabindex="0"
               role="button"
-              aria-haspopup="dialog"
-              :aria-label="`查看 ${item.商品} 及 ${followerSellerCount(item)} 个跟卖卖家`"
-              @click="openProductModal(item)"
-              @keydown.enter="openProductModal(item)"
-              @keydown.space.prevent="openProductModal(item)"
+              :aria-label="`在新标签页查看 ${item.商品} 及 ${followerSellerCount(item)} 个跟卖卖家`"
+              @click="openProductDetail(item)"
+              @keydown.enter="openProductDetail(item)"
+              @keydown.space.prevent="openProductDetail(item)"
             >
               <header class="competitor-status-header">
                 <div class="competitor-status-identity">
@@ -8214,7 +8673,7 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
                     </div>
                   </div>
                 </div>
-                <span class="competitor-status-open">查看跟卖库存 →</span>
+                <span class="competitor-status-open">新标签页查看完整详情 →</span>
               </header>
               <div class="competitor-status-summary">
                 <div>
@@ -8323,9 +8782,9 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
             role="button"
             aria-haspopup="dialog"
             :aria-label="`查看 ${item.商品} 及全部 ${item.跟卖报价.length} 个报价的详情`"
-            @click="openProductModal(item)"
-            @keydown.enter="openProductModal(item)"
-            @keydown.space.prevent="openProductModal(item)"
+            @click="openProductDetail(item)"
+            @keydown.enter="openProductDetail(item)"
+            @keydown.space.prevent="openProductDetail(item)"
           >
             <header class="competitor-status-header">
               <div class="competitor-status-identity">
@@ -8437,17 +8896,33 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
     </section>
     </template>
 
-    <Teleport to="body">
+    <section
+      v-if="props.detailOnly && (!detailModalOpen || !selected)"
+      class="standalone-detail-loading-state"
+      :class="{ 'has-error': Boolean(pageError) }"
+      aria-live="polite"
+    >
+      <p class="section-kicker">OWN STORE DETAIL</p>
+      <h1>{{ pageError ? "自有链接详情暂时无法加载" : "正在加载完整自有链接详情" }}</h1>
+      <span>{{ pageError || "正在读取商品、卖家报价、库存、销售、流量、利润、退货与评论记录……" }}</span>
+      <button v-if="pageError" type="button" class="secondary-button" @click="closeDetailView">
+        关闭标签页
+      </button>
+    </section>
+
+    <Teleport to="body" :disabled="props.detailOnly">
       <div
         v-if="detailModalOpen && selected"
         class="competitor-modal-backdrop competitor-product-detail-backdrop"
-        @click.self="closeProductModal"
+        :class="{ 'competitor-standalone-detail-backdrop': props.detailOnly }"
+        @click.self="handleDetailBackdropClick"
       >
         <section
           class="competitor-modal competitor-product-detail-modal"
-          role="dialog"
-          aria-modal="true"
-          :aria-label="`${selected.商品} 竞品详情`"
+          :class="{ 'competitor-standalone-detail-page': props.detailOnly }"
+          :role="props.detailOnly ? 'main' : 'dialog'"
+          :aria-modal="props.detailOnly ? undefined : 'true'"
+          :aria-label="`${selected.商品} ${selected.来源 === 'own_store' ? '自有链接' : '竞品'}详情`"
         >
           <header class="competitor-modal-header">
             <div class="competitor-modal-identity">
@@ -8524,12 +8999,122 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
             <button
               type="button"
               class="competitor-modal-close"
-              aria-label="关闭商品详情"
-              @click="closeProductModal"
+              :aria-label="props.detailOnly ? '关闭详情窗口' : '关闭商品详情'"
+              @click="closeDetailView"
             >
               ×
             </button>
           </header>
+
+          <section
+            v-if="!props.detailOnly && props.isAdmin && selected.来源 === 'competitor'"
+            class="panel competitor-target-action-card"
+          >
+            <div class="competitor-target-action-heading">
+              <div>
+                <p class="section-kicker">MONITORING LINK</p>
+                <h3>监控队列操作</h3>
+              </div>
+              <span>
+                {{
+                  selectedTarget
+                    ? "当前链接已在后续采集队列"
+                    : "当前仅保留历史快照，链接不在后续采集队列"
+                }}
+              </span>
+            </div>
+            <template v-if="selectedTarget">
+              <template v-if="editingTargetPlid === selectedTarget.plid">
+                <input
+                  v-model="editingTargetUrl"
+                  class="target-edit-input"
+                  type="url"
+                  :aria-label="`修改 PLID${selectedTarget.plid} 链接`"
+                  :disabled="targetManagerBusy === selectedTarget.plid"
+                />
+                <div class="competitor-target-action-buttons">
+                  <button
+                    class="primary-button"
+                    type="button"
+                    :disabled="targetManagerBusy === selectedTarget.plid"
+                    @click="saveTargetEdit(selectedTarget.plid)"
+                  >
+                    {{ targetManagerBusy === selectedTarget.plid ? "保存中…" : "保存修改" }}
+                  </button>
+                  <button
+                    class="quiet-button"
+                    type="button"
+                    :disabled="targetManagerBusy === selectedTarget.plid"
+                    @click="cancelEditTarget"
+                  >
+                    取消修改
+                  </button>
+                </div>
+              </template>
+              <template v-else>
+                <a
+                  class="competitor-target-current-url"
+                  :href="selectedTarget.url"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                >
+                  {{ selectedTarget.url }}
+                </a>
+                <div class="competitor-target-action-buttons">
+                  <button
+                    class="secondary-button priority"
+                    type="button"
+                    :disabled="
+                      Boolean(targetManagerBusy)
+                      || !props.canOperate
+                      || !sharedBatchStatus.active
+                      || sharedBatchStatus.current_plid === selectedTarget.plid
+                      || prioritizedTargetStates.has(selectedTarget.plid)
+                    "
+                    @click="prioritizeTarget(selectedTarget)"
+                  >
+                    {{
+                      targetManagerBusy === `priority:${selectedTarget.plid}`
+                        ? "插队中…"
+                        : targetPriorityLabel(selectedTarget.plid)
+                    }}
+                  </button>
+                  <button
+                    class="secondary-button"
+                    type="button"
+                    :disabled="Boolean(targetManagerBusy) || !props.canOperate"
+                    @click="beginEditTarget(selectedTarget)"
+                  >
+                    修改链接
+                  </button>
+                </div>
+              </template>
+            </template>
+            <div v-else class="competitor-target-action-buttons">
+              <button
+                class="primary-button"
+                type="button"
+                :disabled="targetManagerBusy === 'add' || !props.canOperate"
+                @click="addSelectedTarget"
+              >
+                {{ targetManagerBusy === "add" ? "加入中…" : "重新加入监控队列" }}
+              </button>
+            </div>
+            <p
+              v-if="targetManagerError"
+              class="target-manager-message error"
+              role="alert"
+            >
+              {{ targetManagerError }}
+            </p>
+            <p
+              v-if="targetManagerNotice"
+              class="target-manager-message success"
+              role="status"
+            >
+              {{ targetManagerNotice }}
+            </p>
+          </section>
 
           <section
             class="personal-watchlist-banner"
@@ -8541,9 +9126,6 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
               <strong>
                 {{ selectedInPersonalWatchlist ? "已在你的个人监控池" : "尚未加入你的个人监控池" }}
               </strong>
-              <span>
-                仅当前账号可见，用于个人筛选和类型库归类；加入或删除都不会启动、停止全局每日采集，也不会删除历史。
-              </span>
               <small
                 v-if="personalWatchlistError"
                 class="personal-watchlist-feedback error"
@@ -8559,7 +9141,10 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
               type="button"
               class="personal-watchlist-toggle-button"
               :class="{ 'is-remove': selectedInPersonalWatchlist }"
-              :disabled="personalWatchlistBusyPlid === selected.plid"
+              :disabled="
+                personalWatchlistBulkRemoving
+                || personalWatchlistBusyPlid === selected.plid
+              "
               @click="toggleSelectedPersonalWatchlist"
             >
               {{
@@ -8615,9 +9200,49 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
               </article>
             </div>
 
-            <div class="competitor-modal-content">
+            <nav
+              v-if="props.detailOnly && selected.来源 === 'own_store'"
+              class="standalone-own-detail-tabs-shell"
+              aria-label="自有链接详情模块"
+            >
+              <div class="standalone-own-detail-tabs-heading">
+                <div>
+                  <strong>详情标签页</strong>
+                  <small>点击下方标签切换不同内容</small>
+                </div>
+                <span>当前查看：{{ activeStandaloneOwnDetailTabMeta.label }}</span>
+              </div>
+              <div class="standalone-own-detail-tabs" role="tablist" aria-orientation="horizontal">
+                <button
+                  v-for="(tab, tabIndex) in standaloneOwnDetailTabs"
+                  :id="tab.tabId"
+                  :key="tab.id"
+                  type="button"
+                  role="tab"
+                  :class="{ active: activeStandaloneOwnDetailTab === tab.id }"
+                  :aria-selected="activeStandaloneOwnDetailTab === tab.id"
+                  :aria-controls="tab.panelId"
+                  :tabindex="activeStandaloneOwnDetailTab === tab.id ? 0 : -1"
+                  @click="selectStandaloneOwnDetailTab(tab.id)"
+                  @keydown="handleStandaloneOwnDetailTabKeydown($event, tabIndex)"
+                >
+                  <strong>{{ tab.label }}</strong>
+                  <small>{{ tab.description }}</small>
+                </button>
+              </div>
+            </nav>
+
+            <div
+              class="competitor-modal-content"
+              :class="{ 'standalone-own-detail-tab-panel': props.detailOnly }"
+              :role="props.detailOnly ? 'tabpanel' : undefined"
+              :id="props.detailOnly ? activeStandaloneOwnDetailTabMeta.panelId : undefined"
+              :aria-labelledby="props.detailOnly ? activeStandaloneOwnDetailTabMeta.tabId : undefined"
+              :tabindex="props.detailOnly ? 0 : undefined"
+            >
               <section
-                v-if="showOwnProfitabilityPanel"
+                v-if="showOwnProfitabilityShell"
+                v-show="showStandaloneOwnDetailModule('profit')"
                 class="panel own-profitability-panel"
                 aria-label="当前自有 Offer 成本与人民币利润"
               >
@@ -8631,8 +9256,12 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
                     · SKU {{ selectedOwnProfitability.sku || "未返回" }}
                     · 公司 SKU {{ selectedOwnProfitability.company_sku || "未关联" }}
                   </span>
-                  <span v-else>
+                  <span v-else-if="showOwnProfitabilityPanel">
                     {{ detail.own_store_profitability?.message || "当前 Offer 暂无利润数据" }}
+                  </span>
+                  <span v-else>
+                    当前查看 {{ selectedSellerGroup?.sellerName || "跟卖卖家" }} · 公开跟卖报价；
+                    自有成本与利润区域仍保留
                   </span>
                 </div>
 
@@ -8757,7 +9386,12 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
                         <template
                           v-if="detail.own_store_profitability.exchange_rate.fetched_at"
                         >
-                          · 获取于
+                          ·
+                          {{
+                            detail.own_store_profitability.exchange_rate.status === "stale"
+                              ? "最近成功于"
+                              : "获取于"
+                          }}
                           {{ formatChinaDateTime(
                             detail.own_store_profitability.exchange_rate.fetched_at,
                           ) }}
@@ -8765,7 +9399,7 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
                         <template
                           v-if="detail.own_store_profitability.exchange_rate.status === 'stale'"
                         >
-                          · 缓存参考值
+                          · 最新请求失败，已回退最近成功汇率
                         </template>
                       </template>
                       <template v-else>
@@ -8799,24 +9433,47 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
                       </template>
                     </p>
                     <p class="own-profitability-formula">
-                      当前售价毛利润 = 售价（ZAR）÷ CNY/ZAR 汇率 − 人民币成本；
-                      平台直接费用后利润 = 当前售价毛利润 − 当前售价折合人民币
-                      × 同店同 Offer 已验证销售行的实际综合费率；费率按
-                      sum(total_fees) / sum(selling_price) 计算，total_fees 已包含成功费、履约费、揽收费和库存调拨费，不重复扣减；
-                      仓储费、广告费、月租、头程、税费及退货损失未按该 SKU 完整核实，不包含在此估算中，因此不是净利润或平台结算金额；
-                      销售利润率以折合人民币售价为分母，所有利润金额均为人民币。
+                      未含仓储、广告、月租、头程、税费和退货损失；不等同净利润。
                     </p>
                   </div>
                 </template>
 
-                <div v-else class="empty-state slim">
-                  当前选中的 Seller API Offer 尚未匹配到本地成本与汇率证据；
-                  切换变体或店铺后会按 Offer ID 重新匹配。
+                <div v-else-if="showOwnProfitabilityPanel" class="empty-state slim">
+                  当前报价缺少成本或汇率证据。
+                </div>
+
+                <div v-else class="own-profitability-context-unavailable">
+                  <div class="own-profitability-grid" aria-label="公开跟卖报价的成本与利润适用范围">
+                    <article class="own-profitability-card unavailable-card">
+                      <small>人民币单件成本</small>
+                      <strong class="neutral">—</strong>
+                      <span>平台未披露该跟卖卖家的采购成本。</span>
+                    </article>
+                    <article class="own-profitability-card unavailable-card">
+                      <small>当前售价毛利润</small>
+                      <strong class="neutral">—</strong>
+                    </article>
+                    <article class="own-profitability-card unavailable-card">
+                      <small>平台直接费用后利润（估算）</small>
+                      <strong class="neutral">—</strong>
+                    </article>
+                  </div>
+                  <div class="own-profitability-context-note">
+                    <button
+                      v-if="preferredOwnProfitabilityOffer"
+                      type="button"
+                      class="quiet-button"
+                      @click="selectOwnProfitabilityOffer"
+                    >
+                      返回 {{ preferredOwnProfitabilityOffer.卖家 || "自有卖家" }} 的自有报价查看
+                    </button>
+                  </div>
                 </div>
               </section>
 
               <section
                 v-if="selected.来源 === 'own_store'"
+                v-show="showStandaloneOwnDetailModule('inventory')"
                 class="panel company-inventory-panel"
                 aria-label="公司 SKU 海外仓和平台仓库存"
               >
@@ -8898,9 +9555,7 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
                         <p v-else class="inventory-unavailable">授权店铺中暂无对应平台 Offer。</p>
                       </section>
                     </div>
-                    <p class="method-note">
-                      各字段是不同库存阶段，可能相互包含；页面不把海外仓与平台仓阶段强行相加。
-                    </p>
+                    <p class="method-note">库存阶段可能重叠，不相加。</p>
                   </article>
                 </div>
                 <div v-else class="empty-state slim">
@@ -8910,6 +9565,7 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
 
               <section
                 v-if="selected.来源 === 'own_store'"
+                v-show="showStandaloneOwnDetailModule('returns')"
                 class="panel own-return-panel"
                 aria-label="该自有商品退货情况"
               >
@@ -9014,14 +9670,14 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
                 </div>
                 <div v-else class="empty-state slim own-return-empty">
                   <strong>{{ detail.own_store_returns.message }}</strong>
-                  <span>{{ detail.own_store_returns.source_notice }}</span>
                 </div>
-                <p v-if="detail.own_store_returns.items.length" class="method-note">
-                  {{ detail.own_store_returns.message }} {{ detail.own_store_returns.source_notice }}
-                </p>
               </section>
 
-              <section class="panel competitor-offer-workbench" aria-label="卖家报价连续对比台">
+              <section
+                v-show="showStandaloneOwnDetailModule('offers')"
+                class="panel competitor-offer-workbench"
+                aria-label="卖家报价连续对比台"
+              >
                 <div class="competitor-offer-workbench-heading">
                   <div>
                     <p class="section-kicker">SELLER COMPARISON WORKBENCH</p>
@@ -9063,14 +9719,12 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
                   </div>
                 </div>
                 <p class="method-note competitor-offer-sort-note">
-                  当前观察区间：{{ activeRangeLabel }}。默认按可比首尾精确库存的净流出排序；
-                  库存净流出是公开库存观察信号，不等于平台实际出货或订单，补货也会影响结果。
+                  {{ activeRangeLabel }} · 默认按库存净流出排序
                 </p>
 
                 <div
                   v-if="selectedSellerGroups.length"
                   class="competitor-offer-workbench-grid"
-                  :class="{ 'with-own-traffic': showOwnTrafficPanel }"
                 >
                   <div class="competitor-offer-navigator" role="listbox" aria-label="卖家报价列表">
                     <button
@@ -9153,10 +9807,10 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
                           {{ selectedOfferIntervalSalesUnits === null ? "数据不足" : `${selectedOfferIntervalSalesUnits} 件` }}
                         </strong>
                         <small v-if="selectedOfferIntervalSalesUnits === null">
-                          缺失、非精确和不足两点的范围均已跳过；当前区间没有任何同范围精确库存点对。
+                          当前区间没有可比的精确库存点。
                         </small>
                         <small v-else>
-                          缺失与非精确点会跳过，不同卖家、SKU、变体和条件范围各自累计，单点范围不参与；下降段按组内前后净变化计算，补货不抵扣。这是公开库存观察，不是 Takealot 实际订单。
+                          基于可比精确库存点，不等同实际订单。
                         </small>
                       </div>
                       <div
@@ -9168,10 +9822,10 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
                           {{ selectedOfferIntervalReplenishmentUnits === null ? "数据不足" : `${selectedOfferIntervalReplenishmentUnits} 件` }}
                         </strong>
                         <small v-if="selectedOfferIntervalReplenishmentUnits === null">
-                          缺失、非精确和不足两点的范围均已跳过；当前区间没有任何同范围精确库存点对。
+                          当前区间没有可比的精确库存点。
                         </small>
                         <small v-else>
-                          缺失与非精确点会跳过，不同卖家、SKU、变体和条件范围各自累计，单点范围不参与；上升段按组内前后净变化计算，售出不抵扣。这是公开库存观察，不是 Takealot 实际入库单。
+                          基于可比精确库存点，不等同实际入库。
                         </small>
                       </div>
                     </div>
@@ -9384,13 +10038,7 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
                           :text-anchor="tick.anchor"
                         >{{ tick.label }}</text>
                       </svg>
-                      <p>
-                        图表共用同一北京时间横轴和绘图区边界；图表上方固定显示当前 Seller 刷新点的报价、库存、评论和同次流量记录。
-                        <template v-if="showOwnTrafficPanel">
-                          近30天浏览量是 Seller Offer 滚动值，不是当天流量或访客数；只展示时间戳完全相同的 Seller 刷新记录，历史无法证实的点保持缺口；粗边节点表示商品名称发生变更。
-                        </template>
-                        鼠标横向移动或键盘左右方向键可切换时间点。虚线只连接缺失区间两端的真实值，不代表中间数值或补零。
-                      </p>
+                      <p v-if="showOwnTrafficPanel">近30天浏览量为滚动值；缺失点不补 0。</p>
                     </div>
                     <OwnStoreSalesChart
                       v-if="selected.来源 === 'own_store'"
@@ -9401,133 +10049,12 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
                 </div>
                 <div v-else class="competitor-offer-empty">
                   <strong>当前快照未返回可区分的卖家报价</strong>
-                  <span>原链接仍然保留；系统不会把变体本身猜成跟卖，也不会伪造卖家、Offer ID或库存数量。</span>
+                  <span>原链接已保留。</span>
                 </div>
               </section>
 
               <section
-                v-if="props.isAdmin && selected.来源 === 'competitor'"
-                class="panel competitor-target-action-card"
-              >
-                <div class="competitor-target-action-heading">
-                  <div>
-                    <p class="section-kicker">MONITORING LINK</p>
-                    <h3>监控队列操作</h3>
-                  </div>
-                  <span>
-                    {{
-                      selectedTarget
-                        ? "当前链接已在后续采集队列"
-                        : "当前仅保留历史快照，链接不在后续采集队列"
-                    }}
-                  </span>
-                </div>
-                <p class="method-note">
-                  监控队列按 PLID 管理；切换卖家报价只改变详情展示，不会重复加入队列。
-                </p>
-                <template v-if="selectedTarget">
-                  <template v-if="editingTargetPlid === selectedTarget.plid">
-                    <input
-                      v-model="editingTargetUrl"
-                      class="target-edit-input"
-                      type="url"
-                      :aria-label="`修改 PLID${selectedTarget.plid} 链接`"
-                      :disabled="targetManagerBusy === selectedTarget.plid"
-                    />
-                    <div class="competitor-target-action-buttons">
-                      <button
-                        class="primary-button"
-                        type="button"
-                        :disabled="targetManagerBusy === selectedTarget.plid"
-                        @click="saveTargetEdit(selectedTarget.plid)"
-                      >
-                        {{ targetManagerBusy === selectedTarget.plid ? "保存中…" : "保存修改" }}
-                      </button>
-                      <button
-                        class="quiet-button"
-                        type="button"
-                        :disabled="targetManagerBusy === selectedTarget.plid"
-                        @click="cancelEditTarget"
-                      >
-                        取消修改
-                      </button>
-                    </div>
-                  </template>
-                  <template v-else>
-                    <a
-                      class="competitor-target-current-url"
-                      :href="selectedTarget.url"
-                      target="_blank"
-                      rel="noopener noreferrer"
-                    >
-                      {{ selectedTarget.url }}
-                    </a>
-                    <div class="competitor-target-action-buttons">
-                      <button
-                        class="secondary-button priority"
-                        type="button"
-                        :disabled="
-                          Boolean(targetManagerBusy)
-                          || !props.canOperate
-                          || !sharedBatchStatus.active
-                          || sharedBatchStatus.current_plid === selectedTarget.plid
-                          || prioritizedTargetStates.has(selectedTarget.plid)
-                        "
-                        @click="prioritizeTarget(selectedTarget)"
-                      >
-                        {{
-                          targetManagerBusy === `priority:${selectedTarget.plid}`
-                            ? "插队中…"
-                            : targetPriorityLabel(selectedTarget.plid)
-                        }}
-                      </button>
-                      <button
-                        class="secondary-button"
-                        type="button"
-                        :disabled="Boolean(targetManagerBusy) || !props.canOperate"
-                        @click="beginEditTarget(selectedTarget)"
-                      >
-                        修改链接
-                      </button>
-                      <button
-                        class="secondary-button danger"
-                        type="button"
-                        :disabled="Boolean(targetManagerBusy) || !props.canOperate"
-                        @click="removeTarget(selectedTarget)"
-                      >
-                        删除链接
-                      </button>
-                    </div>
-                  </template>
-                </template>
-                <div v-else class="competitor-target-action-buttons">
-                  <button
-                    class="primary-button"
-                    type="button"
-                    :disabled="targetManagerBusy === 'add' || !props.canOperate"
-                    @click="addSelectedTarget"
-                  >
-                    {{ targetManagerBusy === "add" ? "加入中…" : "重新加入监控队列" }}
-                  </button>
-                </div>
-                <p
-                  v-if="targetManagerError"
-                  class="target-manager-message error"
-                  role="alert"
-                >
-                  {{ targetManagerError }}
-                </p>
-                <p
-                  v-if="targetManagerNotice"
-                  class="target-manager-message success"
-                  role="status"
-                >
-                  {{ targetManagerNotice }}
-                </p>
-              </section>
-
-              <section
-                v-else-if="props.isAdmin"
+                v-if="!props.detailOnly && props.isAdmin"
                 class="panel competitor-target-action-card own-store-auto-target"
               >
                 <div class="competitor-target-action-heading">
@@ -9538,10 +10065,7 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
                   <span>无需加入真实竞品清单</span>
                 </div>
                 <p class="method-note">
-                  该 PLID 来自全部已接入店铺的 Seller API 当前 Offer，每天09:00自动纳入可见共享批次；
-                  公开报价先排除全部自有 Offer ID/SKU，竞争卖家即使成为主报价也继续追踪。
-                  公开变体只作为商品选项展示，不直接算作跟卖；首次或评论数变化时单独读取PLID共用评论。
-                  删除或修改真实竞品清单不会影响这个自动目标。
+                  每天 09:00 巡检；排除自有 Offer 后识别其他卖家。
                 </p>
                 <div class="competitor-target-action-buttons">
                   <button
@@ -9570,7 +10094,7 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
                 </div>
               </section>
 
-              <section class="detail-grid modal-detail-grid">
+              <section v-if="!props.detailOnly" class="detail-grid modal-detail-grid">
                 <article v-if="selectedOffer" class="panel decision-card">
                   <p class="section-kicker">SELLER OFFER SIGNAL</p>
                   <h2>{{ selectedOffer.卖家 || "未知卖家" }}</h2>
@@ -9644,16 +10168,17 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
                     打开 Takealot 商品页
                   </a>
                 </article>
+              </section>
 
-                <article class="panel review-balance">
+              <section
+                v-show="showStandaloneOwnDetailModule('reviews')"
+                class="detail-grid modal-detail-grid"
+              >
+                <article
+                  class="panel review-balance"
+                >
                   <p class="section-kicker">REVIEW BALANCE</p>
                   <h2>评论结构（同一 PLID 商品共用）</h2>
-                  <p v-if="selected.共享评论说明" class="method-note">
-                    {{ selected.共享评论说明 }}
-                  </p>
-                  <p v-else class="method-note">
-                    Takealot 评论属于当前 PLID 商品，未区分卖家或 Offer ID，因此主报价与跟卖共用同一份评论结构。
-                  </p>
                   <div class="balance-row positive">
                     <span>好评 4–5 星</span><strong>{{ selected.好评 }}</strong>
                     <i
@@ -9681,7 +10206,10 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
                 </article>
               </section>
 
-              <section class="panel variant-panel">
+              <section
+                v-show="showStandaloneOwnDetailModule('inventory')"
+                class="panel variant-panel"
+              >
                 <div class="section-heading">
                   <div>
                     <p class="section-kicker">VARIANT INVENTORY</p>
@@ -9757,13 +10285,14 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
                   </table>
                 </div>
                 <p class="method-note">
-                  库存按变体分别探测；供应商调货、长时效到货和当前不可购买的变体按平台仓没货处理。
-                  达到每位客户限购数时只记录“至少”该数量，不把促销限购误判成精确库存。
-                  评论按 PLID 商品维度共用，不因变体重复采集或重复计数。
+                  库存按变体探测；限购仅记“至少”。
                 </p>
               </section>
 
-              <section class="panel reviews-panel">
+              <section
+                v-show="showStandaloneOwnDetailModule('reviews')"
+                class="panel reviews-panel"
+              >
                 <div class="section-heading">
                   <div>
                     <p class="section-kicker">VOICE OF CUSTOMER</p>
@@ -9774,9 +10303,6 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
                     · 全部 {{ detail.reviews.length }} 条
                   </span>
                 </div>
-                <p class="method-note">
-                  同一 PLID 的主报价与跟卖共用这些商品评论；平台未返回卖家或 Offer ID 归属。
-                </p>
                 <div class="review-filter-bar">
                   <div class="filter-tabs">
                     <button
@@ -9876,15 +10402,14 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
               <a :href="selectedOfferLink" target="_blank" rel="noreferrer">
                 打开当前卖家报价页
               </a>
-              <button type="button" @click="closeProductModal">关闭</button>
+              <button type="button" @click="closeDetailView">
+                {{ props.detailOnly ? "关闭标签页" : "关闭" }}
+              </button>
             </div>
           </template>
         </section>
       </div>
     </Teleport>
 
-    <footer v-if="!props.detailOnly" class="module-footer">
-      价格和库存按每个卖家报价分开展示；同一 PLID 的商品评论共用。所有观察信号均需结合连续快照判断。
-    </footer>
   </div>
 </template>

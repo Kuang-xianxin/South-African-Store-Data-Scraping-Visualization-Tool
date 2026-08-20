@@ -784,6 +784,7 @@ export interface ProductItem extends ProductMasterIdentity {
   status?: string | null;
   status_label?: string | null;
   image_url?: string | null;
+  productline_id?: string | null;
 }
 
 export interface SummaryPayload {
@@ -1012,7 +1013,68 @@ export type AnomalyProductType =
   | "not_buyable_with_stock"
   | "disabled_by_takealot_with_stock"
   | "disabled_by_seller_with_stock"
-  | "slow_moving";
+  | "slow_moving"
+  | "daily_bad_review"
+  | "poor_review_quality"
+  | "high_return_volume";
+
+export interface AnomalyReviewRecord {
+  review_id: string;
+  rating: number | null;
+  title: string | null;
+  body: string | null;
+  customer_name: string | null;
+  review_date: string | null;
+  first_seen_at: string | null;
+  first_seen_on: string | null;
+}
+
+export interface AnomalyReturnReasonCount {
+  reason: string;
+  label: string;
+  units: number;
+  records: number;
+}
+
+export interface AnomalyReturnRecord {
+  seller_return_id: string;
+  return_date: string | null;
+  quantity: number;
+  return_reason: string | null;
+  return_reason_label: string;
+  customer_comment: string | null;
+  sku: string | null;
+  plid: string | null;
+  store_code?: string | null;
+  store_name?: string | null;
+}
+
+export type AnomalyReturnDataStatus =
+  | "collected"
+  | "partial"
+  | "stale"
+  | "failed"
+  | "uncollected";
+
+export interface AnomalyReturnCoverage {
+  data_status: AnomalyReturnDataStatus;
+  window_start: string | null;
+  window_end: string | null;
+  window_days: number;
+  source: "seller_returns_detail";
+  uncollected_is_zero: false;
+  covered_store_count?: number;
+  store_count?: number;
+  stores?: Array<{
+    store_code: string;
+    store_name: string;
+    data_status: AnomalyReturnDataStatus;
+    requested_from?: string | null;
+    requested_through?: string | null;
+    last_success_at?: string | null;
+    latest_error?: string | null;
+  }>;
+}
 
 export interface AnomalyProductItem extends ProductMasterIdentity {
   anomaly_type: AnomalyProductType;
@@ -1035,6 +1097,10 @@ export interface AnomalyProductItem extends ProductMasterIdentity {
   on_way_stock: number;
   inventory_units: number;
   data_through: string | null;
+  offer_collected_at?: string | null;
+  sales_collected_at?: string | null;
+  review_collected_at?: string | null;
+  return_collected_at?: string | null;
   latest_ordered_units: number | null;
   no_sales_days: number;
   no_sales_days_exact: boolean;
@@ -1047,6 +1113,29 @@ export interface AnomalyProductItem extends ProductMasterIdentity {
   baseline_total_units?: number;
   baseline_selling_days?: number;
   baseline_daily_average?: number;
+  store_codes?: string[];
+  store_names?: string[];
+  platform_skus?: string[];
+  plids?: string[];
+  offer_ids?: string[];
+  company_skus?: string[];
+  review_count?: number;
+  bad_review_count?: number;
+  bad_review_rate_percentage?: number;
+  bad_review_rating_counts?: Record<string, number>;
+  review_baseline_first_seen_at?: string | null;
+  review_discovered_on?: string;
+  new_bad_review_count?: number;
+  new_bad_reviews?: AnomalyReviewRecord[];
+  recent_bad_reviews?: AnomalyReviewRecord[];
+  return_units_30_days?: number;
+  return_record_count?: number;
+  affected_platform_sku_count?: number;
+  return_reason_counts?: AnomalyReturnReasonCount[];
+  recent_returns?: AnomalyReturnRecord[];
+  return_window_start?: string | null;
+  return_window_end?: string | null;
+  return_data_status?: AnomalyReturnDataStatus;
 }
 
 export interface AnomalyProductPayload {
@@ -1054,6 +1143,13 @@ export interface AnomalyProductPayload {
   completed_through: string;
   data_through: string | null;
   date_basis: "Africa/Johannesburg";
+  collection_times: {
+    offers_at: string | null;
+    sales_at: string | null;
+    reviews_at: string | null;
+    returns_at: string | null;
+    latest_at: string | null;
+  };
   sales_zero_evidence: "verified_complete_business_days_only";
   rules: {
     sales_stop_zero_days: number;
@@ -1066,6 +1162,16 @@ export interface AnomalyProductPayload {
     slow_moving_day_basis: "verified_zero_sales_and_positive_stock_days";
     stock_status_requires_available_stock: boolean;
     stock_status_excluded_inventory: Array<"receiving" | "on_way">;
+    bad_review_rating_below: number;
+    daily_bad_review_basis: "first_seen_after_plid_review_baseline";
+    poor_review_min_bad_count: number;
+    poor_review_min_bad_rate_percentage: number;
+    poor_review_identity: "plid";
+    return_window_days: number;
+    high_return_min_units: number;
+    high_return_identity: "company_sku";
+    high_return_source: "seller_returns_detail";
+    uncollected_returns_are_zero: false;
   };
   summary: {
     sudden_sales_stop: number;
@@ -1073,6 +1179,9 @@ export interface AnomalyProductPayload {
     disabled_by_takealot_with_stock: number;
     disabled_by_seller_with_stock: number;
     slow_moving_by_days: Record<string, number>;
+    daily_bad_reviews: number;
+    poor_review_quality: number;
+    high_returns: number;
   };
   sudden_sales_stop: AnomalyProductItem[];
   stock_status_anomalies: {
@@ -1081,6 +1190,11 @@ export interface AnomalyProductPayload {
     disabled_by_seller: AnomalyProductItem[];
   };
   slow_moving: AnomalyProductItem[];
+  daily_bad_reviews: AnomalyProductItem[];
+  poor_review_quality: AnomalyProductItem[];
+  review_discovery_through: string | null;
+  return_coverage: AnomalyReturnCoverage;
+  high_returns: AnomalyProductItem[];
 }
 
 export type QuadrantKey =
@@ -1142,6 +1256,7 @@ export interface KeywordTrafficListPayload {
 export interface KeywordTrafficHistoryPoint {
   date: string;
   page_views_30_days: number | null;
+  source_title: string | null;
 }
 
 export interface KeywordTrafficWindow {
@@ -1352,6 +1467,7 @@ export type SearchAutocompleteLibraryPayload = SearchRootExpansionLibraryPayload
 
 export type SearchRankingRootSource =
   | "human_confirmed_product_fact"
+  | "image_title_same_product_lexicon"
   | "image_title_first_instinct"
   | "title_word_root"
   | "result_page_learning"
@@ -1368,6 +1484,13 @@ export interface SearchRankingStatus {
   fallback_model: string | null;
   configured_provider_count: number;
   pricing_snapshot_date: string;
+  pricing_mode: "api_unit_price";
+  model_policy: {
+    transport: "openai_compatible_https";
+    model_fallback_allowed: boolean;
+    codex_cli_integration_retained: true;
+    codex_cli_execution_enabled: false;
+  };
   max_pages: number;
   max_keywords: number;
   root_expansion_input_limit: number;
@@ -1392,9 +1515,11 @@ export interface SearchRankingStatus {
     max_words: 4;
     preferred_max_words: 3;
     min_preferred_count: 4;
+    source_priority: ["same_product_lexicon", "fusion_keywords"];
   };
   query_source_targets: {
     model_south_african_direct: number;
+    same_product_lexicon_first: true;
     takealot_root_expansion: number;
     seller_title_complete_phrase_max: number;
     root_related_core_total: number;
@@ -1407,6 +1532,11 @@ export interface SearchRankingStatus {
   organic_page_size: number;
   columns_per_row: number;
   core_first_page_threshold: number;
+  core_same_demand_competitor_ratio_floor: number;
+  core_same_demand_competitor_min_results: number;
+  core_min_platform_results: number;
+  platform_result_count_is_search_volume: false;
+  platform_result_count_role: "core_keyword_supply_breadth_gate";
   semantic_relation_grades: ["S", "A", "C/I"];
   semantic_relation_source_priority_decides_grade: false;
   semantic_adjacent_ratio_floor: number;
@@ -1443,6 +1573,16 @@ export interface SearchRankingAnalysisSummary {
   created_at: string;
   completed_at: string | null;
   error: string | null;
+  failure_audit?: {
+    stage?: string;
+    summary?: string;
+    validation_errors?: Array<{
+      path: string;
+      type: string;
+      message: string;
+    }>;
+    normalization?: Record<string, unknown>;
+  } | null;
   vision_stage_completed: boolean;
   usage: {
     input_tokens?: number;
@@ -1524,6 +1664,42 @@ export interface SearchRankingProduct extends ProductMasterIdentity {
   latest_analysis: SearchRankingAnalysisSummary | null;
 }
 
+export interface SearchRankingFirstPageResultClassification {
+  organic_position: number;
+  plid: string;
+  title: string;
+  subtitle: string;
+  url: string;
+  image_url: string;
+  classification:
+    | "direct_same_product"
+    | "same_demand_competitor"
+    | "adjacent_or_ambiguous"
+    | "unrelated";
+  is_direct_competitor: boolean;
+  is_same_demand_competitor?: boolean;
+  is_core_competitor?: boolean;
+  is_target: boolean;
+  reason:
+    | "target_product"
+    | "source_title_identity_signature"
+    | "same_product_identity_with_different_form"
+    | "same_demand_product_family"
+    | "same_demand_product_family_in_subtitle"
+    | "conflicting_product_family_in_title"
+    | "ordered_same_product_name_or_alias"
+    | "identity_tokens_scattered_not_direct_proof"
+    | "conflicting_product_family_in_subtitle"
+    | "no_complete_same_product_identity";
+  matched_identity_terms: string[];
+  matched_loose_identity_terms: string[];
+  matched_exclusion_terms: string[];
+  matched_subtitle_exclusion_terms: string[];
+  matched_source_title_signatures: string[];
+  matched_same_demand_terms?: string[];
+  matched_subtitle_same_demand_terms?: string[];
+}
+
 export interface SearchRankingKeywordResult {
   id: number;
   keyword: string;
@@ -1548,40 +1724,74 @@ export interface SearchRankingKeywordResult {
     semantic_relation_grade?: "S" | "A" | "C/I";
     semantic_relation_label?:
       | "same_product_or_direct_alias"
+      | "core_query_with_same_demand_competitor_density"
       | "adjacent_demand_alternative"
       | "complementary_or_irrelevant_rejected";
     semantic_relation_decision?: string;
     semantic_relation_source_priority_decides_grade?: false;
+    semantic_relation_requires_page_majority_for_s?: boolean;
+    semantic_relation_requires_demand_competitor_density_for_s?: boolean;
     semantic_relation_current_title_alias?: string | null;
+    semantic_relation_query_identity_supported?: boolean;
     semantic_relation_query_same_product_terms?: string[];
+    semantic_relation_query_strict_same_product_terms?: string[];
+    semantic_relation_query_core_identity_terms?: string[];
+    semantic_relation_query_core_only_candidate?: boolean;
+    semantic_relation_query_matches_explicit_opportunity_phrase?: boolean;
     semantic_relation_same_product_terms?: string[];
+    semantic_relation_same_demand_product_terms?: string[];
     semantic_relation_buyer_jobs?: string[];
     semantic_relation_adjacent_roots?: string[];
     semantic_relation_alternative_product_terms?: string[];
     semantic_relation_excluded_product_terms?: string[];
     semantic_relation_same_product_result_count?: number;
+    semantic_relation_same_demand_result_count?: number;
     semantic_relation_adjacent_result_count?: number;
     semantic_relation_rejected_result_count?: number;
     semantic_relation_evaluated_result_count?: number;
     semantic_relation_same_product_ratio?: number;
+    semantic_relation_same_demand_ratio?: number;
     semantic_relation_adjacent_ratio?: number;
     semantic_relation_supported_ratio?: number;
+    semantic_relation_core_competitor_result_count?: number;
+    semantic_relation_core_competitor_ratio?: number;
+    semantic_relation_core_density_qualified?: boolean;
+    semantic_relation_core_page_qualified?: boolean;
+    semantic_relation_core_demand_ratio_floor?: number;
+    semantic_relation_core_demand_min_results?: number;
+    semantic_relation_platform_supply_evidence_available?: boolean;
+    semantic_relation_platform_supply_qualified?: boolean;
+    semantic_relation_platform_total_num_found?: number | null;
+    semantic_relation_core_min_platform_results?: number;
     semantic_relation_adjacent_page_qualified?: boolean;
     semantic_relation_adjacent_ratio_floor?: number;
     semantic_relation_supported_ratio_floor?: number;
     semantic_relation_min_adjacent_results?: number;
     semantic_relation_same_product_result_titles?: string[];
     semantic_relation_adjacent_result_titles?: string[];
-    semantic_relation_evidence_scope?: "first_page_organic_result_titles";
+    semantic_relation_evidence_scope?:
+      | "first_page_organic_result_titles"
+      | "first_page_organic_result_title_subtitle_and_product_metadata";
+    first_page_result_classifications?: SearchRankingFirstPageResultClassification[];
+    source_title_identity_signatures?: string[];
     semantic_relation_uses_per_result_image_or_category?: false;
     semantic_relation_limitations?: string;
     page_validation_status?: "completed" | "not_run";
     first_page_majority?: boolean;
+    first_page_core_competitor_density_qualified?: boolean;
     direct_competitor_count_first_page?: number;
+    same_demand_competitor_count_first_page?: number;
+    core_competitor_count_first_page?: number;
+    core_competitor_count_excluding_target_first_page?: number;
     direct_competitor_count_excluding_target_first_page?: number;
     target_on_first_page?: boolean;
     target_counted_as_direct_competitor?: boolean;
     core_threshold?: number;
+    core_demand_ratio_floor?: number;
+    core_demand_min_results?: number;
+    core_min_platform_results?: number;
+    platform_result_count_is_search_volume?: false;
+    platform_result_count_role?: "core_keyword_supply_breadth_gate";
     opportunity_threshold?: number;
     opportunity_max_direct_competitors?: number;
     opportunity_max_organic_rank?: number;
@@ -1599,12 +1809,14 @@ export interface SearchRankingKeywordResult {
     candidate_source?:
       | "image_precise"
       | "image_title_fused_precise"
+      | "same_product_lexicon"
       | "takealot_root_expansion"
       | "takealot_autocomplete"
       | "seller_title_complete_phrase"
       | "comparison_resample"
       | "title_verified_parameter";
     query_source_channel?:
+      | "same_product_lexicon_direct"
       | "model_south_african_direct"
       | "takealot_root_expansion"
       | "takealot_autocomplete_path"
@@ -1614,6 +1826,7 @@ export interface SearchRankingKeywordResult {
       | "human_confirmed_decision_parameter"
       | "unknown";
     query_source_channels?: Array<
+      | "same_product_lexicon_direct"
       | "model_south_african_direct"
       | "takealot_root_expansion"
       | "takealot_autocomplete_path"
@@ -1638,6 +1851,7 @@ export interface SearchRankingKeywordResult {
       | "image_need_state"
       | "image_only_model"
       | "image_title_first_instinct"
+      | "image_title_same_product_lexicon"
       | "image_title_need_state"
       | "image_title_fusion_model"
       | "human_confirmed_product_fact"
@@ -1672,7 +1886,9 @@ export interface SearchRankingKeywordResult {
     same_type_validation_method?:
       | "canonicalized_title_token_subset"
       | "canonicalized_title_token_subset_with_controlled_product_aliases"
-      | "semantic_alias_token_subset_with_retarget_rejection";
+      | "semantic_alias_token_subset_with_retarget_rejection"
+      | "ordered_identity_phrase_with_exclusion_and_title_signature_audit"
+      | "exact_identity_and_same_demand_family_page_audit";
     same_type_validation_controlled_aliases?: string[];
     same_type_validation_term_source?:
       | "image_primary_physical_form"
@@ -1680,13 +1896,15 @@ export interface SearchRankingKeywordResult {
       | "image_title_fused_same_product_terms"
       | "semantic_verified_same_product_terms";
     same_type_validation_uses_multimodal_per_result?: false;
-    same_type_validation_requires_contiguous_phrase?: false;
+    same_type_validation_requires_contiguous_phrase?: boolean;
     same_type_validation_limitations?: string;
     journey_type?:
+      | "same_product_lexicon_direct"
       | "concise_direct"
       | "known_long_tail"
       | "platform_root_expansion"
       | "human_confirmed_fact_root_expansion"
+      | "same_product_lexicon_root_expansion"
       | "title_cross_check_root_expansion"
       | "model_fusion_root_expansion"
       | "title_root_expansion"
@@ -1714,6 +1932,9 @@ export interface SearchRankingKeywordResult {
       | "second_best_root_expansion"
       | "second_best_autocomplete"
       | null;
+    captured_request_endpoint?: string;
+    captured_request_qsearch?: string;
+    captured_request_matches_keyword?: boolean;
     api_version?: string | null;
     reason?: string;
   };
@@ -1789,12 +2010,44 @@ export interface SearchRankingTitleScore {
   };
 }
 
+export type SearchRankingSameProductLexiconSource =
+  | "human_confirmed_product_fact"
+  | "seller_title_identity_phrase"
+  | "fusion_product_type_terms"
+  | "fusion_same_product_aliases"
+  | "historical_profile_term";
+
+export interface SearchRankingSameProductLexicon {
+  policy_version:
+    | "same-product-lexicon-v1"
+    | "same-product-lexicon-v2"
+    | "historical-profile-projection";
+  selection_policy: string;
+  search_use: "priority_direct_query_and_complete_root_expansion";
+  direct_query_limit: number;
+  complete_root_expansion_limit?: number;
+  entries: Array<{
+    term: string;
+    sources: SearchRankingSameProductLexiconSource[];
+    word_count: number;
+    direct_query_eligible: true;
+  }>;
+  excluded: Array<{
+    term: string;
+    source: SearchRankingSameProductLexiconSource | string;
+    word_count: number;
+    reason: "outside_2_to_4_words" | string;
+  }>;
+}
+
 export interface SearchRankingAnalysis extends SearchRankingAnalysisSummary {
   product_name: string | null;
   category: string | null;
   profile: {
     product_type_terms?: string[];
     same_product_aliases?: string[];
+    same_demand_product_terms?: string[];
+    same_product_lexicon?: SearchRankingSameProductLexicon;
     distinctive_terms?: string[];
     exclusions?: string[];
     title_strategies?: SearchRankingTitleStrategy[];
@@ -1967,14 +2220,23 @@ export interface SearchRankingAnalysis extends SearchRankingAnalysisSummary {
       max_words: 4;
       preferred_max_words: 3;
       min_preferred_count: 4;
+      source_priority: ["same_product_lexicon", "fusion_keywords"];
     };
     query_source_targets?: {
       model_south_african_direct: number;
+      same_product_lexicon_first: true;
       takealot_root_expansion: number;
       seller_title_complete_phrase_max: number;
       root_related_core_total: number;
       adjacent_opportunity: number;
       adaptive_recovery: number;
+    };
+    same_product_lexicon?: {
+      policy_version: "same-product-lexicon-v1";
+      entry_count: number;
+      direct_query_priority: true;
+      complete_root_expansion_enabled: true;
+      complete_root_expansion_limit: number;
     };
     adaptive_policy?: {
       base_query_target: number;
@@ -2024,7 +2286,8 @@ export interface SearchRankingAnalysis extends SearchRankingAnalysisSummary {
       | "accepted"
       | "request_or_schema_failed"
       | "identity_conflict"
-      | "cached_identity_conflict";
+      | "cached_identity_conflict"
+      | "weekly_quota_stopped";
     reason?: string;
     source_title_similarity?: number;
     title_identity_support?: boolean;
@@ -2150,6 +2413,7 @@ export type SearchRankingBatchStatusValue =
   | "paused_after_error"
   | "stopping"
   | "stopped"
+  | "stopped_quota_limit"
   | "interrupted"
   | "completed";
 
@@ -2213,7 +2477,7 @@ export interface SearchRankingBatchState {
     productline_id: string | null;
     title: string | null;
     variant_count?: number;
-    outcome: "completed" | "skipped" | "failed";
+    outcome: "completed" | "skipped" | "failed" | "quota_stopped";
     message: string | null;
     analysis_id: number | null;
     vision_reused: boolean;
@@ -2231,6 +2495,19 @@ export interface SearchRankingBatchState {
   automatic_retry?: false;
   can_pause?: boolean;
   can_resume?: boolean;
+  can_retry_failed_target?: boolean;
+  retry_failed_target?: {
+    index: number;
+    store_code: string;
+    store_name: string;
+    offer_id: string;
+    productline_id: string | null;
+    title: string | null;
+    variant_count?: number;
+    outcome: "failed";
+    message: string | null;
+  } | null;
+  retry_remaining_count?: number | null;
   can_stop?: boolean;
   can_restart?: boolean;
 }
@@ -2245,6 +2522,13 @@ export interface SearchRankingBatchPreviewPayload {
     pause_after_provider_or_network_error: true;
     reverse_image_search: false;
     requires_snapshot_confirmation: true;
+    primary_provider: string;
+    primary_model: string;
+    fallback_provider: string | null;
+    fallback_model: string | null;
+    model_fallback_allowed: boolean;
+    codex_cli_integration_retained: true;
+    codex_cli_execution_enabled: false;
     public_request_min_interval_seconds: number;
     public_request_max_interval_seconds: number;
   };
@@ -2282,6 +2566,8 @@ export interface SearchRankingBatchPreviewPayload {
     };
     estimated_cost: {
       currency: "CNY";
+      pricing_mode: "api_unit_price";
+      cost_estimate_applicable: true;
       base_cny: number;
       typical_low_cny: number;
       typical_high_cny: number;

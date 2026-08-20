@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import date, datetime
+from decimal import Decimal
 
-from sqlalchemy import select
+from sqlalchemy import exists, literal, select, union_all
 from sqlalchemy.orm import Session
 
 from takealot_ops.storage.models import (
@@ -23,6 +25,27 @@ class ConnectedStoreOffer:
     store_code: str
     store_name: str
     offer: OfferCurrent
+
+
+@dataclass(frozen=True, slots=True)
+class ConnectedStoreOfferPoint:
+    """Lightweight cross-store Seller API point used by read projections."""
+
+    id: int
+    store_code: str
+    display_date: date
+    offer_id: str
+    productline_id: str | None
+    sku: str | None
+    title: str | None
+    image_url: str | None
+    selling_price: Decimal | None
+    status: str | None
+    total_stock: int | None
+    takealot_available_stock: int | None
+    seller_available_stock: int | None
+    captured_at: datetime
+    source_kind: str
 
 
 @dataclass(frozen=True)
@@ -88,7 +111,7 @@ def load_connected_store_offer_points(
     *,
     plids: set[str] | None = None,
     store_codes: set[str] | None = None,
-) -> list[StoreOfferBaseline | StoreOfferObservation]:
+) -> list[ConnectedStoreOfferPoint]:
     """Load every Seller API refresh point, retaining legacy baselines as fallback."""
     normalized_plids = (
         {str(plid).strip() for plid in plids if str(plid).strip()}
@@ -97,44 +120,91 @@ def load_connected_store_offer_points(
     )
     if normalized_plids is not None and not normalized_plids:
         return []
-    result: list[StoreOfferBaseline | StoreOfferObservation] = []
-    for store_code, _ in _connected_store_catalog(session, store_codes=store_codes):
-        with store_scope(store_code):
-            observation_statement = select(StoreOfferObservation)
-            observation_exists = (
-                select(StoreOfferObservation.id)
-                .where(
-                    StoreOfferObservation.store_code == StoreOfferBaseline.store_code,
-                    StoreOfferObservation.offer_id == StoreOfferBaseline.offer_id,
-                    StoreOfferObservation.captured_at == StoreOfferBaseline.captured_at,
-                )
-                .exists()
-            )
-            baseline_statement = select(StoreOfferBaseline).where(~observation_exists)
-            if normalized_plids is not None:
-                observation_statement = observation_statement.where(
-                    StoreOfferObservation.productline_id.in_(normalized_plids)
-                )
-                baseline_statement = baseline_statement.where(
-                    StoreOfferBaseline.productline_id.in_(normalized_plids)
-                )
-            observations = list(
-                session.scalars(
-                    observation_statement.order_by(
-                        StoreOfferObservation.captured_at.desc(),
-                        StoreOfferObservation.offer_id.asc(),
-                    )
-                )
-            )
-            baselines = session.scalars(
-                baseline_statement.order_by(
-                    StoreOfferBaseline.captured_at.desc(),
-                    StoreOfferBaseline.offer_id.asc(),
-                )
-            )
-            result.extend(observations)
-            result.extend(baselines)
-    return result
+    selected_store_codes = tuple(
+        code
+        for code, _ in _connected_store_catalog(session, store_codes=store_codes)
+    )
+    if not selected_store_codes:
+        return []
+
+    observation = StoreOfferObservation.__table__
+    baseline = StoreOfferBaseline.__table__
+    common_columns = (
+        "id",
+        "store_code",
+        "display_date",
+        "offer_id",
+        "productline_id",
+        "sku",
+        "title",
+        "image_url",
+        "selling_price",
+        "status",
+        "total_stock",
+        "takealot_available_stock",
+        "seller_available_stock",
+        "captured_at",
+    )
+    observation_statement = select(
+        *(observation.c[name] for name in common_columns),
+        literal(0).label("source_rank"),
+    ).where(observation.c.store_code.in_(selected_store_codes))
+    observation_exists = exists(
+        select(observation.c.id).where(
+            observation.c.store_code == baseline.c.store_code,
+            observation.c.offer_id == baseline.c.offer_id,
+            observation.c.captured_at == baseline.c.captured_at,
+        )
+    )
+    baseline_statement = select(
+        *(baseline.c[name] for name in common_columns),
+        literal(1).label("source_rank"),
+    ).where(
+        baseline.c.store_code.in_(selected_store_codes),
+        ~observation_exists,
+    )
+    if normalized_plids is not None:
+        observation_statement = observation_statement.where(
+            observation.c.productline_id.in_(normalized_plids)
+        )
+        baseline_statement = baseline_statement.where(
+            baseline.c.productline_id.in_(normalized_plids)
+        )
+
+    combined = union_all(observation_statement, baseline_statement).subquery()
+    rows = session.connection().execute(
+        select(
+            *(combined.c[name] for name in common_columns),
+            combined.c.source_rank,
+        ).order_by(
+            combined.c.store_code.asc(),
+            combined.c.source_rank.asc(),
+            combined.c.captured_at.desc(),
+            combined.c.offer_id.asc(),
+        )
+    ).mappings()
+    return [
+        ConnectedStoreOfferPoint(
+            id=row["id"],
+            store_code=row["store_code"],
+            display_date=row["display_date"],
+            offer_id=row["offer_id"],
+            productline_id=row["productline_id"],
+            sku=row["sku"],
+            title=row["title"],
+            image_url=row["image_url"],
+            selling_price=row["selling_price"],
+            status=row["status"],
+            total_stock=row["total_stock"],
+            takealot_available_stock=row["takealot_available_stock"],
+            seller_available_stock=row["seller_available_stock"],
+            captured_at=row["captured_at"],
+            source_kind=(
+                "observation" if int(row["source_rank"]) == 0 else "baseline"
+            ),
+        )
+        for row in rows
+    ]
 
 
 def connected_store_plids(session: Session) -> set[str]:

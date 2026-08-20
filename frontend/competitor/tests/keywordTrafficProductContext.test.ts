@@ -28,6 +28,16 @@ test("keyword traffic detail type carries the shared lifecycle evidence", () => 
   assert.match(typeSource, /interface KeywordTrafficProduct extends ProductLifecycleContext/);
 });
 
+test("keyword traffic follow tooltip shows the title from the same daily snapshot", () => {
+  assert.match(pageSource, /<span>当时主标题<\/span>/);
+  assert.match(pageSource, /activePoint\.source_title \|\| "—"/);
+  assert.match(pageSource, /point\.source_title \|\| '无标题快照'/);
+  assert.match(
+    typeSource,
+    /interface KeywordTrafficHistoryPoint \{[^}]*source_title: string \| null;/s,
+  );
+});
+
 test("keyword traffic omits the selected-event impact summary while keeping node controls", () => {
   assert.doesNotMatch(pageSource, /已选变化节点|已选基线节点/);
   assert.doesNotMatch(pageSource, /30天浏览量上升 \/ 下降|上升 \/ 下降趋势变化/);

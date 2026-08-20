@@ -84,6 +84,7 @@ def test_erp_quadrants_use_thirty_day_orders_and_keep_identity_enrichment(
     offer_a = next(item for item in payload["items"] if item["offer_id"] == "offer-a")
     offer_b = next(item for item in payload["items"] if item["offer_id"] == "offer-b")
     assert offer_a["ordered_units"] == 19
+    assert offer_a["productline_id"] == "line-a"
     assert "page_views_7_day_estimate" not in offer_a
     assert offer_a["first_listed_at"] == "2026-01-15 12:34"
     assert offer_a["first_listed_source"] == "platform"

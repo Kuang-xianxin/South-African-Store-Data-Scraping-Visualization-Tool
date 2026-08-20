@@ -1,7 +1,8 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, ref, watch } from "vue";
+import { computed, onBeforeUnmount, ref, shallowRef, watch } from "vue";
 
 import { fetchQuadrants } from "../api";
+import { openOwnStoreDetailTab } from "../moduleNavigation";
 import { PRODUCT_IMAGE_SIZE, productThumbnailUrl } from "../productImages";
 import { matchesProductSearch } from "../productSearch";
 import type { OwnStoreScope, QuadrantItem, QuadrantPayload } from "../types";
@@ -10,8 +11,13 @@ const props = defineProps<{
   asOf: string;
   storeScope?: OwnStoreScope;
   multiStoreLabel?: string;
+  rangeStart?: string;
+  rangeEnd?: string;
+  canViewCompetitors?: boolean;
+  currentStoreCode?: string;
+  onPermissionDenied?: () => void;
 }>();
-const data = ref<QuadrantPayload | null>(null);
+const data = shallowRef<QuadrantPayload | null>(null);
 const loading = ref(true);
 const copiedOfferId = ref("");
 const copyFeedback = ref("");
@@ -19,11 +25,16 @@ const copyFeedbackKind = ref<"success" | "error">("success");
 const hoveredItem = ref<QuadrantItem | null>(null);
 const failedImageUrls = ref<Set<string>>(new Set());
 const skuQuery = ref("");
+const productPage = ref(1);
+const markerImagesReady = ref(false);
+const detailTabError = ref("");
 const productSort = ref<"views_desc" | "orders_desc" | "stock_desc" | "name_asc">(
   "views_desc",
 );
+const productPageSize = 60;
 let feedbackTimer: ReturnType<typeof setTimeout> | undefined;
 let loadRequestRevision = 0;
+let markerImageFrame: number | undefined;
 
 const rankTicks = [0, 25, 50, 75, 100];
 const gridTicks = rankTicks.filter((tick) => tick > 0 && tick < 100);
@@ -61,6 +72,19 @@ const sortedItems = computed(() => {
     );
   });
 });
+const productPageCount = computed(() =>
+  Math.max(1, Math.ceil(sortedItems.value.length / productPageSize)),
+);
+const visibleSortedItems = computed(() => {
+  const start = (productPage.value - 1) * productPageSize;
+  return sortedItems.value.slice(start, start + productPageSize);
+});
+const productPageStart = computed(() =>
+  sortedItems.value.length ? (productPage.value - 1) * productPageSize + 1 : 0,
+);
+const productPageEnd = computed(() =>
+  Math.min(productPage.value * productPageSize, sortedItems.value.length),
+);
 const plottableItems = computed(() =>
   allItems.value.filter(
     (item) =>
@@ -95,12 +119,20 @@ const hoveredImageUrl = computed(() => {
 });
 
 watch([() => props.asOf, () => props.storeScope], load, { immediate: true });
+watch([skuQuery, productSort], () => {
+  productPage.value = 1;
+});
+watch(productPageCount, (pageCount) => {
+  if (productPage.value > pageCount) productPage.value = pageCount;
+});
 
 async function load() {
   const requestRevision = ++loadRequestRevision;
   const requestedAsOf = props.asOf;
   const requestedStoreScope = props.storeScope ?? "current";
   loading.value = true;
+  markerImagesReady.value = false;
+  cancelMarkerImageFrame();
   try {
     const nextData = await fetchQuadrants(
       requestedAsOf,
@@ -113,6 +145,8 @@ async function load() {
       || requestedStoreScope !== (props.storeScope ?? "current")
     ) return;
     data.value = nextData;
+    productPage.value = 1;
+    scheduleMarkerImages();
   } finally {
     if (requestRevision === loadRequestRevision) loading.value = false;
   }
@@ -177,8 +211,12 @@ function sourceImageUrl(item: QuadrantItem) {
 function imageUrl(item: QuadrantItem) {
   const source = sourceImageUrl(item);
   return source && !failedImageUrls.value.has(source)
-    ? productThumbnailUrl(source, PRODUCT_IMAGE_SIZE.list)
+    ? productThumbnailUrl(source, PRODUCT_IMAGE_SIZE.list, item.store_code)
     : "";
+}
+
+function markerImageUrl(item: QuadrantItem) {
+  return markerImagesReady.value ? imageUrl(item) : "";
 }
 
 function imageFailed(item: QuadrantItem) {
@@ -191,6 +229,70 @@ function markImageUnavailable(url: string) {
   const failed = new Set(failedImageUrls.value);
   failed.add(url);
   failedImageUrls.value = failed;
+}
+
+function scheduleMarkerImages() {
+  cancelMarkerImageFrame();
+  markerImageFrame = window.requestAnimationFrame(() => {
+    markerImageFrame = window.requestAnimationFrame(() => {
+      markerImageFrame = undefined;
+      markerImagesReady.value = true;
+    });
+  });
+}
+
+function cancelMarkerImageFrame() {
+  if (markerImageFrame === undefined) return;
+  window.cancelAnimationFrame(markerImageFrame);
+  markerImageFrame = undefined;
+}
+
+function productPlid(item: QuadrantItem) {
+  const value = String(item.productline_id ?? "").trim();
+  return /^\d{1,20}$/.test(value) ? value : "";
+}
+
+function activateProductCard(item: QuadrantItem, event?: Event) {
+  if (event instanceof MouseEvent) {
+    const target = event.target;
+    if (
+      target instanceof Element
+      && target.closest("a, button, input, select, textarea, [contenteditable='true']")
+    ) return;
+    if (window.getSelection()?.toString().trim()) return;
+  }
+  openProductDetail(item);
+}
+
+function openProductDetail(item: QuadrantItem) {
+  if (!props.canViewCompetitors) {
+    props.onPermissionDenied?.();
+    return;
+  }
+  const plid = productPlid(item);
+  if (!plid) {
+    detailTabError.value = "该商品暂未解析到自有链接 PLID，当前不能打开详情。";
+    return;
+  }
+  const scope = props.storeScope ?? "current";
+  const storeCode = String(item.store_code || props.currentStoreCode || "").trim();
+  detailTabError.value = "";
+  const opened = openOwnStoreDetailTab({
+    plid,
+    scope,
+    ...(scope === "current" && storeCode ? { storeCode } : {}),
+    ...(props.rangeStart ? { startDate: props.rangeStart } : {}),
+    ...(props.rangeEnd ? { endDate: props.rangeEnd } : {}),
+  });
+  if (!opened) {
+    detailTabError.value = "浏览器阻止了自有链接详情新标签页，请允许此站点打开新标签页后重试。";
+  }
+}
+
+function detailAriaLabel(item: QuadrantItem) {
+  return productPlid(item)
+    ? `在新标签页查看 ${productName(item)} 的完整自有链接详情`
+    : `${productName(item)} 暂无可打开的自有链接详情`;
 }
 
 async function copyPlatformSku(item: QuadrantItem) {
@@ -244,6 +346,7 @@ function showCopyFeedback(
 
 onBeforeUnmount(() => {
   if (feedbackTimer) clearTimeout(feedbackTimer);
+  cancelMarkerImageFrame();
 });
 </script>
 
@@ -252,7 +355,7 @@ onBeforeUnmount(() => {
     <div class="page-intro">
       <div>
         <p class="section-kicker">PRODUCT POSITION</p>
-        <h2>用近30日下单与近30天浏览量查看商品分布</h2>
+        <h2>流量 × 下单商品分布</h2>
       </div>
     </div>
 
@@ -297,6 +400,7 @@ onBeforeUnmount(() => {
               {
                 copied: copiedOfferId === itemKey(item),
                 'missing-sku': !item.sku,
+                'has-thumbnail': Boolean(markerImageUrl(item)),
               },
             ]"
             :style="{
@@ -310,7 +414,21 @@ onBeforeUnmount(() => {
             @focus="hoveredItem = item"
             @blur="hoveredItem = null"
             @click="copyPlatformSku(item)"
-          ></button>
+          >
+            <img
+              v-if="markerImageUrl(item)"
+              :src="markerImageUrl(item)"
+              alt=""
+              width="192"
+              height="192"
+              loading="lazy"
+              decoding="async"
+              fetchpriority="low"
+              referrerpolicy="no-referrer"
+              draggable="false"
+              @error="markImageUnavailable(sourceImageUrl(item))"
+            />
+          </button>
           </div>
           <div class="matrix-rank-axis x" aria-hidden="true">
             <span
@@ -345,7 +463,7 @@ onBeforeUnmount(() => {
           >
             <div class="tooltip-heading">
               <span class="coordinate-tag">商品坐标</span>
-              <small>点击小点复制 SKU</small>
+              <small>点击缩略图复制 SKU</small>
             </div>
             <div class="tooltip-product-summary">
               <div class="tooltip-product-image">
@@ -402,7 +520,7 @@ onBeforeUnmount(() => {
                 <b>{{ restockLabel(hoveredItem) }}</b>
               </span>
               <em>
-                库存和指标截至 {{ hoveredItem.metric_date }}；浏览量为平台明确返回的近30天窗口值。
+                数据截至 {{ hoveredItem.metric_date }}
               </em>
             </div>
           </aside>
@@ -411,10 +529,6 @@ onBeforeUnmount(() => {
             横轴 · 近30天浏览量相对排名
           </span>
         </div>
-        <p class="method-note">
-          图中只表达两个维度在当前店铺范围内的相对位置，不再划分四象限或使用分位边界。
-          缺少任一坐标的数据不会按0处理，仍完整保留在下方商品卡片；悬停可查看完整经营信息，点击小点直接复制平台 SKU。
-        </p>
         <p
           v-if="copyFeedback"
           class="copy-feedback"
@@ -435,7 +549,7 @@ onBeforeUnmount(() => {
           <div class="coordinate-list-actions">
             <span>
               {{ sortedItems.length }} / {{ allItems.length }} 个商品 ·
-              完整展示，无需左右滑动
+              完整覆盖，每页最多 {{ productPageSize }} 个
             </span>
             <label class="compact-field coordinate-search-field">
               <span>搜索商品名称 / 平台 / 公司 SKU</span>
@@ -458,12 +572,27 @@ onBeforeUnmount(() => {
             </label>
           </div>
         </div>
+        <p
+          v-if="detailTabError"
+          class="copy-feedback error coordinate-detail-error"
+          role="status"
+          aria-live="polite"
+        >
+          {{ detailTabError }}
+        </p>
         <div v-if="sortedItems.length" class="coordinate-product-grid">
           <article
-            v-for="item in sortedItems"
+            v-for="item in visibleSortedItems"
             :key="itemKey(item)"
             v-memo="[item, imageFailed(item)]"
             class="coordinate-product-card"
+            :class="{ 'is-clickable': Boolean(productPlid(item)) }"
+            :tabindex="productPlid(item) ? 0 : undefined"
+            :role="productPlid(item) ? 'button' : undefined"
+            :aria-label="detailAriaLabel(item)"
+            @click="activateProductCard(item, $event)"
+            @keydown.enter.self.prevent="activateProductCard(item, $event)"
+            @keydown.space.self.prevent="activateProductCard(item, $event)"
           >
             <div class="coordinate-product-card-head">
               <div class="coordinate-product-image">
@@ -521,7 +650,27 @@ onBeforeUnmount(() => {
             </dl>
           </article>
         </div>
-        <div v-else class="state-card coordinate-empty-state">
+        <nav
+          v-if="sortedItems.length > productPageSize"
+          class="coordinate-pagination"
+          aria-label="全部商品分页"
+        >
+          <span>当前显示 {{ productPageStart }}–{{ productPageEnd }} / {{ sortedItems.length }}</span>
+          <div>
+            <button
+              type="button"
+              :disabled="productPage <= 1"
+              @click="productPage -= 1"
+            >上一页</button>
+            <strong>第 {{ productPage }} / {{ productPageCount }} 页</strong>
+            <button
+              type="button"
+              :disabled="productPage >= productPageCount"
+              @click="productPage += 1"
+            >下一页</button>
+          </div>
+        </nav>
+        <div v-if="!sortedItems.length" class="state-card coordinate-empty-state">
           未找到匹配“{{ skuQuery.trim() }}”的平台或公司 SKU
         </div>
       </section>

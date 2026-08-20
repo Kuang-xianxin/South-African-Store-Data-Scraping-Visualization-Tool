@@ -135,7 +135,7 @@ test("personal watchlist does not classify replenished inventory as unchanged", 
   );
 });
 
-test("date-range apply refetches both source partitions before personal-pool projection", () => {
+test("date-range apply shows true competitors before restoring the own-store partition", () => {
   assert.doesNotMatch(pageSource, /日期按北京时间自然日筛选/);
   assert.doesNotMatch(pageSource, /上述金额只是公开库存变化的观察口径/);
   assert.match(
@@ -152,12 +152,12 @@ test("date-range apply refetches both source partitions before personal-pool pro
   );
   assert.match(
     overviewLoader,
-    /fetchCompetitors\(\s*appliedStartDate\.value,\s*appliedEndDate\.value,\s*requestScope,\s*controller\.signal,\s*\)/,
+    /fetchCompetitors\(\s*appliedStartDate\.value,\s*appliedEndDate\.value,\s*requestScope,\s*controller\.signal,\s*false,\s*\)/,
   );
   assert.match(overviewLoader, /competitors\.value = overview\.items/);
   assert.match(
     overviewLoader,
-    /storeRequestId === ownStoreRequestId[\s\S]*ownStoreScopeStillCurrent\([\s\S]*applyOwnStoreOverview\(ownStoreOverview\)/,
+    /trueCompetitorDateRange\.value = overview\.date_range[\s\S]*void loadOwnStoreScope\(\)/,
   );
   assert.match(
     pageSource,
@@ -178,7 +178,7 @@ test("personal watchlist hydrates its PLIDs before the full radar projection", (
   assert.doesNotMatch(projectionSource, /ownStoreScope|own_store_scope/);
   assert.match(
     pageSource,
-    /async function loadOverview\(\)[\s\S]*loadPersonalWatchlistOverview\(\),[\s\S]*competitors\.value = overview\.items;/,
+    /async function loadOverview\(\)[\s\S]*void loadPersonalWatchlistOverview\(\);[\s\S]*competitors\.value = overview\.items;/,
   );
   assert.match(
     pageSource,
@@ -192,9 +192,10 @@ test("personal watchlist hydrates its PLIDs before the full radar projection", (
     pageSource,
     /fetchCompetitorPersonalWatchlistOverview\(\s*appliedStartDate\.value,\s*appliedEndDate\.value,\s*\)/,
   );
-  assert.match(pageSource, /正在优先恢复个人池内已采集的商品、图片、价格和库存/);
-  assert.match(pageSource, /个人池内店铺详情始终按当前账号全部已授权店铺读取/);
+  assert.match(pageSource, /正在恢复商品详情/);
+  assert.match(pageSource, /等待首次采集/);
   assert.match(pageSource, /无权查看店铺详情/);
+  assert.doesNotMatch(pageSource, /个人池内店铺详情始终按当前账号全部已授权店铺读取/);
   assert.doesNotMatch(pageSource, /已加入两个清单，首次采集完成后/);
 });
 
@@ -209,7 +210,7 @@ test("shared-library items can open detail without leaving an invisible scroll l
   );
   assert.match(
     pageSource,
-    /\[\s*detailModalOpen,\s*\(\) => selected\.value !== null,[\s\S]*personalWatchlistLibraryModalOpen,[\s\S]*detailOpen,[\s\S]*detailSelected,[\s\S]*personalLibraryDialogOpen,[\s\S]*\(detailOpen && detailSelected\)[\s\S]*\|\| personalLibraryDialogOpen/,
+    /\[\s*detailModalOpen,\s*\(\) => selected\.value !== null,[\s\S]*personalWatchlistLibraryModalOpen,[\s\S]*detailOpen,[\s\S]*detailSelected,[\s\S]*personalLibraryDialogOpen,[\s\S]*\(!props\.detailOnly && detailOpen && detailSelected\)[\s\S]*\|\| personalLibraryDialogOpen/,
   );
   assert.doesNotMatch(
     pageSource,
