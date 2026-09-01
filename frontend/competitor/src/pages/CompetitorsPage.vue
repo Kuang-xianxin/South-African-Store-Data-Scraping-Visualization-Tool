@@ -6285,6 +6285,15 @@ function formatCurrency(value: number | null) {
       }).format(value);
 }
 
+function latestReviewCountLabel(item: CompetitorItem): string {
+  const value = typeof item.最新评论数 === "number"
+    ? item.最新评论数
+    : item.评论数可用 === false
+      ? null
+      : item.评论数;
+  return value === null ? "数据不足" : `${value.toLocaleString("zh-CN")} 条`;
+}
+
 function formatRmb(value: number | null | undefined) {
   return value === null || value === undefined
     ? "—"
@@ -7464,6 +7473,17 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
                 <span>
                   <small>最近采集</small>
                   <strong>{{ formatChinaDateTime(card.competitor.采集时间) }}</strong>
+                </span>
+                <span>
+                  <small>首次监控</small>
+                  <strong>{{ formatChinaDateTime(card.competitor.首次监控时间 ?? null) }}</strong>
+                </span>
+                <span>
+                  <small>最新评论数（PLID 共用）</small>
+                  <strong>{{ latestReviewCountLabel(card.competitor) }}</strong>
+                  <small v-if="card.competitor.最新评论获取时间">
+                    更新 {{ formatChinaDateTime(card.competitor.最新评论获取时间) }}
+                  </small>
                 </span>
               </div>
               <CompetitorObservedSalesMetrics
@@ -9574,15 +9594,21 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
                   <small>{{ item.区间快照数 ?? 0 }} 次跟卖观察</small>
                 </div>
                 <div>
-                  <span>商品共享评论 / 评分</span>
-                  <strong>{{ item.评论数 }} 条 · {{ item.评分 ?? "—" }}</strong>
-                  <small>评论按 PLID 商品维度单独同步</small>
+                  <span>最新评论数（PLID 共用）</span>
+                  <strong>{{ latestReviewCountLabel(item) }}</strong>
+                  <small>首次监控 {{ formatChinaDateTime(item.首次监控时间 ?? null) }}</small>
+                  <small v-if="item.最新评论获取时间">
+                    评论更新 {{ formatChinaDateTime(item.最新评论获取时间) }} · 区间末评分 {{ item.评分 ?? "—" }}
+                  </small>
+                  <small v-else>公开评论尚未同步 · 区间末评分 {{ item.评分 ?? "—" }}</small>
                 </div>
+                <CompetitorObservedSalesMetrics
+                  class="competitor-status-observed-sales"
+                  :values="item.近期观察售出"
+                  :through-date="item.近期观察售出截至"
+                  compact
+                />
               </div>
-              <CompetitorObservedSalesMetrics
-                :values="item.近期观察售出"
-                :through-date="item.近期观察售出截至"
-              />
             </article>
           </div>
           <div
@@ -9728,15 +9754,21 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
                 </small>
               </div>
               <div>
-                <span>评论 / 评分</span>
-                <strong>{{ item.评论数 }} 条 · {{ item.评分 ?? "—" }}</strong>
-                <small>点击查看历史和评论</small>
+                <span>最新评论数（PLID 共用）</span>
+                <strong>{{ latestReviewCountLabel(item) }}</strong>
+                <small>首次监控 {{ formatChinaDateTime(item.首次监控时间 ?? null) }}</small>
+                <small v-if="item.最新评论获取时间">
+                  评论更新 {{ formatChinaDateTime(item.最新评论获取时间) }} · 区间末评分 {{ item.评分 ?? "—" }}
+                </small>
+                <small v-else>公开评论尚未同步 · 区间末评分 {{ item.评分 ?? "—" }}</small>
               </div>
+              <CompetitorObservedSalesMetrics
+                class="competitor-status-observed-sales"
+                :values="item.近期观察售出"
+                :through-date="item.近期观察售出截至"
+                compact
+              />
             </div>
-            <CompetitorObservedSalesMetrics
-              :values="item.近期观察售出"
-              :through-date="item.近期观察售出截至"
-            />
           </article>
         </div>
         <div

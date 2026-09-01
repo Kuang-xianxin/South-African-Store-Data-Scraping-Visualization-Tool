@@ -22,6 +22,7 @@ const observedSalesSource = readFileSync(
   "utf8",
 );
 const stylesSource = readFileSync(new URL("../src/styles.css", import.meta.url), "utf8");
+const typesSource = readFileSync(new URL("../src/types.ts", import.meta.url), "utf8");
 
 function competitor(
   plid: string,
@@ -90,7 +91,7 @@ test("personal watchlist reranks from refreshed interval metrics", () => {
   );
 });
 
-test("all radar cards and the line-chart detail use the same compact vertical observed-sales card", () => {
+test("all radar cards use the vertical observed-sales card and wide cards keep it in the metric row", () => {
   assert.deepEqual(
     [...observedSalesSource.matchAll(/const windowDays = \[([^\]]+)\]/g)]
       .map((match) => match[1]?.replace(/\s/g, "")),
@@ -105,6 +106,14 @@ test("all radar cards and the line-chart detail use the same compact vertical ob
   assert.match(stylesSource, /\.competitor-observed-sales-list > div \{[\s\S]*grid-template-columns: 44px max-content[\s\S]*justify-content: start/);
   assert.match(stylesSource, /\.competitor-observed-sales-list dd \{[\s\S]*text-align: left/);
   assert.match(stylesSource, /\.competitor-observed-sales\.embedded/);
+  assert.match(
+    stylesSource,
+    /\.competitor-status-summary \{[\s\S]*grid-template-columns: repeat\(5, minmax\(0, 1fr\)\) minmax\(152px, 176px\)/,
+  );
+  assert.match(
+    stylesSource,
+    /\.competitor-status-summary > \.competitor-observed-sales\.competitor-status-observed-sales \{[\s\S]*width: calc\(100% - 12px\)[\s\S]*max-width: 164px/,
+  );
   assert.doesNotMatch(stylesSource, /competitor-observed-sales-grid/);
   assert.equal(
     pageSource.match(/<CompetitorObservedSalesMetrics/g)?.length,
@@ -119,6 +128,23 @@ test("all radar cards and the line-chart detail use the same compact vertical ob
     pageSource,
     /:values="detail\.current_item\?\.近期观察售出 \?\? selected\.近期观察售出"/,
   );
+  assert.equal(
+    pageSource.match(/class="competitor-status-observed-sales"/g)?.length,
+    2,
+  );
+  assert.equal(
+    [...pageSource.matchAll(
+      /class="competitor-status-observed-sales"[\s\S]{0,260}?\/>\s*<\/div>\s*<\/article>/g,
+    )].length,
+    2,
+  );
+  assert.equal(pageSource.match(/最新评论数（PLID 共用）/g)?.length, 3);
+  assert.equal(pageSource.match(/<small[^>]*>首次监控/g)?.length, 3);
+  assert.match(pageSource, /latestReviewCountLabel\(card\.competitor\)/);
+  assert.equal(pageSource.match(/latestReviewCountLabel\(item\)/g)?.length, 2);
+  assert.match(typesSource, /首次监控时间\?: string \| null/);
+  assert.match(typesSource, /最新评论数\?: number \| null/);
+  assert.match(typesSource, /最新评论获取时间\?: string \| null/);
 });
 
 test("stock-decrease filtering includes sales that were later replenished", () => {

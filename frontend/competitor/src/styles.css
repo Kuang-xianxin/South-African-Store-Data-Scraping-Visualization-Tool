@@ -3026,7 +3026,7 @@ textarea.link-input-error-pulse {
 
 .competitor-status-summary {
   display: grid;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
+  grid-template-columns: repeat(5, minmax(0, 1fr)) minmax(152px, 176px);
   gap: 0;
   padding-top: 10px;
   border-top: 1px solid #e4e9e5;
@@ -3154,6 +3154,14 @@ textarea.link-input-error-pulse {
   border: 0;
   border-radius: 0;
   background: transparent;
+}
+
+.competitor-status-summary > .competitor-observed-sales.competitor-status-observed-sales {
+  align-self: start;
+  justify-self: end;
+  width: calc(100% - 12px);
+  max-width: 164px;
+  margin: 0;
 }
 
 .competitor-offer-workbench > .competitor-observed-sales {

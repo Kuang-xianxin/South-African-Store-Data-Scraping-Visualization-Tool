@@ -3524,7 +3524,7 @@ def create_app(project_root: Path | None = None) -> FastAPI:
     ) -> dict[str, object]:
         own_store_codes = _own_store_codes_for_request(request, own_store_scope)
         cache_key = (
-            "competitors-list-v4",
+            "competitors-list-v5",
             tuple(sorted(own_store_codes)),
             start_date.isoformat() if start_date else None,
             end_date.isoformat() if end_date else None,
@@ -3567,7 +3567,7 @@ def create_app(project_root: Path | None = None) -> FastAPI:
         """Return only the scope-dependent private-store radar partition."""
         own_store_codes = _own_store_codes_for_request(request, own_store_scope)
         cache_key = (
-            "competitors-own-store-v3",
+            "competitors-own-store-v4",
             tuple(sorted(own_store_codes)),
             start_date.isoformat() if start_date else None,
             end_date.isoformat() if end_date else None,
@@ -3841,7 +3841,7 @@ def create_app(project_root: Path | None = None) -> FastAPI:
         user = request.state.erp_user
         own_store_codes = _own_store_codes_for_request(request, "all")
         cache_key = (
-            "competitor-personal-overview-v3",
+            "competitor-personal-overview-v4",
             user.id,
             tuple(sorted(own_store_codes)),
             start_date.isoformat() if start_date else None,

@@ -1222,6 +1222,9 @@ def test_own_store_product_is_separated_and_only_exposes_follower_offers(
         "90": 1,
     }
     assert item["近期观察售出截至"] == date(2026, 8, 2)
+    assert item["首次监控时间"].date() == date(2026, 8, 2)
+    assert item["最新评论数"] == 8
+    assert item["最新评论获取时间"].date() == date(2026, 8, 2)
     assert item["最新Offer状态"] == ["disabled_by_seller"]
     assert item["最新Offer状态更新时间"].date() == captured_at.date()
     assert item["自有报价"][0]["状态"] == "buyable"
@@ -1701,6 +1704,11 @@ def test_competitor_signals_recompute_from_oldest_and_latest_in_date_range(
         start_date=date(2026, 7, 23),
         end_date=date(2026, 7, 24),
     )
+    historical_range = load_competitor_dataset(
+        engine,
+        start_date=date(2026, 7, 22),
+        end_date=date(2026, 7, 23),
+    )
     engine.dispose()
 
     all_signal = all_range.current.iloc[0]
@@ -1719,6 +1727,9 @@ def test_competitor_signals_recompute_from_oldest_and_latest_in_date_range(
         "90": 6,
     }
     assert all_signal["近期观察售出截至"] == date(2026, 7, 24)
+    assert all_signal["首次监控时间"].date() == date(2026, 7, 22)
+    assert all_signal["最新评论数"] == 13
+    assert all_signal["最新评论获取时间"].date() == date(2026, 7, 24)
     assert all_signal["新增评论"] == 3
     assert all_signal["新增好评"] == 2
     assert all_signal["新增差评"] == 1
@@ -1776,6 +1787,12 @@ def test_competitor_signals_recompute_from_oldest_and_latest_in_date_range(
     assert recent_signal["区间起始价格"] == 210.0
     assert recent_signal["价格变化"] == -10.0
     assert recent_signal["价格信号"] == "降价"
+
+    historical_signal = historical_range.current.iloc[0]
+    assert historical_signal["评论数"] == 11
+    assert historical_signal["最新评论数"] == 13
+    assert historical_signal["最新评论获取时间"].date() == date(2026, 7, 24)
+    assert historical_signal["首次监控时间"].date() == date(2026, 7, 22)
     assert recent_signal["新增跟卖卖家数"] == 0
     assert recent_signal["跟卖卖家明细"][0]["是否区间新增"] is False
     recent_offers = {offer["offer_id"]: offer for offer in recent_signal["跟卖报价"]}

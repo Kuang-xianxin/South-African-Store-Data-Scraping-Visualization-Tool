@@ -80,8 +80,13 @@ export interface CompetitorItem {
   上次成功库存数量: number | null;
   上次成功库存精确: boolean;
   上次成功库存时间: string | null;
+  /** Earliest locally stored observation for this product card. */
+  首次监控时间?: string | null;
   评论数: number;
   评论数可用?: boolean;
+  /** Latest locally fetched PLID-level review total, independent of the list date range. */
+  最新评论数?: number | null;
+  最新评论获取时间?: string | null;
   评分: number | null;
   好评: number;
   中评: number;

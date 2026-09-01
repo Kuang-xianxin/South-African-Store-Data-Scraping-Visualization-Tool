@@ -1215,6 +1215,12 @@ def load_competitor_dataset(
         if plid not in active_plids:
             continue
         interval = snapshots_by_plid[plid]
+        all_plid_snapshots = all_snapshots_by_plid[plid]
+        first_monitored_at = min(row.collected_at for row in all_plid_snapshots)
+        latest_review_snapshot = max(
+            all_plid_snapshots,
+            key=lambda row: (row.collected_at, row.id),
+        )
         oldest = interval[-1]
         signal, stock_change, stock_comparable = _interval_sales_signal(
             oldest,
@@ -1262,6 +1268,9 @@ def load_competitor_dataset(
                 price_signal=price_signal,
                 offer_rows=offer_rows,
                 follower_timeline=competitor_follower_timelines.get(plid),
+                first_monitored_at=first_monitored_at,
+                latest_review_count=latest_review_snapshot.review_count,
+                latest_review_collected_at=latest_review_snapshot.collected_at,
             )
         )
     current = pd.DataFrame(current_rows)
@@ -1326,6 +1335,7 @@ def load_competitor_dataset(
         _store_snapshot_rows(
             store_baselines,
             interval_store_snapshots,
+            all_follower_snapshots=store_snapshots,
             current_store_offers=selected_store_offers,
             selected_start_date=selected_start_date,
             selected_end_date=selected_end_date,
@@ -2011,6 +2021,9 @@ def _snapshot_row(
     price_signal: str | None = None,
     offer_rows: list[dict[str, object]] | None = None,
     follower_timeline: dict[str, object] | None = None,
+    first_monitored_at: datetime | None = None,
+    latest_review_count: int | None = None,
+    latest_review_collected_at: datetime | None = None,
     raw_history: bool = False,
 ) -> dict[str, object]:
     stock_text = _stock_text(row)
@@ -2072,8 +2085,11 @@ def _snapshot_row(
         "上次成功库存数量": (stale_stock.stock_quantity if stale_stock is not None else None),
         "上次成功库存精确": (stale_stock.stock_exact if stale_stock is not None else False),
         "上次成功库存时间": (stale_stock.collected_at if stale_stock is not None else None),
+        "首次监控时间": first_monitored_at,
         "评论数": row.review_count,
         "评论数可用": True,
+        "最新评论数": latest_review_count,
+        "最新评论获取时间": latest_review_collected_at,
         "评分": float(row.rating) if row.rating is not None else None,
         "好评": row.positive_reviews,
         "中评": row.neutral_reviews,
@@ -2561,6 +2577,7 @@ def _store_snapshot_rows(
     baselines: list[StoreOfferPoint],
     follower_snapshots: list[CompetitorSnapshot],
     *,
+    all_follower_snapshots: list[CompetitorSnapshot],
     current_store_offers: list[ConnectedStoreOffer],
     selected_start_date: date | None,
     selected_end_date: date | None,
@@ -2599,6 +2616,12 @@ def _store_snapshot_rows(
     followers_by_plid: dict[str, list[CompetitorSnapshot]] = {}
     for follower_snapshot in follower_snapshots:
         followers_by_plid.setdefault(follower_snapshot.plid, []).append(
+            follower_snapshot
+        )
+
+    all_followers_by_plid: dict[str, list[CompetitorSnapshot]] = {}
+    for follower_snapshot in all_follower_snapshots:
+        all_followers_by_plid.setdefault(follower_snapshot.plid, []).append(
             follower_snapshot
         )
 
@@ -2713,6 +2736,18 @@ def _store_snapshot_rows(
         observations.sort(key=lambda row: row.collected_at, reverse=True)
         latest_observation = observations[0] if observations else None
         oldest_observation = observations[-1] if observations else None
+        all_observations = all_followers_by_plid.get(plid, [])
+        latest_review_observation = max(
+            all_observations,
+            key=lambda row: (row.collected_at, row.id),
+            default=None,
+        )
+        first_monitored_at = min(
+            [
+                *(row.captured_at for row in all_baselines_by_plid[plid]),
+                *(row.collected_at for row in all_observations),
+            ]
+        )
         follower_rows = (
             _store_follower_offer_rows(
                 oldest_observation,
@@ -2777,8 +2812,19 @@ def _store_snapshot_rows(
                 "上次成功库存数量": None,
                 "上次成功库存精确": False,
                 "上次成功库存时间": None,
+                "首次监控时间": first_monitored_at,
                 "评论数": review_count,
                 "评论数可用": latest_observation is not None,
+                "最新评论数": (
+                    latest_review_observation.review_count
+                    if latest_review_observation is not None
+                    else None
+                ),
+                "最新评论获取时间": (
+                    latest_review_observation.collected_at
+                    if latest_review_observation is not None
+                    else None
+                ),
                 "评分": (
                     float(latest_observation.rating)
                     if latest_observation is not None
@@ -2945,8 +2991,11 @@ def _store_baseline_history_row(
         "上次成功库存数量": None,
         "上次成功库存精确": False,
         "上次成功库存时间": None,
+        "首次监控时间": None,
         "评论数": 0,
         "评论数可用": False,
+        "最新评论数": None,
+        "最新评论获取时间": None,
         "评分": None,
         "好评": 0,
         "中评": 0,
