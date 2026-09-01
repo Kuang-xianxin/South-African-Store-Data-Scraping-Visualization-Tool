@@ -6,7 +6,7 @@ import ast
 import re
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, replace
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import cast
@@ -143,6 +143,7 @@ class _InventoryTurnoverObservation:
     stock_quantity: int | None
     stock_exact: bool
     price: Decimal | None
+    display_date: date | None = None
 
 
 @dataclass(frozen=True)
@@ -154,6 +155,9 @@ class _PeriodInventoryTurnover:
     replenishment_units: int | None = None
     replenishment_value: float | None = None
     turnover_value: float | None = None
+
+
+OBSERVED_SALES_WINDOW_DAYS = (7, 15, 30, 60, 90)
 
 
 def _discovered_offer_targets(
@@ -346,14 +350,16 @@ class CompetitorCollector:
                     variant_stocks,
                     offer_stocks,
                 )
-                stock_scope_count = len(variant_stocks) + len(offer_stocks)
+                seller_quote_count = len(variant_stocks) + len(offer_stocks)
                 return CompetitorCollectionResult(
                     plid=plid,
                     title=product.title,
                     succeeded=False,
                     message=(
-                        f"商品与评论快照已保存，但 {failed_stock_count}/"
-                        f"{stock_scope_count} 个变体/卖家报价库存仍未探测；"
+                        "商品与评论快照已保存，"
+                        f"有{len(variant_stocks)}个变体/"
+                        f"{seller_quote_count}个卖家报价，"
+                        f"其中{failed_stock_count}个报价库存仍未探测；"
                         f"失败原因：{failure_summary}；"
                         "已加入本轮其他链接结束后的库存复探"
                     ),
@@ -826,26 +832,78 @@ def _period_inventory_turnover(
     )
 
 
+def _recent_observed_sales_units(
+    observations: list[_InventoryTurnoverObservation],
+) -> tuple[dict[str, int | None], date | None]:
+    """Calculate fixed inclusive windows ending on the latest available local date."""
+
+    dated_observations = [
+        observation
+        for observation in observations
+        if observation.display_date is not None
+    ]
+    if not dated_observations:
+        return ({str(days): None for days in OBSERVED_SALES_WINDOW_DAYS}, None)
+    through_date = max(
+        cast(date, observation.display_date) for observation in dated_observations
+    )
+    values: dict[str, int | None] = {}
+    for days in OBSERVED_SALES_WINDOW_DAYS:
+        start_date = through_date - timedelta(days=days - 1)
+        window = [
+            observation
+            for observation in dated_observations
+            if start_date <= cast(date, observation.display_date) <= through_date
+        ]
+        values[str(days)] = _period_inventory_turnover(window).sales_units
+    return values, through_date
+
+
+def _snapshot_inventory_turnover_observations(
+    snapshots: list[CompetitorSnapshot],
+    *,
+    variant_signatures: dict[int, frozenset[tuple[str, str, str]]],
+) -> list[_InventoryTurnoverObservation]:
+    ordered = sorted(snapshots, key=lambda row: (row.collected_at, row.id))
+    return [
+        _InventoryTurnoverObservation(
+            scope=(
+                row.sku,
+                row.seller_id,
+                variant_signatures.get(row.id, frozenset()),
+            ),
+            stock_quantity=row.stock_quantity,
+            stock_exact=row.stock_exact,
+            price=Decimal(str(row.price)) if row.price is not None else None,
+            display_date=_competitor_display_date(row.collected_at),
+        )
+        for row in ordered
+    ]
+
+
 def _snapshot_period_inventory_turnover(
     snapshots: list[CompetitorSnapshot],
     *,
     variant_signatures: dict[int, frozenset[tuple[str, str, str]]],
 ) -> _PeriodInventoryTurnover:
-    ordered = sorted(snapshots, key=lambda row: (row.collected_at, row.id))
     return _period_inventory_turnover(
-        [
-            _InventoryTurnoverObservation(
-                scope=(
-                    row.sku,
-                    row.seller_id,
-                    variant_signatures.get(row.id, frozenset()),
-                ),
-                stock_quantity=row.stock_quantity,
-                stock_exact=row.stock_exact,
-                price=Decimal(str(row.price)) if row.price is not None else None,
-            )
-            for row in ordered
-        ],
+        _snapshot_inventory_turnover_observations(
+            snapshots,
+            variant_signatures=variant_signatures,
+        ),
+    )
+
+
+def _snapshot_recent_observed_sales_units(
+    snapshots: list[CompetitorSnapshot],
+    *,
+    variant_signatures: dict[int, frozenset[tuple[str, str, str]]],
+) -> tuple[dict[str, int | None], date | None]:
+    return _recent_observed_sales_units(
+        _snapshot_inventory_turnover_observations(
+            snapshots,
+            variant_signatures=variant_signatures,
+        )
     )
 
 
@@ -1121,6 +1179,9 @@ def load_competitor_dataset(
     for snapshot in interval_snapshots:
         latest_by_plid.setdefault(snapshot.plid, snapshot)
         snapshots_by_plid.setdefault(snapshot.plid, []).append(snapshot)
+    all_snapshots_by_plid: dict[str, list[CompetitorSnapshot]] = {}
+    for snapshot in active_snapshots:
+        all_snapshots_by_plid.setdefault(snapshot.plid, []).append(snapshot)
     variants_by_snapshot: dict[int, list[CompetitorVariantSnapshot]] = {}
     variant_signatures: dict[int, frozenset[tuple[str, str, str]]] = {}
     for variant in variants:
@@ -1168,6 +1229,12 @@ def load_competitor_dataset(
             interval,
             variant_signatures=variant_signatures,
         )
+        recent_observed_sales, recent_observed_sales_through = (
+            _snapshot_recent_observed_sales_units(
+                all_snapshots_by_plid[plid],
+                variant_signatures=variant_signatures,
+            )
+        )
         price_start, price_change, price_signal = _interval_price_signal(oldest, latest)
         offer_rows = _interval_offer_rows(
             oldest,
@@ -1186,6 +1253,8 @@ def load_competitor_dataset(
                 stock_change=stock_change,
                 stock_comparable=stock_comparable,
                 inventory_turnover=inventory_turnover,
+                recent_observed_sales=recent_observed_sales,
+                recent_observed_sales_through=recent_observed_sales_through,
                 positive_review_delta=positive_review_delta,
                 negative_review_delta=negative_review_delta,
                 price_start=price_start,
@@ -1933,6 +2002,8 @@ def _snapshot_row(
     stock_change: int | None = None,
     stock_comparable: bool | None = None,
     inventory_turnover: _PeriodInventoryTurnover | None = None,
+    recent_observed_sales: dict[str, int | None] | None = None,
+    recent_observed_sales_through: date | None = None,
     positive_review_delta: int | None = None,
     negative_review_delta: int | None = None,
     price_start: float | None = None,
@@ -2018,6 +2089,14 @@ def _snapshot_row(
         "周期补货量": inventory_turnover.replenishment_units,
         "周期补货货值": inventory_turnover.replenishment_value,
         "周期库存周转金额": inventory_turnover.turnover_value,
+        **(
+            {
+                "近期观察售出": recent_observed_sales,
+                "近期观察售出截至": recent_observed_sales_through,
+            }
+            if recent_observed_sales is not None
+            else {}
+        ),
         "新增评论": review_delta,
         "新增好评": positive_review_delta,
         "新增差评": negative_review_delta,
@@ -2066,26 +2145,33 @@ def _latest_store_baselines(
     return sorted(latest.values(), key=lambda row: (row.store_code, row.offer_id))
 
 
-def _store_offer_period_inventory_turnover(
+def _store_offer_inventory_turnover_observations(
     history: list[StoreOfferPoint],
-) -> _PeriodInventoryTurnover:
+) -> list[_InventoryTurnoverObservation]:
     distinct_points: dict[tuple[date, datetime], StoreOfferPoint] = {}
     for row in sorted(history, key=lambda item: (item.display_date, item.captured_at, item.id)):
         distinct_points[(row.display_date, row.captured_at)] = row
+    return [
+        _InventoryTurnoverObservation(
+            scope=(row.store_code, row.offer_id, row.productline_id, row.sku),
+            stock_quantity=row.total_stock,
+            stock_exact=row.total_stock is not None,
+            price=(
+                Decimal(str(row.selling_price))
+                if row.selling_price is not None
+                else None
+            ),
+            display_date=row.display_date,
+        )
+        for row in distinct_points.values()
+    ]
+
+
+def _store_offer_period_inventory_turnover(
+    history: list[StoreOfferPoint],
+) -> _PeriodInventoryTurnover:
     return _period_inventory_turnover(
-        [
-            _InventoryTurnoverObservation(
-                scope=(row.store_code, row.offer_id, row.productline_id, row.sku),
-                stock_quantity=row.total_stock,
-                stock_exact=row.total_stock is not None,
-                price=(
-                    Decimal(str(row.selling_price))
-                    if row.selling_price is not None
-                    else None
-                ),
-            )
-            for row in distinct_points.values()
-        ]
+        _store_offer_inventory_turnover_observations(history)
     )
 
 
@@ -2133,6 +2219,20 @@ def _store_period_inventory_turnover(
             else None
         ),
     )
+
+
+def _store_recent_observed_sales_units(
+    baselines: list[StoreOfferPoint],
+) -> tuple[dict[str, int | None], date | None]:
+    by_identity: dict[tuple[str, str], list[StoreOfferPoint]] = {}
+    for row in baselines:
+        by_identity.setdefault((row.store_code, row.offer_id), []).append(row)
+    observations = [
+        observation
+        for history in by_identity.values()
+        for observation in _store_offer_inventory_turnover_observations(history)
+    ]
+    return _recent_observed_sales_units(observations)
 
 
 def _seller_api_offer_rows(
@@ -2477,6 +2577,12 @@ def _store_snapshot_rows(
         if plid:
             current_offers_by_plid.setdefault(plid, []).append(current_offer)
 
+    all_baselines_by_plid: dict[str, list[StoreOfferPoint]] = {}
+    for baseline_row in baselines:
+        plid = str(baseline_row.productline_id or "").strip()
+        if plid:
+            all_baselines_by_plid.setdefault(plid, []).append(baseline_row)
+
     selected_baselines = [
         row
         for row in baselines
@@ -2599,6 +2705,9 @@ def _store_snapshot_rows(
             else None
         )
         inventory_turnover = _store_period_inventory_turnover(plid_baselines)
+        recent_observed_sales, recent_observed_sales_through = (
+            _store_recent_observed_sales_units(all_baselines_by_plid[plid])
+        )
 
         observations = followers_by_plid.get(plid, [])
         observations.sort(key=lambda row: row.collected_at, reverse=True)
@@ -2698,6 +2807,8 @@ def _store_snapshot_rows(
                 "周期补货量": inventory_turnover.replenishment_units,
                 "周期补货货值": inventory_turnover.replenishment_value,
                 "周期库存周转金额": inventory_turnover.turnover_value,
+                "近期观察售出": recent_observed_sales,
+                "近期观察售出截至": recent_observed_sales_through,
                 "新增评论": (
                     max(0, latest_observation.review_count - oldest_observation.review_count)
                     if latest_observation is not None

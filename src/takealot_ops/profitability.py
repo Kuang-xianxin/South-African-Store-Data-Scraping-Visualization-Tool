@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
@@ -141,6 +141,177 @@ def load_own_store_profitability(
         fee_window_end=fee_window_end,
         fee_window_days=fee_window_days,
     )
+
+
+def load_own_store_profitability_bulk(
+    engine: Engine,
+    *,
+    plids: Iterable[str],
+    store_codes: set[str],
+    rate_service: ExchangeRateProvider,
+    cost_as_of: date,
+    fee_window_end: date,
+    fee_window_days: int = DEFAULT_FEE_WINDOW_DAYS,
+) -> dict[str, dict[str, Any]]:
+    """Build per-PLID profitability payloads from one query set per store."""
+    normalized_plids = sorted(
+        {
+            str(plid or "").strip()
+            for plid in plids
+            if str(plid or "").strip()
+        }
+    )
+    normalized_codes = sorted(
+        {
+            normalize_store_code(store_code)
+            for store_code in store_codes
+            if str(store_code or "").strip()
+        }
+    )
+    if not normalized_plids:
+        return {}
+    if not normalized_codes:
+        return {
+            plid: empty_own_store_profitability(
+                store_codes=set(),
+                fee_window_end=fee_window_end,
+                fee_window_days=fee_window_days,
+                message="当前授权范围内没有可计算利润的自有 Offer。",
+            )
+            for plid in normalized_plids
+        }
+
+    fee_window_start = _fee_window_start(fee_window_end, fee_window_days)
+    offers_by_plid: dict[str, list[ProfitabilityOffer]] = defaultdict(list)
+    with Session(engine) as session:
+        store_names = {
+            str(store.code): str(store.display_name)
+            for store in session.scalars(
+                select(ErpStore).where(ErpStore.code.in_(normalized_codes))
+            )
+        }
+        for store_code in normalized_codes:
+            with store_scope(store_code):
+                store_offers = _load_store_offers_bulk(
+                    session,
+                    plids=normalized_plids,
+                    store_code=store_code,
+                    store_name=store_names.get(store_code, store_code),
+                    cost_as_of=cost_as_of,
+                    fee_window_start=fee_window_start,
+                    fee_window_end=fee_window_end,
+                )
+            for offer in store_offers:
+                offers_by_plid[offer.plid].append(offer)
+
+    return {
+        plid: build_own_store_profitability_payload(
+            offers_by_plid.get(plid, []),
+            rate_service=rate_service,
+            store_codes=set(normalized_codes),
+            fee_window_start=fee_window_start,
+            fee_window_end=fee_window_end,
+            fee_window_days=fee_window_days,
+        )
+        for plid in normalized_plids
+    }
+
+
+def _load_store_offers_bulk(
+    session: Session,
+    *,
+    plids: list[str],
+    store_code: str,
+    store_name: str,
+    cost_as_of: date,
+    fee_window_start: date,
+    fee_window_end: date,
+) -> list[ProfitabilityOffer]:
+    current_offers = list(
+        session.scalars(
+            select(OfferCurrent)
+            .where(OfferCurrent.productline_id.in_(plids))
+            .order_by(OfferCurrent.productline_id, OfferCurrent.offer_id)
+        )
+    )
+    if not current_offers:
+        return []
+
+    links = load_product_master_links(
+        session,
+        platform_skus=[offer.sku for offer in current_offers if offer.sku],
+        as_of_date=cost_as_of,
+    )
+    states = list(
+        session.scalars(
+            select(DailySalesMetricState).where(
+                DailySalesMetricState.metric_date >= fee_window_start,
+                DailySalesMetricState.metric_date <= fee_window_end,
+            )
+        )
+    )
+    verified_dates = sorted(
+        {
+            state.metric_date
+            for state in states
+            if _sales_state_is_verified(state)
+        }
+    )
+    offer_ids = [str(offer.offer_id) for offer in current_offers]
+    sales = (
+        list(
+            session.scalars(
+                select(SaleItem).where(
+                    SaleItem.offer_id.in_(offer_ids),
+                    SaleItem.sales_day.in_(verified_dates),
+                )
+            )
+        )
+        if verified_dates
+        else []
+    )
+    sales_by_offer: dict[str, list[ProfitabilitySalesLine]] = defaultdict(list)
+    for sale in sales:
+        offer_id = str(sale.offer_id or "").strip()
+        if not offer_id:
+            continue
+        sales_by_offer[offer_id].append(
+            ProfitabilitySalesLine(
+                sales_day=sale.sales_day,
+                selling_price=_decimal_or_none(sale.selling_price),
+                total_fees=_decimal_or_none(sale.total_fees),
+                quantity=int(sale.quantity or 0),
+            )
+        )
+
+    result: list[ProfitabilityOffer] = []
+    for offer in current_offers:
+        offer_id = str(offer.offer_id)
+        plid = str(offer.productline_id or "").strip()
+        if not plid:
+            continue
+        sku = str(offer.sku).strip() if offer.sku else None
+        link = links.get(normalize_product_sku(sku)) if sku else None
+        result.append(
+            ProfitabilityOffer(
+                store_code=store_code,
+                store_name=store_name,
+                offer_id=offer_id,
+                plid=plid,
+                sku=sku,
+                company_sku=link.company_sku if link is not None else None,
+                company_product_name=link.product_name if link is not None else None,
+                cost_rmb=link.cost_rmb if link is not None else None,
+                cost_effective_date=(
+                    link.cost_effective_date if link is not None else None
+                ),
+                selling_price_zar=_decimal_or_none(offer.selling_price),
+                rrp_zar=_decimal_or_none(offer.rrp),
+                fee_covered_days=len(verified_dates),
+                fee_lines=tuple(sales_by_offer.get(offer_id, [])),
+            )
+        )
+    return result
 
 
 def build_own_store_profitability_payload(

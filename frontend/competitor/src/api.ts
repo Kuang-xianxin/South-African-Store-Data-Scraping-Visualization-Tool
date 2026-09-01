@@ -16,6 +16,7 @@ import type {
   CompetitorStoreTargetPayload,
   CompetitorTargetAuditPayload,
   CompetitorTargetItem,
+  ContainerSelectionPayload,
   FreshnessPayload,
   LogisticsOverviewPayload,
   KeywordTrafficDetailPayload,
@@ -26,9 +27,8 @@ import type {
   ManagedUser,
   PermissionKey,
   UserRole,
-  ProductDetailPayload,
-  ProductsPayload,
   QuadrantPayload,
+  ReturnRemovalSyncResult,
   ReturnsPayload,
   SalesRevenueRevisionPayload,
   StoreOverviewPayload,
@@ -631,6 +631,20 @@ export function fetchReturns(
   return request<ReturnsPayload>(`/api/erp/returns?${params.toString()}`, { signal });
 }
 
+export function refreshReturnRemovalOrders(): Promise<ReturnRemovalSyncResult> {
+  return request<ReturnRemovalSyncResult>("/api/erp/returns/removal-orders/sync", {
+    method: "POST",
+  });
+}
+
+export function verifyReturnRemovalOrderOtp(otp: string): Promise<ReturnRemovalSyncResult> {
+  return request<ReturnRemovalSyncResult>("/api/erp/returns/removal-orders/verify-otp", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ otp }),
+  });
+}
+
 export interface CompetitorCollectionContext {
   batchId: string;
   clientId: string;
@@ -714,17 +728,68 @@ export interface CompetitorBatchStatus {
     url: string;
     message: string;
   }>;
+  terminal_errors: Array<{
+    plid: string;
+    url: string;
+    message: string;
+  }>;
   result_count?: number;
   error_count?: number;
+  terminal_error_count?: number;
   result_page?: number;
   error_page?: number;
+  terminal_error_page?: number;
   detail_page_size?: number;
   scheduled_resume_available?: boolean;
   scheduled_resume_pending?: number;
+  scheduled_network_resume_available?: boolean;
+  scheduled_network_resume_pending?: number;
   scheduled_wait_kind?: "network" | "pending_retry" | null;
   scheduled_auto_resume_at?: string | null;
   scheduled_retry_round?: number;
   scheduled_retry_round_limit?: number;
+}
+
+export interface CompetitorCollectionLogRound {
+  batch_id: string;
+  modified_at: string;
+  size_bytes: number;
+  current: boolean;
+  source: "manual" | "scheduled" | null;
+  round_number: number | null;
+  revision: number | null;
+  trigger_date: string | null;
+  status:
+    | "running"
+    | "paused"
+    | "retry_wait"
+    | "stopped"
+    | "completed"
+    | "waiting_resume"
+    | "unknown";
+  latest_event: string | null;
+  started_at: string | null;
+  completed_at: string | null;
+  summary_updated_at: string | null;
+  elapsed_seconds: number | null;
+  completed: number | null;
+  total: number | null;
+  pending: number | null;
+  succeeded: number | null;
+  failed: number | null;
+  terminal: number | null;
+  retry_round: number | null;
+  retry_round_limit: number | null;
+  reason: string;
+}
+
+export interface CompetitorCollectionLogPayload {
+  current_batch_id: string | null;
+  selected_batch_id: string | null;
+  rounds: CompetitorCollectionLogRound[];
+  total_rounds: number;
+  selected_round: CompetitorCollectionLogRound | null;
+  updated_at: string;
 }
 
 export async function collectCompetitor(
@@ -781,17 +846,35 @@ export async function logCompetitorBatchEvent(
 }
 
 export function fetchCompetitorBatchStatus(
-  detail?: { resultPage: number; errorPage: number; pageSize: number },
+  detail?: {
+    resultPage: number;
+    errorPage: number;
+    terminalErrorPage: number;
+    pageSize: number;
+  },
+  signal?: AbortSignal,
 ): Promise<CompetitorBatchStatus> {
   const query = new URLSearchParams();
   if (detail) {
     query.set("include_details", "true");
     query.set("result_page", String(detail.resultPage));
     query.set("error_page", String(detail.errorPage));
+    query.set("terminal_error_page", String(detail.terminalErrorPage));
     query.set("page_size", String(detail.pageSize));
   }
   const suffix = query.size ? `?${query.toString()}` : "";
-  return request<CompetitorBatchStatus>(`/api/competitors/batch-status${suffix}`);
+  return request<CompetitorBatchStatus>(`/api/competitors/batch-status${suffix}`, { signal });
+}
+
+export function fetchCompetitorCollectionLogs(
+  batchId?: string,
+): Promise<CompetitorCollectionLogPayload> {
+  const query = new URLSearchParams();
+  if (batchId) query.set("batch_id", batchId);
+  const suffix = query.size ? `?${query.toString()}` : "";
+  return request<CompetitorCollectionLogPayload>(
+    `/api/competitors/collection-logs${suffix}`,
+  );
 }
 
 export async function updateCompetitorBatchOptions(
@@ -919,32 +1002,12 @@ function storeHeaders(storeCode?: string | null): HeadersInit | undefined {
   return normalized ? { "X-Store-Code": normalized } : undefined;
 }
 
-export async function fetchProducts(
-  asOf: string,
-  storeScope: OwnStoreScope = "current",
-): Promise<ProductsPayload> {
-  return request<ProductsPayload>(
-    `/api/erp/products?${scopedQuery(asOf, storeScope)}`,
-  );
-}
-
 export async function fetchAnomalyProducts(
   asOf: string,
   storeScope: OwnStoreScope = "current",
 ): Promise<AnomalyProductPayload> {
   return request<AnomalyProductPayload>(
     `/api/erp/anomaly-products?${scopedQuery(asOf, storeScope)}`,
-  );
-}
-
-export async function fetchProductDetail(
-  offerId: string,
-  asOf: string,
-  storeCode?: string | null,
-): Promise<ProductDetailPayload> {
-  return request<ProductDetailPayload>(
-    `/api/erp/products/${encodeURIComponent(offerId)}?${query(asOf)}`,
-    { headers: storeHeaders(storeCode) },
   );
 }
 
@@ -955,6 +1018,17 @@ export async function fetchQuadrants(
 ): Promise<QuadrantPayload> {
   return request<QuadrantPayload>(
     `/api/erp/quadrants?${scopedQuery(asOf, storeScope)}&percentile=${percentile}`,
+  );
+}
+
+export function fetchContainerSelection(
+  asOf: string,
+  signal?: AbortSignal,
+): Promise<ContainerSelectionPayload> {
+  const params = new URLSearchParams({ as_of: asOf });
+  return request<ContainerSelectionPayload>(
+    `/api/erp/container-selection?${params.toString()}`,
+    { signal },
   );
 }
 

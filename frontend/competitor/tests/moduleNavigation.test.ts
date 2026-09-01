@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import test from "node:test";
 
 import {
@@ -15,6 +15,9 @@ import {
 } from "../src/moduleNavigation.ts";
 
 const appSource = readFileSync(new URL("../src/App.vue", import.meta.url), "utf8");
+const apiSource = readFileSync(new URL("../src/api.ts", import.meta.url), "utf8");
+const stylesSource = readFileSync(new URL("../src/styles.css", import.meta.url), "utf8");
+const typesSource = readFileSync(new URL("../src/types.ts", import.meta.url), "utf8");
 
 test("every ERP module has a stable hash link that restores the same module", () => {
   assert.equal(ERP_MODULE_KEYS.length, 10);
@@ -25,6 +28,7 @@ test("every ERP module has a stable hash link that restores the same module", ()
   assert.equal(modulePageFromHash("#module=unknown"), null);
   assert.equal(modulePageFromHash("#module=daily-report"), null);
   assert.equal(modulePageFromHash("#module=platform-warehouse"), null);
+  assert.equal(modulePageFromHash("#module=products"), null);
   assert.equal(modulePageFromHash("#section=products"), null);
   assert.equal(modulePageFromHash(""), null);
 });
@@ -160,6 +164,23 @@ test("the sidebar exposes real links while retaining guarded left-click navigati
   assert.doesNotMatch(appSource, /<button\s+v-for="page in allPages"/);
   assert.doesNotMatch(appSource, /DailyReportPage|daily-report|运营日报/);
   assert.doesNotMatch(appSource, /PlatformWarehousePage|platform-warehouse|约平台仓/);
+  assert.doesNotMatch(appSource, /\bProductsPage\b|label: "商品中心"|key: "products"/);
+});
+
+test("removed product center frontend stays absent while its backend can remain compatible", () => {
+  assert.equal(
+    existsSync(new URL("../src/pages/ProductsPage.vue", import.meta.url)),
+    false,
+  );
+  assert.doesNotMatch(apiSource, /fetchProducts|fetchProductDetail|\/api\/erp\/products/);
+  assert.doesNotMatch(
+    typesSource,
+    /ProductsPayload|ProductDetailPayload|ProductCostConversion/,
+  );
+  assert.doesNotMatch(
+    stylesSource,
+    /product-workspace|product-list-toolbar|product-scroll|product-modal|sales-history-chart|spark-bars/,
+  );
 });
 
 test("ordinary SPA navigation keeps every ERP module instance cached", () => {
@@ -169,13 +190,13 @@ test("ordinary SPA navigation keeps every ERP module instance cached", () => {
   );
   const expectedComponents = new Map([
     ["overview", "OverviewPage"],
-    ["products", "ProductsPage"],
     ["keyword-traffic", "KeywordTrafficPage"],
     ["search-ranking", "SearchRankingPage"],
     ["quadrants", "QuadrantsPage"],
     ["anomaly-products", "AnomalyProductsPage"],
     ["returns", "ReturnsPage"],
     ["logistics", "LogisticsPage"],
+    ["container-selection", "ContainerSelectionPage"],
     ["competitors", "CompetitorsPage"],
     ["users", "UsersPage"],
   ]);

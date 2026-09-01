@@ -17,6 +17,10 @@ const pageSource = readFileSync(
   "utf8",
 );
 const apiSource = readFileSync(new URL("../src/api.ts", import.meta.url), "utf8");
+const observedSalesSource = readFileSync(
+  new URL("../src/components/CompetitorObservedSalesMetrics.vue", import.meta.url),
+  "utf8",
+);
 
 function competitor(
   plid: string,
@@ -82,6 +86,29 @@ test("personal watchlist reranks from refreshed interval metrics", () => {
   assert.deepEqual(
     rankedPersonalPlids([competitor("A", 5, 50), competitor("B", 2, 800)]),
     ["A", "B"],
+  );
+});
+
+test("all radar cards and the line-chart detail expose the same five observed-sales windows", () => {
+  assert.deepEqual(
+    [...observedSalesSource.matchAll(/const windowDays = \[([^\]]+)\]/g)]
+      .map((match) => match[1]?.replace(/\s/g, "")),
+    ["7,15,30,60,90"],
+  );
+  assert.match(observedSalesSource, /近期库存观察售出/);
+  assert.match(observedSalesSource, /不等同 Takealot 实际订单销量/);
+  assert.equal(
+    pageSource.match(/<CompetitorObservedSalesMetrics/g)?.length,
+    4,
+  );
+  assert.match(pageSource, /:values="card\.competitor\?\.近期观察售出"/);
+  assert.equal(
+    pageSource.match(/:values="item\.近期观察售出"/g)?.length,
+    2,
+  );
+  assert.match(
+    pageSource,
+    /:values="detail\.current_item\?\.近期观察售出 \?\? selected\.近期观察售出"/,
   );
 });
 

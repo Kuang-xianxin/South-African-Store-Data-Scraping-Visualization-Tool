@@ -1214,11 +1214,22 @@ def test_own_store_product_is_separated_and_only_exposes_follower_offers(
     assert item["周期补货量"] == 0
     assert item["周期补货货值"] == 0.0
     assert item["周期库存周转金额"] == 95.0
+    assert item["近期观察售出"] == {
+        "7": 1,
+        "15": 1,
+        "30": 1,
+        "60": 1,
+        "90": 1,
+    }
+    assert item["近期观察售出截至"] == date(2026, 8, 2)
     assert item["最新Offer状态"] == ["disabled_by_seller"]
     assert item["最新Offer状态更新时间"].date() == captured_at.date()
     assert item["自有报价"][0]["状态"] == "buyable"
     assert ranged_dataset.store_current.iloc[0]["最新Offer状态"] == [
         "disabled_by_seller"
+    ]
+    assert ranged_dataset.store_current.iloc[0]["近期观察售出"] == item[
+        "近期观察售出"
     ]
     assert list_only_dataset.current.empty
     assert len(list_only_dataset.store_current) == 1
@@ -1700,6 +1711,14 @@ def test_competitor_signals_recompute_from_oldest_and_latest_in_date_range(
     assert all_signal["周期补货量"] == 0
     assert all_signal["周期补货货值"] == 0.0
     assert all_signal["周期库存周转金额"] == 1220.0
+    assert all_signal["近期观察售出"] == {
+        "7": 6,
+        "15": 6,
+        "30": 6,
+        "60": 6,
+        "90": 6,
+    }
+    assert all_signal["近期观察售出截至"] == date(2026, 7, 24)
     assert all_signal["新增评论"] == 3
     assert all_signal["新增好评"] == 2
     assert all_signal["新增差评"] == 1
@@ -1747,6 +1766,8 @@ def test_competitor_signals_recompute_from_oldest_and_latest_in_date_range(
     assert recent_signal["周期补货量"] == 0
     assert recent_signal["周期补货货值"] == 0.0
     assert recent_signal["周期库存周转金额"] == 800.0
+    assert recent_signal["近期观察售出"] == all_signal["近期观察售出"]
+    assert recent_signal["近期观察售出截至"] == date(2026, 7, 24)
     assert recent_signal["新增评论"] == 2
     assert recent_signal["新增好评"] == 1
     assert recent_signal["新增差评"] == 1

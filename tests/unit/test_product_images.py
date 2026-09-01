@@ -6,6 +6,7 @@ from pathlib import Path
 from threading import Event
 from time import monotonic, sleep
 
+import httpx
 import pytest
 from PIL import Image
 
@@ -132,6 +133,45 @@ def test_thumbnail_cache_does_not_retain_completed_unique_keys(tmp_path: Path) -
             cache.thumbnail_path(url)
 
     assert cache._locks == {}
+
+
+def test_thumbnail_cache_uses_fresh_direct_client_after_pooled_failures(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    requests: list[tuple[str, str]] = []
+
+    def unavailable(request: httpx.Request) -> httpx.Response:
+        requests.append(("pooled", request.headers["accept"]))
+        return httpx.Response(503, request=request)
+
+    def available(request: httpx.Request) -> httpx.Response:
+        requests.append(("fresh", request.headers["accept"]))
+        return httpx.Response(
+            200,
+            headers={"Content-Type": "image/jpeg"},
+            content=_large_jpeg(),
+            request=request,
+        )
+
+    cache = ProductThumbnailCache(tmp_path)
+    assert cache._network_client is not None
+    assert cache._direct_client is not None
+    cache._network_client.close()
+    cache._direct_client.close()
+    cache._network_client = httpx.Client(transport=httpx.MockTransport(unavailable))
+    cache._direct_client = httpx.Client(transport=httpx.MockTransport(unavailable))
+    fresh_client = httpx.Client(transport=httpx.MockTransport(available))
+    monkeypatch.setattr(cache, "_new_direct_client", lambda: fresh_client)
+
+    try:
+        thumbnail = cache.thumbnail_path(TRUSTED_URL)
+    finally:
+        cache.close()
+
+    assert thumbnail.is_file()
+    assert [kind for kind, _accept in requests] == ["pooled", "pooled", "fresh"]
+    assert all("image/avif" not in accept for _kind, accept in requests)
 
 
 def test_media_takealot_image_is_trusted_and_normalized() -> None:

@@ -2,13 +2,13 @@ import type { OwnStoreScope } from "./types";
 
 export const ERP_MODULE_KEYS = [
   "overview",
-  "products",
   "keyword-traffic",
   "search-ranking",
   "quadrants",
   "anomaly-products",
   "returns",
   "logistics",
+  "container-selection",
   "competitors",
   "users",
 ] as const;

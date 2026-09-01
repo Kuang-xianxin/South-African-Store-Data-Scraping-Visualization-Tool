@@ -78,7 +78,6 @@ test("multi-store APIs carry an explicit operating scope", () => {
   assert.match(typesSource, /OwnStoreScope = "current" \| "all" \| "operating"/);
   assert.match(apiSource, /store_scope: storeScope/);
   assert.match(apiSource, /params\.set\("store_scope", options\.storeScope\)/);
-  assert.match(apiSource, /\/api\/erp\/products\?\$\{scopedQuery\(asOf, storeScope\)\}/);
   assert.match(apiSource, /\/api\/erp\/anomaly-products\?\$\{scopedQuery\(asOf, storeScope\)\}/);
   assert.match(apiSource, /\/api\/erp\/quadrants\?\$\{scopedQuery\(asOf, storeScope\)\}/);
   assert.match(apiSource, /\/api\/erp\/keyword-traffic\?\$\{scopedQuery\(asOf, storeScope\)\}/);

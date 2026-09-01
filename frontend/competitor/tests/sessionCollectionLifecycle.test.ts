@@ -66,7 +66,10 @@ test("logout detaches the old collection loop before replacing the session", () 
     signOutBlock.indexOf("AUTH_SESSION_ENDING_EVENT")
       < signOutBlock.indexOf("await logout()"),
   );
-  assert.match(pageSource, /onBeforeUnmount\(\(\) => \{\s+detachCollectionForSessionChange\(\)/);
+  assert.match(
+    pageSource,
+    /onBeforeUnmount\(\(\) => \{[\s\S]{0,160}detachCollectionForSessionChange\(\)/,
+  );
   assert.match(pageSource, /abortController\.value\?\.abort\(\)/);
   assert.match(
     pageSource,

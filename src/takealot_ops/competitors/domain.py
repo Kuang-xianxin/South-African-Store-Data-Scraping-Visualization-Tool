@@ -9,6 +9,8 @@ from datetime import datetime
 
 REVIEW_RATE_LOW = 0.02
 REVIEW_RATE_HIGH = 0.05
+TAKEALOT_RETAIL_SELLER_ID = "takealot-retail"
+TAKEALOT_RETAIL_SELLER_NAME = "Takealot"
 
 
 @dataclass(frozen=True)

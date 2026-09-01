@@ -16,6 +16,11 @@ from uuid import UUID, uuid4
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from takealot_ops.erp.return_removal import (
+    REMOVAL_SNAPSHOT_PROVIDER,
+    collect_removal_order_snapshot,
+)
+from takealot_ops.logistics.snapshots import save_provider_snapshot
 from takealot_ops.platform_warehouse.portal import (
     PortalAction,
     PortalAmbiguousWriteError,
@@ -116,6 +121,71 @@ class PlatformWarehouseService:
 
     def portal_logout(self) -> dict[str, Any]:
         return self._portal.logout(current_store_code())
+
+    def sync_return_removal_orders(self) -> dict[str, Any]:
+        """Explicitly read the full removal-order module and persist one safe snapshot."""
+        self._assert_portal_enabled()
+        store_code = current_store_code()
+        try:
+            token = self._portal.validated_token(store_code)
+        except PortalAuthenticationError:
+            session_status = self._portal.status(store_code)
+            if session_status["requires_otp"]:
+                return {
+                    "state": "otp_required",
+                    "portal": self.portal_status(),
+                }
+            try:
+                credential = self._credentials.get(store_code)
+            except (OSError, RuntimeError) as exc:
+                raise PortalAuthenticationError(
+                    "服务器无法读取 Windows 凭据管理器中的 Seller Portal 凭据"
+                ) from exc
+            if credential is None:
+                raise PortalAuthenticationError(
+                    "当前店铺尚未在服务器 Windows 凭据管理器配置 Seller Portal 凭据"
+                )
+            session_status = self._portal.login(
+                store_code,
+                credential.email,
+                credential.password,
+            )
+            if session_status["requires_otp"]:
+                return {
+                    "state": "otp_required",
+                    "portal": self.portal_status(),
+                }
+            token = self._portal.validated_token(store_code)
+        return self._sync_return_removal_orders_with_token(token)
+
+    def verify_otp_and_sync_return_removal_orders(self, otp: str) -> dict[str, Any]:
+        """Verify the pending server-side login and continue the same read-only sync."""
+        self._assert_portal_enabled()
+        store_code = current_store_code()
+        self._portal.verify_otp(store_code, otp)
+        token = self._portal.validated_token(store_code)
+        return self._sync_return_removal_orders_with_token(token)
+
+    def _sync_return_removal_orders_with_token(self, token: str) -> dict[str, Any]:
+        snapshot = collect_removal_order_snapshot(self._portal.client, token)
+        settings = DashboardSettings.from_env(self._project_root)
+        engine = create_engine_for_settings(settings)
+        try:
+            synced_at = save_provider_snapshot(
+                engine,
+                REMOVAL_SNAPSHOT_PROVIDER,
+                snapshot,
+            )
+        finally:
+            engine.dispose()
+        return {
+            "state": "synced",
+            "synced_at": synced_at,
+            "counts": snapshot["counts"],
+            "order_count": len(snapshot["orders"]),
+            "warnings": snapshot["warnings"],
+            "portal": self.portal_status(),
+        }
 
     def create_platform_draft_direct(
         self,
@@ -753,10 +823,11 @@ class PlatformWarehouseService:
     def _assert_portal_enabled(self) -> None:
         store_code = current_store_code()
         if not self._portal_settings.enabled:
-            raise PortalDisabledError("约平台仓真实写入总开关当前关闭")
+            raise PortalDisabledError("Takealot Seller Portal 接入总开关当前关闭")
         if not self._portal_settings.is_store_enabled(store_code):
             raise PortalDisabledError(
-                f"当前店铺 {store_code} 未启用约平台仓；仅允许已配置的店铺"
+                f"当前店铺 {store_code} 未启用约平台仓 / Seller Portal 接入；"
+                "仅允许已配置的店铺"
             )
 
     # Retained only for drafts created while the integration is disabled. These methods

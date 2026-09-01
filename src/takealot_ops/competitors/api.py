@@ -9,7 +9,7 @@ import re
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any, Literal
-from urllib.parse import parse_qsl, urlencode, urlsplit
+from urllib.parse import parse_qsl, unquote, urlencode, urlsplit, urlunsplit
 
 from playwright.async_api import (
     Browser,
@@ -25,12 +25,15 @@ from takealot_ops.competitors.domain import (
     CompetitorProduct,
     CompetitorReviewRecord,
     CompetitorVariant,
+    TAKEALOT_RETAIL_SELLER_ID,
+    TAKEALOT_RETAIL_SELLER_NAME,
     competitor_offer_identity,
 )
 
 
 PUBLIC_API_BASE = "https://api.takealot.com/rest/v-1-10-0"
 PLID_PATTERN = re.compile(r"PLID(\d+)", re.IGNORECASE)
+API_QUERY_SEPARATOR = re.compile(r"&(?=[A-Za-z0-9_.~-]+=)")
 
 BROWSER_PATHS = (
     Path("C:/Program Files/Google/Chrome/Application/chrome.exe"),
@@ -196,7 +199,7 @@ class CompetitorPublicClient:
                     if attempt == 2:
                         raise
                     await self._human_delay(2.0 * (2**attempt), 4.0 * (2**attempt))
-            await self._human_delay(4.0, 7.0)
+            await self._human_delay(3.0, 5.0)
             self._started = True
         except asyncio.CancelledError:
             await self._close_after_failed_start()
@@ -319,13 +322,22 @@ class CompetitorPublicClient:
         detail = await self._get_json(f"{PUBLIC_API_BASE}/product-details/PLID{plid}")
         variant_details = await self._fetch_variant_details(detail)
         variants = tuple(_variant_record(item, plid) for item in variant_details)
-        requested_key = _variant_key(url)
+        requested_keys = {
+            _variant_key(url),
+            _variant_key(_normalise_api_desktop_href(url)),
+        }
+        requested_keys.discard("")
         selected_index = next(
             (
                 index
                 for index, item in enumerate(variant_details)
-                if requested_key
-                and _variant_key(str(item.get("desktop_href") or "")) == requested_key
+                if requested_keys
+                and _variant_key(
+                    _normalise_api_desktop_href(
+                        str(item.get("desktop_href") or "")
+                    )
+                )
+                in requested_keys
             ),
             -1,
         )
@@ -379,7 +391,7 @@ class CompetitorPublicClient:
                     compact_offers.append(
                         _offer_record(
                             other_offer,
-                            _mapping(other_offer.get("seller")),
+                            _public_offer_seller(other_offer),
                             selected=False,
                             is_buybox=False,
                             fallback_url=str(
@@ -398,7 +410,9 @@ class CompetitorPublicClient:
         image_url = _product_image_url(selected_detail)
         return CompetitorProduct(
             plid=plid,
-            url=str(detail.get("desktop_href") or url),
+            url=_normalise_api_desktop_href(
+                str(detail.get("desktop_href") or url)
+            ),
             title=str(core.get("title") or detail.get("title") or f"PLID{plid}"),
             image_url=image_url,
             sku=selected_variant.sku,
@@ -423,7 +437,9 @@ class CompetitorPublicClient:
         visited: set[str] = set()
         while queue:
             detail = queue.pop(0)
-            detail_url = str(detail.get("desktop_href") or "")
+            detail_url = _normalise_api_desktop_href(
+                str(detail.get("desktop_href") or "")
+            )
             state_key = _variant_key(detail_url) or "__default__"
             selectors = _mapping_list(_mapping(detail.get("variants")).get("selectors"))
             pending = next(
@@ -445,7 +461,7 @@ class CompetitorPublicClient:
                 if not href or href in visited:
                     continue
                 visited.add(href)
-                await self._human_delay(3.0, 6.0)
+                await self._human_delay(2.5, 4.0)
                 queue.append(await self._get_json(href))
         return list(terminal.values()) or [root]
 
@@ -460,7 +476,7 @@ class CompetitorPublicClient:
             delay = (
                 max(0.0, page_delay_seconds)
                 if page_delay_seconds is not None
-                else random.uniform(2.0, 5.0)
+                else random.uniform(1.0, 3.0)
             )
             await asyncio.sleep(delay)
             result = await self._get_json(
@@ -969,6 +985,16 @@ def _normalised_public_seller_id(value: object) -> str:
     return seller_id[1:] if seller_id[:1].casefold() == "m" else seller_id
 
 
+def _public_offer_seller(offer: Mapping[str, Any]) -> Mapping[str, Any]:
+    """Return the authoritative seller identity embedded in one public offer."""
+    if offer.get("is_takealot") is True:
+        return {
+            "seller_id": TAKEALOT_RETAIL_SELLER_ID,
+            "display_name": TAKEALOT_RETAIL_SELLER_NAME,
+        }
+    return _mapping(offer.get("seller"))
+
+
 def _known_offer_sellers(detail: Mapping[str, Any]) -> dict[str, Mapping[str, Any]]:
     sellers: dict[str, Mapping[str, Any]] = {}
     selected_seller = _mapping(detail.get("seller_detail"))
@@ -978,7 +1004,7 @@ def _known_offer_sellers(detail: Mapping[str, Any]) -> dict[str, Mapping[str, An
     other_offers = _mapping(detail.get("other_offers"))
     for condition in _mapping_list(other_offers.get("conditions")):
         for offer in _mapping_list(condition.get("items")):
-            seller = _mapping(offer.get("seller"))
+            seller = _public_offer_seller(offer)
             seller_id = _normalised_public_seller_id(seller.get("seller_id"))
             if seller_id:
                 sellers[seller_id] = seller
@@ -991,6 +1017,8 @@ def _buybox_offer_seller(
     selected_seller: Mapping[str, Any],
     known_sellers: Mapping[str, Mapping[str, Any]],
 ) -> Mapping[str, Any]:
+    if offer.get("is_takealot") is True:
+        return _public_offer_seller(offer)
     embedded = _mapping(offer.get("seller"))
     seller_id = _normalised_public_seller_id(
         embedded.get("seller_id") or offer.get("sponsored_ads_seller_id")
@@ -1048,8 +1076,12 @@ def _offer_target(
         fallback_url,
     ]
     for candidate in candidates:
-        value = str(candidate or "").strip()
-        if not value:
+        # A Takealot variant value can legitimately end with whitespace.  Remove
+        # only accidental leading padding around an API field; the URL normalizer
+        # below must still see any trailing query-value whitespace so it can encode
+        # the exact SKU selector instead of silently opening another variant.
+        value = str(candidate or "").lstrip()
+        if not value.strip():
             continue
         match = PLID_PATTERN.search(value)
         if match is None:
@@ -1059,7 +1091,7 @@ def _offer_target(
             hostname = (urlsplit(value).hostname or "").casefold()
             if hostname != "takealot.com" and not hostname.endswith(".takealot.com"):
                 continue
-            return value, plid
+            return _normalise_api_desktop_href(value), plid
         return f"https://www.takealot.com/product/PLID{plid}", plid
     return None, None
 
@@ -1076,7 +1108,12 @@ def _selected_offer(detail: Mapping[str, Any]) -> Mapping[str, Any]:
 def _variant_record(detail: Mapping[str, Any], plid: str) -> CompetitorVariant:
     buybox = _mapping(detail.get("buybox"))
     offer = _selected_offer(detail)
-    seller = _mapping(detail.get("seller_detail"))
+    selected_seller = _mapping(detail.get("seller_detail"))
+    seller = _buybox_offer_seller(
+        offer,
+        selected_seller=selected_seller,
+        known_sellers=_known_offer_sellers(detail),
+    )
     stock = _mapping(offer.get("stock_availability"))
     is_leadtime = bool(stock.get("is_leadtime"))
     selected_values: list[str] = []
@@ -1095,7 +1132,9 @@ def _variant_record(detail: Mapping[str, Any], plid: str) -> CompetitorVariant:
             value = _selector_option_display_value(selected)
             if value:
                 selected_values.append(f"{title}：{value}")
-    url = str(detail.get("desktop_href") or f"https://www.takealot.com/PLID{plid}")
+    url = _normalise_api_desktop_href(
+        str(detail.get("desktop_href") or f"https://www.takealot.com/PLID{plid}")
+    )
     return CompetitorVariant(
         key=_variant_key(url) or "default",
         label=" / ".join(selected_values) if selected_values else "默认款",
@@ -1193,6 +1232,36 @@ def _variant_key(url: str) -> str:
         if key.lower() != "platform"
     ]
     return urlencode(sorted(values))
+
+
+def _normalise_api_desktop_href(url: str) -> str:
+    """Encode literal variant values from Takealot's display-oriented PDP URLs.
+
+    The public API can return ``desktop_href`` values with unescaped ampersands,
+    literal leading plus signs, or significant trailing spaces.  Passing those
+    strings directly to a browser leaves the variant selectors incomplete.  Split
+    only on ampersands that introduce another ``key=`` pair, then encode the exact
+    API value so Playwright opens the intended SKU.
+    """
+    parts = urlsplit(url)
+    if not parts.query:
+        return url
+
+    query: list[tuple[str, str]] = []
+    for component in API_QUERY_SEPARATOR.split(parts.query):
+        key, separator, value = component.partition("=")
+        if not key:
+            continue
+        query.append((unquote(key), unquote(value if separator else "")))
+    return urlunsplit(
+        (
+            parts.scheme,
+            parts.netloc,
+            parts.path,
+            urlencode(query),
+            parts.fragment,
+        )
+    )
 
 
 def _mapping(value: object) -> Mapping[str, Any]:

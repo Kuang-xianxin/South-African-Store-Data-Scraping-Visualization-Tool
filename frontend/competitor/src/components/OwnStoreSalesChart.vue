@@ -93,10 +93,9 @@ const filteredPoints = computed(() => {
   );
 });
 const aggregatedPoints = computed(() =>
-  aggregateOwnStoreSalesPoints(filteredPoints.value),
+  aggregateOwnStoreSalesPoints(filteredPoints.value, "day"),
 );
 const displayBuckets = computed(() => aggregatedPoints.value.buckets);
-const granularity = computed(() => aggregatedPoints.value.granularity);
 const geometry = computed(() =>
   buildOwnStoreSalesChart(displayBuckets.value),
 );
@@ -277,8 +276,6 @@ function decimal(value: number | null): string {
 }
 
 function granularityLabel(): string {
-  if (granularity.value === "week") return "按周汇总";
-  if (granularity.value === "month") return "按月汇总";
   return "按日展示";
 }
 
@@ -345,9 +342,24 @@ function activePeriodLabel(): string {
           <div class="own-sales-range-presets" role="group" aria-label="销量图快捷日期范围">
             <button
               type="button"
+              :class="{ selected: isRecentRange(7) && !isFullRange }"
+              @click="setRecentRange(7)"
+            >近7天</button>
+            <button
+              type="button"
+              :class="{ selected: isRecentRange(15) && !isFullRange }"
+              @click="setRecentRange(15)"
+            >近15天</button>
+            <button
+              type="button"
               :class="{ selected: isRecentRange(30) && !isFullRange }"
               @click="setRecentRange(30)"
             >近30天</button>
+            <button
+              type="button"
+              :class="{ selected: isRecentRange(60) && !isFullRange }"
+              @click="setRecentRange(60)"
+            >近60天</button>
             <button
               type="button"
               :class="{ selected: isRecentRange(90) && !isFullRange }"
@@ -415,10 +427,10 @@ function activePeriodLabel(): string {
           </span>
         </p>
         <p
-          v-if="granularity !== 'day' || rangeSummary.partialDays || rangeSummary.missingDays"
+          v-if="rangeSummary.partialDays || rangeSummary.missingDays"
           class="own-sales-range-note"
         >
-          橙色柱为已有小计；缺失日期不补 0。
+          橙色柱为截至采集值；缺失日期不补 0。
         </p>
       </div>
 
@@ -432,7 +444,7 @@ function activePeriodLabel(): string {
       >
         <div v-if="activePoint" class="own-sales-readout" aria-live="polite">
           <div>
-            <small>{{ granularity === "day" ? "国内日期" : "国内日期范围" }}</small>
+            <small>北京时间日期</small>
             <strong>{{ activePeriodLabel() }}</strong>
             <span>{{ granularityLabel() }}</span>
           </div>
@@ -443,7 +455,7 @@ function activePeriodLabel(): string {
                 activePoint.units === null
                   ? "未覆盖"
                   : activePoint.status === "partial"
-                    ? `${number(activePoint.units)} 件（周期不完整）`
+                    ? `${number(activePoint.units)} 件（截至采集）`
                     : `${number(activePoint.units)} 件`
               }}
             </strong>
@@ -466,8 +478,8 @@ function activePeriodLabel(): string {
         <div class="own-sales-chart-meta">
           <div class="own-sales-legend" aria-label="销量条形图图例">
             <strong>图例</strong>
-            <span><i class="complete" aria-hidden="true"></i>完整日 / 周期</span>
-            <span><i class="partial" aria-hidden="true"></i>截至采集 / 周期不完整</span>
+            <span><i class="complete" aria-hidden="true"></i>完整日</span>
+            <span><i class="partial" aria-hidden="true"></i>截至采集</span>
             <span><i class="zero" aria-hidden="true"></i>完整 0 件基线</span>
             <span><i class="missing" aria-hidden="true">×</i>缺失，不补 0</span>
           </div>
@@ -713,6 +725,7 @@ function activePeriodLabel(): string {
 
 .own-sales-range-presets {
   display: inline-flex;
+  flex-wrap: wrap;
   gap: 4px;
   padding: 3px;
   border-radius: 9px;

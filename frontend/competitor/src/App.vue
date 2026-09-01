@@ -104,19 +104,18 @@ const lazyPage = (loader: () => Promise<{ default: Component }>) =>
     timeout: 30_000,
   });
 const OverviewPage = lazyPage(() => import("./pages/OverviewPage.vue"));
-const ProductsPage = lazyPage(() => import("./pages/ProductsPage.vue"));
 const KeywordTrafficPage = lazyPage(() => import("./pages/KeywordTrafficPage.vue"));
 const SearchRankingPage = lazyPage(() => import("./pages/SearchRankingPage.vue"));
 const QuadrantsPage = lazyPage(() => import("./pages/QuadrantsPage.vue"));
 const AnomalyProductsPage = lazyPage(() => import("./pages/AnomalyProductsPage.vue"));
 const ReturnsPage = lazyPage(() => import("./pages/ReturnsPage.vue"));
 const LogisticsPage = lazyPage(() => import("./pages/LogisticsPage.vue"));
+const ContainerSelectionPage = lazyPage(() => import("./pages/ContainerSelectionPage.vue"));
 const CompetitorsPage = lazyPage(() => import("./pages/CompetitorsPage.vue"));
 const UsersPage = lazyPage(() => import("./pages/UsersPage.vue"));
 
 const storeScopedPages = new Set<PageKey>([
   "overview",
-  "products",
   "keyword-traffic",
   "search-ranking",
   "quadrants",
@@ -136,13 +135,13 @@ const refreshStatusIdlePollIntervalMs = 15_000;
 
 const basePages = [
   { key: "overview", label: "经营总览", hint: "今日经营脉搏", mark: "01", permission: "store.view" },
-  { key: "products", label: "商品中心", hint: "单品销售与流量", mark: "02", permission: "store.view" },
-  { key: "keyword-traffic", label: "关键词流量", hint: "变更节点与趋势对比", mark: "03", permission: "store.view" },
-  { key: "search-ranking", label: "搜索定位", hint: "图片热词与自然排名", mark: "04", permission: "store.view" },
-  { key: "quadrants", label: "经营坐标", hint: "流量与下单分布", mark: "05", permission: "store.view" },
-  { key: "anomaly-products", label: "异常商品", hint: "销量、库存、评论与退货", mark: "06", permission: "store.view" },
-  { key: "returns", label: "退货管理", hint: "原因、结果与交易", mark: "07", permission: "store.view" },
-  { key: "logistics", label: "物流管理", hint: "长睿与平台货件", mark: "08", permission: "store.view" },
+  { key: "keyword-traffic", label: "关键词流量", hint: "变更节点与趋势对比", mark: "02", permission: "store.view" },
+  { key: "search-ranking", label: "搜索定位", hint: "图片热词与自然排名", mark: "03", permission: "store.view" },
+  { key: "quadrants", label: "经营坐标", hint: "流量与下单分布", mark: "04", permission: "store.view" },
+  { key: "anomaly-products", label: "异常商品", hint: "销量、库存、评论与退货", mark: "05", permission: "store.view" },
+  { key: "returns", label: "退货管理", hint: "原因、结果与交易", mark: "06", permission: "store.view" },
+  { key: "logistics", label: "物流管理", hint: "长睿与平台货件", mark: "07", permission: "store.view" },
+  { key: "container-selection", label: "配柜选品", hint: "大体积非带电快动销", mark: "08", permission: "competitors.view" },
   { key: "competitors", label: "竞品雷达", hint: "库存评论与销量", mark: "09", permission: "competitors.view" },
 ] as const;
 const adminPage = {
@@ -300,13 +299,13 @@ const activePage = computed(
 const pageComponent = computed(() => {
   const components = {
     overview: OverviewPage,
-    products: ProductsPage,
     "keyword-traffic": KeywordTrafficPage,
     "search-ranking": SearchRankingPage,
     quadrants: QuadrantsPage,
     "anomaly-products": AnomalyProductsPage,
     returns: ReturnsPage,
     logistics: LogisticsPage,
+    "container-selection": ContainerSelectionPage,
     competitors: CompetitorsPage,
     users: UsersPage,
   };
@@ -486,6 +485,18 @@ const activePageProps = computed(() => {
       onPermissionDenied: showPermissionDenied,
     };
   }
+  if (key === "container-selection") {
+    return {
+      asOf: dataToday,
+      canOperate: canCollectCompetitors.value,
+      canControlCollection: canControlCompetitorCollection.value,
+      isAdmin: session.value?.user.role === "admin",
+      currentUsername: session.value?.user.username ?? "",
+      accessibleConnectedStoreCount: accessibleConnectedStoreCount.value,
+      operatingConnectedStoreCount: operatingConnectedStoreCount.value,
+      onPermissionDenied: showPermissionDenied,
+    };
+  }
   if (key === "quadrants") {
     return {
       ...scopedCommon,
@@ -511,6 +522,7 @@ const activePageProps = computed(() => {
       ...scopedCommon,
       rangeStart: dataRangeStart.value,
       rangeEnd: dataRangeEnd.value,
+      canSyncRemovalOrders: canRefresh.value,
     };
   }
   if (key === "logistics") {
@@ -1052,7 +1064,13 @@ function localDate() {
           <h1>{{ activePage.label }}</h1>
         </div>
         <div class="topbar-actions">
-          <label v-if="session.user.accessible_stores.length" class="store-context">
+          <label
+            v-if="
+              session.user.accessible_stores.length
+              && currentPage !== 'container-selection'
+            "
+            class="store-context"
+          >
             <span>当前查看店铺</span>
             <select v-model="selectedStoreChoice" aria-label="切换当前查看店铺">
               <option
@@ -1110,7 +1128,7 @@ function localDate() {
           <section
             v-else-if="
               !selectedStorePending
-              && !['search-ranking', 'logistics', 'anomaly-products', 'competitors', 'users'].includes(currentPage)
+              && !['search-ranking', 'logistics', 'anomaly-products', 'container-selection', 'competitors', 'users'].includes(currentPage)
             "
             class="data-viewport"
             aria-label="全局数据日期范围"
@@ -1169,7 +1187,7 @@ function localDate() {
           </section>
           <button
             v-if="
-              !['logistics', 'users'].includes(currentPage)
+              !['logistics', 'container-selection', 'users'].includes(currentPage)
               && !selectedStorePending
               && canAccessConnectedStore
               && canRefresh

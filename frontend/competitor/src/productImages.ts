@@ -2,7 +2,6 @@ import { withStoreContext } from "./storeContext";
 
 export const PRODUCT_IMAGE_SIZE = {
   list: 192,
-  detail: 640,
 } as const;
 
 export type ProductImageSize =
@@ -12,6 +11,7 @@ export function productThumbnailUrl(
   source: string | null | undefined,
   size: ProductImageSize = PRODUCT_IMAGE_SIZE.list,
   storeCode?: string | null,
+  retryAttempt = 0,
 ): string {
   const normalized = String(source ?? "").trim();
   if (!normalized) return "";
@@ -19,6 +19,9 @@ export function productThumbnailUrl(
     image_url: normalized,
     size: String(size),
   });
+  if (retryAttempt > 0) {
+    query.set("image_retry", String(Math.trunc(retryAttempt)));
+  }
   const normalizedStoreCode = String(storeCode ?? "").trim().toLowerCase();
   if (normalizedStoreCode) {
     query.set("store_code", normalizedStoreCode);

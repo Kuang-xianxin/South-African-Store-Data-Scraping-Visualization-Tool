@@ -10,6 +10,7 @@ from takealot_ops.competitors.domain import (
     CompetitorOffer,
     CompetitorProduct,
     CompetitorVariant,
+    TAKEALOT_RETAIL_SELLER_ID,
 )
 from takealot_ops.competitors.stock import (
     _BuyboxOfferCandidate,
@@ -27,6 +28,7 @@ from takealot_ops.competitors.stock import (
     _find_other_offer_button_by_seller_row,
     _find_product_quantity_combo,
     _open_quantity_menu_with_retry,
+    _page_contains_product_title,
     _parse_customer_purchase_limit,
     _probe_page_offer_stock,
     _probe_above_quick_menu,
@@ -49,6 +51,17 @@ def test_target_url_requires_the_requested_plid() -> None:
     assert not _url_matches_plid(
         "https://www.takealot.com/recommendation/PLID91577928",
         "72189176",
+    )
+
+
+def test_page_title_match_folds_api_trailing_whitespace() -> None:
+    assert _page_contains_product_title(
+        "Creality Water Washable 3D Printer Resin 1Kg - White\nR 499",
+        "Creality Water Washable 3D Printer Resin 1Kg - White ",
+    )
+    assert not _page_contains_product_title(
+        "Recommended: Creality Resin",
+        "Creality Water Washable 3D Printer Resin 1Kg - White ",
     )
 
 
@@ -773,6 +786,43 @@ async def test_current_other_offer_button_uses_exact_seller_row() -> None:
     assert selected is button
     page.locator.assert_called_once_with('a[href*="sellers="]:visible')
     row.locator.assert_called_once_with(
+        'button[data-ref="buying-choice-atc"]:visible'
+    )
+
+
+@pytest.mark.asyncio
+async def test_takealot_retail_offer_uses_unique_label_and_price_row() -> None:
+    offer = CompetitorOffer(
+        selected=False,
+        sku="221394361",
+        seller_id=TAKEALOT_RETAIL_SELLER_ID,
+        seller_name="Takealot",
+        price=11959.0,
+        stock_status="In stock",
+    )
+    page = Mock()
+    rows = Mock()
+    marketplace_row = Mock()
+    retail_row = Mock()
+    retail_button = Mock()
+    page.locator.return_value = rows
+    rows.count = AsyncMock(return_value=2)
+    rows.nth.side_effect = [marketplace_row, retail_row]
+    marketplace_row.inner_text = AsyncMock(
+        return_value="R 9,775 Acumen Technologies Seller Score 4.5"
+    )
+    retail_row.inner_text = AsyncMock(
+        return_value="R 11,959 Delivery 23 Aug - 25 Aug Takealot"
+    )
+    retail_row.locator.return_value = retail_button
+    retail_button.count = AsyncMock(return_value=1)
+    retail_button.is_visible = AsyncMock(return_value=True)
+
+    selected = await _find_other_offer_button_by_seller_row(page, offer)
+
+    assert selected is retail_button
+    page.locator.assert_called_once_with("div.buying-choice-list-item:visible")
+    retail_row.locator.assert_called_once_with(
         'button[data-ref="buying-choice-atc"]:visible'
     )
 

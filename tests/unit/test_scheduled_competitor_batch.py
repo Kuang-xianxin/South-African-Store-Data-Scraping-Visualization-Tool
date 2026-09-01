@@ -5,7 +5,10 @@ import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from takealot_ops.competitors.batch import CollectionBatchRegistry
+from takealot_ops.competitors.batch import (
+    CollectionBatchRegistry,
+    configure_collection_logger,
+)
 from takealot_ops.competitors.scheduled import (
     ScheduledCollectionAttempt,
     ScheduledCollectionTarget,
@@ -36,6 +39,7 @@ def _runner(
     pending_retry_delay_seconds: float = 600,
     pending_retry_round_limit: int = 3,
     continuous_rounds: bool = False,
+    logger=None,
 ) -> ScheduledCompetitorBatchRunner:
     import logging
 
@@ -45,7 +49,7 @@ def _runner(
         trigger_dir=trigger_dir,
         load_targets=load_targets,
         collect_target=collect_target,
-        logger=logging.getLogger("tests.scheduled-competitor"),
+        logger=logger or logging.getLogger("tests.scheduled-competitor"),
         clock=clock or (lambda: FIXED_NOW),
         sleeper=sleeper,
         busy_poll_seconds=0.005,
@@ -101,6 +105,7 @@ async def test_runner_publishes_visible_results_and_only_starts_once(
         registry=registry,
         load_targets=load_targets,
         collect_target=collect_target,
+        logger=configure_collection_logger(tmp_path),
     )
     try:
         triggered = await runner.trigger()
@@ -115,6 +120,16 @@ async def test_runner_publishes_visible_results_and_only_starts_once(
         assert status["total"] == 2
         assert status["succeeded"] == 2
         assert [row["plid"] for row in status["results"]] == ["11111111", "22222222"]
+        batch_id = str(status["batch_id"])
+        round_log = (
+            tmp_path / "logs" / "competitor-rounds" / f"{batch_id}.log"
+        ).read_text(encoding="utf-8")
+        assert f"round_event batch={batch_id} source=scheduled round=1" in round_log
+        assert "event=start" in round_log
+        assert round_log.count("event=progress") == 2
+        assert "completed=2 total=2 pending=0 succeeded_total=2" in round_log
+        assert "event=completed" in round_log
+        assert "wall_elapsed_seconds=" in round_log
         repeated = await runner.trigger()
         assert repeated["accepted"] is False
         assert repeated["state"] == "already_handled"
@@ -701,6 +716,77 @@ async def test_network_pause_remains_visible_and_can_be_stopped(
         await runner.close()
 
 
+async def test_network_pause_can_be_resumed_manually_without_new_batch(
+    tmp_path: Path,
+) -> None:
+    class RecordingRegistry(CollectionBatchRegistry):
+        def __init__(self) -> None:
+            super().__init__()
+            self.events: list[str] = []
+
+        def event(self, **kwargs):
+            self.events.append(str(kwargs.get("event") or ""))
+            return super().event(**kwargs)
+
+    registry = RecordingRegistry()
+    collected: list[str] = []
+    attempts: dict[str, int] = {}
+
+    async def load_targets() -> list[ScheduledCollectionTarget]:
+        return [
+            ScheduledCollectionTarget(plid, f"https://takealot.com/p/PLID{plid}")
+            for plid in ("82500001", "82500002", "82500003")
+        ]
+
+    async def collect_target(
+        url: str,
+        *_args,
+    ) -> ScheduledCollectionAttempt:
+        plid = url.rsplit("PLID", 1)[1]
+        collected.append(plid)
+        attempts[plid] = attempts.get(plid, 0) + 1
+        if plid in {"82500001", "82500002"} and attempts[plid] == 1:
+            return ScheduledCollectionAttempt(
+                plid,
+                None,
+                "temporary network failure",
+                False,
+                failure_kind="network",
+                retryable=True,
+            )
+        return ScheduledCollectionAttempt(plid, f"Product {plid}", "采集成功", True)
+
+    runner = _runner(
+        tmp_path,
+        registry=registry,
+        load_targets=load_targets,
+        collect_target=collect_target,
+    )
+    try:
+        await runner.trigger()
+        await _wait_for(lambda: runner.status()["run_status"] == "paused")
+        paused_status = runner.status()
+        batch_id = str(paused_status["batch_id"])
+        assert paused_status["network_resume_available"] is True
+        assert paused_status["network_resume_pending"] == 3
+        assert paused_status["resume_after"] is not None
+        assert registry.events.count("auto_resume") == 0
+
+        resumed = await runner.resume_network_pause(batch_id, resumed_by="kxx")
+
+        assert resumed["active"] is True
+        assert resumed["batch_id"] == batch_id
+        assert resumed["event"] == "resume"
+        assert runner.status()["run_status"] == "running"
+        assert runner.status()["resume_after"] is None
+        assert runner.status()["network_resume_available"] is False
+        assert registry.events.count("auto_resume") == 0
+        await _wait_for(lambda: "82500003" in collected)
+        assert str(registry.status()["batch_id"]) == batch_id
+    finally:
+        await runner.close()
+
+
 async def test_stop_during_target_refresh_cannot_enqueue_into_manual_batch(
     tmp_path: Path,
 ) -> None:
@@ -916,9 +1002,15 @@ async def test_kxx_explicitly_resumes_stopped_batch_in_frozen_target_order(
         lightweight = runner.stopped_checkpoint_status(include_details=False)
         assert lightweight is not None
         assert lightweight["result_count"] == 1
-        assert lightweight["error_count"] == len(projected["errors"])
+        assert lightweight["error_count"] == 1
+        assert lightweight["terminal_error_count"] == 1
+        assert [row["plid"] for row in projected["errors"]] == ["91000002"]
+        assert [row["plid"] for row in projected["terminal_errors"]] == [
+            "91000003"
+        ]
         assert lightweight["results"] == []
         assert lightweight["errors"] == []
+        assert lightweight["terminal_errors"] == []
 
         resumed = await runner.resume_stopped(batch_id, resumed_by="kxx")
         assert resumed["active"] is True

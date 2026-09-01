@@ -305,6 +305,13 @@ TITLE_ROOT_EXPANSION_NOISE_TOKENS = {
     "plid",
     "style",
 }
+TITLE_PRESERVED_BRAND_PHRASES = (
+    ("nexohogar",),
+    ("nexohogarheight",),
+    ("nexohogart",),
+    ("soly", "sombra"),
+    ("wovibo",),
+)
 IDENTITY_TOKEN_ALIASES = {
     "cellphone": "phone",
     "couch": "sofa",
@@ -10360,6 +10367,10 @@ def _build_title_suggestion(
     return _build_title_from_priority_tokens(
         raw_suggestion,
         priority_tokens,
+        leading_tokens=_source_title_brand_tokens(
+            raw_suggestion,
+            " ".join(priority_tokens),
+        ),
         front_parameter_tokens=_validated_title_decision_parameter_tokens(
             raw_suggestion,
             accepted_keywords,
@@ -10381,6 +10392,10 @@ def _build_hot_term_title_suggestion(
     return _build_title_from_priority_tokens(
         raw_suggestion,
         merged,
+        leading_tokens=_source_title_brand_tokens(
+            raw_suggestion,
+            " ".join(merged),
+        ),
         front_parameter_tokens=_validated_title_decision_parameter_tokens(
             raw_suggestion,
             hot_term_keywords,
@@ -10398,6 +10413,10 @@ def _build_validated_identity_title_suggestion(
     """Replace a contradicted product noun while preserving title-backed facts."""
 
     source_tokens = _title_tokens(source_title)
+    source_brand_tokens = _source_title_brand_tokens(
+        source_title,
+        validated_identity_keyword,
+    )
     source_parameter_indexes = _title_parameter_indexes(source_tokens)
     suffix_start = next(
         (
@@ -10429,12 +10448,49 @@ def _build_validated_identity_title_suggestion(
     return _build_title_from_priority_tokens(
         " ".join(retained),
         _title_tokens(validated_identity_keyword),
+        leading_tokens=source_brand_tokens,
         front_parameter_tokens=_validated_title_decision_parameter_tokens(
             source_title,
             [validated_identity_keyword],
             decision_parameter_values=decision_parameter_values,
         ),
     )
+
+
+def _source_title_brand_tokens(
+    source_title: str,
+    _validated_identity_keyword: str,
+) -> list[str]:
+    """Return only controlled brand phrases already present in the source title."""
+
+    source_tokens = _title_tokens(source_title)
+    if not source_tokens:
+        return []
+    canonical_tokens = [_canonical_token(token.casefold()) for token in source_tokens]
+    brand_tokens: list[str] = []
+    for phrase in TITLE_PRESERVED_BRAND_PHRASES:
+        phrase_length = len(phrase)
+        start = next(
+            (
+                index
+                for index in range(len(canonical_tokens) - phrase_length + 1)
+                if tuple(canonical_tokens[index : index + phrase_length]) == phrase
+            ),
+            None,
+        )
+        if start is None:
+            continue
+        brand_tokens.extend(source_tokens[start : start + phrase_length])
+
+    output: list[str] = []
+    seen: set[str] = set()
+    for token in brand_tokens:
+        key = _title_dedup_key(token)
+        if key in seen:
+            continue
+        seen.add(key)
+        output.append(token)
+    return output
 
 
 def _title_has_redundant_identity_prefix(source_title: str, keyword: str) -> bool:
@@ -10693,6 +10749,7 @@ def _build_title_from_priority_tokens(
     raw_suggestion: str,
     priority_tokens: list[str],
     *,
+    leading_tokens: list[str] | None = None,
     front_parameter_tokens: list[str] | None = None,
 ) -> str:
     suggestion_tokens = _title_tokens(raw_suggestion)
@@ -10717,6 +10774,13 @@ def _build_title_from_priority_tokens(
 
     output: list[str] = []
     output_keys: set[str] = set()
+
+    for token in leading_tokens or []:
+        key = _title_dedup_key(token)
+        if key in output_keys:
+            continue
+        output.append(_title_token_case(token, preferred_case))
+        output_keys.add(key)
 
     for token in front_parameters:
         key = _title_dedup_key(token)

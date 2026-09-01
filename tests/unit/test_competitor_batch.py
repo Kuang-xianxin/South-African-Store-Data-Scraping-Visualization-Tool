@@ -10,6 +10,7 @@ from takealot_ops.competitors.batch import (
     CollectionBatchRegistry,
     CollectionRequestCoordinator,
     configure_collection_logger,
+    read_collection_round_summaries,
 )
 
 
@@ -90,15 +91,105 @@ async def test_collection_request_coordinator_explicitly_cancels_inflight_reques
     assert await coordinator.cancel("request-stop") is False
 
 
-def test_collection_logger_writes_rotating_project_log(tmp_path: Path) -> None:
+def test_collection_logger_writes_aggregate_and_per_round_logs(tmp_path: Path) -> None:
     logger = configure_collection_logger(tmp_path)
 
     logger.info("batch_event batch=batch-1 event=start")
+    logger.info("link_result batch=batch-1 request=request-1 succeeded=True")
+    logger.info("batch_event batch=batch-2 event=start")
+    logger.info("scheduled_trigger date=2026-08-22 state=accepted")
     for handler in logger.handlers:
         handler.flush()
 
     log_text = (tmp_path / "logs" / "competitor-collection.log").read_text(encoding="utf-8")
     assert "batch=batch-1 event=start" in log_text
+    round_one = (
+        tmp_path / "logs" / "competitor-rounds" / "batch-1.log"
+    ).read_text(encoding="utf-8")
+    round_two = (
+        tmp_path / "logs" / "competitor-rounds" / "batch-2.log"
+    ).read_text(encoding="utf-8")
+    assert "batch=batch-1 event=start" in round_one
+    assert "link_result batch=batch-1 request=request-1 succeeded=True" in round_one
+    assert "batch=batch-2" not in round_one
+    assert "scheduled_trigger" not in round_one
+    assert "batch=batch-2 event=start" in round_two
+
+
+def test_collection_round_log_reader_returns_structured_round_summaries(
+    tmp_path: Path,
+) -> None:
+    round_dir = tmp_path / "logs" / "competitor-rounds"
+    round_dir.mkdir(parents=True)
+    (round_dir / "batch-current.log").write_text(
+        "\n".join(
+            [
+                "2026-08-22 10:00:00,000 INFO round_event batch=batch-current "
+                "source=scheduled round=3 revision=7 event=start "
+                "trigger_date=2026-08-22 item=-/6 plid=- retry_kind=- "
+                "retry_attempt=- retry_round=0/3 succeeded=- failure_kind=- "
+                "completed=0 total=6 pending=6 succeeded_total=0 failed=0 "
+                "terminal=0 wall_elapsed_seconds=0 reason=windows_scheduled_trigger",
+                "2026-08-22 10:02:00,000 INFO link_result batch=batch-current "
+                "request=request-4 item=4/6 plid=123 succeeded=True duration_ms=2000",
+                "2026-08-22 10:02:00,100 INFO round_event batch=batch-current "
+                "source=scheduled round=3 revision=7 event=progress "
+                "trigger_date=2026-08-22 item=4/6 plid=123 retry_kind=- "
+                "retry_attempt=- retry_round=0/3 succeeded=True failure_kind=- "
+                "completed=4 total=6 pending=2 succeeded_total=3 failed=0 "
+                "terminal=1 wall_elapsed_seconds=120.1 reason=单个商品采集成功",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (round_dir / "batch-previous.log").write_text(
+        "2026-08-22 09:05:00,000 INFO batch_event batch=batch-previous "
+        "event=completed completed=5 total=5 pending=0 succeeded=4 failed=0 "
+        "terminal=1 user=kxx source=manual result_count=4 error_count=1 "
+        "stock_probe=True visible_browser=False wall_elapsed_seconds=300 "
+        "reason=本轮完成\n",
+        encoding="utf-8",
+    )
+
+    payload = read_collection_round_summaries(
+        tmp_path,
+        current_batch_id="batch-current",
+        selected_batch_id="batch-current",
+    )
+
+    assert payload["selected_batch_id"] == "batch-current"
+    assert "content" not in payload
+    selected = payload["selected_round"]
+    assert isinstance(selected, dict)
+    assert selected["status"] == "running"
+    assert selected["source"] == "scheduled"
+    assert selected["round_number"] == 3
+    assert selected["revision"] == 7
+    assert selected["completed"] == 4
+    assert selected["total"] == 6
+    assert selected["succeeded"] == 3
+    assert selected["terminal"] == 1
+    assert selected["pending"] == 2
+    assert selected["retry_round"] == 0
+    assert selected["retry_round_limit"] == 3
+    assert selected["started_at"] == "2026-08-22T10:00:00+08:00"
+    assert selected["reason"] == ""
+    rounds = payload["rounds"]
+    assert isinstance(rounds, list)
+    assert any(
+        item["batch_id"] == "batch-current" and item["current"] is True
+        for item in rounds
+    )
+    previous = next(item for item in rounds if item["batch_id"] == "batch-previous")
+    assert previous["status"] == "completed"
+    assert previous["completed_at"] == "2026-08-22T09:05:00+08:00"
+    assert previous["reason"] == "本轮完成"
+
+    with pytest.raises(ValueError, match="批次编号格式无效"):
+        read_collection_round_summaries(tmp_path, selected_batch_id="../outside")
+    with pytest.raises(FileNotFoundError, match="未找到批次"):
+        read_collection_round_summaries(tmp_path, selected_batch_id="batch-missing")
 
 
 def test_collection_batch_registry_blocks_other_users_and_syncs_progress() -> None:
@@ -916,7 +1007,7 @@ def test_collection_batch_registry_rejects_priority_without_active_batch() -> No
         )
 
 
-def test_collection_batch_status_hides_and_pages_large_task_details() -> None:
+def test_collection_batch_status_separates_and_pages_retry_and_terminal_details() -> None:
     registry = CollectionBatchRegistry()
     registry.event(
         batch_id="batch-large",
@@ -925,8 +1016,8 @@ def test_collection_batch_status_hides_and_pages_large_task_details() -> None:
         username="operator.one",
         display_name="Operator One",
         completed=0,
-        total=125,
-        pending=125,
+        total=129,
+        pending=129,
         succeeded=0,
         failed=0,
         terminal=0,
@@ -952,20 +1043,36 @@ def test_collection_batch_status_hides_and_pages_large_task_details() -> None:
             message="retry later",
             succeeded=False,
         )
+    for index in range(4):
+        plid = str(30_000_000 + index)
+        registry.record_outcome(
+            batch_id="batch-large",
+            plid=plid,
+            url=f"https://www.takealot.com/p/PLID{plid}",
+            title=None,
+            message="confirmed invalid",
+            succeeded=False,
+            failure_kind="confirmed-invalid",
+        )
 
     lightweight = registry.status(include_details=False)
     page = registry.status(
         include_details=True,
         result_offset=50,
         error_offset=2,
+        terminal_error_offset=1,
         detail_limit=25,
     )
 
     assert lightweight["result_count"] == 120
     assert lightweight["error_count"] == 5
+    assert lightweight["terminal_error_count"] == 4
     assert lightweight["results"] == []
     assert lightweight["errors"] == []
+    assert lightweight["terminal_errors"] == []
     assert len(page["results"]) == 25
     assert page["results"][0]["plid"] == "10000050"
     assert len(page["errors"]) == 3
     assert page["errors"][0]["plid"] == "20000002"
+    assert len(page["terminal_errors"]) == 3
+    assert page["terminal_errors"][0]["plid"] == "30000001"

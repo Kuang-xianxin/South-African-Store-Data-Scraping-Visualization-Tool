@@ -2,6 +2,8 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, shallowRef, watch } from "vue";
 
 import OwnStoreSalesChart from "../components/OwnStoreSalesChart.vue";
+import CompetitorObservedSalesMetrics from "../components/CompetitorObservedSalesMetrics.vue";
+import CompetitorCollectionLogViewer from "../components/CompetitorCollectionLogViewer.vue";
 import {
   AUTH_SESSION_ENDING_EVENT,
   ApiRequestError,
@@ -46,8 +48,11 @@ import {
   buildOwnStoreTrafficTrend,
   comparableOfferNetOutflow,
   comparisonOffers,
+  filterCompetitorHistoryByDate,
   followerOffers,
+  getCompetitorHistoryDateBounds,
   groupCompetitorOffersBySeller,
+  needsFullCompetitorHistory,
   offerIntervalReplenishmentUnits,
   offerIntervalSalesUnits,
   sortCompetitorOffers,
@@ -56,6 +61,7 @@ import {
   type CompetitorOfferTrendPoint,
   type OwnStoreTrafficTrendPoint,
 } from "../competitorOfferHistory";
+import { getOwnStoreSalesRecentRange } from "../ownStoreSalesChart";
 import {
   COMPETITOR_OPERATING_SIGNAL_OPTIONS,
   competitorOperatingSignals,
@@ -70,6 +76,7 @@ import {
   sortCompetitorItems,
   type CompetitorListSortDirection,
 } from "../competitorListSort";
+import { formatCollectionTaskMessage } from "../collectionTaskMessages";
 import {
   COMPETITOR_LISTING_SORT_OPTIONS,
   DEFAULT_COMPETITOR_LISTING_SORTS,
@@ -137,6 +144,7 @@ import {
 import {
   SHARED_BATCH_CHECKPOINT_YIELD_REASON,
   activeSharedBatchSupersedesLocalCheckpoint,
+  canResumeScheduledNetworkPause,
   canUpdateVisibleBrowserForBatch,
   scheduledRetryWaitLabel,
   stoppedScheduledBatchResumeCount,
@@ -186,10 +194,16 @@ const props = defineProps<{
   ownStoreScope?: OwnStoreScope;
   requestedDetailPlid?: string;
   requestedDetailRevision?: number;
+  requestedDetailPrefetchPlid?: string;
+  requestedDetailPrefetchRevision?: number;
   requestedDetailStartDate?: string;
   requestedDetailEndDate?: string;
   onPermissionDenied?: () => void;
   detailOnly?: boolean;
+  embeddedDetailOnly?: boolean;
+}>();
+const emit = defineEmits<{
+  (event: "detail-closed"): void;
 }>();
 
 interface CollectionQueueItem {
@@ -500,6 +514,8 @@ const targetAuditLoading = ref(false);
 const targetAuditError = ref("");
 const targetAuditOpen = ref(false);
 const targetAuditTrigger = ref<HTMLButtonElement | null>(null);
+const collectionLogOpen = ref(false);
+const collectionLogTrigger = ref<HTMLButtonElement | null>(null);
 const targetAuditLoaded = ref(false);
 const targetAuditTotal = ref(0);
 const targetAuditPage = ref(1);
@@ -531,6 +547,18 @@ const detail = shallowRef<CompetitorDetail>({
 const detailModalOpen = ref(false);
 const detailLoading = ref(false);
 const detailError = ref("");
+const offerTrendFullDetail = shallowRef<CompetitorDetail | null>(null);
+const offerTrendHistoryLoading = ref(false);
+const offerTrendHistoryError = ref("");
+const offerTrendHistoryRetry = ref(0);
+const offerTrendRangeStart = ref("");
+const offerTrendRangeEnd = ref("");
+const embeddedDetailItem = shallowRef<CompetitorItem | null>(null);
+const embeddedDetailLoading = ref(false);
+const embeddedDetailError = ref("");
+let embeddedDetailRequestId = 0;
+let handledEmbeddedDetailRevision = 0;
+let handledEmbeddedDetailPrefetchRevision = 0;
 const activeStandaloneOwnDetailTab = ref<StandaloneOwnDetailTabId>("offers");
 const activeStandaloneOwnDetailTabMeta = computed(
   () => standaloneOwnDetailTabs.find((tab) => tab.id === activeStandaloneOwnDetailTab.value)
@@ -548,6 +576,13 @@ const requestedOwnStoreDetailRequests = new Map<
 >();
 const requestedOwnStoreDetailCacheLimit = 12;
 const requestedOwnStoreDetailCacheTtlMs = 15_000;
+const requestedEmbeddedDetailCache = new Map<string, {
+  detail: CompetitorDetail;
+  cachedAt: number;
+}>();
+const requestedEmbeddedDetailRequests = new Map<string, Promise<CompetitorDetail>>();
+const requestedEmbeddedDetailCacheLimit = 12;
+const requestedEmbeddedDetailCacheTtlMs = 15_000;
 const loading = ref(true);
 const ownStoreScopeLoading = ref(false);
 const ownStoreOverviewCache = new Map<string, OwnStoreCompetitorOverview>();
@@ -618,13 +653,18 @@ const sharedBatchStatus = ref<CompetitorBatchStatus>({
   prioritized_targets: [],
   results: [],
   errors: [],
+  terminal_errors: [],
   result_count: 0,
   error_count: 0,
+  terminal_error_count: 0,
   result_page: 1,
   error_page: 1,
+  terminal_error_page: 1,
   detail_page_size: collectionDetailPageSize,
   scheduled_resume_available: false,
   scheduled_resume_pending: 0,
+  scheduled_network_resume_available: false,
+  scheduled_network_resume_pending: 0,
   scheduled_wait_kind: null,
   scheduled_auto_resume_at: null,
   scheduled_retry_round: 0,
@@ -635,6 +675,7 @@ const collectionDetailsLoading = ref(false);
 const collectionDetailsError = ref("");
 const collectionResultPage = ref(1);
 const collectionErrorPage = ref(1);
+const collectionTerminalErrorPage = ref(1);
 const linkHealth = ref<CompetitorLinkHealthItem[]>([]);
 const linkHealthOpen = ref(false);
 const pageError = ref("");
@@ -683,6 +724,7 @@ const ownFollowerHistoryLoaded = ref(false);
 const ownFollowerHistoryError = ref("");
 const ownFollowerHistoryOpen = ref(false);
 const failedCompetitorImages = ref<Set<string>>(new Set());
+const competitorImageRetryDelaysMs = [500, 1_500] as const;
 
 const allCompetitorItems = computed(() => [
   ...storeCompetitors.value,
@@ -705,6 +747,9 @@ const selected = computed(() => {
     : personalWatchlistOverviewItems.value;
   return preferredItems.find((item) => item.plid === selectedPlid.value)
     ?? fallbackItems.find((item) => item.plid === selectedPlid.value)
+    ?? (embeddedDetailItem.value?.plid === selectedPlid.value
+      ? embeddedDetailItem.value
+      : null)
     ?? null;
 });
 const selectedComparisonOffers = computed(() =>
@@ -772,8 +817,45 @@ const selectedSellerGroupOffers = computed(() =>
 const selectedOfferPosition = computed(() =>
   selectedSellerGroups.value.findIndex((group) => group.key === selectedSellerGroup.value?.key),
 );
+const offerTrendNeedsFullHistory = computed(() =>
+  needsFullCompetitorHistory(
+    appliedStartDate.value,
+    appliedEndDate.value,
+    detailOwnStoreScope.value === ownStoreScope.value
+      ? competitorDateRange.value
+      : { available_start: null, available_end: null },
+  ),
+);
+const offerTrendDetail = computed(() =>
+  offerTrendNeedsFullHistory.value ? offerTrendFullDetail.value : detail.value,
+);
+const offerTrendHistory = computed(() =>
+  (offerTrendDetail.value?.history ?? []).filter((item) => item.plid === selectedPlid.value),
+);
+const offerTrendAvailableRange = computed(() =>
+  getCompetitorHistoryDateBounds(offerTrendHistory.value),
+);
+const offerTrendAvailableStart = computed(() => offerTrendAvailableRange.value?.start ?? "");
+const offerTrendAvailableEnd = computed(() => offerTrendAvailableRange.value?.end ?? "");
+const offerTrendScopeKey = computed(() => [
+  selectedPlid.value,
+  detailOwnStoreScope.value,
+  detailOwnStoreScope.value === "current" ? props.currentStoreCode ?? "" : "",
+].join("\u001f"));
+const isFullOfferTrendRange = computed(() =>
+  Boolean(offerTrendAvailableRange.value)
+  && offerTrendRangeStart.value === offerTrendAvailableStart.value
+  && offerTrendRangeEnd.value === offerTrendAvailableEnd.value,
+);
+const filteredOfferTrendHistory = computed(() =>
+  filterCompetitorHistoryByDate(
+    offerTrendHistory.value,
+    offerTrendRangeStart.value,
+    offerTrendRangeEnd.value,
+  ),
+);
 const selectedOfferTrend = computed(() =>
-  buildCompetitorOfferTrend(detail.value.history, selectedOffer.value),
+  buildCompetitorOfferTrend(filteredOfferTrendHistory.value, selectedOffer.value),
 );
 const showOwnTrafficPanel = computed(() =>
   selected.value?.来源 === "own_store"
@@ -784,7 +866,7 @@ const selectedOwnTrafficSeries = computed(() => {
   const storeCode = String(selectedOffer.value?.卖家ID ?? "").trim().toLocaleLowerCase();
   const offerId = String(selectedOffer.value?.offer_id ?? "").trim();
   if (!storeCode || !offerId) return null;
-  return (detail.value.own_store_traffic ?? []).find(
+  return (offerTrendDetail.value?.own_store_traffic ?? []).find(
     (series) =>
       series.store_code.toLocaleLowerCase() === storeCode
       && series.offer_id === offerId,
@@ -800,10 +882,10 @@ const selectedOwnTrafficChartTrend = computed(() =>
   ),
 );
 const selectedOfferIntervalSalesUnits = computed(() =>
-  offerIntervalSalesUnits(detail.value.history, selectedOffer.value),
+  offerIntervalSalesUnits(filteredOfferTrendHistory.value, selectedOffer.value),
 );
 const selectedOfferIntervalReplenishmentUnits = computed(() =>
-  offerIntervalReplenishmentUnits(detail.value.history, selectedOffer.value),
+  offerIntervalReplenishmentUnits(filteredOfferTrendHistory.value, selectedOffer.value),
 );
 const offerTrendChartWidth = 960;
 const offerTrendPlotLeft = COMPETITOR_OFFER_TREND_HORIZONTAL_LAYOUT.plotLeft;
@@ -826,13 +908,6 @@ const offerTrendTimelinePoints = computed(() => {
   selectedOfferTrend.value.forEach((point) => {
     byTimestamp.set(point.capturedAtMs, point.snapshot.采集时间);
   });
-  if (!byTimestamp.size && showOwnTrafficPanel.value) {
-    selectedOwnTrafficTrend.value.forEach((point) => {
-      if (point.data_status === "observed" && point.captured_at) {
-        byTimestamp.set(point.capturedAtMs, point.captured_at);
-      }
-    });
-  }
   return [...byTimestamp.entries()]
     .map(([capturedAtMs, label]) => ({ capturedAtMs, label }))
     .sort((left, right) => left.capturedAtMs - right.capturedAtMs);
@@ -1280,7 +1355,6 @@ const canUpdateVisibleBrowser = computed(() =>
   ),
 );
 const sharedBatchOwnerLabel = computed(() => {
-  if (sharedBatchStatus.value.source === "scheduled") return "每日 09:00 自动任务";
   if (!sharedBatchBelongsToCurrentAccount.value) return sharedBatchOwner.value;
   return sharedBatchMatchesCheckpoint.value ? "本页面" : "本账号另一页面";
 });
@@ -1293,6 +1367,12 @@ const sharedScheduledRetryWait = computed(
   () =>
     sharedScheduledPause.value
     && sharedBatchStatus.value.scheduled_wait_kind === "pending_retry",
+);
+const scheduledNetworkPauseCanResume = computed(() =>
+  canResumeScheduledNetworkPause(
+    Boolean(props.canControlCollection),
+    sharedBatchStatus.value,
+  ),
 );
 const stoppedScheduledResumeCount = computed(() =>
   stoppedScheduledBatchResumeCount(
@@ -1588,6 +1668,24 @@ watch(
 watch(reviewPageCount, (pageCount) => {
   if (reviewPage.value > pageCount) reviewPage.value = pageCount;
 });
+const ownReturnPage = ref(1);
+const ownReturnPageSize = 20;
+const ownReturnPageCount = computed(() =>
+  Math.max(1, Math.ceil(detail.value.own_store_returns.items.length / ownReturnPageSize)),
+);
+const visibleOwnReturnItems = computed(() => {
+  const start = (ownReturnPage.value - 1) * ownReturnPageSize;
+  return detail.value.own_store_returns.items.slice(start, start + ownReturnPageSize);
+});
+watch(
+  [selectedPlid, detailOwnStoreScope, () => props.currentStoreCode],
+  () => {
+    ownReturnPage.value = 1;
+  },
+);
+watch(ownReturnPageCount, (pageCount) => {
+  if (ownReturnPage.value > pageCount) ownReturnPage.value = pageCount;
+});
 const sharedBatchProgressIsAuthoritative = computed(
   () =>
     sharedBatchStatus.value.active
@@ -1621,10 +1719,26 @@ const displayedCollectionResults = computed(() =>
     ? sharedBatchStatus.value.results
     : collectionResults.value,
 );
+const localTerminalPlids = computed(() => new Set(
+  terminalIndexes.value
+    .map((index) => plidFromUrl(batchUrls.value[index] ?? ""))
+    .filter(Boolean),
+));
+const localCollectionTerminalErrors = computed(() =>
+  collectionErrors.value.filter((item) => localTerminalPlids.value.has(item.plid)),
+);
+const localCollectionRetryErrors = computed(() =>
+  collectionErrors.value.filter((item) => !localTerminalPlids.value.has(item.plid)),
+);
 const displayedCollectionErrors = computed(() =>
   sharedBatchDetailsAreAuthoritative.value
     ? sharedBatchStatus.value.errors
-    : collectionErrors.value,
+    : localCollectionRetryErrors.value,
+);
+const displayedCollectionTerminalErrors = computed(() =>
+  sharedBatchDetailsAreAuthoritative.value
+    ? (sharedBatchStatus.value.terminal_errors ?? [])
+    : localCollectionTerminalErrors.value,
 );
 const displayedCollectionResultCount = computed(() =>
   sharedBatchDetailsAreAuthoritative.value
@@ -1634,7 +1748,16 @@ const displayedCollectionResultCount = computed(() =>
 const displayedCollectionErrorCount = computed(() =>
   sharedBatchDetailsAreAuthoritative.value
     ? (sharedBatchStatus.value.error_count ?? sharedBatchStatus.value.errors.length)
-    : collectionErrors.value.length,
+    : localCollectionRetryErrors.value.length,
+);
+const displayedCollectionTerminalErrorCount = computed(() =>
+  sharedBatchDetailsAreAuthoritative.value
+    ? (
+        sharedBatchStatus.value.terminal_error_count
+        ?? sharedBatchStatus.value.terminal_errors?.length
+        ?? 0
+      )
+    : localCollectionTerminalErrors.value.length,
 );
 const collectionResultPageCount = computed(() =>
   Math.max(
@@ -1646,6 +1769,14 @@ const collectionErrorPageCount = computed(() =>
   Math.max(
     1,
     Math.ceil(displayedCollectionErrorCount.value / collectionDetailPageSize),
+  ),
+);
+const collectionTerminalErrorPageCount = computed(() =>
+  Math.max(
+    1,
+    Math.ceil(
+      displayedCollectionTerminalErrorCount.value / collectionDetailPageSize,
+    ),
   ),
 );
 const visibleDisplayedCollectionResults = computed(() => {
@@ -1668,6 +1799,18 @@ const visibleDisplayedCollectionErrors = computed(() => {
     start + collectionDetailPageSize,
   );
 });
+const visibleDisplayedCollectionTerminalErrors = computed(() => {
+  if (sharedBatchDetailsAreAuthoritative.value) {
+    return displayedCollectionTerminalErrors.value;
+  }
+  const start = (
+    collectionTerminalErrorPage.value - 1
+  ) * collectionDetailPageSize;
+  return displayedCollectionTerminalErrors.value.slice(
+    start,
+    start + collectionDetailPageSize,
+  );
+});
 watch(collectionResultPageCount, (pageCount) => {
   if (collectionResultPage.value > pageCount) {
     collectionResultPage.value = pageCount;
@@ -1676,6 +1819,11 @@ watch(collectionResultPageCount, (pageCount) => {
 watch(collectionErrorPageCount, (pageCount) => {
   if (collectionErrorPage.value > pageCount) {
     collectionErrorPage.value = pageCount;
+  }
+});
+watch(collectionTerminalErrorPageCount, (pageCount) => {
+  if (collectionTerminalErrorPage.value > pageCount) {
+    collectionTerminalErrorPage.value = pageCount;
   }
 });
 const hasDisplayedBatchProgress = computed(
@@ -1767,7 +1915,8 @@ const showCollectionDetails = computed(
   () =>
     Boolean(
       displayedCollectionResultCount.value
-      || displayedCollectionErrorCount.value,
+      || displayedCollectionErrorCount.value
+      || displayedCollectionTerminalErrorCount.value,
     ),
 );
 const activeCollectionStatus = computed(() => {
@@ -1942,6 +2091,10 @@ onMounted(async () => {
     loading.value = false;
     return;
   }
+  if (props.embeddedDetailOnly) {
+    loading.value = false;
+    return;
+  }
   let checkpoint: CollectionCheckpoint | null = null;
   if (props.isAdmin) {
     window.addEventListener("beforeunload", closeCollectionClientChannel);
@@ -1959,7 +2112,7 @@ onMounted(async () => {
   if (props.isAdmin) {
     if (checkpoint) await restoreCollectionCheckpoint(checkpoint);
     sharedBatchTimer = window.setInterval(
-      () => void loadSharedBatchStatus(),
+      () => void loadSharedBatchStatus(undefined, true),
       2_000,
     );
     batchHeartbeatTimer = window.setInterval(() => {
@@ -1978,6 +2131,7 @@ onMounted(async () => {
 });
 
 onBeforeUnmount(() => {
+  ++embeddedDetailRequestId;
   detachCollectionForSessionChange();
   overviewAbortController?.abort();
   ownStoreAbortController?.abort();
@@ -1998,6 +2152,8 @@ onBeforeUnmount(() => {
 });
 
 let sharedBatchTimer: number | null = null;
+let sharedBatchStatusRequestId = 0;
+let sharedBatchStatusController: AbortController | null = null;
 let batchHeartbeatTimer: number | null = null;
 let collectionClockTimer: number | null = null;
 let personalWatchlistHighlightTimer: number | null = null;
@@ -2152,13 +2308,77 @@ watch(
 );
 
 watch([ownStoreScope, () => props.currentStoreCode ?? ""], () => {
-  if (props.detailOnly) return;
+  if (props.detailOnly || props.embeddedDetailOnly) return;
   storeCompetitorPage.value = 1;
   selectedPlid.value = "";
   void loadOwnStoreScope();
 });
 
-watch([selectedOfferKey, () => selectedOfferTrend.value.length], () => {
+watch(
+  [
+    detailModalOpen,
+    offerTrendNeedsFullHistory,
+    () => competitorDetailCacheKey(selectedPlid.value, "", "", detailOwnStoreScope.value),
+    offerTrendScopeKey,
+    offerTrendHistoryRetry,
+  ],
+  async ([modalOpen, needsFullHistory, detailKey, scopeKey], _previous, onCleanup) => {
+    offerTrendFullDetail.value = null;
+    offerTrendHistoryLoading.value = false;
+    offerTrendHistoryError.value = "";
+    if (!modalOpen || !needsFullHistory || !selectedPlid.value) return;
+
+    // Keep the list/returns interval intact; only the chart uses this full local history.
+    const cacheKey = `${detailKey}\u001fchart-history\u001f${scopeKey}`;
+    const cached = cachedCompetitorDetail(cacheKey);
+    if (cached) {
+      offerTrendFullDetail.value = cached;
+      return;
+    }
+    const controller = new AbortController();
+    let cancelled = false;
+    onCleanup(() => {
+      cancelled = true;
+      controller.abort();
+    });
+    offerTrendHistoryLoading.value = true;
+    try {
+      const result = await fetchCompetitorDetail(
+        selectedPlid.value,
+        undefined,
+        undefined,
+        detailOwnStoreScope.value,
+        controller.signal,
+      );
+      if (cancelled) return;
+      offerTrendFullDetail.value = result;
+      cacheCompetitorDetail(cacheKey, result);
+    } catch (error) {
+      if (cancelled || isAbortError(error)) return;
+      offerTrendHistoryError.value = error instanceof Error ? error.message : "读取完整历史失败";
+    } finally {
+      if (!cancelled) offerTrendHistoryLoading.value = false;
+    }
+  },
+);
+
+watch(
+  [detailModalOpen, offerTrendScopeKey, offerTrendAvailableStart, offerTrendAvailableEnd],
+  ([modalOpen, scopeKey, start, end], [wasOpen, previousScopeKey]) => {
+    if (!modalOpen) return;
+    if (!wasOpen || scopeKey !== previousScopeKey) {
+      offerTrendRangeStart.value = start;
+      offerTrendRangeEnd.value = end;
+      return;
+    }
+    if (!start || !end) return;
+    offerTrendRangeStart.value = clampOfferTrendDate(offerTrendRangeStart.value || start);
+    offerTrendRangeEnd.value = clampOfferTrendDate(offerTrendRangeEnd.value || end);
+    if (offerTrendRangeStart.value > offerTrendRangeEnd.value) resetOfferTrendDateRange();
+  },
+);
+
+watch([selectedOfferKey, filteredOfferTrendHistory], () => {
   hoveredOfferTrendIndex.value = null;
 });
 
@@ -2170,6 +2390,7 @@ watch(
     targetAuditOpen,
     targetActionOpen,
     personalWatchlistLibraryModalOpen,
+    () => props.embeddedDetailOnly && Boolean(props.requestedDetailPlid),
   ],
   ([
     detailOpen,
@@ -2178,9 +2399,11 @@ watch(
     targetAuditDialogOpen,
     targetActionDialogOpen,
     personalLibraryDialogOpen,
+    embeddedDetailOpen,
   ]) => {
     document.body.style.overflow =
       (!props.detailOnly && detailOpen && detailSelected)
+        || embeddedDetailOpen
         || targetManagerOpen
         || targetAuditDialogOpen
         || targetActionDialogOpen
@@ -2288,9 +2511,17 @@ function canShowCompetitorImage(url: string | null | undefined): url is string {
   return Boolean(url && !failedCompetitorImages.value.has(url));
 }
 
-function competitorImageUrl(url: string | null | undefined): string {
+function competitorImageUrl(
+  url: string | null | undefined,
+  retryAttempt = 0,
+): string {
   return canShowCompetitorImage(url)
-    ? productThumbnailUrl(url, PRODUCT_IMAGE_SIZE.list)
+    ? productThumbnailUrl(
+        url,
+        PRODUCT_IMAGE_SIZE.list,
+        undefined,
+        retryAttempt,
+      )
     : "";
 }
 
@@ -2300,6 +2531,35 @@ function markCompetitorImageFailed(url: string | null | undefined): void {
     ...failedCompetitorImages.value,
     url,
   ]);
+}
+
+function retryCompetitorImage(
+  event: Event,
+  url: string | null | undefined,
+): void {
+  if (!url) return;
+  const image = event.currentTarget;
+  if (!(image instanceof HTMLImageElement)) {
+    markCompetitorImageFailed(url);
+    return;
+  }
+  const currentAttempt = Number.parseInt(
+    image.dataset.imageRetryAttempt ?? "0",
+    10,
+  );
+  if (
+    !Number.isFinite(currentAttempt)
+    || currentAttempt >= competitorImageRetryDelaysMs.length
+  ) {
+    markCompetitorImageFailed(url);
+    return;
+  }
+  const nextAttempt = currentAttempt + 1;
+  image.dataset.imageRetryAttempt = String(nextAttempt);
+  window.setTimeout(() => {
+    if (!image.isConnected || failedCompetitorImages.value.has(url)) return;
+    image.src = competitorImageUrl(url, nextAttempt);
+  }, competitorImageRetryDelaysMs[currentAttempt]);
 }
 
 function ownStoreNames(item: CompetitorItem): string {
@@ -2633,6 +2893,200 @@ watch(
   { immediate: true },
 );
 
+function requestedEmbeddedDetailCacheKey(
+  plid: string,
+  startDate: string,
+  endDate: string,
+  scope: OwnStoreScope,
+): string {
+  return [scope, plid, startDate, endDate].join("\u001f");
+}
+
+async function loadRequestedEmbeddedDetail(
+  plid: string,
+  startDate: string,
+  endDate: string,
+  scope: OwnStoreScope,
+): Promise<CompetitorDetail> {
+  const key = requestedEmbeddedDetailCacheKey(plid, startDate, endDate, scope);
+  const cached = requestedEmbeddedDetailCache.get(key);
+  if (cached && Date.now() - cached.cachedAt <= requestedEmbeddedDetailCacheTtlMs) {
+    requestedEmbeddedDetailCache.delete(key);
+    requestedEmbeddedDetailCache.set(key, cached);
+    return cached.detail;
+  }
+  if (cached) requestedEmbeddedDetailCache.delete(key);
+
+  const existingRequest = requestedEmbeddedDetailRequests.get(key);
+  if (existingRequest) return existingRequest;
+
+  const request = fetchCompetitorDetail(
+    plid,
+    startDate || undefined,
+    endDate || undefined,
+    scope,
+  );
+  requestedEmbeddedDetailRequests.set(key, request);
+  try {
+    const result = await request;
+    requestedEmbeddedDetailCache.set(key, {
+      detail: result,
+      cachedAt: Date.now(),
+    });
+    while (requestedEmbeddedDetailCache.size > requestedEmbeddedDetailCacheLimit) {
+      const oldestKey = requestedEmbeddedDetailCache.keys().next().value;
+      if (oldestKey === undefined) break;
+      requestedEmbeddedDetailCache.delete(oldestKey);
+    }
+    return result;
+  } finally {
+    if (requestedEmbeddedDetailRequests.get(key) === request) {
+      requestedEmbeddedDetailRequests.delete(key);
+    }
+  }
+}
+
+async function prefetchRequestedEmbeddedDetail(
+  revision: number,
+  plid: string,
+): Promise<void> {
+  handledEmbeddedDetailPrefetchRevision = revision;
+  try {
+    await loadRequestedEmbeddedDetail(
+      plid,
+      props.requestedDetailStartDate ?? "",
+      props.requestedDetailEndDate ?? "",
+      ownStoreScope.value,
+    );
+  } catch {
+    // The explicit card click retries and displays any local read error.
+  }
+}
+
+watch(
+  [
+    () => props.requestedDetailPrefetchRevision ?? 0,
+    () => props.requestedDetailPrefetchPlid ?? "",
+    () => props.requestedDetailStartDate ?? "",
+    () => props.requestedDetailEndDate ?? "",
+    ownStoreScope,
+  ],
+  ([revision, plid]) => {
+    if (
+      !props.embeddedDetailOnly
+      || !revision
+      || revision <= handledEmbeddedDetailPrefetchRevision
+      || !plid
+    ) {
+      return;
+    }
+    void prefetchRequestedEmbeddedDetail(revision, plid);
+  },
+  { immediate: true },
+);
+
+function currentCompetitorItemFromDetail(
+  payload: CompetitorDetail,
+  plid: string,
+): CompetitorItem | null {
+  if (payload.current_item?.plid === plid) return payload.current_item;
+  return payload.history
+    .filter((item) => item.plid === plid)
+    .reduce<CompetitorItem | null>((latest, item) => {
+      if (!latest || item.采集时间 > latest.采集时间) return item;
+      return latest;
+    }, null);
+}
+
+async function openRequestedEmbeddedDetail(
+  revision: number,
+  plid: string,
+): Promise<void> {
+  const requestId = ++embeddedDetailRequestId;
+  const startDate = props.requestedDetailStartDate ?? "";
+  const endDate = props.requestedDetailEndDate ?? "";
+  const scope = ownStoreScope.value;
+  embeddedDetailLoading.value = true;
+  embeddedDetailError.value = "";
+  failedCompetitorImages.value = new Set();
+  detailModalOpen.value = false;
+  embeddedDetailItem.value = null;
+  selectedPlid.value = plid;
+  appliedStartDate.value = startDate;
+  appliedEndDate.value = endDate;
+  try {
+    const result = await loadRequestedEmbeddedDetail(plid, startDate, endDate, scope);
+    if (requestId !== embeddedDetailRequestId) return;
+    const item = currentCompetitorItemFromDetail(result, plid);
+    if (!item) {
+      throw new Error(`PLID${plid} 尚无可展示的本地竞品快照`);
+    }
+    const cacheKey = competitorDetailCacheKey(
+      plid,
+      startDate,
+      endDate,
+      scope,
+      item.采集时间,
+    );
+    detail.value = result;
+    cacheCompetitorDetail(cacheKey, result);
+    targets.value = result.monitoring_target
+      ? [result.monitoring_target]
+      : [];
+    personalWatchlistItems.value = result.personal_watchlist_item
+      ? [result.personal_watchlist_item]
+      : [];
+    personalWatchlistSharedItems.value = [];
+    personalWatchlistPlids.value = new Set(
+      result.personal_watchlist_item ? [result.personal_watchlist_item.plid] : [],
+    );
+    detailLoading.value = false;
+    detailError.value = "";
+    embeddedDetailItem.value = item;
+    openProductModal(item);
+    handledEmbeddedDetailRevision = revision;
+  } catch (error) {
+    if (requestId !== embeddedDetailRequestId) return;
+    embeddedDetailError.value = error instanceof Error
+      ? error.message
+      : "读取商品详情失败";
+    handledEmbeddedDetailRevision = revision;
+  } finally {
+    if (requestId === embeddedDetailRequestId) {
+      embeddedDetailLoading.value = false;
+    }
+  }
+}
+
+function retryEmbeddedDetail(): void {
+  const revision = props.requestedDetailRevision ?? 0;
+  const plid = props.requestedDetailPlid ?? "";
+  if (!revision || !plid) return;
+  void openRequestedEmbeddedDetail(revision, plid);
+}
+
+watch(
+  [
+    () => props.requestedDetailRevision ?? 0,
+    () => props.requestedDetailPlid ?? "",
+    () => props.requestedDetailStartDate ?? "",
+    () => props.requestedDetailEndDate ?? "",
+    ownStoreScope,
+  ],
+  ([revision, plid]) => {
+    if (
+      !props.embeddedDetailOnly
+      || !revision
+      || revision <= handledEmbeddedDetailRevision
+      || !plid
+    ) {
+      return;
+    }
+    void openRequestedEmbeddedDetail(revision, plid);
+  },
+  { immediate: true },
+);
+
 function closeProductModal() {
   detailModalOpen.value = false;
   selectedOfferKey.value = "";
@@ -2647,11 +3101,17 @@ function closeDetailView(): void {
     window.close();
     return;
   }
+  if (props.embeddedDetailOnly) {
+    ++embeddedDetailRequestId;
+    closeProductModal();
+    emit("detail-closed");
+    return;
+  }
   closeProductModal();
 }
 
 function handleDetailBackdropClick(): void {
-  if (!props.detailOnly) closeProductModal();
+  if (!props.detailOnly) closeDetailView();
 }
 
 function selectCompetitorOffer(offer: CompetitorOfferItem) {
@@ -2752,8 +3212,21 @@ function closeTargetAudit() {
   void nextTick(() => targetAuditTrigger.value?.focus());
 }
 
+function openCollectionLogs() {
+  collectionLogOpen.value = true;
+}
+
+function closeCollectionLogs() {
+  collectionLogOpen.value = false;
+  void nextTick(() => collectionLogTrigger.value?.focus());
+}
+
 function handleWindowKeydown(event: KeyboardEvent) {
   if (event.key !== "Escape") return;
+  if (collectionLogOpen.value) {
+    closeCollectionLogs();
+    return;
+  }
   if (personalWatchlistLibraryModalOpen.value) {
     closePersonalWatchlistLibraryModal();
     return;
@@ -2770,11 +3243,12 @@ function handleWindowKeydown(event: KeyboardEvent) {
     closeTargetList();
     return;
   }
-  if (detailModalOpen.value) closeDetailView();
+  if (detailModalOpen.value || props.embeddedDetailOnly) closeDetailView();
 }
 
 async function loadOverview() {
   ownStoreOverviewCache.clear();
+  failedCompetitorImages.value = new Set();
   const requestId = ++overviewRequestId;
   ++ownStoreRequestId;
   const requestScope = ownStoreScope.value;
@@ -2909,24 +3383,33 @@ async function loadOwnStoreScope(): Promise<void> {
 
 async function loadSharedBatchStatus(
   includeDetails = collectionDetailsOpen.value,
+  background = false,
 ) {
-  if (includeDetails) {
-    collectionDetailsLoading.value = true;
-    collectionDetailsError.value = "";
-  }
+  if (background && sharedBatchStatusController) return;
+  const requestId = ++sharedBatchStatusRequestId;
+  sharedBatchStatusController?.abort();
+  const controller = new AbortController();
+  sharedBatchStatusController = controller;
+  // Poll silently; only an explicit open/page change needs a loading indicator.
+  if (!background) collectionDetailsLoading.value = includeDetails;
   try {
     const status = await fetchCompetitorBatchStatus(
       includeDetails
         ? {
             resultPage: collectionResultPage.value,
             errorPage: collectionErrorPage.value,
+            terminalErrorPage: collectionTerminalErrorPage.value,
             pageSize: collectionDetailPageSize,
           }
         : undefined,
+      controller.signal,
     );
+    if (requestId !== sharedBatchStatusRequestId || controller.signal.aborted) return;
+    if (includeDetails) collectionDetailsError.value = "";
     if (status.batch_id !== sharedBatchStatus.value.batch_id) {
       collectionResultPage.value = 1;
       collectionErrorPage.value = 1;
+      collectionTerminalErrorPage.value = 1;
     }
     sharedBatchStatus.value = status;
     suspendLoadedCollectionCheckpoint(status);
@@ -2959,13 +3442,21 @@ async function loadSharedBatchStatus(
     }
     mergeQueuedTargetsIntoLocalBatch(status);
   } catch (error) {
+    if (
+      requestId !== sharedBatchStatusRequestId
+      || controller.signal.aborted
+      || isAbortError(error)
+    ) return;
     if (includeDetails) {
       collectionDetailsError.value =
         error instanceof Error ? error.message : "读取任务明细失败";
     }
     // Keep the last shared progress during a short local-service interruption.
   } finally {
-    if (includeDetails) collectionDetailsLoading.value = false;
+    if (sharedBatchStatusController === controller) {
+      sharedBatchStatusController = null;
+      collectionDetailsLoading.value = false;
+    }
   }
 }
 
@@ -2978,7 +3469,7 @@ async function handleCollectionDetailsToggle(event: Event) {
 }
 
 async function changeCollectionDetailPage(
-  kind: "result" | "error",
+  kind: "result" | "error" | "terminal",
   page: number,
 ) {
   if (kind === "result") {
@@ -2986,9 +3477,14 @@ async function changeCollectionDetailPage(
       collectionResultPageCount.value,
       Math.max(1, page),
     );
-  } else {
+  } else if (kind === "error") {
     collectionErrorPage.value = Math.min(
       collectionErrorPageCount.value,
+      Math.max(1, page),
+    );
+  } else {
+    collectionTerminalErrorPage.value = Math.min(
+      collectionTerminalErrorPageCount.value,
       Math.max(1, page),
     );
   }
@@ -4970,6 +5466,36 @@ async function resumeStoppedScheduledCollection() {
   }
 }
 
+async function resumePausedScheduledCollection() {
+  if (!props.canControlCollection) {
+    showCollectionNotice("手动继续网络暂停的 09:00 自动批次仅限 kxx 账号。");
+    return;
+  }
+  if (scheduledResumeBusy.value) return;
+  const status = sharedBatchStatus.value;
+  if (!status.batch_id || !scheduledNetworkPauseCanResume.value) {
+    showCollectionNotice("当前没有可手动继续的网络暂停自动批次。");
+    return;
+  }
+  scheduledResumeBusy.value = true;
+  collectionStopReason.value = "";
+  try {
+    sharedBatchStatus.value = await resumeStoppedScheduledCompetitorBatch(
+      status.batch_id,
+    );
+    showCollectionActivityNotice(
+      `已手动继续同一 09:00 自动批次，正在从原断点续爬 ${status.scheduled_network_resume_pending ?? status.pending} 条；原自动续爬倒计时已取消。`,
+    );
+  } catch (error) {
+    showCollectionNotice(
+      error instanceof Error ? error.message : "手动继续网络暂停自动批次失败",
+    );
+  } finally {
+    scheduledResumeBusy.value = false;
+    await loadSharedBatchStatus();
+  }
+}
+
 async function startNewCollection(urls: string[], emptyMessage: string) {
   if (collectionDetachRequested.value) return;
   if (sharedBatchStatus.value.active && !collecting.value) {
@@ -5611,6 +6137,12 @@ async function runCollection(
 }
 
 function detachCollectionForSessionChange() {
+  if (sharedBatchTimer !== null) window.clearInterval(sharedBatchTimer);
+  sharedBatchTimer = null;
+  ++sharedBatchStatusRequestId;
+  sharedBatchStatusController?.abort();
+  sharedBatchStatusController = null;
+  collectionDetailsLoading.value = false;
   if (!collecting.value && !collectionPreparing.value) return;
   collectionDetachRequested.value = true;
   if (!collecting.value) return;
@@ -5658,6 +6190,7 @@ async function stopCollection() {
 
 function emptyOwnStoreReturns(): ReturnsPayload {
   return {
+    date_scope: "all_collected",
     range_start: "",
     range_end: "",
     date_basis: "Africa/Johannesburg",
@@ -5803,6 +6336,50 @@ function periodInventoryTurnoverLabel(item: CompetitorItem): string {
     `补货 ${item.周期补货量 ?? 0} 件 / ${formatCurrency(item.周期补货货值)}`,
     `周转 ${formatCurrency(item.周期库存周转金额)}`,
   ].join(" · ");
+}
+
+function clampOfferTrendDate(value: string): string {
+  return value < offerTrendAvailableStart.value
+    ? offerTrendAvailableStart.value
+    : value > offerTrendAvailableEnd.value ? offerTrendAvailableEnd.value : value;
+}
+
+function updateOfferTrendRangeStart(event: Event) {
+  if (!offerTrendAvailableRange.value) return;
+  offerTrendRangeStart.value = clampOfferTrendDate(
+    (event.target as HTMLInputElement).value || offerTrendAvailableStart.value,
+  );
+  if (offerTrendRangeStart.value > offerTrendRangeEnd.value) {
+    offerTrendRangeEnd.value = offerTrendRangeStart.value;
+  }
+}
+
+function updateOfferTrendRangeEnd(event: Event) {
+  if (!offerTrendAvailableRange.value) return;
+  offerTrendRangeEnd.value = clampOfferTrendDate(
+    (event.target as HTMLInputElement).value || offerTrendAvailableEnd.value,
+  );
+  if (offerTrendRangeEnd.value < offerTrendRangeStart.value) {
+    offerTrendRangeStart.value = offerTrendRangeEnd.value;
+  }
+}
+
+function resetOfferTrendDateRange() {
+  offerTrendRangeStart.value = offerTrendAvailableStart.value;
+  offerTrendRangeEnd.value = offerTrendAvailableEnd.value;
+}
+
+function setRecentOfferTrendRange(dayCount: number) {
+  if (!offerTrendAvailableRange.value) return;
+  const range = getOwnStoreSalesRecentRange(offerTrendAvailableRange.value, dayCount);
+  offerTrendRangeStart.value = range.start;
+  offerTrendRangeEnd.value = range.end;
+}
+
+function isRecentOfferTrendRange(dayCount: number): boolean {
+  if (!offerTrendAvailableRange.value || isFullOfferTrendRange.value) return false;
+  const range = getOwnStoreSalesRecentRange(offerTrendAvailableRange.value, dayCount);
+  return offerTrendRangeStart.value === range.start && offerTrendRangeEnd.value === range.end;
 }
 
 function offerTrendXAtTime(capturedAtMs: number) {
@@ -5997,8 +6574,9 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
   <div
     class="competitor-module"
     :class="{ 'admin-priority-layout': props.isAdmin }"
+    :hidden="props.embeddedDetailOnly && !props.requestedDetailPlid"
   >
-    <template v-if="!props.detailOnly">
+    <template v-if="!props.detailOnly && !props.embeddedDetailOnly">
     <header class="hero">
       <div>
         <p class="eyebrow">TAKEALOT MARKET INTELLIGENCE</p>
@@ -6778,7 +7356,7 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
                 height="192"
                 loading="lazy"
                 decoding="async"
-                @error="markCompetitorImageFailed(card.competitor.图片)"
+                @error="retryCompetitorImage($event, card.competitor.图片)"
               />
               <span
                 v-else-if="!card.competitor && personalWatchlistOverviewHydrating"
@@ -6888,6 +7466,11 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
                   <strong>{{ formatChinaDateTime(card.competitor.采集时间) }}</strong>
                 </span>
               </div>
+              <CompetitorObservedSalesMetrics
+                :values="card.competitor?.近期观察售出"
+                :through-date="card.competitor?.近期观察售出截至"
+                compact
+              />
               <div class="personal-watchlist-product-actions">
                 <span>
                   {{ card.personalMember ? "加入个人池" : "加入共享库" }}时间
@@ -7469,7 +8052,9 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
                   ? "全员同步暂停中"
                   : "全员同步采集中"
             }}
-            · {{ sharedBatchOwnerLabel }}
+            <template v-if="sharedBatchStatus.source !== 'scheduled'">
+              · {{ sharedBatchOwnerLabel }}
+            </template>
           </strong>
           <span>
             已检查 {{ sharedBatchStatus.completed }}/{{ sharedBatchStatus.total }}
@@ -7493,7 +8078,7 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
         <span v-else-if="sharedScheduledRetryWait">
           正在等待安全复核间隔，届时自动续爬；kxx可随时停止
         </span>
-        <span v-else-if="sharedScheduledPause">网络暂停，等待自动续爬；kxx可随时停止</span>
+        <span v-else-if="sharedScheduledPause">网络暂停，等待自动续爬；kxx可立即继续或停止</span>
         <span v-else>正在准备下一条商品</span>
       </div>
       <div class="collector-actions">
@@ -7588,11 +8173,28 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
           继续失败/未完成（{{ pendingResumeCount }}）
         </button>
         <button
+          v-if="scheduledNetworkPauseCanResume"
+          class="primary-button resume-button"
+          @click="resumePausedScheduledCollection"
+          :disabled="scheduledResumeBusy"
+        >
+          {{ scheduledResumeBusy ? "正在继续采集…" : "立即继续采集" }}
+        </button>
+        <button
           class="primary-button stop-button"
           @click="stopCollection"
           v-if="props.canControlCollection && (collecting || sharedBatchStatus.active)"
         >
           停止采集
+        </button>
+        <button
+          ref="collectionLogTrigger"
+          class="secondary-button collection-log-open-button"
+          type="button"
+          aria-haspopup="dialog"
+          @click="openCollectionLogs"
+        >
+          查看轮次日志
         </button>
         <p
           v-if="props.canOperate && !props.canControlCollection"
@@ -7604,6 +8206,11 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
           继续原批次待重试项。
         </p>
       </div>
+      <CompetitorCollectionLogViewer
+        v-if="collectionLogOpen"
+        :current-batch-id="sharedBatchStatus.batch_id"
+        @close="closeCollectionLogs"
+      />
       <div
         v-if="showLocalCollectionAlert"
         :key="collectionNoticeVersion"
@@ -7667,7 +8274,13 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
             <strong>任务爬取详情</strong>
             <small>展开后按页读取，不影响页面刷新与批次运行</small>
           </span>
-          <b>{{ displayedCollectionResultCount + displayedCollectionErrorCount }}</b>
+          <b>
+            {{
+              displayedCollectionResultCount
+              + displayedCollectionErrorCount
+              + displayedCollectionTerminalErrorCount
+            }}
+          </b>
         </summary>
         <div v-if="collectionDetailsOpen" class="collection-task-detail-groups">
           <p v-if="collectionDetailsLoading" class="collection-detail-state" role="status">
@@ -7776,7 +8389,7 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
                 "
               >
                 <strong>{{ error.plid ? `PLID${error.plid}` : "采集任务" }}</strong>
-                <span>{{ error.message }}</span>
+                <span>{{ formatCollectionTaskMessage(error.message) }}</span>
                 <small v-if="error.plid && error.url">点击可修改队列或发起人工重试</small>
               </article>
             </div>
@@ -7802,6 +8415,83 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
                   || collectionErrorPage >= collectionErrorPageCount
                 "
                 @click="changeCollectionDetailPage('error', collectionErrorPage + 1)"
+              >
+                下一页
+              </button>
+            </div>
+          </section>
+          <section
+            v-if="displayedCollectionTerminalErrorCount"
+            class="collection-task-detail-group terminal"
+          >
+            <header>
+              <strong>确认失效任务</strong>
+              <span>{{ displayedCollectionTerminalErrorCount }} 个 · 已排除自动重试</span>
+            </header>
+            <div class="collection-task-detail-list">
+              <article
+                v-for="error in visibleDisplayedCollectionTerminalErrors"
+                :key="`terminal-${error.plid}-${error.message}`"
+                :class="{ 'collection-task-link-action': Boolean(error.plid && error.url) }"
+                :tabindex="error.plid && error.url ? 0 : undefined"
+                :role="error.plid && error.url ? 'button' : undefined"
+                :aria-haspopup="error.plid && error.url ? 'dialog' : undefined"
+                @click="
+                  error.plid
+                    && error.url
+                    && openTargetActionForLink(error.plid, error.url, 'manual_retry')
+                "
+                @keydown.enter="
+                  error.plid
+                    && error.url
+                    && openTargetActionForLink(error.plid, error.url, 'manual_retry')
+                "
+                @keydown.space.prevent="
+                  error.plid
+                    && error.url
+                    && openTargetActionForLink(error.plid, error.url, 'manual_retry')
+                "
+              >
+                <strong>{{ error.plid ? `PLID${error.plid}` : "采集任务" }}</strong>
+                <span>{{ formatCollectionTaskMessage(error.message) }}</span>
+                <small v-if="error.plid && error.url">
+                  本批不会自动重试；点击可修改队列或发起人工复核
+                </small>
+              </article>
+            </div>
+            <div
+              v-if="collectionTerminalErrorPageCount > 1"
+              class="compact-pagination collection-detail-pagination"
+            >
+              <button
+                type="button"
+                :disabled="collectionDetailsLoading || collectionTerminalErrorPage <= 1"
+                @click="
+                  changeCollectionDetailPage(
+                    'terminal',
+                    collectionTerminalErrorPage - 1,
+                  )
+                "
+              >
+                上一页
+              </button>
+              <span>
+                第 {{ collectionTerminalErrorPage }} /
+                {{ collectionTerminalErrorPageCount }} 页
+                · 每页 {{ collectionDetailPageSize }} 条
+              </span>
+              <button
+                type="button"
+                :disabled="
+                  collectionDetailsLoading
+                  || collectionTerminalErrorPage >= collectionTerminalErrorPageCount
+                "
+                @click="
+                  changeCollectionDetailPage(
+                    'terminal',
+                    collectionTerminalErrorPage + 1,
+                  )
+                "
               >
                 下一页
               </button>
@@ -7905,7 +8595,7 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
                         height="192"
                         loading="lazy"
                         decoding="async"
-                        @error="markCompetitorImageFailed(item.图片)"
+                        @error="retryCompetitorImage($event, item.图片)"
                       />
                       <span v-else>暂无图片</span>
                     </div>
@@ -8807,7 +9497,7 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
                       height="192"
                       loading="lazy"
                       decoding="async"
-                      @error="markCompetitorImageFailed(item.图片)"
+                      @error="retryCompetitorImage($event, item.图片)"
                     />
                     <span v-else>暂无图片</span>
                   </div>
@@ -8889,6 +9579,10 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
                   <small>评论按 PLID 商品维度单独同步</small>
                 </div>
               </div>
+              <CompetitorObservedSalesMetrics
+                :values="item.近期观察售出"
+                :through-date="item.近期观察售出截至"
+              />
             </article>
           </div>
           <div
@@ -8972,7 +9666,7 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
                     height="192"
                     loading="lazy"
                     decoding="async"
-                    @error="markCompetitorImageFailed(item.图片)"
+                    @error="retryCompetitorImage($event, item.图片)"
                   />
                   <span v-else>暂无图片</span>
                 </div>
@@ -9039,6 +9733,10 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
                 <small>点击查看历史和评论</small>
               </div>
             </div>
+            <CompetitorObservedSalesMetrics
+              :values="item.近期观察售出"
+              :through-date="item.近期观察售出截至"
+            />
           </article>
         </div>
         <div
@@ -9085,6 +9783,55 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
       </button>
     </section>
 
+    <Teleport to="body">
+      <div
+        v-if="
+          props.embeddedDetailOnly
+          && props.requestedDetailPlid
+          && (!detailModalOpen || !selected)
+        "
+        class="competitor-modal-backdrop competitor-product-detail-backdrop"
+        @click.self="closeDetailView"
+      >
+        <section
+          class="competitor-modal competitor-product-detail-modal embedded-detail-loading-modal"
+          role="dialog"
+          aria-modal="true"
+          aria-label="竞品详情加载状态"
+        >
+          <header class="competitor-modal-header">
+            <div>
+              <p class="section-kicker">COMPETITOR DETAIL</p>
+              <h1>{{ embeddedDetailError ? "竞品详情暂时无法加载" : "正在加载完整竞品详情" }}</h1>
+            </div>
+            <button
+              type="button"
+              class="competitor-modal-close"
+              aria-label="关闭商品详情"
+              @click="closeDetailView"
+            >
+              ×
+            </button>
+          </header>
+          <div class="embedded-detail-loading-content" aria-live="polite">
+            <span>
+              {{ embeddedDetailError || (embeddedDetailLoading
+                ? "正在读取商品、卖家报价、价格、库存、评论与历史趋势……"
+                : "正在准备竞品详情……") }}
+            </span>
+            <button
+              v-if="embeddedDetailError"
+              type="button"
+              class="secondary-button"
+              @click="retryEmbeddedDetail"
+            >
+              重新读取
+            </button>
+          </div>
+        </section>
+      </div>
+    </Teleport>
+
     <Teleport to="body" :disabled="props.detailOnly">
       <div
         v-if="detailModalOpen && selected"
@@ -9110,7 +9857,7 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
                   height="192"
                   decoding="async"
                   fetchpriority="high"
-                  @error="markCompetitorImageFailed(selectedHeroImage)"
+                  @error="retryCompetitorImage($event, selectedHeroImage)"
                 />
                 <span v-else>暂无图片</span>
               </div>
@@ -9748,10 +10495,7 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
                   <div>
                     <p class="section-kicker">SELLER RETURNS</p>
                     <h2>退货情况</h2>
-                    <span>
-                      {{ detail.own_store_returns.range_start || "—" }} 至
-                      {{ detail.own_store_returns.range_end || "—" }} · 南非业务日
-                    </span>
+                    <span>全部已采集历史 · 南非业务日</span>
                   </div>
                   <div class="own-return-heading-actions">
                     <strong
@@ -9771,7 +10515,7 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
                     <span>独立滚动指标，不用于代替下方明细</span>
                   </article>
                   <article>
-                    <small>选定区间退货件数</small>
+                    <small>历史退货件数</small>
                     <strong>{{ detail.own_store_returns.summary.return_units }}</strong>
                     <span>{{ detail.own_store_returns.summary.return_count }} 条明细</span>
                   </article>
@@ -9821,7 +10565,7 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
                     </thead>
                     <tbody>
                       <tr
-                        v-for="item in detail.own_store_returns.items"
+                        v-for="item in visibleOwnReturnItems"
                         :key="item.store_scope_key"
                       >
                         <td>
@@ -9846,6 +10590,33 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
                 <div v-else class="empty-state slim own-return-empty">
                   <strong>{{ detail.own_store_returns.message }}</strong>
                 </div>
+                <nav
+                  v-if="ownReturnPageCount > 1"
+                  class="compact-pagination"
+                  aria-label="退货明细分页"
+                >
+                  <button
+                    type="button"
+                    class="quiet-button"
+                    :disabled="ownReturnPage <= 1"
+                    @click="ownReturnPage -= 1"
+                  >
+                    上一页
+                  </button>
+                  <span>
+                    共 {{ detail.own_store_returns.total }} 条 ·
+                    第 {{ ownReturnPage }} / {{ ownReturnPageCount }} 页
+                  </span>
+                  <button
+                    type="button"
+                    class="quiet-button"
+                    :disabled="ownReturnPage >= ownReturnPageCount"
+                    @click="ownReturnPage += 1"
+                  >
+                    下一页
+                  </button>
+                </nav>
+                <p class="method-note">{{ detail.own_store_returns.source_notice }}</p>
               </section>
 
               <section
@@ -9894,8 +10665,13 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
                   </div>
                 </div>
                 <p class="method-note competitor-offer-sort-note">
-                  {{ activeRangeLabel }} · 默认按库存净流出排序
+                  列表区间 {{ activeRangeLabel }} · 默认按库存净流出排序
                 </p>
+
+                <CompetitorObservedSalesMetrics
+                  :values="detail.current_item?.近期观察售出 ?? selected.近期观察售出"
+                  :through-date="detail.current_item?.近期观察售出截至 ?? selected.近期观察售出截至"
+                />
 
                 <div
                   v-if="selectedSellerGroups.length"
@@ -9972,7 +10748,65 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
                       </button>
                     </div>
 
-                    <div class="competitor-offer-period-metrics" aria-live="polite">
+                    <div v-if="offerTrendHistoryLoading" class="empty-state slim" role="status">
+                      正在读取完整本地历史……
+                    </div>
+                    <p v-else-if="offerTrendHistoryError" class="error-banner" role="alert">
+                      {{ offerTrendHistoryError }}
+                      <button type="button" class="quiet-button" @click="offerTrendHistoryRetry += 1">重新读取</button>
+                    </p>
+                    <div v-if="offerTrendAvailableRange" class="competitor-offer-range">
+                      <div class="competitor-offer-range-controls">
+                        <strong>折线图范围（北京时间）</strong>
+                        <div class="competitor-offer-range-presets" role="group" aria-label="折线图快捷日期范围">
+                          <button
+                            v-for="days in [7, 15, 30, 60, 90]"
+                            :key="days"
+                            type="button"
+                            :class="{ selected: isRecentOfferTrendRange(days) }"
+                            :aria-pressed="isRecentOfferTrendRange(days)"
+                            @click="setRecentOfferTrendRange(days)"
+                          >近{{ days }}天</button>
+                          <button
+                            type="button"
+                            :class="{ selected: isFullOfferTrendRange }"
+                            :aria-pressed="isFullOfferTrendRange"
+                            @click="resetOfferTrendDateRange"
+                          >全部日期</button>
+                        </div>
+                        <label>
+                          <span>开始日期</span>
+                          <input
+                            type="date"
+                            :value="offerTrendRangeStart"
+                            :min="offerTrendAvailableStart"
+                            :max="offerTrendRangeEnd || offerTrendAvailableEnd"
+                            required
+                            @input="updateOfferTrendRangeStart"
+                          />
+                        </label>
+                        <label>
+                          <span>结束日期</span>
+                          <input
+                            type="date"
+                            :value="offerTrendRangeEnd"
+                            :min="offerTrendRangeStart || offerTrendAvailableStart"
+                            :max="offerTrendAvailableEnd"
+                            required
+                            @input="updateOfferTrendRangeEnd"
+                          />
+                        </label>
+                      </div>
+                      <p aria-live="polite">
+                        {{ offerTrendRangeStart }} 至 {{ offerTrendRangeEnd }} · 售出与补货随此区间计算
+                      </p>
+                    </div>
+
+                    <div
+                      v-if="!offerTrendHistoryLoading && !offerTrendHistoryError"
+                      class="competitor-offer-period-metrics"
+                      aria-live="polite"
+                    >
                       <div
                         class="competitor-offer-period-metric"
                         :class="{ unavailable: selectedOfferIntervalSalesUnits === null }"
@@ -10053,11 +10887,14 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
                       </div>
                     </div>
 
-                    <div v-if="!selectedOfferTrend.length" class="empty-state slim">
+                    <div
+                      v-if="!selectedOfferTrend.length && !offerTrendHistoryLoading && !offerTrendHistoryError"
+                      class="empty-state slim"
+                    >
                       当前观察区间没有可安全识别为该卖家的历史报价，不使用其他卖家快照代替。
                     </div>
                     <div
-                      v-else
+                      v-else-if="selectedOfferTrend.length"
                       class="competitor-offer-trend-chart"
                       tabindex="0"
                       aria-label="卖家报价历史折线图，使用左右方向键切换时间点"
@@ -10229,7 +11066,11 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
               </section>
 
               <section
-                v-if="!props.detailOnly && props.isAdmin"
+                v-if="
+                  !props.detailOnly
+                  && props.isAdmin
+                  && selected.来源 === 'own_store'
+                "
                 class="panel competitor-target-action-card own-store-auto-target"
               >
                 <div class="competitor-target-action-heading">
@@ -10423,7 +11264,7 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
                                 height="192"
                                 loading="lazy"
                                 decoding="async"
-                                @error="markCompetitorImageFailed(variant.图片)"
+                                @error="retryCompetitorImage($event, variant.图片)"
                               />
                               <span v-else>暂无图片</span>
                             </div>

@@ -46,6 +46,7 @@ from takealot_ops.competitors.batch import (
     CollectionBatchRegistry,
     CollectionRequestCoordinator,
     configure_collection_logger,
+    read_collection_round_summaries,
 )
 from takealot_ops.competitors.listings import (
     BALANCED_LISTING_SELECTION_RULE,
@@ -80,6 +81,7 @@ from takealot_ops.competitors.scheduled import (
     ScheduledCompetitorBatchRunner,
 )
 from takealot_ops.dashboard.refresh import run_dashboard_refresh
+from takealot_ops.container_selection import load_container_selection_payload
 from takealot_ops.domain import sast_date
 from takealot_ops.exchange_rates import (
     CnyZarRateService,
@@ -161,6 +163,14 @@ from takealot_ops.erp.product_images import (
     ProductThumbnailCache,
 )
 from takealot_ops.erp.read_cache import ReadProjectionCache
+from takealot_ops.erp.return_removal import (
+    REMOVAL_SNAPSHOT_PROVIDER,
+    attach_removal_lifecycles,
+    project_removal_orders,
+    removal_snapshot_warnings,
+    removal_tracking_status,
+    summarize_removal_lifecycles,
+)
 from takealot_ops.erp.returns import (
     filter_return_rows,
     load_offer_returned_30_day_counter,
@@ -192,6 +202,7 @@ from takealot_ops.erp.store_overview import (
     load_store_traffic_series,
 )
 from takealot_ops.logistics import LogisticsLinkError, LogisticsOverviewService
+from takealot_ops.logistics.snapshots import load_provider_snapshot
 from takealot_ops.metrics.service import DashboardDataset
 from takealot_ops.platform_warehouse import (
     PlatformWarehouseConflictError,
@@ -962,7 +973,7 @@ def _aggregate_store_revenue_series(
     completed_through: date | None = None,
     limit: int | None = 30,
 ) -> list[dict[str, Any]]:
-    """Combine completed SAST days from available stores without zero-filling gaps."""
+    """Combine completed SAST days without zero-filling or smearing store alerts."""
     store_count = len(store_series)
     values_by_store: dict[str, dict[str, float | None]] = {}
     metric_dates: set[str] = set()
@@ -1021,7 +1032,12 @@ def _aggregate_store_revenue_series(
                 if state.get("latest_revision_at"):
                     latest_revision_values.append(str(state["latest_revision_at"]))
             reconciliation = (reconciliation_by_store or {}).get(store_code)
-            if isinstance(reconciliation, Mapping) and reconciliation.get("status") == "pending":
+            if (
+                isinstance(reconciliation, Mapping)
+                and reconciliation.get("status") == "pending"
+                and str(reconciliation.get("period_end_business_date") or "")
+                == metric_date
+            ):
                 pending_reconciliation_store_count += 1
         covered_store_count = len(revenues)
         if pending_reconciliation_store_count or unverified_source_store_count:
@@ -2033,33 +2049,80 @@ def create_app(project_root: Path | None = None) -> FastAPI:
             raise HTTPException(status_code=422, detail="开始日期不能晚于结束日期")
         stores = _read_store_identities_for_request(request, selected_store_scope)
         cache_key = (
-            "seller-returns-v2",
+            "seller-returns-v4-full-removal-orders",
             tuple(store.code for store in stores),
             selected_start.isoformat(),
             selected_end.isoformat(),
         )
 
-        def load_projection() -> dict[str, list[dict[str, Any]]]:
+        def load_projection() -> dict[str, Any]:
             all_rows: list[dict[str, Any]] = []
             statuses: list[dict[str, Any]] = []
             counters: list[dict[str, Any]] = []
+            removal_statuses: list[dict[str, Any]] = []
+            all_removal_orders: list[dict[str, Any]] = []
+            removal_warnings: list[str] = []
+            with store_scope("current"):
+                w8_snapshot = load_provider_snapshot(read_engine, "w8")
+            raw_w8_payload = (
+                w8_snapshot.get("payload")
+                if isinstance(w8_snapshot, Mapping)
+                else None
+            )
+            w8_payload: Mapping[str, Any] = (
+                raw_w8_payload if isinstance(raw_w8_payload, Mapping) else {}
+            )
+            w8_return_orders = (
+                w8_payload.get("return_orders", [])
+                if isinstance(w8_payload, Mapping)
+                else []
+            )
+            if not isinstance(w8_return_orders, list):
+                w8_return_orders = []
             for store in stores:
-                with store_scope(store.code), Session(read_engine) as session:
-                    store_rows = enrich_product_master_records(
-                        session,
-                        load_store_return_rows(
+                with store_scope(store.code):
+                    removal_snapshot = load_provider_snapshot(
+                        read_engine,
+                        REMOVAL_SNAPSHOT_PROVIDER,
+                    )
+                    with Session(read_engine) as session:
+                        store_rows = enrich_product_master_records(
+                            session,
+                            load_store_return_rows(
+                                session,
+                                start_date=selected_start,
+                                end_date=selected_end,
+                            ),
+                            as_of_date=selected_end,
+                        )
+                        status = load_return_collection_status(
                             session,
                             start_date=selected_start,
                             end_date=selected_end,
-                        ),
-                        as_of_date=selected_end,
+                        )
+                        counter = load_offer_returned_30_day_counter(session)
+                removal_payload = (
+                    removal_snapshot.get("payload")
+                    if isinstance(removal_snapshot, Mapping)
+                    and isinstance(removal_snapshot.get("payload"), Mapping)
+                    else None
+                )
+                store_rows = attach_removal_lifecycles(
+                    store_rows,
+                    removal_snapshot=removal_payload,
+                    w8_return_orders=w8_return_orders,
+                    today=datetime.now(ZoneInfo("Africa/Johannesburg")).date(),
+                )
+                all_removal_orders.extend(
+                    project_removal_orders(
+                        store.code,
+                        store.display_name,
+                        removal_snapshot,
+                        w8_return_orders=w8_return_orders,
+                        today=datetime.now(ZoneInfo("Africa/Johannesburg")).date(),
                     )
-                    status = load_return_collection_status(
-                        session,
-                        start_date=selected_start,
-                        end_date=selected_end,
-                    )
-                    counter = load_offer_returned_30_day_counter(session)
+                )
+                removal_warnings.extend(removal_snapshot_warnings(removal_snapshot))
                 all_rows.extend(
                     _tag_store_records(
                         store_rows,
@@ -2069,16 +2132,56 @@ def create_app(project_root: Path | None = None) -> FastAPI:
                 )
                 statuses.append({**status, "store_code": store.code, "store_name": store.display_name})
                 counters.append({**counter, "store_code": store.code, "store_name": store.display_name})
+                removal_statuses.append(
+                    removal_tracking_status(
+                        store.code,
+                        store.display_name,
+                        removal_snapshot,
+                    )
+                )
             return {
                 "rows": all_rows,
                 "statuses": statuses,
                 "counters": counters,
+                "removal_statuses": removal_statuses,
+                "removal_orders": all_removal_orders,
+                "removal_warnings": list(dict.fromkeys(removal_warnings)),
+                "w8_tracking": {
+                    "data_status": (
+                        "synced"
+                        if isinstance(w8_snapshot, Mapping)
+                        and "return_orders" in w8_payload
+                        else "uncollected"
+                    ),
+                    "synced_at": (
+                        w8_snapshot.get("fetched_at")
+                        if isinstance(w8_snapshot, Mapping)
+                        else None
+                    ),
+                    "return_order_count": len(w8_return_orders),
+                    "message": (
+                        "已读取本地长睿退货快照"
+                        if isinstance(w8_snapshot, Mapping)
+                        and "return_orders" in w8_payload
+                        else "现有长睿快照尚未包含退货处置明细，请在物流同步后再核对"
+                    ),
+                },
             }
 
         projection = read_projection_cache.get_or_load(cache_key, load_projection)
         all_rows = projection["rows"]
         statuses = projection["statuses"]
         counters = projection["counters"]
+        removal_statuses = projection["removal_statuses"]
+        removal_orders = projection["removal_orders"]
+        removal_data_status = (
+            "synced"
+            if removal_statuses
+            and all(item.get("data_status") == "synced" for item in removal_statuses)
+            else "partial"
+            if any(item.get("data_status") == "synced" for item in removal_statuses)
+            else "uncollected"
+        )
 
         options = return_filter_options(all_rows)
         filtered = filter_return_rows(
@@ -2088,6 +2191,8 @@ def create_app(project_root: Path | None = None) -> FastAPI:
             outcome=outcome,
         )
         offset = (page - 1) * page_size
+        summary = summarize_return_rows(filtered)
+        summary["removal_lifecycle"] = summarize_removal_lifecycles(filtered)
         return {
             "range_start": selected_start.isoformat(),
             "range_end": selected_end.isoformat(),
@@ -2097,7 +2202,32 @@ def create_app(project_root: Path | None = None) -> FastAPI:
             "data_status": _combined_return_data_status(statuses),
             "store_statuses": statuses,
             "offer_returned_30_days": _aggregate_offer_return_counter(counters),
-            "summary": summarize_return_rows(filtered),
+            "summary": summary,
+            "removal_order_tracking": {
+                "data_status": removal_data_status,
+                "store_statuses": removal_statuses,
+                "w8": projection["w8_tracking"],
+            },
+            "removal_orders": {
+                "data_status": removal_data_status,
+                "counts": {
+                    "total": len(removal_orders),
+                    **{
+                        stage: sum(
+                            1 for item in removal_orders if item.get("stage") == stage
+                        )
+                        for stage in ("submitted", "pickup_ready", "closed")
+                    },
+                },
+                "items": removal_orders,
+                "warnings": projection["removal_warnings"],
+                "source_notice": (
+                    "Submitted、Ready For Pickup、Closed 及其商品明细来自本地 "
+                    "Seller Portal Manage Removal Orders 快照；列表不受退货日期和筛选影响。"
+                    "长睿结果只在 PO reference + SKU 双重一致时显示；长睿已上架不是 "
+                    "Takealot 重新上架。"
+                ),
+            },
             "filters": options,
             "items": filtered[offset : offset + page_size],
             "total": len(filtered),
@@ -2105,9 +2235,38 @@ def create_app(project_root: Path | None = None) -> FastAPI:
             "page_size": page_size,
             "source_notice": (
                 "退货原因、客户备注、处理结果与交易来自 Seller API /returns；"
+                "完整 PO 模块、到期、预约与提货数量来自本地 Seller Portal 移除单快照；"
+                "到仓、上架与报损只在长睿 PO + SKU 双重一致时展示。"
                 "Offer 的 quantity_returned_30_days 是独立滚动30天计数，不替代退货明细。"
             ),
         }
+
+    @app.post("/api/erp/returns/removal-orders/sync")
+    def sync_seller_return_removal_orders(request: Request) -> dict[str, Any]:
+        """Explicitly refresh read-only Seller Portal removal-order snapshots."""
+        _require_platform_warehouse_loopback(request)
+        require_full_refresh_controller(request)
+        try:
+            return platform_warehouse.sync_return_removal_orders()
+        except PortalAuthenticationError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except (PortalDisabledError, PortalError) as exc:
+            _raise_platform_warehouse_portal_error(exc)
+
+    @app.post("/api/erp/returns/removal-orders/verify-otp")
+    def verify_seller_return_removal_order_otp(
+        payload: PlatformWarehousePortalOtpRequest,
+        request: Request,
+    ) -> dict[str, Any]:
+        """Verify pending OTP and continue the same read-only removal-order sync."""
+        _require_platform_warehouse_loopback(request)
+        require_full_refresh_controller(request)
+        try:
+            return platform_warehouse.verify_otp_and_sync_return_removal_orders(payload.otp)
+        except PortalAuthenticationError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except (PortalDisabledError, PortalError) as exc:
+            _raise_platform_warehouse_portal_error(exc)
 
     @app.get("/api/erp/keyword-traffic")
     def keyword_traffic_products(
@@ -2574,6 +2733,28 @@ def create_app(project_root: Path | None = None) -> FastAPI:
             return payload
 
         return read_projection_cache.get_or_load(cache_key, load_projection)
+
+    @app.get("/api/erp/container-selection")
+    def container_selection(
+        request: Request,
+        as_of: date = Query(default_factory=date.today),
+    ) -> dict[str, Any]:
+        """Return the all-authorized-store container-fill decision workbench."""
+        store_codes = _own_store_codes_for_request(request, "all")
+        cache_key = (
+            "container-selection-v1",
+            tuple(sorted(store_codes)),
+            as_of.isoformat(),
+        )
+        return read_projection_cache.get_or_load(
+            cache_key,
+            lambda: load_container_selection_payload(
+                root,
+                read_engine,
+                store_codes=store_codes,
+                as_of=as_of,
+            ),
+        )
 
     @app.get("/api/erp/product-thumbnail")
     def product_thumbnail(
@@ -3343,7 +3524,7 @@ def create_app(project_root: Path | None = None) -> FastAPI:
     ) -> dict[str, object]:
         own_store_codes = _own_store_codes_for_request(request, own_store_scope)
         cache_key = (
-            "competitors-list-v3",
+            "competitors-list-v4",
             tuple(sorted(own_store_codes)),
             start_date.isoformat() if start_date else None,
             end_date.isoformat() if end_date else None,
@@ -3386,7 +3567,7 @@ def create_app(project_root: Path | None = None) -> FastAPI:
         """Return only the scope-dependent private-store radar partition."""
         own_store_codes = _own_store_codes_for_request(request, own_store_scope)
         cache_key = (
-            "competitors-own-store-v2",
+            "competitors-own-store-v3",
             tuple(sorted(own_store_codes)),
             start_date.isoformat() if start_date else None,
             end_date.isoformat() if end_date else None,
@@ -3427,12 +3608,14 @@ def create_app(project_root: Path | None = None) -> FastAPI:
         include_details: bool = False,
         result_page: int = 1,
         error_page: int = 1,
+        terminal_error_page: int = 1,
         page_size: int = 50,
     ) -> dict[str, object]:
         status = collection_registry.status(
             include_details=include_details,
             result_offset=(result_page - 1) * page_size,
             error_offset=(error_page - 1) * page_size,
+            terminal_error_offset=(terminal_error_page - 1) * page_size,
             detail_limit=page_size if include_details else None,
         )
         runner_status = (
@@ -3445,6 +3628,7 @@ def create_app(project_root: Path | None = None) -> FastAPI:
                 include_details=include_details,
                 result_offset=(result_page - 1) * page_size,
                 error_offset=(error_page - 1) * page_size,
+                terminal_error_offset=(terminal_error_page - 1) * page_size,
                 detail_limit=page_size if include_details else None,
             )
             if scheduled_competitor_runner is not None
@@ -3464,6 +3648,21 @@ def create_app(project_root: Path | None = None) -> FastAPI:
         status["scheduled_resume_pending"] = (
             resumable_pending
             if resume_available and isinstance(resumable_pending, int)
+            else 0
+        )
+        network_resume_available = bool(
+            status.get("active")
+            and status.get("source") == "scheduled"
+            and status.get("event") == "scheduled_pause"
+            and status.get("batch_id") == runner_status.get("batch_id")
+            and runner_status.get("wait_kind") == "network"
+            and runner_status.get("network_resume_available")
+        )
+        network_resume_pending = runner_status.get("network_resume_pending")
+        status["scheduled_network_resume_available"] = network_resume_available
+        status["scheduled_network_resume_pending"] = (
+            network_resume_pending
+            if network_resume_available and isinstance(network_resume_pending, int)
             else 0
         )
         status["scheduled_wait_kind"] = (
@@ -3486,6 +3685,7 @@ def create_app(project_root: Path | None = None) -> FastAPI:
         )
         status["result_page"] = result_page
         status["error_page"] = error_page
+        status["terminal_error_page"] = terminal_error_page
         status["detail_page_size"] = page_size
         return status
 
@@ -3494,6 +3694,7 @@ def create_app(project_root: Path | None = None) -> FastAPI:
         include_details: bool = Query(default=False),
         result_page: int = Query(default=1, ge=1),
         error_page: int = Query(default=1, ge=1),
+        terminal_error_page: int = Query(default=1, ge=1),
         page_size: int = Query(default=50, ge=10, le=100),
     ) -> dict[str, object]:
         """Return lightweight progress by default and bounded task detail on demand."""
@@ -3501,8 +3702,31 @@ def create_app(project_root: Path | None = None) -> FastAPI:
             include_details=include_details,
             result_page=result_page,
             error_page=error_page,
+            terminal_error_page=terminal_error_page,
             page_size=page_size,
         )
+
+    @app.get("/api/competitors/collection-logs")
+    def competitor_collection_logs(
+        request: Request,
+        batch_id: str | None = Query(default=None, min_length=1, max_length=128),
+    ) -> dict[str, object]:
+        """Return one structured read-only summary per competitor collection round."""
+        require_competitor_admin(request)
+        status = _competitor_batch_status_payload()
+        current_batch_id = status.get("batch_id")
+        try:
+            return read_collection_round_summaries(
+                root,
+                current_batch_id=(
+                    current_batch_id if isinstance(current_batch_id, str) else None
+                ),
+                selected_batch_id=batch_id,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
 
     @app.post("/api/competitors/batch-options")
     def update_competitor_batch_options(
@@ -3617,7 +3841,7 @@ def create_app(project_root: Path | None = None) -> FastAPI:
         user = request.state.erp_user
         own_store_codes = _own_store_codes_for_request(request, "all")
         cache_key = (
-            "competitor-personal-overview-v2",
+            "competitor-personal-overview-v3",
             user.id,
             tuple(sorted(own_store_codes)),
             start_date.isoformat() if start_date else None,
@@ -4938,6 +5162,53 @@ def create_app(project_root: Path | None = None) -> FastAPI:
             history = dataset.store_history
             if not history.empty:
                 history = history.loc[history["plid"].astype(str) == plid]
+        current_frame = dataset.store_current if store_item is not None else dataset.current
+        if not current_frame.empty:
+            current_frame = current_frame.loc[
+                current_frame["plid"].astype(str) == plid
+            ].head(1)
+        current_records = frame_records(current_frame)
+        with Session(read_engine) as session:
+            target = session.get(CompetitorTarget, plid)
+            monitoring_target = (
+                _competitor_target_payload(
+                    target,
+                    has_history=session.scalar(
+                        select(CompetitorSnapshot.id)
+                        .where(CompetitorSnapshot.plid == plid)
+                        .limit(1)
+                    )
+                    is not None,
+                )
+                if target is not None and target.active
+                else None
+            )
+            competitor_personal_item = session.get(
+                CompetitorPersonalWatchlist,
+                (request.state.erp_user.id, plid),
+            )
+            own_personal_item = (
+                session.get(
+                    OwnStorePersonalWatchlist,
+                    (request.state.erp_user.id, plid),
+                )
+                if competitor_personal_item is None
+                else None
+            )
+            personal_item: CompetitorPersonalWatchlist | OwnStorePersonalWatchlist | None
+            personal_item = competitor_personal_item or own_personal_item
+            personal_source: Literal["competitor", "own_store"] = (
+                "competitor" if competitor_personal_item is not None else "own_store"
+            )
+            personal_watchlist_item = (
+                _personal_watchlist_item_payload(
+                    personal_item,
+                    source=personal_source,
+                    library_ids=[],
+                )
+                if personal_item is not None
+                else None
+            )
         own_store_sales = (
             _load_own_store_sales(
                 root,
@@ -4966,8 +5237,6 @@ def create_app(project_root: Path | None = None) -> FastAPI:
                 root,
                 plid=plid,
                 own_store_codes=own_store_codes,
-                start_date=start_date,
-                end_date=end_date,
                 engine=read_engine,
             )
             if store_item is not None
@@ -4978,6 +5247,9 @@ def create_app(project_root: Path | None = None) -> FastAPI:
             )
         )
         return {
+            "current_item": current_records[0] if current_records else None,
+            "monitoring_target": monitoring_target,
+            "personal_watchlist_item": personal_watchlist_item,
             "category_path": dataset.category_paths.get(plid, []),
             "history": frame_records(history),
             "reviews": frame_records(reviews),
@@ -5054,6 +5326,15 @@ def create_app(project_root: Path | None = None) -> FastAPI:
                 fallback_visible_browser=payload.visible_browser,
             )
         )
+        request_started_at = time.perf_counter()
+        collection_source = (
+            "scheduled"
+            if user.username == SCHEDULED_OWNER_USERNAME
+            else "manual"
+        )
+
+        def request_elapsed_ms() -> int:
+            return max(0, int(round((time.perf_counter() - request_started_at) * 1000)))
 
         async def execute_collection() -> CompetitorCollectionResult:
             registry_reason = ""
@@ -5065,22 +5346,32 @@ def create_app(project_root: Path | None = None) -> FastAPI:
                     stage=stage,
                 )
                 competitor_logger.info(
-                    "link_stage batch=%s request=%s item=%s/%s plid=%s stage=%s",
+                    "link_stage batch=%s request=%s item=%s/%s plid=%s "
+                    "elapsed_ms=%s stage=%s",
                     payload.batch_id or "-",
                     payload.request_id or "-",
                     _display_item_number(payload.item_index),
                     payload.total_items or "-",
                     plid,
+                    request_elapsed_ms(),
                     _single_line(stage),
                 )
 
             competitor_logger.info(
-                "link_start batch=%s request=%s item=%s/%s plid=%s",
+                "link_start batch=%s request=%s item=%s/%s plid=%s source=%s "
+                "user=%s retry_kind=%s retry_attempt=%s stock_probe=%s "
+                "visible_browser=%s",
                 payload.batch_id or "-",
                 payload.request_id or "-",
                 _display_item_number(payload.item_index),
                 payload.total_items or "-",
                 plid,
+                collection_source,
+                user.username,
+                payload.retry_kind or "-",
+                payload.retry_attempt if payload.retry_attempt is not None else "-",
+                effective_with_stock_probe,
+                effective_visible_browser,
             )
             settings = DashboardSettings.from_env(root)
             engine = create_engine_for_settings(settings)
@@ -5133,7 +5424,10 @@ def create_app(project_root: Path | None = None) -> FastAPI:
                                 added_target_count=len(added_targets),
                             )
                             competitor_logger.info(
-                                "offer_targets_discovered origin_plid=%s added=%s queued=%s user=%s",
+                                "offer_targets_discovered batch=%s request=%s "
+                                "origin_plid=%s added=%s queued=%s user=%s",
+                                payload.batch_id or "-",
+                                payload.request_id or "-",
                                 plid,
                                 len(added_targets),
                                 queued_target_count,
@@ -5145,12 +5439,13 @@ def create_app(project_root: Path | None = None) -> FastAPI:
                     registry_reason = _single_line(str(exc))
                     competitor_logger.warning(
                         "link_failure batch=%s request=%s item=%s/%s "
-                        "plid=%s kind=network reason=%s",
+                        "plid=%s kind=network duration_ms=%s reason=%s",
                         payload.batch_id or "-",
                         payload.request_id or "-",
                         _display_item_number(payload.item_index),
                         payload.total_items or "-",
                         plid,
+                        request_elapsed_ms(),
                         _single_line(str(exc)),
                     )
                     raise
@@ -5159,13 +5454,15 @@ def create_app(project_root: Path | None = None) -> FastAPI:
                 registry_reason = registry_reason or _single_line(str(exc))
                 if not isinstance(exc, CompetitorNetworkError):
                     competitor_logger.error(
-                        "link_exception batch=%s request=%s item=%s/%s plid=%s type=%s reason=%s",
+                        "link_exception batch=%s request=%s item=%s/%s plid=%s "
+                        "type=%s duration_ms=%s reason=%s",
                         payload.batch_id or "-",
                         payload.request_id or "-",
                         _display_item_number(payload.item_index),
                         payload.total_items or "-",
                         plid,
                         type(exc).__name__,
+                        request_elapsed_ms(),
                         _single_line(str(exc)),
                     )
                 raise
@@ -5178,7 +5475,8 @@ def create_app(project_root: Path | None = None) -> FastAPI:
                 )
             competitor_logger.info(
                 "link_result batch=%s request=%s item=%s/%s plid=%s "
-                "succeeded=%s kind=%s retryable=%s reason=%s",
+                "succeeded=%s kind=%s retryable=%s added_targets=%s "
+                "duration_ms=%s reason=%s",
                 payload.batch_id or "-",
                 payload.request_id or "-",
                 _display_item_number(payload.item_index),
@@ -5187,6 +5485,8 @@ def create_app(project_root: Path | None = None) -> FastAPI:
                 result.succeeded,
                 result.failure_kind or "-",
                 result.retryable,
+                result.added_target_count,
+                request_elapsed_ms(),
                 _single_line(result.message),
             )
             return result
@@ -5206,16 +5506,19 @@ def create_app(project_root: Path | None = None) -> FastAPI:
                 title=None,
                 message=_single_line(str(exc)) or type(exc).__name__,
                 succeeded=False,
+                failure_kind="other",
             )
             raise
         if reused:
             competitor_logger.info(
-                "link_reused batch=%s request=%s item=%s/%s plid=%s",
+                "link_reused batch=%s request=%s item=%s/%s plid=%s "
+                "duration_ms=%s",
                 payload.batch_id or "-",
                 payload.request_id or "-",
                 _display_item_number(payload.item_index),
                 payload.total_items or "-",
                 result.plid,
+                request_elapsed_ms(),
             )
             collection_registry.finish_link(
                 batch_id=payload.batch_id,
@@ -5229,6 +5532,7 @@ def create_app(project_root: Path | None = None) -> FastAPI:
             title=result.title,
             message=result.message,
             succeeded=result.succeeded,
+            failure_kind=result.failure_kind,
         )
         return result
 
@@ -5375,16 +5679,23 @@ def create_app(project_root: Path | None = None) -> FastAPI:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     @app.post("/api/competitors/batch-resume")
-    async def resume_stopped_scheduled_competitor_batch(
+    async def resume_scheduled_competitor_batch(
         payload: CompetitorBatchResumeRequest,
         request: Request,
     ) -> dict[str, object]:
         require_competitor_batch_controller(request)
         try:
-            await scheduled_competitor_runner.resume_stopped(
-                payload.batch_id,
-                resumed_by=request.state.erp_user.username,
-            )
+            runner_status = scheduled_competitor_runner.status()
+            if runner_status.get("run_status") == "paused":
+                await scheduled_competitor_runner.resume_network_pause(
+                    payload.batch_id,
+                    resumed_by=request.state.erp_user.username,
+                )
+            else:
+                await scheduled_competitor_runner.resume_stopped(
+                    payload.batch_id,
+                    resumed_by=request.state.erp_user.username,
+                )
         except (CollectionBatchBusyError, ValueError) as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         return {"ok": True, "status": _competitor_batch_status_payload()}
@@ -5436,8 +5747,9 @@ def create_app(project_root: Path | None = None) -> FastAPI:
                 return status
             cancelled_request_id = str(status.get("current_request_id") or "")
             cancelled = False
+            scheduled_stop_recorded = False
             try:
-                await scheduled_competitor_runner.mark_stopped(
+                scheduled_stop_recorded = await scheduled_competitor_runner.mark_stopped(
                     batch_id,
                     stopped_by=stopped_by,
                     reason=reason,
@@ -5460,6 +5772,23 @@ def create_app(project_root: Path | None = None) -> FastAPI:
                 stopped_by,
                 status.get("source") or "manual",
             )
+            if not scheduled_stop_recorded:
+                competitor_logger.info(
+                    "batch_event batch=%s event=manual_stop completed=%s total=%s "
+                    "pending=%s succeeded=%s failed=%s terminal=%s user=%s source=%s "
+                    "wall_elapsed_seconds=%.3f reason=%s",
+                    batch_id,
+                    status.get("completed") or 0,
+                    status.get("total") or 0,
+                    status.get("pending") or 0,
+                    status.get("succeeded") or 0,
+                    status.get("failed") or 0,
+                    status.get("terminal") or 0,
+                    stopped_by,
+                    status.get("source") or "manual",
+                    _wall_elapsed_seconds(status.get("started_at")),
+                    _single_line(reason),
+                )
             return status
 
     @app.post("/api/competitors/batch-stop")
@@ -5510,11 +5839,13 @@ def create_app(project_root: Path | None = None) -> FastAPI:
         except CollectionBatchBusyError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         effective_event = str(status["event"])
+        wall_elapsed_seconds = _wall_elapsed_seconds(status.get("started_at"))
         if effective_event != payload.event:
             competitor_logger.info(
                 "batch_event batch=%s event=%s submitted_event=%s completed=%s "
                 "total=%s pending=%s succeeded=%s failed=%s terminal=%s user=%s "
-                "reason=%s",
+                "source=%s result_count=%s error_count=%s stock_probe=%s "
+                "visible_browser=%s wall_elapsed_seconds=%.3f reason=%s",
                 payload.batch_id,
                 effective_event,
                 payload.event,
@@ -5525,12 +5856,20 @@ def create_app(project_root: Path | None = None) -> FastAPI:
                 payload.failed,
                 payload.terminal,
                 user.username,
+                status.get("source") or "manual",
+                status.get("result_count") or 0,
+                status.get("error_count") or 0,
+                status.get("with_stock_probe"),
+                status.get("visible_browser"),
+                wall_elapsed_seconds,
                 _single_line(payload.reason),
             )
         else:
             competitor_logger.info(
                 "batch_event batch=%s event=%s completed=%s total=%s pending=%s "
-                "succeeded=%s failed=%s terminal=%s user=%s reason=%s",
+                "succeeded=%s failed=%s terminal=%s user=%s source=%s "
+                "result_count=%s error_count=%s stock_probe=%s visible_browser=%s "
+                "wall_elapsed_seconds=%.3f reason=%s",
                 payload.batch_id,
                 payload.event,
                 payload.completed,
@@ -5540,6 +5879,12 @@ def create_app(project_root: Path | None = None) -> FastAPI:
                 payload.failed,
                 payload.terminal,
                 user.username,
+                status.get("source") or "manual",
+                status.get("result_count") or 0,
+                status.get("error_count") or 0,
+                status.get("with_stock_probe"),
+                status.get("visible_browser"),
+                wall_elapsed_seconds,
                 _single_line(payload.reason),
             )
         return {"ok": True, "status": status}
@@ -6763,8 +7108,12 @@ def _required_permission(path: str, method: str) -> str | tuple[str, ...] | None
         return None
     if path == "/api/erp/product-thumbnail":
         return STORE_VIEW, COMPETITORS_VIEW, DAILY_REPORT_VIEW
+    if path.startswith("/api/erp/container-selection"):
+        return STORE_VIEW, COMPETITORS_VIEW
     if path == "/api/erp/refresh":
         return REFRESH_RUN
+    if path.startswith("/api/erp/returns/removal-orders"):
+        return STORE_VIEW if safe_method else REFRESH_RUN
     if path.startswith("/api/erp/logistics/links"):
         return STORE_VIEW if safe_method else LOGISTICS_MANAGE
     if path.startswith("/api/erp/platform-warehouse"):
@@ -6887,6 +7236,19 @@ def _display_item_number(item_index: int | None) -> int | str:
 
 def _single_line(value: str) -> str:
     return " ".join(value.split())[:500]
+
+
+def _wall_elapsed_seconds(started_at: object) -> float:
+    raw = str(started_at or "").strip()
+    if not raw:
+        return 0.0
+    try:
+        parsed = datetime.fromisoformat(raw)
+    except ValueError:
+        return 0.0
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return max(0.0, (datetime.now(UTC) - parsed.astimezone(UTC)).total_seconds())
 
 
 def _load_competitor_dataset(
@@ -7029,25 +7391,18 @@ def _load_own_store_returns(
     *,
     plid: str,
     own_store_codes: set[str],
-    start_date: date | None,
-    end_date: date | None,
     engine: Engine | None = None,
 ) -> dict[str, Any]:
-    """Load one own PLID's detailed returns without widening store authorization."""
-    selected_end = end_date or datetime.now(ZoneInfo("Africa/Johannesburg")).date()
-    selected_start = start_date or selected_end - timedelta(days=29)
+    """Load all locally collected returns for one PLID in the authorized stores."""
+    today = datetime.now(ZoneInfo("Africa/Johannesburg")).date()
     if not own_store_codes:
-        return _empty_return_payload(
-            start_date=selected_start,
-            end_date=selected_end,
+        return _empty_own_store_return_payload(
             message="当前账号没有可读取的店铺范围。",
         )
     settings = DashboardSettings.from_env(project_root)
     path = sqlite_database_path(settings.database_url)
     if path is not None and not path.exists():
-        return _empty_return_payload(
-            start_date=selected_start,
-            end_date=selected_end,
+        return _empty_own_store_return_payload(
             message="本地退货数据库尚未建立。",
         )
     owned_engine = engine is None
@@ -7068,18 +7423,8 @@ def _load_own_store_returns(
             with store_scope(store_code), Session(read_engine) as session:
                 store_rows = enrich_product_master_records(
                     session,
-                    load_store_return_rows(
-                        session,
-                        start_date=selected_start,
-                        end_date=selected_end,
-                        plid=plid,
-                    ),
-                    as_of_date=selected_end,
-                )
-                status = load_return_collection_status(
-                    session,
-                    start_date=selected_start,
-                    end_date=selected_end,
+                    load_store_return_rows(session, plid=plid),
+                    as_of_date=today,
                 )
                 counter = load_offer_returned_30_day_counter(session, plid=plid)
             for source in store_rows:
@@ -7088,14 +7433,38 @@ def _load_own_store_returns(
                 item["store_name"] = store_name
                 item["store_scope_key"] = f"{store_code}:{item.get('seller_return_id')}"
                 rows.append(item)
-            statuses.append(
-                {**status, "store_code": store_code, "store_name": store_name}
-            )
             counters.append(
                 {**counter, "store_code": store_code, "store_name": store_name}
             )
         filtered = filter_return_rows(rows)
+        # These bounds describe coverage of the observed history, not a row filter
+        # or a claim that the platform's entire lifetime has been collected.
+        observed_dates = [
+            date.fromisoformat(str(row["return_date"]))
+            for row in filtered
+            if row.get("return_date")
+        ]
+        selected_start = min([today, *observed_dates])
+        selected_end = max([today, *observed_dates])
+        undated_store_codes = {
+            row["store_code"] for row in filtered if not row.get("return_date")
+        }
+        for store_code in sorted(own_store_codes):
+            with store_scope(store_code), Session(read_engine) as session:
+                status = load_return_collection_status(
+                    session, start_date=selected_start, end_date=selected_end
+                )
+            if store_code in undated_store_codes and status["data_status"] == "collected":
+                status = {**status, "data_status": "partial"}
+            statuses.append(
+                {
+                    **status,
+                    "store_code": store_code,
+                    "store_name": store_names.get(store_code, store_code),
+                }
+            )
         return {
+            "date_scope": "all_collected",
             "range_start": selected_start.isoformat(),
             "range_end": selected_end.isoformat(),
             "date_basis": "Africa/Johannesburg",
@@ -7104,29 +7473,41 @@ def _load_own_store_returns(
             "offer_returned_30_days": _aggregate_offer_return_counter(counters),
             "summary": summarize_return_rows(filtered),
             "filters": return_filter_options(filtered),
-            "items": filtered[:20],
+            "items": filtered,
             "total": len(filtered),
             "page": 1,
-            "page_size": 20,
+            "page_size": len(filtered),
             "message": (
-                "详情卡展示当前选择区间的最近20条；全部记录可在退货管理模块筛选查看。"
+                "展示该商品全部已采集历史退货明细。"
                 if filtered
-                else "当前选择区间没有已采集到的该商品退货明细。"
+                else "本地尚无该商品退货明细，不代表平台全部历史无退货。"
             ),
             "source_notice": (
-                "明细来自 Seller API /returns；滚动30天计数来自 Offers，两个口径分开展示。"
+                "仅展示本地已采集明细，不代表平台全部历史完整；Offers 为独立滚动30天计数。"
             ),
         }
     except SQLAlchemyError:
-        return _empty_return_payload(
-            start_date=selected_start,
-            end_date=selected_end,
+        return _empty_own_store_return_payload(
             message="退货明细暂时不可读，请查看采集状态。",
             data_status="unavailable",
         )
     finally:
         if owned_engine:
             read_engine.dispose()
+
+
+def _empty_own_store_return_payload(
+    *, message: str, data_status: str = "uncollected"
+) -> dict[str, Any]:
+    return {
+        **_empty_return_payload(
+            start_date=None, end_date=None, message=message, data_status=data_status
+        ),
+        "date_scope": "all_collected",
+        "range_start": "",
+        "range_end": "",
+        "page_size": 0,
+    }
 
 
 def _combined_return_data_status(statuses: Sequence[Mapping[str, Any]]) -> str:
@@ -7194,7 +7575,34 @@ def _empty_return_payload(
             "metric": "quantity_returned_30_days",
             "window": "rolling_30_days",
         },
-        "summary": summarize_return_rows([]),
+        "summary": {
+            **summarize_return_rows([]),
+            "removal_lifecycle": summarize_removal_lifecycles([]),
+        },
+        "removal_order_tracking": {
+            "data_status": "uncollected",
+            "store_statuses": [],
+            "w8": {
+                "data_status": "uncollected",
+                "synced_at": None,
+                "return_order_count": 0,
+                "message": "尚无可读取的移除单或长睿退货快照",
+            },
+        },
+        "removal_orders": {
+            "data_status": "uncollected",
+            "counts": {
+                "total": 0,
+                "submitted": 0,
+                "pickup_ready": 0,
+                "closed": 0,
+            },
+            "items": [],
+            "warnings": [],
+            "source_notice": (
+                "尚无本地 Seller Portal Manage Removal Orders 快照；未知不能解释为 0 单。"
+            ),
+        },
         "filters": return_filter_options([]),
         "items": [],
         "total": 0,
@@ -8031,7 +8439,7 @@ def _require_platform_warehouse_loopback(request: Request) -> None:
     if not _is_loopback_request(request):
         raise HTTPException(
             status_code=403,
-            detail="Seller Portal 登录、预审和写入只允许从 ERP 服务器本机执行",
+            detail="Seller Portal 登录、同步、预审和写入只允许从 ERP 服务器本机执行",
         )
 
 

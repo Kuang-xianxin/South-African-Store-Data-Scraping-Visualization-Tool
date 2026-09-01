@@ -13,7 +13,6 @@ test("business modules are split into on-demand chunks", () => {
   assert.match(appSource, /defineAsyncComponent\(\{/);
   for (const page of [
     "OverviewPage",
-    "ProductsPage",
     "KeywordTrafficPage",
     "SearchRankingPage",
     "AnomalyProductsPage",

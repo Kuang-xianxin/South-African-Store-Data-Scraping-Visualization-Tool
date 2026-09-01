@@ -30,6 +30,10 @@ DEFAULT_MAX_DIMENSION = 192
 SUPPORTED_MAX_DIMENSIONS = frozenset({192, 384, 640})
 DEFAULT_MAX_SOURCE_BYTES = 8 * 1024 * 1024
 DEFAULT_MAX_SOURCE_PIXELS = 36_000_000
+IMAGE_REQUEST_HEADERS = {
+    "Accept": "image/jpeg,image/png,image/webp,image/*;q=0.8",
+    "User-Agent": "TakealotLocalERP/0.1",
+}
 
 
 class ProductImageInputError(ValueError):
@@ -58,9 +62,11 @@ class ProductThumbnailCache:
         self._locks_guard = Lock()
         self._network_client: httpx.Client | None = None
         self._direct_client: httpx.Client | None = None
+        self._timeout: httpx.Timeout | None = None
         self._fetcher: Callable[[str], bytes]
         if fetcher is None:
             timeout = httpx.Timeout(connect=8.0, read=20.0, write=10.0, pool=10.0)
+            self._timeout = timeout
             self._network_client = httpx.Client(
                 follow_redirects=False,
                 timeout=timeout,
@@ -144,36 +150,57 @@ class ProductThumbnailCache:
         for client in clients:
             if client is None:
                 continue
-            try:
-                with client.stream(
-                    "GET",
-                    image_url,
-                    headers={
-                        "Accept": "image/avif,image/webp,image/jpeg,image/*",
-                        "User-Agent": "TakealotLocalERP/0.1",
-                    },
-                ) as response:
-                    response.raise_for_status()
-                    declared_size = int(response.headers.get("Content-Length") or 0)
-                    if declared_size > self.max_source_bytes:
+            downloaded = self._download_with_client(client, image_url)
+            if downloaded is not None:
+                return downloaded
+
+        # Long-running ERP processes can retain an unusable pooled connection even
+        # though the public image is healthy. A fresh direct client is the bounded
+        # final recovery path before the endpoint reports a transient 502.
+        with self._new_direct_client() as client:
+            downloaded = self._download_with_client(client, image_url)
+            if downloaded is not None:
+                return downloaded
+        raise ProductImageUnavailableError("商品原图暂时无法读取")
+
+    def _new_direct_client(self) -> httpx.Client:
+        return httpx.Client(
+            follow_redirects=False,
+            timeout=self._timeout,
+            trust_env=False,
+        )
+
+    def _download_with_client(
+        self,
+        client: httpx.Client,
+        image_url: str,
+    ) -> bytes | None:
+        try:
+            with client.stream(
+                "GET",
+                image_url,
+                headers=IMAGE_REQUEST_HEADERS,
+            ) as response:
+                response.raise_for_status()
+                declared_size = int(response.headers.get("Content-Length") or 0)
+                if declared_size > self.max_source_bytes:
+                    raise ProductImageUnavailableError(
+                        "商品原图超过安全大小限制"
+                    )
+                chunks: list[bytes] = []
+                received = 0
+                for chunk in response.iter_bytes():
+                    received += len(chunk)
+                    if received > self.max_source_bytes:
                         raise ProductImageUnavailableError(
                             "商品原图超过安全大小限制"
                         )
-                    chunks: list[bytes] = []
-                    received = 0
-                    for chunk in response.iter_bytes():
-                        received += len(chunk)
-                        if received > self.max_source_bytes:
-                            raise ProductImageUnavailableError(
-                                "商品原图超过安全大小限制"
-                            )
-                        chunks.append(chunk)
-                    return b"".join(chunks)
-            except ProductImageUnavailableError:
-                raise
-            except (httpx.HTTPError, OSError, ValueError):
-                continue
-        raise ProductImageUnavailableError("商品原图暂时无法读取")
+                    chunks.append(chunk)
+                return b"".join(chunks)
+        except ProductImageUnavailableError:
+            raise
+        except (httpx.HTTPError, OSError, ValueError):
+            return None
 
     def _render_thumbnail(self, source: bytes, max_dimension: int) -> bytes:
         try:

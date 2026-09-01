@@ -15,6 +15,16 @@ type ScheduledBatchResumeStatus = Pick<
   | "scheduled_resume_pending"
 >;
 
+type ScheduledNetworkResumeStatus = Pick<
+  CompetitorBatchStatus,
+  | "active"
+  | "batch_id"
+  | "event"
+  | "source"
+  | "scheduled_network_resume_available"
+  | "scheduled_wait_kind"
+>;
+
 type BatchIdentityStatus = Pick<CompetitorBatchStatus, "active" | "batch_id">;
 
 type ScheduledRetryWaitStatus = Pick<
@@ -114,6 +124,21 @@ export function stoppedScheduledBatchResumeCount(
     return 0;
   }
   return Math.max(0, status.scheduled_resume_pending ?? 0);
+}
+
+export function canResumeScheduledNetworkPause(
+  canControlCollection: boolean,
+  status: ScheduledNetworkResumeStatus,
+): boolean {
+  return Boolean(
+    canControlCollection
+    && status.active
+    && status.batch_id
+    && status.source === "scheduled"
+    && status.event === "scheduled_pause"
+    && status.scheduled_wait_kind === "network"
+    && status.scheduled_network_resume_available === true,
+  );
 }
 
 export function scheduledRetryWaitLabel(

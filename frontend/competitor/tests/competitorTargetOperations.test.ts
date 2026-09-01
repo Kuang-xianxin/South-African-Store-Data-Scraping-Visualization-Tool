@@ -20,3 +20,10 @@ test("global competitor targets only expose add and update operations", () => {
 test("historical delete audit copy stays read-only", () => {
   assert.match(pageSource, /历史删除留痕/);
 });
+
+test("own-store automatic tracking card never appears in true-competitor detail", () => {
+  assert.match(
+    pageSource,
+    /v-if="\s*!props\.detailOnly\s*&& props\.isAdmin\s*&& selected\.来源 === 'own_store'\s*"\s*class="panel competitor-target-action-card own-store-auto-target"/,
+  );
+});

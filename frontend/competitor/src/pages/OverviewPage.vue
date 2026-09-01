@@ -13,8 +13,10 @@ import {
   type FloatingChartTooltipPosition,
 } from "../floatingChartTooltip";
 import {
+  projectRevenueMonthTotal,
   revenuePeriodLabels,
   summarizeRevenuePeriod,
+  type RevenueMonthProjection,
   type RevenuePeriodSummary,
 } from "../overviewRevenue";
 import { formatChinaDateTime } from "../time";
@@ -224,6 +226,20 @@ const singleStorePeriodRevenue = computed(() =>
     })),
   ),
 );
+const multiStoreRevenueProjection = computed(() =>
+  projectRevenueMonthTotal(
+    multiStorePeriodRevenue.value.dailyAverage,
+    props.rangeStart,
+    props.rangeEnd,
+  ),
+);
+const singleStoreRevenueProjection = computed(() =>
+  projectRevenueMonthTotal(
+    singleStorePeriodRevenue.value.dailyAverage,
+    props.rangeStart,
+    props.rangeEnd,
+  ),
+);
 
 const REVENUE_WIDTH = 760;
 const REVENUE_HEIGHT = 250;
@@ -420,6 +436,19 @@ function periodRevenueAverageBasis(summary: RevenuePeriodSummary) {
     : "暂无可计算日均的销售额数据";
 }
 
+function periodRevenueProjectionBasis(
+  projection: RevenueMonthProjection,
+  summary: RevenuePeriodSummary,
+) {
+  if (projection.monthDayCount === null) return "仅在单个自然月视口计算";
+  if (projection.projectedTotal === null) return "暂无可计算预测的销售额数据";
+  const details = [`月内日均 × ${projection.monthDayCount} 天`];
+  if (summary.partialDayCount) details.push("含部分店铺合计");
+  if (summary.pendingDayCount) details.push("含待核验日");
+  if (summary.missingDayCount) details.push("缺失不补 0");
+  return details.join(" · ");
+}
+
 function offerCoverage(coverage: number, total: number) {
   if (!total) return "暂无商品库存快照";
   return coverage === total
@@ -601,7 +630,7 @@ function stepTrafficPoint(index: number, direction: -1 | 1, event: KeyboardEvent
 function revenuePointTitle(point: MultiStoreRevenuePoint) {
   if (point.total_ordered_revenue !== null) {
     const status = point.data_status === "pending"
-      ? `；${point.pending_reconciliation_store_count} 家待失败后核验，${point.unverified_source_store_count} 家来源未建档`
+      ? `；${revenuePendingStatus(point)}`
       : point.data_status === "revised"
         ? `；已记录 ${point.revision_count} 条日终基线后修订`
         : "；来源已核验";
@@ -611,6 +640,17 @@ function revenuePointTitle(point: MultiStoreRevenuePoint) {
     return `${point.metric_date}（南非业务日）：下单金额${point.missing_store_count ? "部分合计" : "合计"} ${currency(point.total_ordered_revenue)}${coverage}${status}`;
   }
   return `${point.metric_date}（南非业务日）：没有任何店铺返回销售额，折线保留断点`;
+}
+
+function revenuePendingStatus(point: MultiStoreRevenuePoint) {
+  const details: string[] = [];
+  if (point.pending_reconciliation_store_count) {
+    details.push(`${point.pending_reconciliation_store_count} 家对应周期末业务日待失败后核验`);
+  }
+  if (point.unverified_source_store_count) {
+    details.push(`${point.unverified_source_store_count} 家来源未建档`);
+  }
+  return details.join("；") || "该业务日销售额来源待核验";
 }
 
 function trafficSlotLabel(slot: string) {
@@ -721,6 +761,13 @@ function trafficPointTitle(point: StoreTrafficPoint) {
             <strong>{{ currency(multiStorePeriodRevenue.dailyAverage) }}</strong>
             <small>{{ periodRevenueAverageBasis(multiStorePeriodRevenue) }}</small>
           </article>
+          <article class="revenue-projection-card">
+            <span>{{ periodRevenueLabels.projectedTotal }}</span>
+            <strong>{{ currency(multiStoreRevenueProjection.projectedTotal) }}</strong>
+            <small>
+              {{ periodRevenueProjectionBasis(multiStoreRevenueProjection, multiStorePeriodRevenue) }}
+            </small>
+          </article>
         </div>
 
         <section class="revenue-command" aria-labelledby="multi-store-revenue-title">
@@ -744,7 +791,8 @@ function trafficPointTitle(point: StoreTrafficPoint) {
             </strong>
             <span>
               {{ storeData.sales_reconciliation.failed_store_count }} 家失败，
-              {{ storeData.sales_reconciliation.recovered_store_count }} 家已恢复。未核验区间以橙色显示。
+              {{ storeData.sales_reconciliation.recovered_store_count }} 家已恢复。
+              仅对应失败业务日与来源未建档日以橙色显示。
             </span>
           </div>
           <div
@@ -797,7 +845,7 @@ function trafficPointTitle(point: StoreTrafficPoint) {
                   @pointerleave="clearRevenuePointer"
                 >
                 <title id="multi-store-revenue-svg-title">合并范围内店铺已结束业务日总销售额折线图</title>
-                <desc id="multi-store-revenue-svg-description">当前仍在进行的SAST日不进入折线；绿色折线为来源已核验的完整店铺日；橙色虚线表示周期末失败后尚待新的 Sales 批次核验；蓝色线表示该日已有可审计历史修订；店铺覆盖不完整时绘制已有店铺合计并披露覆盖数，缺失店铺不按0补齐。</desc>
+                <desc id="multi-store-revenue-svg-description">当前仍在进行的SAST日不进入折线；绿色折线为来源已核验的完整店铺日；橙色虚线只标记来源未建档日或对应的周期末失败业务日，不把当前店铺级待核验状态铺到全部历史日期；蓝色线表示该日已有可审计历史修订；店铺覆盖不完整时绘制已有店铺合计并披露覆盖数，缺失店铺不按0补齐。</desc>
                 <g class="traffic-grid">
                   <template v-for="tick in revenueChart.ticks" :key="tick.y">
                     <line :x1="REVENUE_LEFT" :x2="REVENUE_WIDTH - REVENUE_RIGHT" :y1="tick.y" :y2="tick.y" />
@@ -916,8 +964,7 @@ function trafficPointTitle(point: StoreTrafficPoint) {
                     <div v-else-if="activeRevenueDot.point.data_status === 'pending'">
                       <dt>数据状态</dt>
                       <dd class="warning">
-                        {{ activeRevenueDot.point.pending_reconciliation_store_count }} 家待周期末失败后核验；
-                        {{ activeRevenueDot.point.unverified_source_store_count }} 家来源未建档
+                        {{ revenuePendingStatus(activeRevenueDot.point) }}
                       </dd>
                     </div>
                     <div v-else-if="activeRevenueDot.point.data_status === 'revised'">
@@ -941,7 +988,7 @@ function trafficPointTitle(point: StoreTrafficPoint) {
             </div>
             <div class="traffic-legend revenue-legend">
               <span><i></i>合并范围内店铺完整且来源已核验</span>
-              <span><i class="reconciliation-pending"></i>周期末失败后待新批次核验</span>
+              <span><i class="reconciliation-pending"></i>该业务日来源待核验（含对应周期末失败日）</span>
               <span><i class="revised"></i>日终正式基线后被 Sales 数据纠偏并留审计</span>
               <span><i class="missing"></i>店铺缺失，未展示部分合计</span>
               <span><i class="missing-bridge"></i>缺失区间虚线桥接，仅连接两端真实值</span>
@@ -1274,6 +1321,13 @@ function trafficPointTitle(point: StoreTrafficPoint) {
           <span>{{ periodRevenueLabels.dailyAverage }}</span>
           <strong>{{ currency(singleStorePeriodRevenue.dailyAverage) }}</strong>
           <small>{{ periodRevenueAverageBasis(singleStorePeriodRevenue) }}</small>
+        </article>
+        <article class="revenue-projection-card">
+          <span>{{ periodRevenueLabels.projectedTotal }}</span>
+          <strong>{{ currency(singleStoreRevenueProjection.projectedTotal) }}</strong>
+          <small>
+            {{ periodRevenueProjectionBasis(singleStoreRevenueProjection, singleStorePeriodRevenue) }}
+          </small>
         </article>
       </div>
 
@@ -1675,7 +1729,12 @@ function trafficPointTitle(point: StoreTrafficPoint) {
 }
 
 .revenue-period-grid {
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.multi-total-grid .revenue-projection-card {
+  border-color: rgba(24, 103, 78, 0.22);
+  background: rgba(239, 248, 244, 0.88);
 }
 
 .multi-total-grid article {

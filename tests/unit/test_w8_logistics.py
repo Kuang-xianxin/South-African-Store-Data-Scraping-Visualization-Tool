@@ -174,7 +174,30 @@ def test_logistics_overview_aggregates_both_read_only_apis(
                 }
             )
         if path.endswith("/queryReBoundOrders"):
-            return _w8_response({"records": [{"statusName": "已退仓"}], "total": 2})
+            return _w8_response(
+                {
+                    "records": [
+                        {
+                            "orderNo": "RB-001",
+                            "statusName": "已入库",
+                            "remark": "Takealot removal PO 12345678",
+                            "inboundDateStr": "2026-08-01 09:00:00",
+                            "items": [
+                                {
+                                    "sku": "SKU-A",
+                                    "sysSku": "COMPANY-A",
+                                    "returnedNum": 2,
+                                    "inboundNum": 2,
+                                    "pendingShelfNum": 0,
+                                    "totalShelfNum": 1,
+                                    "totalDefectiveNum": 1,
+                                }
+                            ],
+                        }
+                    ],
+                    "total": 2,
+                }
+            )
         raise AssertionError(f"unexpected W8 path: {path}")
 
     def takealot_handler(request: httpx.Request) -> httpx.Response:
@@ -245,6 +268,36 @@ def test_logistics_overview_aggregates_both_read_only_apis(
             "outbound_allocated": 2,
             "transit_stock": 3,
             "defective_stock": 1,
+        }
+    ]
+    assert payload["w8"]["return_orders"] == [
+        {
+            "order_no": "RB-001",
+            "status": "已入库",
+            "created_at": "",
+            "expected_arrival_at": "",
+            "inbound_date": "2026-08-01 09:00:00",
+            "shelf_date": "",
+            "returned_type": "",
+            "waybill_no": "",
+            "po_references": ["12345678"],
+            "items": [
+                {
+                    "platform_sku": "SKU-A",
+                    "company_sku": "COMPANY-A",
+                    "product_name": None,
+                    "returned_quantity": 2,
+                    "inbound_quantity": 2,
+                    "pending_shelf_quantity": 0,
+                    "shelf_quantity": None,
+                    "total_shelf_quantity": 1,
+                    "defective_quantity": None,
+                    "total_defective_quantity": 1,
+                    "inbound_date": None,
+                    "shelf_date": None,
+                    "finished": False,
+                }
+            ],
         }
     ]
     assert "total=2" in payload["w8"]["warnings"][0]

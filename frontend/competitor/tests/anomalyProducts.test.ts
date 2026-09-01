@@ -247,7 +247,10 @@ test("cards open the shared full own-link detail as a standalone browser page", 
     ),
     /loadOwnStoreScope|loadPersonalWatchlist/,
   );
-  assert.match(competitorSource, /<template v-if="!props\.detailOnly">/);
+  assert.match(
+    competitorSource,
+    /<template v-if="!props\.detailOnly && !props\.embeddedDetailOnly">/,
+  );
   assert.match(competitorSource, /const ownItem = overview\.store_items\.find/);
   assert.match(competitorSource, /openProductModal\(ownItem\)/);
   assert.match(

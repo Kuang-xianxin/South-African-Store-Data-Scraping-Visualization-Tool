@@ -2,10 +2,13 @@ from __future__ import annotations
 
 from datetime import UTC, date, datetime
 
-from sqlalchemy import create_engine, select
+from sqlalchemy import create_engine, event, select
 from sqlalchemy.orm import Session
 
-from takealot_ops.competitors.own_store_sales import build_own_store_sales_series
+from takealot_ops.competitors.own_store_sales import (
+    build_own_store_sales_series,
+    build_own_store_sales_series_bulk,
+)
 from takealot_ops.storage.migrations import create_schema
 from takealot_ops.storage.models import (
     DailySalesMetricState,
@@ -159,6 +162,80 @@ def test_series_aggregates_own_offers_and_keeps_missing_days_distinct_from_zero(
         "missing",
         "missing",
     ]
+    engine.dispose()
+
+
+def test_bulk_series_matches_single_plid_results_with_fewer_queries() -> None:
+    engine = _engine()
+    with store_scope("store-a"), Session(engine) as session, session.begin():
+        session.add_all(
+            [
+                OfferCurrent(
+                    offer_id="offer-123",
+                    productline_id="123",
+                    sku="SKU-123",
+                    created_at=datetime(2026, 8, 1, 1, tzinfo=UTC),
+                    captured_at=datetime(2026, 8, 5, 1, tzinfo=UTC),
+                ),
+                OfferCurrent(
+                    offer_id="offer-456",
+                    productline_id="456",
+                    sku="SKU-456",
+                    created_at=datetime(2026, 8, 2, 1, tzinfo=UTC),
+                    captured_at=datetime(2026, 8, 5, 1, tzinfo=UTC),
+                ),
+                SaleItem(
+                    order_item_id="order-123",
+                    order_date=datetime(2026, 8, 2, 1, tzinfo=UTC),
+                    sales_day=date(2026, 8, 2),
+                    offer_id="offer-123",
+                    quantity=2,
+                    raw_payload={},
+                ),
+                SaleItem(
+                    order_item_id="order-456",
+                    order_date=datetime(2026, 8, 3, 1, tzinfo=UTC),
+                    sales_day=date(2026, 8, 3),
+                    offer_id="offer-456",
+                    quantity=3,
+                    raw_payload={},
+                ),
+                _state(date(2026, 8, 1)),
+                _state(date(2026, 8, 2)),
+                _state(date(2026, 8, 3)),
+                _state(date(2026, 8, 4)),
+            ]
+        )
+
+    query_count = 0
+
+    def count_query(*_args) -> None:
+        nonlocal query_count
+        query_count += 1
+
+    event.listen(engine, "after_cursor_execute", count_query)
+    with Session(engine) as session:
+        singles = {
+            plid: build_own_store_sales_series(
+                session,
+                plid=plid,
+                store_codes={"store-a", "store-b"},
+                through=date(2026, 8, 5),
+            )
+            for plid in ("123", "456")
+        }
+        single_query_count = query_count
+        query_count = 0
+        bulk = build_own_store_sales_series_bulk(
+            session,
+            plids={"123", "456"},
+            store_codes={"store-a", "store-b"},
+            through=date(2026, 8, 5),
+        )
+        bulk_query_count = query_count
+
+    assert bulk == singles
+    assert bulk_query_count < single_query_count
     engine.dispose()
 
 

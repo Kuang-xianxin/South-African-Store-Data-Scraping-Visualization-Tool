@@ -75,7 +75,7 @@ test("manual viewport keeps an ordered past range", () => {
 test("the global selector and overview data requests use the same range", () => {
   assert.match(
     appSource,
-    /\['search-ranking', 'logistics', 'anomaly-products', 'competitors', 'users'\]\.includes\(currentPage\)/,
+    /\['search-ranking', 'logistics', 'anomaly-products', 'container-selection', 'competitors', 'users'\]\.includes\(currentPage\)/,
   );
   assert.match(appSource, /<span>数据范围<\/span>/);
   assert.match(appSource, /<span>开始日期<\/span>/);

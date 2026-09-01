@@ -7,14 +7,18 @@ import {
   buildCompetitorOfferTrend,
   buildOwnStoreTrafficTrend,
   comparableOfferNetOutflow,
+  filterCompetitorHistoryByDate,
   followerOffers,
+  getCompetitorHistoryDateBounds,
   groupCompetitorOffersBySeller,
   findSnapshotOffer,
+  needsFullCompetitorHistory,
   nearestObservedOwnStoreTrafficPoint,
   offerIntervalReplenishmentUnits,
   offerIntervalSalesUnits,
   sortCompetitorOffers,
 } from "../src/competitorOfferHistory.ts";
+import { getOwnStoreSalesRecentRange } from "../src/ownStoreSalesChart.ts";
 import type {
   CompetitorItem,
   CompetitorOfferItem,
@@ -332,6 +336,17 @@ test("traffic nodes align only to the exact Seller refresh timestamp", () => {
     aligned.map((point) => point.capturedAtMs),
     trafficTrend.slice(0, 2).map((point) => point.capturedAtMs),
   );
+  const filteredOfferTrend = buildCompetitorOfferTrend(
+    filterCompetitorHistoryByDate([firstOffer, secondOffer], "2026-08-03", "2026-08-03"),
+    selected,
+  );
+  const filteredTraffic = alignOwnStoreTrafficTrendToOfferTrend(trafficTrend, filteredOfferTrend);
+  assert.equal(filteredTraffic.length, 1);
+  assert.equal(filteredTraffic[0]?.capturedAtMs, filteredOfferTrend[0]?.capturedAtMs);
+  assert.equal(filteredTraffic[0]?.page_views_30_days, 120);
+  assert.equal(filteredTraffic[0]?.title_changed, false);
+  assert.equal(filteredTraffic[0]?.previous_title, null);
+  assert.equal(trafficTrend[1]?.title_changed, true);
 });
 
 test("offer interval units accumulate exact decreases and replenishment separately", () => {
@@ -348,6 +363,89 @@ test("offer interval units accumulate exact decreases and replenishment separate
 
   assert.equal(offerIntervalSalesUnits(history, selected), 7);
   assert.equal(offerIntervalReplenishmentUnits(history, selected), 6);
+});
+
+test("history date filters include both Beijing calendar days and reject invalid timestamps", () => {
+  const timestamps = [
+    "2026-07-31T15:59:59Z",
+    "2026-07-31T16:00:00",
+    "2026-08-02T23:59:59+08:00",
+    "2026-08-02T16:00:00Z",
+    "invalid",
+  ];
+  const history = timestamps.map((timestamp, index) => ({
+    ...snapshot(index + 1, [offer({})]),
+    采集时间: timestamp,
+  }));
+
+  assert.deepEqual(getCompetitorHistoryDateBounds(history), {
+    start: "2026-07-31", end: "2026-08-03",
+  });
+  assert.equal(getCompetitorHistoryDateBounds([]), null);
+  assert.equal(getCompetitorHistoryDateBounds([history[4]!]), null);
+  for (const [start, end] of [["2026-08-01", "2026-08-02"], ["2026-08-02", "2026-08-01"]]) {
+    assert.deepEqual(
+      filterCompetitorHistoryByDate(history, start!, end!).map((item) => item.快照ID),
+      [2, 3],
+    );
+  }
+});
+
+test("7, 15, 30, 60, 90 and all dates drive the same offer plots and separate inventory totals", () => {
+  const observations = [
+    ["2026-05-15", 300], ["2026-05-31", 280], ["2026-06-10", 320],
+    ["2026-06-29", 270], ["2026-06-30", 200], ["2026-07-20", 260],
+    ["2026-07-29", 240], ["2026-07-30", 230], ["2026-08-10", 220],
+    ["2026-08-20", 250], ["2026-08-28", 245],
+  ] as const;
+  for (const source of ["public_offer", "seller_api"] as const) {
+    const selected = offer({ 报价来源: source });
+    const history = observations.map(([date, stock], index) => ({
+      ...snapshot(index + 1, [offer({ ...selected, 库存数量: stock, 价格: index + 100 })]),
+      采集时间: `${date}T10:00:00+08:00`,
+      评论数: index + 20,
+    }));
+    const bounds = getCompetitorHistoryDateBounds(history)!;
+    for (const [days, expectedSales, expectedReplenishment, expectedPoints] of [
+      [7, null, null, 1], [15, 5, 0, 2],
+      [30, 15, 30, 4], [60, 45, 90, 7], [90, 165, 130, 10], [0, 185, 130, 11],
+    ] as const) {
+      const range = getOwnStoreSalesRecentRange(bounds, days);
+      const filtered = filterCompetitorHistoryByDate(history, range.start, range.end);
+      const trend = buildCompetitorOfferTrend(filtered, selected);
+      assert.equal(trend.length, expectedPoints);
+      assert.equal(trend[0]?.price, filtered[0]?.跟卖报价[0]?.价格);
+      assert.equal(trend[0]?.reviews, filtered[0]?.评论数);
+      assert.equal(offerIntervalSalesUnits(filtered, selected), expectedSales);
+      assert.equal(offerIntervalReplenishmentUnits(filtered, selected), expectedReplenishment);
+    }
+    const singlePoint = filterCompetitorHistoryByDate(history, "2026-08-28", "2026-08-28");
+    assert.equal(offerIntervalSalesUnits(singlePoint, selected), null);
+    assert.equal(offerIntervalReplenishmentUnits(singlePoint, selected), null);
+    const empty = filterCompetitorHistoryByDate(history, "2026-08-21", "2026-08-27");
+    assert.equal(buildCompetitorOfferTrend(empty, selected).length, 0);
+    assert.equal(offerIntervalSalesUnits(empty, selected), null);
+  }
+});
+
+test("inventory movement orders timezone-free database times as UTC like the chart", () => {
+  const selected = offer({});
+  const history = [
+    { ...snapshot(1, [offer({ 库存数量: 6 })]), 采集时间: "2026-08-02T01:00:00" },
+    { ...snapshot(2, [offer({ 库存数量: 10 })]), 采集时间: "2026-08-02T08:00:00+08:00" },
+  ];
+  assert.deepEqual(buildCompetitorOfferTrend(history, selected).map((point) => point.exactStock), [10, 6]);
+  assert.equal(offerIntervalSalesUnits(history, selected), 4);
+  assert.equal(offerIntervalReplenishmentUnits(history, selected), 0);
+});
+
+test("a restricted or unknown list range needs full local history, while a complete range is reused", () => {
+  const available = { available_start: "2026-05-01", available_end: "2026-08-28" };
+  assert.equal(needsFullCompetitorHistory("", "", available), false);
+  assert.equal(needsFullCompetitorHistory("2026-05-01", "2026-08-28", available), false);
+  assert.equal(needsFullCompetitorHistory("2026-07-01", "2026-08-28", available), true);
+  assert.equal(needsFullCompetitorHistory("2026-05-01", "2026-07-31", available), true);
+  assert.equal(needsFullCompetitorHistory("2026-07-01", "", { available_start: null, available_end: null }), true);
 });
 
 test("offer interval sales units ignore interleaved points from another source", () => {

@@ -19,6 +19,7 @@ from takealot_ops.competitors.domain import (
     CompetitorVariant,
     OfferStockObservation,
     StockProbeResult,
+    TAKEALOT_RETAIL_SELLER_ID,
     VariantStockObservation,
     competitor_offer_stock_state,
 )
@@ -678,7 +679,10 @@ async def _wait_for_product(page: Page, plid: str, title: str) -> None:
         await page.wait_for_timeout(3500 if attempt == 0 else 6500)
         await _dismiss_cookie(page)
         body = await page.locator("body").inner_text()
-        if _url_matches_plid(page.url, plid) and title in body:
+        if _url_matches_plid(page.url, plid) and _page_contains_product_title(
+            body,
+            title,
+        ):
             try:
                 await _find_main_add_to_cart_button(page)
             except RuntimeError:
@@ -690,6 +694,13 @@ async def _wait_for_product(page: Page, plid: str, title: str) -> None:
     raise RuntimeError(
         f"目标竞品 PLID{plid} 的主商品购买按钮未完整加载；已拒绝点击推荐商品，请稍后重试"
     )
+
+
+def _page_contains_product_title(body: str, title: str) -> bool:
+    """Compare rendered and API titles after browser-equivalent whitespace folding."""
+    expected = " ".join(title.casefold().split())
+    rendered = " ".join(body.casefold().split())
+    return bool(expected) and expected in rendered
 
 
 def _url_matches_plid(url: str, plid: str) -> bool:
@@ -800,6 +811,9 @@ async def _find_other_offer_button_by_seller_row(
     offer: CompetitorOffer,
 ) -> Locator | None:
     """Use Takealot's current seller link and its closest quote row."""
+    if offer.seller_id == TAKEALOT_RETAIL_SELLER_ID:
+        return await _find_takealot_retail_offer_button(page, offer)
+
     seller_links = page.locator('a[href*="sellers="]:visible')
     matching_links: list[Locator] = []
     expected_name = _normalise_offer_text(offer.seller_name)
@@ -832,6 +846,26 @@ async def _find_other_offer_button_by_seller_row(
     if await button.count() != 1 or not await button.is_visible():
         return None
     return button
+
+
+async def _find_takealot_retail_offer_button(
+    page: Page,
+    offer: CompetitorOffer,
+) -> Locator | None:
+    """Locate one API-confirmed Takealot retail row by exact label and price."""
+    rows = page.locator("div.buying-choice-list-item:visible")
+    matches: list[Locator] = []
+    for index in range(await rows.count()):
+        row = rows.nth(index)
+        row_text = " ".join((await row.inner_text()).split())
+        if re.search(r"(?:^|\s)Takealot(?:\s|$)", row_text) is None:
+            continue
+        if not _rand_price_matches(row_text, offer.price):
+            continue
+        button = row.locator('button[data-ref="buying-choice-atc"]:visible')
+        if await button.count() == 1 and await button.is_visible():
+            matches.append(button)
+    return matches[0] if len(matches) == 1 else None
 
 
 async def _expand_other_offers(page: Page) -> bool:

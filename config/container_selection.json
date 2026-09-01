@@ -1,0 +1,3339 @@
+{
+  "schema_version": 2,
+  "selection_batch_id": "christmas-2026-cabinet-fill-recent-v3-20260826",
+  "generated_at": "2026-08-26T09:46:45Z",
+  "policy": {
+    "electrified_volume_limit_percent": 30,
+    "own_min_unit_cbm": 0.015,
+    "new_min_unit_cbm": 0.04,
+    "sales_window_days": 90,
+    "clearance_window_days": 30,
+    "minimum_known_days_per_link": 14,
+    "minimum_radar_baseline_days": 7,
+    "minimum_radar_snapshots": 2,
+    "formula_version": "takealot-selection-workbook-sea-v1",
+    "formula_note": "工作簿海运毛利缓存值只用于新品利润与体积初筛；自有补货仅以近30天有效销售覆盖决定动销与数量，前30天只作趋势对比，90天只作背景。",
+    "recent_sales_window_days": 30,
+    "comparison_sales_window_days": 30,
+    "minimum_recent_monthly_units": 3,
+    "strong_recent_monthly_units": 6,
+    "maximum_recent_decline_ratio": 0.2,
+    "replenishment_cover_days": 30,
+    "minimum_representatives_per_category": 4,
+    "minimum_recent_signal_links": 2,
+    "minimum_recent_signal_score": 4,
+    "profit_currency_note": "sea_profit_rmb统一为人民币；杨永泰表缓存利润原为南非兰特，写入配置时按工作簿AG列汇率换算。"
+  },
+  "own_profiles": [
+    {
+      "source_sheet": "工作表9",
+      "source_row": 6,
+      "company_sku": "NFT101-QJD-6",
+      "product_name": "拳击垫（含手套）",
+      "length_cm": 66,
+      "width_cm": 42.1,
+      "height_cm": 54.3,
+      "carton_weight_kg": 19,
+      "units_per_carton": 10,
+      "unit_cbm": 0.015087798,
+      "sea_freight_rmb": 49.7897334,
+      "measured": true,
+      "electrical_status": "non_electric",
+      "electrical_evidence": "软体拳击垫与手套，不含插头、电池或充电部件。",
+      "risk_tags": [
+        "低动销复核",
+        "套装完整性"
+      ]
+    },
+    {
+      "source_sheet": "工作表9",
+      "source_row": 11,
+      "company_sku": "NFT101-DC-SC-65*45",
+      "product_name": "单槽水槽 65×45cm",
+      "length_cm": 69,
+      "width_cm": 49,
+      "height_cm": 23.5,
+      "carton_weight_kg": 4.95,
+      "units_per_carton": 1,
+      "unit_cbm": 0.0794535,
+      "sea_freight_rmb": 158.907,
+      "measured": true,
+      "electrical_status": "non_electric",
+      "electrical_evidence": "普通单槽水槽结构，不含数显、插头、电池或充电部件。",
+      "risk_tags": [
+        "安装适配",
+        "运输磕碰"
+      ]
+    },
+    {
+      "source_sheet": "工作表9",
+      "source_row": 12,
+      "company_sku": "NFT101-AQM-76-83CM",
+      "product_name": "安全门栏 76–83cm",
+      "length_cm": 77,
+      "width_cm": 34,
+      "height_cm": 82,
+      "carton_weight_kg": 26.7,
+      "units_per_carton": 6,
+      "unit_cbm": 0.0357793333333333,
+      "sea_freight_rmb": 71.5586666666667,
+      "measured": false,
+      "electrical_status": "non_electric",
+      "electrical_evidence": "机械压力安装门栏，不含插头、电池或充电部件。",
+      "risk_tags": [
+        "尺寸适配",
+        "锁扣强度"
+      ]
+    },
+    {
+      "source_sheet": "工作表9",
+      "source_row": 14,
+      "company_sku": "NFT101-MSP",
+      "product_name": "普通猫砂盆",
+      "length_cm": 59.3,
+      "width_cm": 18,
+      "height_cm": 42,
+      "carton_weight_kg": 4.22,
+      "units_per_carton": 1,
+      "unit_cbm": 0.0448308,
+      "sea_freight_rmb": 89.6616,
+      "measured": true,
+      "electrical_status": "non_electric",
+      "electrical_evidence": "非自动普通猫砂盆，不含插头、电池或充电部件。",
+      "risk_tags": [
+        "塑料破损",
+        "尺寸退货"
+      ]
+    },
+    {
+      "source_sheet": "工作表9",
+      "source_row": 20,
+      "company_sku": "NFT101-ZJMB-100",
+      "product_name": "手动支架幕布 100",
+      "length_cm": 83.5,
+      "width_cm": 29,
+      "height_cm": 44,
+      "carton_weight_kg": 15.5,
+      "units_per_carton": 4,
+      "unit_cbm": 0.0266365,
+      "sea_freight_rmb": 90.5641,
+      "measured": false,
+      "electrical_status": "non_electric",
+      "electrical_evidence": "手动支架幕布，不含电机、插头、电池或充电部件。",
+      "risk_tags": [
+        "幕布折痕",
+        "支架稳定性"
+      ]
+    },
+    {
+      "source_sheet": "工作表9",
+      "source_row": 21,
+      "company_sku": "NFT101-ZJMB-120",
+      "product_name": "手动支架幕布 120",
+      "length_cm": 83.5,
+      "width_cm": 29,
+      "height_cm": 44,
+      "carton_weight_kg": 19.6,
+      "units_per_carton": 4,
+      "unit_cbm": 0.0266365,
+      "sea_freight_rmb": 90.5641,
+      "measured": false,
+      "electrical_status": "non_electric",
+      "electrical_evidence": "手动支架幕布，不含电机、插头、电池或充电部件。",
+      "risk_tags": [
+        "幕布折痕",
+        "支架稳定性"
+      ]
+    },
+    {
+      "source_sheet": "工作表9",
+      "source_row": 23,
+      "company_sku": "NFT101-KBY-MB",
+      "product_name": "靠背椅 面包款黑",
+      "length_cm": 39,
+      "width_cm": 20,
+      "height_cm": 39.5,
+      "carton_weight_kg": 4.2,
+      "units_per_carton": 1,
+      "unit_cbm": 0.03081,
+      "sea_freight_rmb": 61.62,
+      "measured": false,
+      "electrical_status": "non_electric",
+      "electrical_evidence": "机械座椅结构，不含插头、电池或充电部件。",
+      "risk_tags": [
+        "承重",
+        "当前商品主档未匹配"
+      ]
+    },
+    {
+      "source_sheet": "工作表9",
+      "source_row": 24,
+      "company_sku": "NFT101-KBY-MB-WH",
+      "product_name": "靠背椅 面包款白",
+      "length_cm": 39,
+      "width_cm": 20,
+      "height_cm": 39.5,
+      "carton_weight_kg": 4.2,
+      "units_per_carton": 1,
+      "unit_cbm": 0.03081,
+      "sea_freight_rmb": 61.62,
+      "measured": true,
+      "electrical_status": "non_electric",
+      "electrical_evidence": "机械座椅结构，不含插头、电池或充电部件。",
+      "risk_tags": [
+        "承重",
+        "当前商品主档未匹配"
+      ]
+    },
+    {
+      "source_sheet": "工作表9",
+      "source_row": 32,
+      "company_sku": "NFT101-QGQ-80-L04-Red",
+      "product_name": "L04 双轨平衡尺 80cm 红色",
+      "length_cm": 105.3,
+      "width_cm": 24.3,
+      "height_cm": 39.8,
+      "carton_weight_kg": 22,
+      "units_per_carton": 2,
+      "unit_cbm": 0.050919921,
+      "sea_freight_rmb": 168.0357393,
+      "measured": false,
+      "electrical_status": "non_electric",
+      "electrical_evidence": "机械训练器材，不含插头、电池或充电部件。",
+      "risk_tags": [
+        "低动销复核",
+        "承重"
+      ]
+    },
+    {
+      "source_sheet": "工作表9",
+      "source_row": 65,
+      "company_sku": "NFT101-MTZGD-YX",
+      "product_name": "马桶增高垫 圆形",
+      "length_cm": 38.5,
+      "width_cm": 16.8,
+      "height_cm": 40,
+      "carton_weight_kg": 1.48,
+      "units_per_carton": 1,
+      "unit_cbm": 0.025872,
+      "sea_freight_rmb": 51.744,
+      "measured": true,
+      "electrical_status": "non_electric",
+      "electrical_evidence": "机械卫浴辅具，不含插头、电池或充电部件。",
+      "risk_tags": [
+        "尺寸适配",
+        "卫生退货"
+      ]
+    },
+    {
+      "source_sheet": "工作表9",
+      "source_row": 66,
+      "company_sku": "NFT101-MTZGD-DZ",
+      "product_name": "马桶增高垫 带盖",
+      "length_cm": 40.6,
+      "width_cm": 37.4,
+      "height_cm": 17,
+      "carton_weight_kg": 1.72,
+      "units_per_carton": 1,
+      "unit_cbm": 0.02581348,
+      "sea_freight_rmb": 51.62696,
+      "measured": true,
+      "electrical_status": "non_electric",
+      "electrical_evidence": "机械卫浴辅具，不含插头、电池或充电部件。",
+      "risk_tags": [
+        "尺寸适配",
+        "卫生退货"
+      ]
+    },
+    {
+      "source_sheet": "工作表9",
+      "source_row": 78,
+      "company_sku": "NFT101-KDNL-BK",
+      "product_name": "鸟笼 B600 黑",
+      "length_cm": 48.9,
+      "width_cm": 19.8,
+      "height_cm": 47.5,
+      "carton_weight_kg": 5.21,
+      "units_per_carton": 1,
+      "unit_cbm": 0.04599045,
+      "sea_freight_rmb": 91.9809,
+      "measured": true,
+      "electrical_status": "non_electric",
+      "electrical_evidence": "金属鸟笼结构，不含插头、电池或充电部件。",
+      "risk_tags": [
+        "金属变形",
+        "装配"
+      ]
+    },
+    {
+      "source_sheet": "工作表9",
+      "source_row": 79,
+      "company_sku": "NFT101-KDNL-WH",
+      "product_name": "鸟笼 B600 白",
+      "length_cm": 48.9,
+      "width_cm": 19.8,
+      "height_cm": 47.5,
+      "carton_weight_kg": 5.21,
+      "units_per_carton": 1,
+      "unit_cbm": 0.04599045,
+      "sea_freight_rmb": 91.9809,
+      "measured": true,
+      "electrical_status": "non_electric",
+      "electrical_evidence": "金属鸟笼结构，不含插头、电池或充电部件。",
+      "risk_tags": [
+        "金属变形",
+        "装配"
+      ]
+    },
+    {
+      "source_sheet": "工作表9",
+      "source_row": 80,
+      "company_sku": "NFT101-ZGNL-BK",
+      "product_name": "鸟笼 B601 黑色增高版",
+      "length_cm": 48.9,
+      "width_cm": 19.8,
+      "height_cm": 47.5,
+      "carton_weight_kg": 6.8,
+      "units_per_carton": 1,
+      "unit_cbm": 0.04599045,
+      "sea_freight_rmb": 91.9809,
+      "measured": true,
+      "electrical_status": "non_electric",
+      "electrical_evidence": "金属鸟笼结构，不含插头、电池或充电部件。",
+      "risk_tags": [
+        "金属变形",
+        "装配"
+      ]
+    },
+    {
+      "source_sheet": "工作表9",
+      "source_row": 89,
+      "company_sku": "NFT101-HS-BK-017",
+      "product_name": "黑色三档花洒",
+      "length_cm": 68.6,
+      "width_cm": 32,
+      "height_cm": 53,
+      "carton_weight_kg": 12,
+      "units_per_carton": 5,
+      "unit_cbm": 0.02326912,
+      "sea_freight_rmb": 46.53824,
+      "measured": true,
+      "electrical_status": "non_electric",
+      "electrical_evidence": "水压驱动花洒，不含插头、电池或充电部件。",
+      "risk_tags": [
+        "接口适配",
+        "漏水售后"
+      ]
+    },
+    {
+      "source_sheet": "工作表9",
+      "source_row": 96,
+      "company_sku": "NFT101-CBHL-020",
+      "product_name": "床边护栏",
+      "length_cm": 42,
+      "width_cm": 35.5,
+      "height_cm": 45,
+      "carton_weight_kg": 11.8,
+      "units_per_carton": 4,
+      "unit_cbm": 0.01677375,
+      "sea_freight_rmb": 33.5475,
+      "measured": true,
+      "electrical_status": "non_electric",
+      "electrical_evidence": "机械床边护栏，不含插头、电池或充电部件。",
+      "risk_tags": [
+        "尺寸适配",
+        "锁扣强度"
+      ]
+    },
+    {
+      "source_sheet": "工作表9",
+      "source_row": 97,
+      "company_sku": "NFT101-SQH-027",
+      "product_name": "手枪盒",
+      "length_cm": 40,
+      "width_cm": 38.5,
+      "height_cm": 32.8,
+      "carton_weight_kg": 18.7,
+      "units_per_carton": 3,
+      "unit_cbm": 0.0168373333333333,
+      "sea_freight_rmb": 55.5632,
+      "measured": true,
+      "electrical_status": "conditional_dry_cell_omitted",
+      "electrical_evidence": "工作簿“货物是否可以走”注明密码枪箱不随货放一次性干电池、由客户自配时按非带电；装柜前必须核对包装清单。",
+      "risk_tags": [
+        "必须不含干电池",
+        "合规复核"
+      ]
+    }
+  ],
+  "radar_categories": [
+    {
+      "category_id": "office-desks-straight",
+      "category_name": "直排办公桌 / 储物书桌",
+      "market_leaf_id": "28523",
+      "market_leaf_name": "Computer Workstations",
+      "cohort_basis": {
+        "scope": "现有竞品雷达同叶子类目按标题规则筛选的最新快照候选池",
+        "sample_size": 11,
+        "recent_signal_link_count": 7,
+        "recent_signal_score": 37,
+        "snapshot_date": "2026-08-25",
+        "extremes_are_sample_relative": true
+      },
+      "economics_anchor": {
+        "plid": "95867703",
+        "url": "https://www.takealot.com/computer-desk-home-office-writing-work-desk-120cm/PLID95867703",
+        "source_sheet": "慧",
+        "source_row": 931,
+        "name": "电脑桌 家用/办公书桌 - 120厘米",
+        "workbook_observation": "近三个月7个评论",
+        "length_cm": 130.0,
+        "width_cm": 67.5,
+        "height_cm": 10.0,
+        "unit_cbm": 0.08775,
+        "purchase_rmb": 88.0,
+        "selling_price_zar": 1300.0,
+        "sea_profit_rmb": 6.97500000000003,
+        "sea_margin": 0.0139500000000001,
+        "review_proxy_count": 7,
+        "electrical_status": "provisionally_non_electric",
+        "electrical_evidence": "按标题与工作簿结构判断为机械/家具类，不含插头、电池或充电部件；下单前仍须复核BOM与包装清单。",
+        "risk_tags": [
+          "板材磕碰",
+          "装配",
+          "承重"
+        ]
+      },
+      "representatives": [
+        {
+          "plid": "95257194",
+          "url": "https://www.takealot.com/computer-desk-storage-shelf-office-student-desk/PLID95257194",
+          "roles": [
+            "low_price",
+            "most_reviewed",
+            "recent_stock_mover",
+            "recent_review_grower",
+            "recent_signal_backup"
+          ]
+        },
+        {
+          "plid": "67535869",
+          "url": "https://www.takealot.com/michigan-work-desk/PLID67535869",
+          "roles": [
+            "high_price"
+          ]
+        },
+        {
+          "plid": "90394642",
+          "url": "https://www.takealot.com/west-town-home-office-desk-with-storage/PLID90394642",
+          "roles": [
+            "mid_market"
+          ]
+        },
+        {
+          "plid": "98254770",
+          "url": "https://www.takealot.com/work-desk-office-computer-table-book-shelf-storage-rack-desk/PLID98254770",
+          "roles": [
+            "recent_signal_backup"
+          ]
+        },
+        {
+          "plid": "95867703",
+          "url": "https://www.takealot.com/computer-desk-home-office-writing-work-desk-120cm/PLID95867703",
+          "roles": [
+            "workbook_economics_anchor"
+          ]
+        },
+        {
+          "plid": "91085748",
+          "url": "https://www.takealot.com/anchor-computer-laptop-desk-with-monitor-stand-home-office-metal/PLID91085748",
+          "roles": [
+            "workbook_secondary_anchor"
+          ]
+        }
+      ]
+    },
+    {
+      "category_id": "office-desks-corner",
+      "category_name": "L型 / 转角办公桌",
+      "market_leaf_id": "28523",
+      "market_leaf_name": "Computer Workstations",
+      "cohort_basis": {
+        "scope": "现有竞品雷达同叶子类目按标题规则筛选的最新快照候选池",
+        "sample_size": 10,
+        "recent_signal_link_count": 7,
+        "recent_signal_score": 21,
+        "snapshot_date": "2026-08-25",
+        "extremes_are_sample_relative": true
+      },
+      "economics_anchor": {
+        "plid": "95866939",
+        "url": "https://www.takealot.com/anchor-l-shaped-reversible-home-office-study-desk-with-storage-s/PLID95866939",
+        "source_sheet": "展胜",
+        "source_row": 804,
+        "name": "L型可翻转家用办公桌",
+        "workbook_observation": "1月1评论25年12月1评论",
+        "length_cm": 93.0,
+        "width_cm": 54.0,
+        "height_cm": 10.0,
+        "unit_cbm": 0.05022,
+        "purchase_rmb": 168.0,
+        "selling_price_zar": 1699.0,
+        "sea_profit_rmb": 140.989576923077,
+        "sea_margin": 0.215758034137728,
+        "review_proxy_count": 25,
+        "electrical_status": "provisionally_non_electric",
+        "electrical_evidence": "按标题与工作簿结构判断为机械/家具类，不含插头、电池或充电部件；下单前仍须复核BOM与包装清单。",
+        "risk_tags": [
+          "板材磕碰",
+          "装配",
+          "左右方向适配"
+        ]
+      },
+      "representatives": [
+        {
+          "plid": "72292306",
+          "url": "https://www.takealot.com/heartdeco-corner-computer-desk-gaming-desk-with-monitor-stand/PLID72292306",
+          "roles": [
+            "low_price",
+            "most_reviewed",
+            "recent_stock_mover"
+          ]
+        },
+        {
+          "plid": "99581781",
+          "url": "https://www.takealot.com/anchor-wooden-l-shaped-computer-workstation-desk-with-storage-sh/PLID99581781",
+          "roles": [
+            "high_price"
+          ]
+        },
+        {
+          "plid": "95852474",
+          "url": "https://www.takealot.com/l-shaped-corner-computer-desk/PLID95852474",
+          "roles": [
+            "mid_market"
+          ]
+        },
+        {
+          "plid": "99633184",
+          "url": "https://www.takealot.com/aiyato-aiyato-corner-computer-desk-gaming-desk-for-home-office-w/PLID99633184",
+          "roles": [
+            "recent_review_grower"
+          ]
+        },
+        {
+          "plid": "95866939",
+          "url": "https://www.takealot.com/anchor-l-shaped-reversible-home-office-study-desk-with-storage-s/PLID95866939",
+          "roles": [
+            "workbook_economics_anchor"
+          ]
+        }
+      ]
+    },
+    {
+      "category_id": "gaming-desks",
+      "category_name": "机械结构游戏桌",
+      "market_leaf_id": "33363",
+      "market_leaf_name": "Gaming Desks",
+      "cohort_basis": {
+        "scope": "现有竞品雷达同叶子类目按标题规则筛选的最新快照候选池",
+        "sample_size": 4,
+        "recent_signal_link_count": 3,
+        "recent_signal_score": 21,
+        "snapshot_date": "2026-08-25",
+        "extremes_are_sample_relative": true
+      },
+      "economics_anchor": {
+        "plid": "98954960",
+        "url": "https://www.takealot.com/deli-gaming-table-black-120x60x75cm/PLID98954960",
+        "source_sheet": "慧",
+        "source_row": 774,
+        "name": "游戏桌 黑色 120x60x75厘米",
+        "workbook_observation": "一/三月各一个评论",
+        "length_cm": 125.0,
+        "width_cm": 65.0,
+        "height_cm": 10.5,
+        "unit_cbm": 0.0853125,
+        "purchase_rmb": 69.5,
+        "selling_price_zar": 1300.0,
+        "sea_profit_rmb": 50.09375,
+        "sea_margin": 0.1001875,
+        "review_proxy_count": 0,
+        "electrical_status": "provisionally_non_electric",
+        "electrical_evidence": "按标题与工作簿结构判断为机械/家具类，不含插头、电池或充电部件；下单前仍须复核BOM与包装清单。",
+        "risk_tags": [
+          "承重",
+          "装配",
+          "桌面划伤"
+        ]
+      },
+      "representatives": [
+        {
+          "plid": "97509125",
+          "url": "https://www.takealot.com/gaming-desk-steel-100x50x75cm/PLID97509125",
+          "roles": [
+            "low_price",
+            "most_reviewed",
+            "recent_stock_mover",
+            "recent_review_grower",
+            "recent_signal_backup"
+          ]
+        },
+        {
+          "plid": "94715967",
+          "url": "https://www.takealot.com/ergonomic-gaming-office-desk-180cm-wing-shaped-home-cuputer-tabl/PLID94715967",
+          "roles": [
+            "high_price"
+          ]
+        },
+        {
+          "plid": "97564082",
+          "url": "https://www.takealot.com/mix-box-carbon-fiber-large-corner-computer-desk-gaming-desk-100x/PLID97564082",
+          "roles": [
+            "mid_market",
+            "recent_signal_backup"
+          ]
+        },
+        {
+          "plid": "98434690",
+          "url": "https://www.takealot.com/saturn-gaming-desk-with-gaming-desk-mat-adjustable-monitor-stand/PLID98434690",
+          "roles": [
+            "recent_signal_backup"
+          ]
+        },
+        {
+          "plid": "98954960",
+          "url": "https://www.takealot.com/deli-gaming-table-black-120x60x75cm/PLID98954960",
+          "roles": [
+            "workbook_economics_anchor"
+          ]
+        }
+      ]
+    },
+    {
+      "category_id": "family-cabin-tents",
+      "category_name": "多人家庭 / 充气舱式帐篷",
+      "market_leaf_id": "27895",
+      "market_leaf_name": "Family Tents",
+      "cohort_basis": {
+        "scope": "现有竞品雷达同叶子类目按标题规则筛选的最新快照候选池",
+        "sample_size": 11,
+        "recent_signal_link_count": 4,
+        "recent_signal_score": 13,
+        "snapshot_date": "2026-08-25",
+        "extremes_are_sample_relative": true
+      },
+      "economics_anchor": {
+        "plid": "102787140",
+        "url": "https://www.takealot.com/inflatable-and-camping-tent-waterproof-uv-proof-4-6-person-tent/PLID102787140",
+        "source_sheet": "展胜",
+        "source_row": 1506,
+        "name": "充气和露营帐篷——防水紫外线防护——4-6人帐篷",
+        "workbook_observation": "",
+        "length_cm": 75.0,
+        "width_cm": 37.0,
+        "height_cm": 35.0,
+        "unit_cbm": 0.097125,
+        "purchase_rmb": 630.0,
+        "selling_price_zar": 3899.0,
+        "sea_profit_rmb": 233.105769230769,
+        "sea_margin": 0.155443703513721,
+        "review_proxy_count": 0,
+        "electrical_status": "provisionally_non_electric",
+        "electrical_evidence": "按标题与工作簿结构判断为机械/家具类，不含插头、电池或充电部件；下单前仍须复核BOM与包装清单。",
+        "risk_tags": [
+          "防水",
+          "尺寸重量",
+          "搭建售后"
+        ]
+      },
+      "representatives": [
+        {
+          "plid": "102650684",
+          "url": "https://www.takealot.com/3m-hexagonal-dome-camping-tent-outdoor-mesh-screen-family-campin/PLID102650684",
+          "roles": [
+            "low_price"
+          ]
+        },
+        {
+          "plid": "102579999",
+          "url": "https://www.takealot.com/spacious-heavy-duty-canvas-tent-for-camping-hunting-and-events/PLID102579999",
+          "roles": [
+            "high_price"
+          ]
+        },
+        {
+          "plid": "95502821",
+          "url": "https://www.takealot.com/campground-8-person-fast-frame-family-tent/PLID95502821",
+          "roles": [
+            "most_reviewed"
+          ]
+        },
+        {
+          "plid": "99668050",
+          "url": "https://www.takealot.com/waterproof-all-season-inflatable-family-camping-tent-house/PLID99668050",
+          "roles": [
+            "mid_market"
+          ]
+        },
+        {
+          "plid": "102787140",
+          "url": "https://www.takealot.com/inflatable-and-camping-tent-waterproof-uv-proof-4-6-person-tent/PLID102787140",
+          "roles": [
+            "recent_stock_mover",
+            "workbook_economics_anchor"
+          ]
+        },
+        {
+          "plid": "101510692",
+          "url": "https://www.takealot.com/automatic-camping-tent-4-6-person-waterproof-quick-setup/PLID101510692",
+          "roles": [
+            "recent_review_grower"
+          ]
+        }
+      ]
+    },
+    {
+      "category_id": "quick-canopy-tents",
+      "category_name": "快开 / 天幕 / 遮阳帐篷",
+      "market_leaf_id": "27895",
+      "market_leaf_name": "Family Tents",
+      "cohort_basis": {
+        "scope": "现有竞品雷达同叶子类目按标题规则筛选的最新快照候选池",
+        "sample_size": 18,
+        "recent_signal_link_count": 6,
+        "recent_signal_score": 15,
+        "snapshot_date": "2026-08-25",
+        "extremes_are_sample_relative": true
+      },
+      "economics_anchor": {
+        "plid": "99559188",
+        "url": "https://www.takealot.com/118-x-118-tent-pop-up-canopy-rain-fly-tent-with-carry-bag-easy-s/PLID99559188",
+        "source_sheet": "展胜",
+        "source_row": 827,
+        "name": "帐篷弹出式雨蝇帐篷带携带袋",
+        "workbook_observation": "118\" x 118\"- Tent Pop-Up Canopy Rain Fly Tent With Carry Bag- Easy Set Up",
+        "length_cm": 120.0,
+        "width_cm": 20.0,
+        "height_cm": 20.0,
+        "unit_cbm": 0.048,
+        "purchase_rmb": 180.0,
+        "selling_price_zar": 1399.0,
+        "sea_profit_rmb": 51.3663461538461,
+        "sea_margin": 0.0954628305932808,
+        "review_proxy_count": 0,
+        "electrical_status": "provisionally_non_electric",
+        "electrical_evidence": "按标题与工作簿结构判断为机械/家具类，不含插头、电池或充电部件；下单前仍须复核BOM与包装清单。",
+        "risk_tags": [
+          "防水",
+          "抗风",
+          "支架强度"
+        ]
+      },
+      "representatives": [
+        {
+          "plid": "102375181",
+          "url": "https://www.takealot.com/3x3x2m-beach-tent-with-beach-mat-sun-shelter-shade-pop-up-tent-o/PLID102375181",
+          "roles": [
+            "low_price"
+          ]
+        },
+        {
+          "plid": "102697752",
+          "url": "https://www.takealot.com/4-6-person-multi-room-family-tent-with-sunshade-awning/PLID102697752",
+          "roles": [
+            "high_price"
+          ]
+        },
+        {
+          "plid": "72871393",
+          "url": "https://www.takealot.com/stretch-tent-gazebo-7m-x12m-nonwaterproof/PLID72871393",
+          "roles": [
+            "most_reviewed",
+            "recent_review_grower"
+          ]
+        },
+        {
+          "plid": "102111266",
+          "url": "https://www.takealot.com/4-2x4-2m-gazebo-canopy-tent-portable-shelter-sunproof-camping-va/PLID102111266",
+          "roles": [
+            "mid_market"
+          ]
+        },
+        {
+          "plid": "102650784",
+          "url": "https://www.takealot.com/mushroom-pop-up-camping-tent-3-sec-open-uv-sun-shelter-for-2-3-p/PLID102650784",
+          "roles": [
+            "recent_stock_mover"
+          ]
+        },
+        {
+          "plid": "99559188",
+          "url": "https://www.takealot.com/118-x-118-tent-pop-up-canopy-rain-fly-tent-with-carry-bag-easy-s/PLID99559188",
+          "roles": [
+            "workbook_economics_anchor"
+          ]
+        }
+      ]
+    },
+    {
+      "category_id": "standard-kitchen-sinks",
+      "category_name": "非数显厨房水槽",
+      "market_leaf_id": "33310",
+      "market_leaf_name": "Kitchen Sinks",
+      "cohort_basis": {
+        "scope": "现有竞品雷达同叶子类目按标题规则筛选的最新快照候选池",
+        "sample_size": 10,
+        "recent_signal_link_count": 9,
+        "recent_signal_score": 110,
+        "snapshot_date": "2026-08-25",
+        "extremes_are_sample_relative": true
+      },
+      "economics_anchor": {
+        "plid": "95536734",
+        "url": "https://www.takealot.com/304-stainless-steel-fully-configured-single-bowl-kitchen-sink/PLID95536734",
+        "source_sheet": "杨永泰",
+        "source_row": 108,
+        "name": "304 不锈钢全配置单碗厨房水槽",
+        "workbook_observation": "近期评论26，竞品少，利润高，可做，微信供货",
+        "length_cm": 79.0,
+        "width_cm": 49.0,
+        "height_cm": 25.0,
+        "unit_cbm": 0.096775,
+        "purchase_rmb": 195.0,
+        "selling_price_zar": 2499.0,
+        "sea_profit_rmb": 269.6734615384615,
+        "sea_margin": 0.280572629051621,
+        "review_proxy_count": 26,
+        "electrical_status": "provisionally_non_electric",
+        "electrical_evidence": "按标题与工作簿结构判断为机械/家具类，不含插头、电池或充电部件；下单前仍须复核BOM与包装清单。",
+        "risk_tags": [
+          "运输磕碰",
+          "安装开孔",
+          "配件完整性"
+        ],
+        "source_profit_currency": "ZAR",
+        "profit_conversion_note": "工作簿缓存利润原值为ZAR，已按AG列2.6 ZAR/CNY换算为人民币。"
+      },
+      "representatives": [
+        {
+          "plid": "96392763",
+          "url": "https://www.takealot.com/decorum-co-modern-double-bowl-stainless-steel-kitchen-sink-780-x/PLID96392763",
+          "roles": [
+            "low_price",
+            "recent_stock_mover",
+            "recent_review_grower"
+          ]
+        },
+        {
+          "plid": "95881303",
+          "url": "https://www.takealot.com/double-bowl-kitchen-sink-with-drainboard-and-rubbish-bin100x45cm/PLID95881303",
+          "roles": [
+            "high_price"
+          ]
+        },
+        {
+          "plid": "95391150",
+          "url": "https://www.takealot.com/double-bowl-kitchen-sink-with-downpipe-and-drain-basket/PLID95391150",
+          "roles": [
+            "most_reviewed"
+          ]
+        },
+        {
+          "plid": "97002937",
+          "url": "https://www.takealot.com/slyhaw-kyoto-multi-functional-kitchen-sink/PLID97002937",
+          "roles": [
+            "mid_market"
+          ]
+        },
+        {
+          "plid": "95536734",
+          "url": "https://www.takealot.com/304-stainless-steel-fully-configured-single-bowl-kitchen-sink/PLID95536734",
+          "roles": [
+            "workbook_economics_anchor"
+          ]
+        }
+      ]
+    },
+    {
+      "category_id": "bird-cages",
+      "category_name": "大型鸟笼 / 鹦鹉笼",
+      "market_leaf_id": "26673",
+      "market_leaf_name": "Cages",
+      "cohort_basis": {
+        "scope": "现有竞品雷达同叶子类目按标题规则筛选的最新快照候选池",
+        "sample_size": 9,
+        "recent_signal_link_count": 3,
+        "recent_signal_score": 19,
+        "snapshot_date": "2026-08-25",
+        "extremes_are_sample_relative": true
+      },
+      "economics_anchor": {
+        "plid": "98309060",
+        "url": "https://www.takealot.com/aviary-bird-cage-81x47x175cm-black/PLID98309060",
+        "source_sheet": "展胜",
+        "source_row": 721,
+        "name": "宠物鸟笼",
+        "workbook_observation": "1评论",
+        "length_cm": 80.0,
+        "width_cm": 10.0,
+        "height_cm": 143.0,
+        "unit_cbm": 0.1144,
+        "purchase_rmb": 368.0,
+        "selling_price_zar": 4999.0,
+        "sea_profit_rmb": 778.957115384615,
+        "sea_margin": 0.405138727745549,
+        "review_proxy_count": 1,
+        "electrical_status": "provisionally_non_electric",
+        "electrical_evidence": "按标题与工作簿结构判断为机械/家具类，不含插头、电池或充电部件；下单前仍须复核BOM与包装清单。",
+        "risk_tags": [
+          "金属变形",
+          "装配",
+          "轮架售后"
+        ]
+      },
+      "representatives": [
+        {
+          "plid": "98342907",
+          "url": "https://www.takealot.com/pet-parrot-cage-with-food-bowl-perch-feeder-black/PLID98342907",
+          "roles": [
+            "low_price"
+          ]
+        },
+        {
+          "plid": "95497800",
+          "url": "https://www.takealot.com/pet-large-centre-divided-flight-bird-cage-removable-rolling-stan/PLID95497800",
+          "roles": [
+            "high_price"
+          ]
+        },
+        {
+          "plid": "98515443",
+          "url": "https://www.takealot.com/large-metal-parrot-cage-with-top-opening-rolling-stand-perches-b/PLID98515443",
+          "roles": [
+            "most_reviewed",
+            "recent_stock_mover"
+          ]
+        },
+        {
+          "plid": "95497838",
+          "url": "https://www.takealot.com/pet-bird-luxury-large-parrot-cages-with-open-top-design-93cm/PLID95497838",
+          "roles": [
+            "mid_market",
+            "recent_review_grower"
+          ]
+        },
+        {
+          "plid": "98309060",
+          "url": "https://www.takealot.com/aviary-bird-cage-81x47x175cm-black/PLID98309060",
+          "roles": [
+            "workbook_economics_anchor"
+          ]
+        }
+      ]
+    },
+    {
+      "category_id": "pet-playpens-kennels",
+      "category_name": "宠物围栏 / 犬舍",
+      "market_leaf_id": "26673",
+      "market_leaf_name": "Cages",
+      "cohort_basis": {
+        "scope": "现有竞品雷达同叶子类目按标题规则筛选的最新快照候选池",
+        "sample_size": 10,
+        "recent_signal_link_count": 4,
+        "recent_signal_score": 26,
+        "snapshot_date": "2026-08-25",
+        "extremes_are_sample_relative": true
+      },
+      "economics_anchor": {
+        "plid": "99750445",
+        "url": "https://www.takealot.com/cat-cages-indoor-pet-cage-cat-playpen-rabbit-cage-small-animals/PLID99750445",
+        "source_sheet": "慧",
+        "source_row": 819,
+        "name": "室内猫笼、宠物笼、猫咪游戏围栏、兔子笼、小型动物笼",
+        "workbook_observation": "此链接没评论",
+        "length_cm": 144.0,
+        "width_cm": 88.0,
+        "height_cm": 11.0,
+        "unit_cbm": 0.139392,
+        "purchase_rmb": 159.0,
+        "selling_price_zar": 3000.0,
+        "sea_profit_rmb": 261.942492307692,
+        "sea_margin": 0.227016826666667,
+        "review_proxy_count": 0,
+        "electrical_status": "provisionally_non_electric",
+        "electrical_evidence": "按标题与工作簿结构判断为机械/家具类，不含插头、电池或充电部件；下单前仍须复核BOM与包装清单。",
+        "risk_tags": [
+          "围栏强度",
+          "尺寸退货",
+          "装配"
+        ]
+      },
+      "representatives": [
+        {
+          "plid": "97993215",
+          "url": "https://www.takealot.com/dog-playpen-fence-dog-gates-wooden-pet-playpen-small-pet-puppy-b/PLID97993215",
+          "roles": [
+            "low_price",
+            "most_reviewed"
+          ]
+        },
+        {
+          "plid": "96347473",
+          "url": "https://www.takealot.com/pet-large-iron-mesh-three-layers-and-three-doors-cage-with-wheel/PLID96347473",
+          "roles": [
+            "high_price"
+          ]
+        },
+        {
+          "plid": "96405642",
+          "url": "https://www.takealot.com/pet-indoor-8-panels-foldable-2-door-play-pen-cage-60cm/PLID96405642",
+          "roles": [
+            "mid_market"
+          ]
+        },
+        {
+          "plid": "100549699",
+          "url": "https://www.takealot.com/mix-box-heavy-duty-metal-outdoor-dog-kennel-with-uv-proof-cover-/PLID100549699",
+          "roles": [
+            "recent_stock_mover"
+          ]
+        },
+        {
+          "plid": "99744613",
+          "url": "https://www.takealot.com/200cm-x-100cm-foldable-outdoor-backyard-metal-coop-chicken-cage-/PLID99744613",
+          "roles": [
+            "recent_review_grower"
+          ]
+        },
+        {
+          "plid": "99750445",
+          "url": "https://www.takealot.com/cat-cages-indoor-pet-cage-cat-playpen-rabbit-cage-small-animals/PLID99750445",
+          "roles": [
+            "workbook_economics_anchor"
+          ]
+        }
+      ]
+    },
+    {
+      "category_id": "toilet-commode-aids",
+      "category_name": "马桶增高 / 坐便辅具",
+      "market_leaf_id": "28132",
+      "market_leaf_name": "Bathroom & Toilet Aids",
+      "cohort_basis": {
+        "scope": "现有竞品雷达同叶子类目按标题规则筛选的最新快照候选池",
+        "sample_size": 8,
+        "recent_signal_link_count": 4,
+        "recent_signal_score": 35,
+        "snapshot_date": "2026-08-25",
+        "extremes_are_sample_relative": true
+      },
+      "economics_anchor": {
+        "plid": "98952417",
+        "url": "https://www.takealot.com/3-in-1-adjustable-basic-commode/PLID98952417",
+        "source_sheet": "展胜",
+        "source_row": 544,
+        "name": "3合1可折叠坐便器",
+        "workbook_observation": "10月1评论9月2评论",
+        "length_cm": 56.0,
+        "width_cm": 52.0,
+        "height_cm": 82.0,
+        "unit_cbm": 0.0477568,
+        "purchase_rmb": 61.0,
+        "selling_price_zar": 899.0,
+        "sea_profit_rmb": 37.1664199999999,
+        "sea_margin": 0.107489090100111,
+        "review_proxy_count": 9,
+        "electrical_status": "provisionally_non_electric",
+        "electrical_evidence": "按标题与工作簿结构判断为机械/家具类，不含插头、电池或充电部件；下单前仍须复核BOM与包装清单。",
+        "risk_tags": [
+          "卫生退货",
+          "尺寸适配",
+          "承重"
+        ]
+      },
+      "representatives": [
+        {
+          "plid": "99684712",
+          "url": "https://www.takealot.com/toilet-seat-riser-with-handles-elevated-toilet-seat-duty-toilet-/PLID99684712",
+          "roles": [
+            "low_price"
+          ]
+        },
+        {
+          "plid": "99738902",
+          "url": "https://www.takealot.com/aluminium-bath-toilet-chair-height-adjustable-with-wheels/PLID99738902",
+          "roles": [
+            "high_price"
+          ]
+        },
+        {
+          "plid": "73150708",
+          "url": "https://www.takealot.com/toilet-safety-rails/PLID73150708",
+          "roles": [
+            "most_reviewed"
+          ]
+        },
+        {
+          "plid": "97219727",
+          "url": "https://www.takealot.com/adjustable-3-in-1-commode-chair/PLID97219727",
+          "roles": [
+            "mid_market"
+          ]
+        },
+        {
+          "plid": "98731719",
+          "url": "https://www.takealot.com/mikaco-raised-toilet-seat-with-handle-adjustable-height-toilet-s/PLID98731719",
+          "roles": [
+            "recent_stock_mover",
+            "recent_review_grower"
+          ]
+        },
+        {
+          "plid": "98952417",
+          "url": "https://www.takealot.com/3-in-1-adjustable-basic-commode/PLID98952417",
+          "roles": [
+            "workbook_economics_anchor"
+          ]
+        }
+      ]
+    },
+    {
+      "category_id": "shower-bath-seats",
+      "category_name": "淋浴椅 / 浴室座椅",
+      "market_leaf_id": "28132",
+      "market_leaf_name": "Bathroom & Toilet Aids",
+      "cohort_basis": {
+        "scope": "现有竞品雷达同叶子类目按标题规则筛选的最新快照候选池",
+        "sample_size": 5,
+        "recent_signal_link_count": 3,
+        "recent_signal_score": 16,
+        "snapshot_date": "2026-08-25",
+        "extremes_are_sample_relative": true
+      },
+      "economics_anchor": {
+        "plid": "99744788",
+        "url": "https://www.takealot.com/foldable-commode-shower-chair-aluminium-frame-with-wheels-white/PLID99744788",
+        "source_sheet": "慧",
+        "source_row": 744,
+        "name": "可折叠式坐便淋浴椅 - 铝合金框架带轮 白色/蓝色",
+        "workbook_observation": "此链接无评论",
+        "length_cm": 87.0,
+        "width_cm": 23.5,
+        "height_cm": 63.0,
+        "unit_cbm": 0.1288035,
+        "purchase_rmb": 510.0,
+        "selling_price_zar": 3900.0,
+        "sea_profit_rmb": 126.40565,
+        "sea_margin": 0.0842704333333333,
+        "review_proxy_count": 0,
+        "electrical_status": "provisionally_non_electric",
+        "electrical_evidence": "按标题与工作簿结构判断为机械/家具类，不含插头、电池或充电部件；下单前仍须复核BOM与包装清单。",
+        "risk_tags": [
+          "防滑",
+          "承重",
+          "卫生退货"
+        ]
+      },
+      "representatives": [
+        {
+          "plid": "97279843",
+          "url": "https://www.takealot.com/elderly-portable-shower-chair-anti-slip-shower-bench-bathtub-sto/PLID97279843",
+          "roles": [
+            "low_price"
+          ]
+        },
+        {
+          "plid": "99819111",
+          "url": "https://www.takealot.com/dura-premium-hygiene-shower-chair-227kg/PLID99819111",
+          "roles": [
+            "high_price"
+          ]
+        },
+        {
+          "plid": "97509150",
+          "url": "https://www.takealot.com/wall-mounted-folding-shower-seat/PLID97509150",
+          "roles": [
+            "most_reviewed",
+            "mid_market"
+          ]
+        },
+        {
+          "plid": "100890463",
+          "url": "https://www.takealot.com/shower-chair-aluminum-360-rotating-7-height-adjustable-anti-slip/PLID100890463",
+          "roles": [
+            "recent_stock_mover"
+          ]
+        },
+        {
+          "plid": "99744788",
+          "url": "https://www.takealot.com/foldable-commode-shower-chair-aluminium-frame-with-wheels-white/PLID99744788",
+          "roles": [
+            "workbook_economics_anchor"
+          ]
+        }
+      ]
+    },
+    {
+      "category_id": "coffee-tables",
+      "category_name": "咖啡桌 / 茶几",
+      "market_leaf_id": "28324",
+      "market_leaf_name": "Coffee Tables",
+      "cohort_basis": {
+        "scope": "现有竞品雷达同叶子类目按标题规则筛选的最新快照候选池",
+        "sample_size": 11,
+        "recent_signal_link_count": 6,
+        "recent_signal_score": 33,
+        "snapshot_date": "2026-08-25",
+        "extremes_are_sample_relative": true
+      },
+      "economics_anchor": {
+        "plid": "96933272",
+        "url": "https://www.takealot.com/round-coffee-table-nesting-coffee-end-tables-stacking-side-table/PLID96933272",
+        "source_sheet": "展胜",
+        "source_row": 425,
+        "name": "咖啡桌",
+        "workbook_observation": "10月1评论，",
+        "length_cm": 80.0,
+        "width_cm": 77.5,
+        "height_cm": 8.5,
+        "unit_cbm": 0.0527,
+        "purchase_rmb": 82.5,
+        "selling_price_zar": 1100.0,
+        "sea_profit_rmb": 59.7838461538462,
+        "sea_margin": 0.141307272727273,
+        "review_proxy_count": 1,
+        "electrical_status": "provisionally_non_electric",
+        "electrical_evidence": "按标题与工作簿结构判断为机械/家具类，不含插头、电池或充电部件；下单前仍须复核BOM与包装清单。",
+        "risk_tags": [
+          "板材磕碰",
+          "装配",
+          "桌面划伤"
+        ]
+      },
+      "representatives": [
+        {
+          "plid": "94801684",
+          "url": "https://www.takealot.com/stable-wooden-c-shape-frame-coffee-table-hb-37/PLID94801684",
+          "roles": [
+            "low_price",
+            "most_reviewed",
+            "recent_stock_mover"
+          ]
+        },
+        {
+          "plid": "97504414",
+          "url": "https://www.takealot.com/fine-living-harmony-coffee-table/PLID97504414",
+          "roles": [
+            "high_price"
+          ]
+        },
+        {
+          "plid": "100687914",
+          "url": "https://www.takealot.com/black-2-tier-coffee-table-centre-sofa-table-with-open-shelves/PLID100687914",
+          "roles": [
+            "mid_market"
+          ]
+        },
+        {
+          "plid": "96933272",
+          "url": "https://www.takealot.com/round-coffee-table-nesting-coffee-end-tables-stacking-side-table/PLID96933272",
+          "roles": [
+            "recent_review_grower",
+            "workbook_economics_anchor"
+          ]
+        }
+      ]
+    },
+    {
+      "category_id": "bookcases-shelves",
+      "category_name": "书架 / 大型储物架",
+      "market_leaf_id": "28327",
+      "market_leaf_name": "Shelves",
+      "cohort_basis": {
+        "scope": "现有竞品雷达同叶子类目按标题规则筛选的最新快照候选池",
+        "sample_size": 10,
+        "recent_signal_link_count": 3,
+        "recent_signal_score": 12,
+        "snapshot_date": "2026-08-25",
+        "extremes_are_sample_relative": true
+      },
+      "economics_anchor": {
+        "plid": "98433751",
+        "url": "https://www.takealot.com/6-tier-bookshelf-with-2-drawers-storage-unit-for-home-office/PLID98433751",
+        "source_sheet": "慧",
+        "source_row": 485,
+        "name": "六层书架带两个抽屉 - 家用及办公储物柜",
+        "workbook_observation": "近3个月7个评论",
+        "length_cm": 68.0,
+        "width_cm": 34.0,
+        "height_cm": 23.0,
+        "unit_cbm": 0.053176,
+        "purchase_rmb": 150.0,
+        "selling_price_zar": 1499.0,
+        "sea_profit_rmb": 76.687423076923,
+        "sea_margin": 0.133013542361574,
+        "review_proxy_count": 7,
+        "electrical_status": "provisionally_non_electric",
+        "electrical_evidence": "按标题与工作簿结构判断为机械/家具类，不含插头、电池或充电部件；下单前仍须复核BOM与包装清单。",
+        "risk_tags": [
+          "防倾倒",
+          "装配",
+          "板材受潮"
+        ]
+      },
+      "representatives": [
+        {
+          "plid": "99232319",
+          "url": "https://www.takealot.com/4tier-corner-bookshelf-bookcase-modern-corner-ladder-shelf-plant/PLID99232319",
+          "roles": [
+            "low_price"
+          ]
+        },
+        {
+          "plid": "90815929",
+          "url": "https://www.takealot.com/manchester-bookshelf/PLID90815929",
+          "roles": [
+            "high_price"
+          ]
+        },
+        {
+          "plid": "94462890",
+          "url": "https://www.takealot.com/lazava-14-shelf-metal-bookcase-heavy-duty-industrial-storage-rac/PLID94462890",
+          "roles": [
+            "most_reviewed",
+            "recent_stock_mover"
+          ]
+        },
+        {
+          "plid": "100594411",
+          "url": "https://www.takealot.com/anchor-10-cube-multi-level-storage-shelf-vintage-wood-120-30-120/PLID100594411",
+          "roles": [
+            "mid_market"
+          ]
+        },
+        {
+          "plid": "94056504",
+          "url": "https://www.takealot.com/lazava-10-cube-wooden-ladder-shelf-modern-storage-books-and-deco/PLID94056504",
+          "roles": [
+            "recent_review_grower"
+          ]
+        },
+        {
+          "plid": "98433751",
+          "url": "https://www.takealot.com/6-tier-bookshelf-with-2-drawers-storage-unit-for-home-office/PLID98433751",
+          "roles": [
+            "workbook_economics_anchor"
+          ]
+        },
+        {
+          "plid": "95240167",
+          "url": "https://www.takealot.com/foldable-storage-shelf-bookshelf-standing-shelves-organizer/PLID95240167",
+          "roles": [
+            "workbook_secondary_anchor"
+          ]
+        },
+        {
+          "plid": "93998846",
+          "url": "https://www.takealot.com/vector-large-bookshelf-with-staggered-shelves-powder-coated-stee/PLID93998846",
+          "roles": [
+            "workbook_secondary_anchor"
+          ]
+        }
+      ]
+    },
+    {
+      "category_id": "kitchen-utility-trolleys",
+      "category_name": "厨房 / 工具手推车",
+      "market_leaf_id": "26982",
+      "market_leaf_name": "Storage Trolleys",
+      "cohort_basis": {
+        "scope": "现有竞品雷达同叶子类目按标题规则筛选的最新快照候选池",
+        "sample_size": 5,
+        "recent_signal_link_count": 4,
+        "recent_signal_score": 68,
+        "snapshot_date": "2026-08-25",
+        "extremes_are_sample_relative": true
+      },
+      "economics_anchor": {
+        "plid": "95890863",
+        "url": "https://www.takealot.com/trolley-3-tier-plastic-pt2026/PLID95890863",
+        "source_sheet": "慧",
+        "source_row": 951,
+        "name": "三层塑料手推车 PT2026",
+        "workbook_observation": "去年3月1个评论",
+        "length_cm": 92.0,
+        "width_cm": 48.0,
+        "height_cm": 28.5,
+        "unit_cbm": 0.125856,
+        "purchase_rmb": 141.0,
+        "selling_price_zar": 3199.0,
+        "sea_profit_rmb": 418.328130769231,
+        "sea_margin": 0.339997855579869,
+        "review_proxy_count": 1,
+        "electrical_status": "provisionally_non_electric",
+        "electrical_evidence": "按标题与工作簿结构判断为机械/家具类，不含插头、电池或充电部件；下单前仍须复核BOM与包装清单。",
+        "risk_tags": [
+          "轮组售后",
+          "承重",
+          "装配"
+        ]
+      },
+      "representatives": [
+        {
+          "plid": "95283611",
+          "url": "https://www.takealot.com/transparent-plastic-storage-trolley/PLID95283611",
+          "roles": [
+            "low_price",
+            "recent_review_grower"
+          ]
+        },
+        {
+          "plid": "95797278",
+          "url": "https://www.takealot.com/stainless-steel-king-2-tier-trolley-utility-cart/PLID95797278",
+          "roles": [
+            "high_price",
+            "recent_stock_mover",
+            "recent_signal_backup"
+          ]
+        },
+        {
+          "plid": "91085527",
+          "url": "https://www.takealot.com/anchor-2-tier-kitchen-units-cart-trolley-on-wheels-with-wine-rac/PLID91085527",
+          "roles": [
+            "most_reviewed",
+            "mid_market",
+            "recent_signal_backup"
+          ]
+        },
+        {
+          "plid": "97467598",
+          "url": "https://www.takealot.com/bestby-3-tier-heavy-duty-stainless-steel-cart-for-kitchen-lab-ro/PLID97467598",
+          "roles": [
+            "recent_signal_backup"
+          ]
+        },
+        {
+          "plid": "95890863",
+          "url": "https://www.takealot.com/trolley-3-tier-plastic-pt2026/PLID95890863",
+          "roles": [
+            "workbook_economics_anchor"
+          ]
+        },
+        {
+          "plid": "95923951",
+          "url": "https://www.takealot.com/rustic-3-tier-kitchen-table-wood-metal-island-counter-with-stora/PLID95923951",
+          "roles": [
+            "workbook_secondary_anchor"
+          ]
+        }
+      ]
+    },
+    {
+      "category_id": "pet-strollers-carriers",
+      "category_name": "宠物推车 / 大型携行箱",
+      "market_leaf_id": "26674",
+      "market_leaf_name": "Carriers",
+      "cohort_basis": {
+        "scope": "现有竞品雷达同叶子类目按标题规则筛选的最新快照候选池",
+        "sample_size": 7,
+        "recent_signal_link_count": 3,
+        "recent_signal_score": 10,
+        "snapshot_date": "2026-08-25",
+        "extremes_are_sample_relative": true
+      },
+      "economics_anchor": {
+        "plid": "99811296",
+        "url": "https://www.takealot.com/42inch-pet-stroller-cat-dog-stroller-travel-pet-carrier-foldable/PLID99811296",
+        "source_sheet": "展胜",
+        "source_row": 596,
+        "name": "可折叠宠物推车",
+        "workbook_observation": "近期没有评论，在打广告，利润可观可少拿测试",
+        "length_cm": 77.0,
+        "width_cm": 42.0,
+        "height_cm": 16.0,
+        "unit_cbm": 0.051744,
+        "purchase_rmb": 115.5,
+        "selling_price_zar": 1750.0,
+        "sea_profit_rmb": 179.589984615385,
+        "sea_margin": 0.266819405714286,
+        "review_proxy_count": 0,
+        "electrical_status": "provisionally_non_electric",
+        "electrical_evidence": "按标题与工作簿结构判断为机械/家具类，不含插头、电池或充电部件；下单前仍须复核BOM与包装清单。",
+        "risk_tags": [
+          "轮组售后",
+          "折叠机构",
+          "承重"
+        ]
+      },
+      "representatives": [
+        {
+          "plid": "96903944",
+          "url": "https://www.takealot.com/topika-black-soft-sided-pet-carrier-handbag-for-cats-and-small-d/PLID96903944",
+          "roles": [
+            "low_price",
+            "most_reviewed",
+            "recent_review_grower"
+          ]
+        },
+        {
+          "plid": "95910133",
+          "url": "https://www.takealot.com/pet-stroller-pet-pram-dog-cat-stroller-double-decker-pet-carrier/PLID95910133",
+          "roles": [
+            "high_price"
+          ]
+        },
+        {
+          "plid": "98505302",
+          "url": "https://www.takealot.com/topikapet-foldable-pet-stroller-for-dogs-cats-pet-pram-with-bask/PLID98505302",
+          "roles": [
+            "mid_market"
+          ]
+        },
+        {
+          "plid": "99212291",
+          "url": "https://www.takealot.com/double-pet-stroller-with-2-detachable-carrier-cages-portable-dog/PLID99212291",
+          "roles": [
+            "recent_stock_mover"
+          ]
+        },
+        {
+          "plid": "99811296",
+          "url": "https://www.takealot.com/42inch-pet-stroller-cat-dog-stroller-travel-pet-carrier-foldable/PLID99811296",
+          "roles": [
+            "workbook_economics_anchor"
+          ]
+        }
+      ]
+    },
+    {
+      "category_id": "kids-room-storage",
+      "category_name": "儿童房大型收纳家具",
+      "market_leaf_id": "28317",
+      "market_leaf_name": "Kid's Room Furnishings",
+      "cohort_basis": {
+        "scope": "现有竞品雷达同叶子类目按标题规则筛选的最新快照候选池",
+        "sample_size": 8,
+        "recent_signal_link_count": 5,
+        "recent_signal_score": 10,
+        "snapshot_date": "2026-08-25",
+        "extremes_are_sample_relative": true
+      },
+      "economics_anchor": {
+        "plid": "98174698",
+        "url": "https://www.takealot.com/topika-4-tier-multipurpose-kids-toy-organizer-with-12-storage-bi/PLID98174698",
+        "source_sheet": "慧",
+        "source_row": 793,
+        "name": "四层多功能儿童玩具收纳架，含12个储物格",
+        "workbook_observation": "1/2/3月 各一个评论",
+        "length_cm": 87.5,
+        "width_cm": 31.5,
+        "height_cm": 15.0,
+        "unit_cbm": 0.04134375,
+        "purchase_rmb": 55.0,
+        "selling_price_zar": 959.0,
+        "sea_profit_rmb": 81.4507211538462,
+        "sea_margin": 0.220825729927007,
+        "review_proxy_count": 0,
+        "electrical_status": "provisionally_non_electric",
+        "electrical_evidence": "按标题与工作簿结构判断为机械/家具类，不含插头、电池或充电部件；下单前仍须复核BOM与包装清单。",
+        "risk_tags": [
+          "儿童安全",
+          "防倾倒",
+          "装配"
+        ]
+      },
+      "representatives": [
+        {
+          "plid": "96472901",
+          "url": "https://www.takealot.com/gogooda-portable-closet-wardrobe-for-bedroom-clothes-storage-dus/PLID96472901",
+          "roles": [
+            "low_price"
+          ]
+        },
+        {
+          "plid": "99987873",
+          "url": "https://www.takealot.com/armoire-wardrobe-3-doors-closet-wooden-storage-cabinet-with-hang/PLID99987873",
+          "roles": [
+            "high_price"
+          ]
+        },
+        {
+          "plid": "96968279",
+          "url": "https://www.takealot.com/furnny-folding-wardrobe-layered-storage-for-kids-movable-caster-/PLID96968279",
+          "roles": [
+            "most_reviewed"
+          ]
+        },
+        {
+          "plid": "97388833",
+          "url": "https://www.takealot.com/furnny-folding-wardrobe-layered-storage-for-kids-movable-caster-/PLID97388833",
+          "roles": [
+            "mid_market"
+          ]
+        },
+        {
+          "plid": "99140449",
+          "url": "https://www.takealot.com/furnny-3-in-1-toddler-kitchen-helper-learning-tower-with-blackbo/PLID99140449",
+          "roles": [
+            "recent_stock_mover"
+          ]
+        },
+        {
+          "plid": "99225851",
+          "url": "https://www.takealot.com/wardrobe-closet-simple-multifunctional-dustproof-portable-closet/PLID99225851",
+          "roles": [
+            "recent_review_grower"
+          ]
+        },
+        {
+          "plid": "98174698",
+          "url": "https://www.takealot.com/topika-4-tier-multipurpose-kids-toy-organizer-with-12-storage-bi/PLID98174698",
+          "roles": [
+            "workbook_economics_anchor"
+          ]
+        }
+      ]
+    },
+    {
+      "category_id": "safety-gates",
+      "category_name": "婴儿 / 宠物安全门栏",
+      "market_leaf_id": "28214",
+      "market_leaf_name": "Safety Gates",
+      "cohort_basis": {
+        "scope": "现有竞品雷达同叶子类目按标题规则筛选的最新快照候选池",
+        "sample_size": 5,
+        "recent_signal_link_count": 4,
+        "recent_signal_score": 44,
+        "snapshot_date": "2026-08-25",
+        "extremes_are_sample_relative": true
+      },
+      "economics_anchor": {
+        "plid": "97592844",
+        "url": "https://www.takealot.com/75-123cm-metal-baby-and-pet-gate-with-pressure-mount/PLID97592844",
+        "source_sheet": "展胜",
+        "source_row": 939,
+        "name": "75-123厘米金属婴儿宠物安全门，带压力安装装置",
+        "workbook_observation": "9月10月1月1评论",
+        "length_cm": 77.0,
+        "width_cm": 14.0,
+        "height_cm": 84.0,
+        "unit_cbm": 0.045276,
+        "purchase_rmb": 74.0,
+        "selling_price_zar": 1099.0,
+        "sea_profit_rmb": 93.2030538461538,
+        "sea_margin": 0.220498580527752,
+        "review_proxy_count": 1,
+        "electrical_status": "provisionally_non_electric",
+        "electrical_evidence": "按标题与工作簿结构判断为机械/家具类，不含插头、电池或充电部件；下单前仍须复核BOM与包装清单。",
+        "risk_tags": [
+          "宽度适配",
+          "锁扣强度",
+          "儿童安全"
+        ]
+      },
+      "representatives": [
+        {
+          "plid": "96479381",
+          "url": "https://www.takealot.com/mix-box-75-96cm-expandable-baby-safety-gate-with-pressure-mount-/PLID96479381",
+          "roles": [
+            "low_price",
+            "most_reviewed",
+            "recent_review_grower"
+          ]
+        },
+        {
+          "plid": "99939648",
+          "url": "https://www.takealot.com/innolife-baby-pet-safety-gate-with-2-extensions-2clips-1lip-widt/PLID99939648",
+          "roles": [
+            "high_price"
+          ]
+        },
+        {
+          "plid": "97964561",
+          "url": "https://www.takealot.com/mix-box-75-96cm-metal-baby-and-pet-gate-with-pressure-mount-blac/PLID97964561",
+          "roles": [
+            "mid_market"
+          ]
+        },
+        {
+          "plid": "97592844",
+          "url": "https://www.takealot.com/mix-box-75-123cm-metal-baby-and-pet-gate-with-pressure-mount/PLID97592844",
+          "roles": [
+            "recent_stock_mover",
+            "workbook_economics_anchor"
+          ]
+        }
+      ]
+    },
+    {
+      "category_id": "roof-racks",
+      "category_name": "车顶行李架 / 横杆",
+      "market_leaf_id": "27692",
+      "market_leaf_name": "Roof Racks",
+      "cohort_basis": {
+        "scope": "现有竞品雷达同叶子类目按标题规则筛选的最新快照候选池",
+        "sample_size": 6,
+        "recent_signal_link_count": 3,
+        "recent_signal_score": 14,
+        "snapshot_date": "2026-08-25",
+        "extremes_are_sample_relative": true
+      },
+      "economics_anchor": {
+        "plid": "99138579",
+        "url": "https://www.takealot.com/1-4m-roof-cargo-basket-universal-rooftop-luggage-carrier/PLID99138579",
+        "source_sheet": "慧",
+        "source_row": 146,
+        "name": "1.4米车顶行李篮",
+        "workbook_observation": "10月新增一条评价",
+        "length_cm": 135.0,
+        "width_cm": 22.0,
+        "height_cm": 25.0,
+        "unit_cbm": 0.07425,
+        "purchase_rmb": 256.6,
+        "selling_price_zar": 1933.0,
+        "sea_profit_rmb": 74.3855769230769,
+        "sea_margin": 0.100053026383859,
+        "review_proxy_count": 0,
+        "electrical_status": "provisionally_non_electric",
+        "electrical_evidence": "按标题与工作簿结构判断为机械/家具类，不含插头、电池或充电部件；下单前仍须复核BOM与包装清单。",
+        "risk_tags": [
+          "车型适配",
+          "安装件完整性",
+          "风噪售后"
+        ]
+      },
+      "representatives": [
+        {
+          "plid": "98008306",
+          "url": "https://www.takealot.com/120cm-luggage-roof-rack-crossbar-anti-theft-lock-aviation-alumin/PLID98008306",
+          "roles": [
+            "low_price",
+            "recent_stock_mover"
+          ]
+        },
+        {
+          "plid": "99666408",
+          "url": "https://www.takealot.com/roof-rack-set-compatible-with-ford-ranger-t6-t7/PLID99666408",
+          "roles": [
+            "high_price"
+          ]
+        },
+        {
+          "plid": "92691303",
+          "url": "https://www.takealot.com/luggage-roof-rack-crossbar-jg120-120cm/PLID92691303",
+          "roles": [
+            "most_reviewed",
+            "recent_review_grower"
+          ]
+        },
+        {
+          "plid": "55069987",
+          "url": "https://www.takealot.com/aluminium-roof-bar-with-gutter-type-mounting-brackets/PLID55069987",
+          "roles": [
+            "mid_market"
+          ]
+        },
+        {
+          "plid": "99138579",
+          "url": "https://www.takealot.com/1-4m-roof-cargo-basket-universal-rooftop-luggage-carrier/PLID99138579",
+          "roles": [
+            "workbook_economics_anchor"
+          ]
+        }
+      ]
+    },
+    {
+      "category_id": "bedframes-mattresses",
+      "category_name": "床架 / 折叠床 / 床垫",
+      "market_leaf_id": "32988",
+      "market_leaf_name": "Beds & Mattresses",
+      "cohort_basis": {
+        "scope": "现有竞品雷达同叶子类目按标题规则筛选的最新快照候选池",
+        "sample_size": 11,
+        "recent_signal_link_count": 5,
+        "recent_signal_score": 9,
+        "snapshot_date": "2026-08-25",
+        "extremes_are_sample_relative": true
+      },
+      "economics_anchor": {
+        "plid": "96475674",
+        "url": "https://www.takealot.com/folding-bed-with-extra-thick-mattress-190x80cm-sturdy-metal-fram/PLID96475674",
+        "source_sheet": "杨永泰",
+        "source_row": 236,
+        "name": "带超厚床垫的折叠床 190x80cm 坚固的金属框架 8 轮",
+        "workbook_observation": "近期评论1，竞品较少，利润较低，待考虑",
+        "length_cm": 81.0,
+        "width_cm": 59.0,
+        "height_cm": 36.0,
+        "unit_cbm": 0.172044,
+        "purchase_rmb": 220.0,
+        "selling_price_zar": 2899.0,
+        "sea_profit_rmb": 145.7432923076923,
+        "sea_margin": 0.130711472921697,
+        "review_proxy_count": 1,
+        "electrical_status": "provisionally_non_electric",
+        "electrical_evidence": "按标题与工作簿结构判断为机械/家具类，不含插头、电池或充电部件；下单前仍须复核BOM与包装清单。",
+        "risk_tags": [
+          "承重",
+          "尺寸适配",
+          "床垫售后"
+        ],
+        "source_profit_currency": "ZAR",
+        "profit_conversion_note": "工作簿缓存利润原值为ZAR，已按AG列2.6 ZAR/CNY换算为人民币。"
+      },
+      "representatives": [
+        {
+          "plid": "96371507",
+          "url": "https://www.takealot.com/adult-removable-bedside-handrail-punch-free-bedside-guardrail/PLID96371507",
+          "roles": [
+            "low_price"
+          ]
+        },
+        {
+          "plid": "95883949",
+          "url": "https://www.takealot.com/luxury-hotel-soft-latex-foam-bed-130kg-mattress-only/PLID95883949",
+          "roles": [
+            "high_price",
+            "recent_review_grower"
+          ]
+        },
+        {
+          "plid": "95111010",
+          "url": "https://www.takealot.com/bunk-bed-detachable-two-single-over-bunk-bed-school-dorms/PLID95111010",
+          "roles": [
+            "most_reviewed"
+          ]
+        },
+        {
+          "plid": "93138400",
+          "url": "https://www.takealot.com/dreamy-comfort-latex-mattress-topper/PLID93138400",
+          "roles": [
+            "mid_market"
+          ]
+        },
+        {
+          "plid": "97005548",
+          "url": "https://www.takealot.com/metal-bed-frame-queen-size-no-box-spring-needed-under-bed-storag/PLID97005548",
+          "roles": [
+            "recent_stock_mover"
+          ]
+        },
+        {
+          "plid": "96475674",
+          "url": "https://www.takealot.com/folding-bed-with-extra-thick-mattress-190x80cm-sturdy-metal-fram/PLID96475674",
+          "roles": [
+            "workbook_economics_anchor"
+          ]
+        },
+        {
+          "plid": "97591773",
+          "url": "https://www.takealot.com/topika-190x75cm-super-size-folding-bed-with-pearl-cotton-mat-3-a/PLID97591773",
+          "roles": [
+            "workbook_secondary_anchor"
+          ]
+        }
+      ]
+    },
+    {
+      "category_id": "dressing-tables",
+      "category_name": "非带灯梳妆台",
+      "market_leaf_id": "26955",
+      "market_leaf_name": "Dressing Tables",
+      "cohort_basis": {
+        "scope": "现有竞品雷达同叶子类目按标题规则筛选的最新快照候选池",
+        "sample_size": 5,
+        "recent_signal_link_count": 2,
+        "recent_signal_score": 15,
+        "snapshot_date": "2026-08-25",
+        "extremes_are_sample_relative": true
+      },
+      "economics_anchor": {
+        "plid": "98559604",
+        "url": "https://www.takealot.com/rustic-brown-vanity-table-mirror-drawer-stool-set/PLID98559604",
+        "source_sheet": "展胜",
+        "source_row": 662,
+        "name": "复古棕色 - 含镜子、抽屉和凳子套装",
+        "workbook_observation": "12月1号有一个评论",
+        "length_cm": 102.0,
+        "width_cm": 46.0,
+        "height_cm": 25.0,
+        "unit_cbm": 0.1173,
+        "purchase_rmb": 280.0,
+        "selling_price_zar": 3000.0,
+        "sea_profit_rmb": 213.725384615385,
+        "sea_margin": 0.185228666666667,
+        "review_proxy_count": 0,
+        "electrical_status": "provisionally_non_electric",
+        "electrical_evidence": "按标题与工作簿结构判断为机械/家具类，不含插头、电池或充电部件；下单前仍须复核BOM与包装清单。",
+        "risk_tags": [
+          "镜面破损",
+          "装配",
+          "板材磕碰"
+        ]
+      },
+      "representatives": [
+        {
+          "plid": "96818324",
+          "url": "https://www.takealot.com/dressing-table-with-mirror-makeup-vanity-table-with-storage-shel/PLID96818324",
+          "roles": [
+            "low_price"
+          ]
+        },
+        {
+          "plid": "98559604",
+          "url": "https://www.takealot.com/lasa-rustic-brown-vanity-table-with-mirror-drawer-and-stool-set/PLID98559604",
+          "roles": [
+            "high_price",
+            "workbook_economics_anchor"
+          ]
+        },
+        {
+          "plid": "98171909",
+          "url": "https://www.takealot.com/dressing-table-with-mirror-stool-set-vanity-desk-makeup-hidden-s/PLID98171909",
+          "roles": [
+            "most_reviewed",
+            "recent_stock_mover"
+          ]
+        },
+        {
+          "plid": "96354269",
+          "url": "https://www.takealot.com/dressing-table-set-stool-360-flip-flop-mirror-makeup-vanity-desk/PLID96354269",
+          "roles": [
+            "mid_market"
+          ]
+        },
+        {
+          "plid": "96407669",
+          "url": "https://www.takealot.com/dressing-table-stool-set-makeup-vanity-desk-with-mirror-dresser-/PLID96407669?colour_variant=White",
+          "roles": [
+            "recent_review_grower"
+          ]
+        }
+      ]
+    },
+    {
+      "category_id": "manual-recliner-rocking-chairs",
+      "category_name": "手动躺椅 / 摇椅",
+      "market_leaf_id": "28329",
+      "market_leaf_name": "Sleeper Couches",
+      "cohort_basis": {
+        "scope": "现有竞品雷达同叶子类目按标题规则筛选的最新快照候选池",
+        "sample_size": 10,
+        "recent_signal_link_count": 2,
+        "recent_signal_score": 13,
+        "snapshot_date": "2026-08-25",
+        "extremes_are_sample_relative": true
+      },
+      "economics_anchor": {
+        "plid": "98516951",
+        "url": "https://www.takealot.com/adjustable-armchair-rocking-chair-low-height-rocking-recliner-la/PLID98516951",
+        "source_sheet": "展胜",
+        "source_row": 1100,
+        "name": "B01摇椅",
+        "workbook_observation": "",
+        "length_cm": 78.0,
+        "width_cm": 21.0,
+        "height_cm": 63.0,
+        "unit_cbm": 0.103194,
+        "purchase_rmb": 145.0,
+        "selling_price_zar": 2200.0,
+        "sea_profit_rmb": 178.156292307692,
+        "sea_margin": 0.210548345454545,
+        "review_proxy_count": 0,
+        "electrical_status": "provisionally_non_electric",
+        "electrical_evidence": "按标题与工作簿结构判断为机械/家具类，不含插头、电池或充电部件；下单前仍须复核BOM与包装清单。",
+        "risk_tags": [
+          "承重",
+          "机械结构",
+          "面料售后"
+        ]
+      },
+      "representatives": [
+        {
+          "plid": "96911411",
+          "url": "https://www.takealot.com/simple-and-stylish-single-rocking-chair-that-can-sleep-or-lie-do/PLID96911411",
+          "roles": [
+            "low_price"
+          ]
+        },
+        {
+          "plid": "95111259",
+          "url": "https://www.takealot.com/emma-tufted-leisure-accent-chair/PLID95111259",
+          "roles": [
+            "high_price"
+          ]
+        },
+        {
+          "plid": "95528738",
+          "url": "https://www.takealot.com/skylora-polyester-blend-upholstered-recliner-armchair/PLID95528738",
+          "roles": [
+            "most_reviewed",
+            "recent_review_grower"
+          ]
+        },
+        {
+          "plid": "96968488",
+          "url": "https://www.takealot.com/decorum-co-urban-loft-accent-chair/PLID96968488",
+          "roles": [
+            "mid_market"
+          ]
+        },
+        {
+          "plid": "102782685",
+          "url": "https://www.takealot.com/topika-3-in-1-foldable-lounge-sofa-single-sofa-bed-with-pillow-f/PLID102782685",
+          "roles": [
+            "recent_stock_mover"
+          ]
+        },
+        {
+          "plid": "98516951",
+          "url": "https://www.takealot.com/adjustable-armchair-rocking-chair-low-height-rocking-recliner-la/PLID98516951",
+          "roles": [
+            "workbook_economics_anchor"
+          ]
+        }
+      ]
+    },
+    {
+      "category_id": "telescopic-ladders",
+      "category_name": "折叠 / 伸缩梯",
+      "market_leaf_id": "25830",
+      "market_leaf_name": "Ladders & Step Tools",
+      "cohort_basis": {
+        "scope": "现有竞品雷达同叶子类目按标题规则筛选的最新快照候选池",
+        "sample_size": 7,
+        "recent_signal_link_count": 3,
+        "recent_signal_score": 12,
+        "snapshot_date": "2026-08-25",
+        "extremes_are_sample_relative": true
+      },
+      "economics_anchor": {
+        "plid": "73482251",
+        "url": "https://www.takealot.com/aluminium-telescopic-ladder-4-4m/PLID73482251",
+        "source_sheet": "杨永泰",
+        "source_row": 107,
+        "name": "铝制伸缩梯（4.4",
+        "workbook_observation": "近期评论1，竞品多，利润高，待考虑",
+        "length_cm": 96.5,
+        "width_cm": 49.0,
+        "height_cm": 9.5,
+        "unit_cbm": 0.04492075,
+        "purchase_rmb": 259.0,
+        "selling_price_zar": 2298.0,
+        "sea_profit_rmb": 272.78297307692304,
+        "sea_margin": 0.308631736292428,
+        "review_proxy_count": 1,
+        "electrical_status": "provisionally_non_electric",
+        "electrical_evidence": "按标题与工作簿结构判断为机械/家具类，不含插头、电池或充电部件；下单前仍须复核BOM与包装清单。",
+        "risk_tags": [
+          "承重",
+          "锁扣安全",
+          "认证复核"
+        ],
+        "source_profit_currency": "ZAR",
+        "profit_conversion_note": "工作簿缓存利润原值为ZAR，已按AG列2.6 ZAR/CNY换算为人民币。"
+      },
+      "representatives": [
+        {
+          "plid": "96102661",
+          "url": "https://www.takealot.com/3-step-ladder-folding-stool-wide-anti-slip-pedal-150kg-sturdy-st/PLID96102661",
+          "roles": [
+            "low_price"
+          ]
+        },
+        {
+          "plid": "70981226",
+          "url": "https://www.takealot.com/telescopic-ladder-en-certified-3-8-meters/PLID70981226",
+          "roles": [
+            "high_price"
+          ]
+        },
+        {
+          "plid": "70399839",
+          "url": "https://www.takealot.com/zys-multi-purpose-folding-ladder-4x3/PLID70399839",
+          "roles": [
+            "most_reviewed",
+            "recent_review_grower"
+          ]
+        },
+        {
+          "plid": "50117966",
+          "url": "https://www.takealot.com/telescopic-ladder-3-2m/PLID50117966",
+          "roles": [
+            "mid_market"
+          ]
+        },
+        {
+          "plid": "47797522",
+          "url": "https://www.takealot.com/telescopic-aluminium-ladder-3-2m/PLID47797522",
+          "roles": [
+            "recent_stock_mover"
+          ]
+        },
+        {
+          "plid": "73482251",
+          "url": "https://www.takealot.com/aluminium-telescopic-ladder-4-4m/PLID73482251",
+          "roles": [
+            "workbook_economics_anchor"
+          ]
+        }
+      ]
+    },
+    {
+      "category_id": "strength-training-racks",
+      "category_name": "大型力量训练架",
+      "market_leaf_id": "24903",
+      "market_leaf_name": "Other Strength Training Equipment",
+      "cohort_basis": {
+        "scope": "现有竞品雷达同叶子类目按标题规则筛选的最新快照候选池",
+        "sample_size": 4,
+        "recent_signal_link_count": 3,
+        "recent_signal_score": 14,
+        "snapshot_date": "2026-08-25",
+        "extremes_are_sample_relative": true
+      },
+      "economics_anchor": {
+        "plid": "95796669",
+        "url": "https://www.takealot.com/getup-multi-functional-weight-bench-with-squat-rack/PLID95796669",
+        "source_sheet": "展胜",
+        "source_row": 906,
+        "name": "多功能举重凳带深蹲架",
+        "workbook_observation": "",
+        "length_cm": 116.0,
+        "width_cm": 45.0,
+        "height_cm": 17.0,
+        "unit_cbm": 0.08874,
+        "purchase_rmb": 280.0,
+        "selling_price_zar": 1999.0,
+        "sea_profit_rmb": 23.9248076923077,
+        "sea_margin": 0.0311178089044522,
+        "review_proxy_count": 0,
+        "electrical_status": "provisionally_non_electric",
+        "electrical_evidence": "按标题与工作簿结构判断为机械/家具类，不含插头、电池或充电部件；下单前仍须复核BOM与包装清单。",
+        "risk_tags": [
+          "承重",
+          "安装固定",
+          "运动伤害"
+        ]
+      },
+      "representatives": [
+        {
+          "plid": "72300622",
+          "url": "https://www.takealot.com/flexi-muscles-multifunctional-wall-mounted-pull-up-bar-and-dip-s/PLID72300622",
+          "roles": [
+            "low_price",
+            "most_reviewed",
+            "recent_stock_mover",
+            "recent_signal_backup"
+          ]
+        },
+        {
+          "plid": "95565914",
+          "url": "https://www.takealot.com/multi-functional-strength-training-pull-up-home-gym-tool/PLID95565914",
+          "roles": [
+            "high_price"
+          ]
+        },
+        {
+          "plid": "100961766",
+          "url": "https://www.takealot.com/multi-functional-pull-up-tool-for-strength-training-home-gym-adj/PLID100961766",
+          "roles": [
+            "mid_market",
+            "recent_review_grower"
+          ]
+        },
+        {
+          "plid": "97219143",
+          "url": "https://www.takealot.com/multi-function-adjustable-power-tower-power-rack-strength-traini/PLID97219143",
+          "roles": [
+            "recent_signal_backup"
+          ]
+        },
+        {
+          "plid": "95796669",
+          "url": "https://www.takealot.com/getup-multi-functional-weight-bench-with-squat-rack/PLID95796669",
+          "roles": [
+            "workbook_economics_anchor"
+          ]
+        }
+      ]
+    },
+    {
+      "category_id": "side-tables",
+      "category_name": "边桌 / 床头柜",
+      "market_leaf_id": "28328",
+      "market_leaf_name": "Side Tables",
+      "cohort_basis": {
+        "scope": "现有竞品雷达同叶子类目按标题规则筛选的最新快照候选池",
+        "sample_size": 3,
+        "recent_signal_link_count": 2,
+        "recent_signal_score": 3,
+        "snapshot_date": "2026-08-25",
+        "extremes_are_sample_relative": true
+      },
+      "economics_anchor": {
+        "plid": "96611845",
+        "url": "https://www.takealot.com/rectangular-space-saving-nightstand-two-drawer-bedside-table/PLID96611845",
+        "source_sheet": "展胜",
+        "source_row": 424,
+        "name": "床头柜",
+        "workbook_observation": "9月1评论，8月1轮，都是差评缺少零件没有英文说明书",
+        "length_cm": 81.0,
+        "width_cm": 42.0,
+        "height_cm": 15.0,
+        "unit_cbm": 0.05103,
+        "purchase_rmb": 70.0,
+        "selling_price_zar": 850.0,
+        "sea_profit_rmb": 0.778153846153852,
+        "sea_margin": 0.00238023529411766,
+        "review_proxy_count": 1,
+        "electrical_status": "provisionally_non_electric",
+        "electrical_evidence": "按标题与工作簿结构判断为机械/家具类，不含插头、电池或充电部件；下单前仍须复核BOM与包装清单。",
+        "risk_tags": [
+          "低毛利",
+          "板材磕碰",
+          "装配"
+        ]
+      },
+      "representatives": [
+        {
+          "plid": "96449763",
+          "url": "https://www.takealot.com/fine-living-nook-bedside-pedestal-white/PLID96449763",
+          "roles": [
+            "low_price",
+            "most_reviewed",
+            "recent_stock_mover",
+            "recent_signal_backup"
+          ]
+        },
+        {
+          "plid": "98007663",
+          "url": "https://www.takealot.com/bragg-orlando-side-end-table-black/PLID98007663",
+          "roles": [
+            "high_price",
+            "recent_signal_backup"
+          ]
+        },
+        {
+          "plid": "100468688",
+          "url": "https://www.takealot.com/counter-square-side-table-with-drawer-stroage-white-bedside-pede/PLID100468688",
+          "roles": [
+            "mid_market",
+            "recent_review_grower",
+            "recent_signal_backup"
+          ]
+        },
+        {
+          "plid": "96611845",
+          "url": "https://www.takealot.com/rectangular-space-saving-nightstand-two-drawer-bedside-table/PLID96611845",
+          "roles": [
+            "workbook_economics_anchor"
+          ]
+        }
+      ]
+    },
+    {
+      "category_id": "barrel-braais",
+      "category_name": "桶式木炭烧烤炉",
+      "market_leaf_id": "25902",
+      "market_leaf_name": "Charcoal",
+      "cohort_basis": {
+        "scope": "2026-08-26 Takealot自然搜索候选池与已有雷达快照合并；新链接先监控，旧累计评论不作为近期需求。",
+        "sample_size": 11,
+        "recent_signal_link_count": 5,
+        "recent_signal_score": 38,
+        "snapshot_date": "2026-08-26",
+        "extremes_are_sample_relative": true,
+        "recent_signal_note": "评论数为公开评论页第0页的近30天下限；库存流出是公开库存信号，不等同平台订单。"
+      },
+      "economics_anchor": {
+        "plid": "95240371",
+        "url": "https://www.takealot.com/outdoor-buddy-barrel-braai/PLID95240371",
+        "source_sheet": "展胜",
+        "source_row": 690,
+        "name": "桶式木炭烧烤炉",
+        "workbook_observation": "工作簿只用于箱规、成本和缓存海运利润；旧评论不计入近期需求，近30天结论只认雷达库存流出和带日期评论。",
+        "length_cm": 78.0,
+        "width_cm": 42.0,
+        "height_cm": 24.0,
+        "unit_cbm": 0.078624,
+        "purchase_rmb": 225.0,
+        "selling_price_zar": 2199.0,
+        "sea_profit_rmb": 189.7414,
+        "sea_margin": 0.224341764438381,
+        "review_proxy_count": 0,
+        "electrical_status": "provisionally_non_electric",
+        "electrical_evidence": "按商品标题、类目和工作簿结构判断，不含插头、电池或充电部件；下单前仍须复核BOM和包装清单。",
+        "profit_basis": "工作簿海运利润缓存只代表该锚点方案，不等于每条竞品利润；上新前复核采购价、箱规、汇率、佣金和头程。",
+        "source_profit_currency": "RMB",
+        "risk_tags": [
+          "高温涂层",
+          "运输变形",
+          "装配完整性"
+        ]
+      },
+      "representatives": [
+        {
+          "plid": "93189204",
+          "url": "https://www.takealot.com/mix-box-57cm-kettle-braai-grill-with-lid-thermometer-with-wheels/PLID93189204",
+          "roles": [
+            "low_price",
+            "most_reviewed"
+          ]
+        },
+        {
+          "plid": "92760129",
+          "url": "https://www.takealot.com/extra-large-charcoal-bbq-grill-braai-stand-with-wheels-155cm/PLID92760129",
+          "roles": [
+            "high_price"
+          ]
+        },
+        {
+          "plid": "95240371",
+          "url": "https://www.takealot.com/outdoor-buddy-barrel-braai/PLID95240371",
+          "roles": [
+            "mid_market",
+            "recent_stock_mover",
+            "recent_review_grower",
+            "workbook_economics_anchor"
+          ]
+        },
+        {
+          "plid": "98440790",
+          "url": "https://www.takealot.com/fire-up-adjustable-height-charcoal-braai/PLID98440790",
+          "roles": [
+            "recent_review_grower",
+            "recent_signal_backup"
+          ]
+        },
+        {
+          "plid": "98055738",
+          "url": "https://www.takealot.com/5-8-person-camping-trolley-bbq-grill-with-collapsible-shelf-110x/PLID98055738",
+          "roles": [
+            "recent_signal_backup"
+          ]
+        },
+        {
+          "plid": "102493718",
+          "url": "https://www.takealot.com/large-barrel-charcoal-braai-bbq-grill-with-lid-shelves-wheels-th/PLID102493718",
+          "roles": [
+            "recent_signal_backup"
+          ]
+        }
+      ]
+    },
+    {
+      "category_id": "kids-climbing-playsets",
+      "category_name": "儿童攀爬架 / 滑梯组合",
+      "market_leaf_id": "25934",
+      "market_leaf_name": "Climbers",
+      "cohort_basis": {
+        "scope": "2026-08-26 Takealot自然搜索候选池与已有雷达快照合并；新链接先监控，旧累计评论不作为近期需求。",
+        "sample_size": 11,
+        "recent_signal_link_count": 6,
+        "recent_signal_score": 20,
+        "snapshot_date": "2026-08-26",
+        "extremes_are_sample_relative": true,
+        "recent_signal_note": "评论数为公开评论页第0页的近30天下限；库存流出是公开库存信号，不等同平台订单。"
+      },
+      "economics_anchor": {
+        "plid": "100235867",
+        "url": "https://www.takealot.com/montessori-climbing-toys-8-in-1-gym-playset-with-slide-swing-roc/PLID100235867",
+        "source_sheet": "展胜",
+        "source_row": 1235,
+        "name": "8合1蒙特梭利儿童攀爬组合",
+        "workbook_observation": "工作簿只用于箱规、成本和缓存海运利润；旧评论不计入近期需求，近30天结论只认雷达库存流出和带日期评论。",
+        "length_cm": 128.0,
+        "width_cm": 60.0,
+        "height_cm": 18.0,
+        "unit_cbm": 0.13824,
+        "purchase_rmb": 215.0,
+        "selling_price_zar": 2399.0,
+        "sea_profit_rmb": 25.1685,
+        "sea_margin": 0.027277240516882,
+        "review_proxy_count": 0,
+        "electrical_status": "provisionally_non_electric",
+        "electrical_evidence": "按商品标题、类目和工作簿结构判断，不含插头、电池或充电部件；下单前仍须复核BOM和包装清单。",
+        "profit_basis": "工作簿海运利润缓存只代表该锚点方案，不等于每条竞品利润；上新前复核采购价、箱规、汇率、佣金和头程。",
+        "source_profit_currency": "RMB",
+        "risk_tags": [
+          "儿童承重",
+          "夹手风险",
+          "装配说明"
+        ]
+      },
+      "representatives": [
+        {
+          "plid": "98509671",
+          "url": "https://www.takealot.com/home-small-slide-toddler-playground-toys-indoor-baby-children-sa/PLID98509671",
+          "roles": [
+            "low_price",
+            "recent_review_grower"
+          ]
+        },
+        {
+          "plid": "100596217",
+          "url": "https://www.takealot.com/babies-up-toddler-garden-twin-slide-set-with-swing-bridge-drawin/PLID100596217",
+          "roles": [
+            "high_price"
+          ]
+        },
+        {
+          "plid": "100258545",
+          "url": "https://www.takealot.com/children-climbing-frame-montessori-pikler-set-indoor-baby-toddle/PLID100258545",
+          "roles": [
+            "most_reviewed",
+            "recent_signal_backup"
+          ]
+        },
+        {
+          "plid": "100235867",
+          "url": "https://www.takealot.com/montessori-climbing-toys-8-in-1-gym-playset-with-slide-swing-roc/PLID100235867",
+          "roles": [
+            "mid_market",
+            "recent_review_grower",
+            "workbook_economics_anchor"
+          ]
+        },
+        {
+          "plid": "102307503",
+          "url": "https://www.takealot.com/foldable-climbing-toys-montessori-climbing-set-toddler-play-clim/PLID102307503",
+          "roles": [
+            "recent_stock_mover"
+          ]
+        },
+        {
+          "plid": "102248457",
+          "url": "https://www.takealot.com/montessori-climbing-toys-wooden-climbing-frame-set-climbing-fram/PLID102248457",
+          "roles": [
+            "recent_signal_backup"
+          ]
+        }
+      ]
+    },
+    {
+      "category_id": "mattress-toppers",
+      "category_name": "记忆棉床垫加厚垫",
+      "market_leaf_id": "33925",
+      "market_leaf_name": "Mattress Toppers",
+      "cohort_basis": {
+        "scope": "2026-08-26 Takealot自然搜索候选池与已有雷达快照合并；新链接先监控，旧累计评论不作为近期需求。",
+        "sample_size": 8,
+        "recent_signal_link_count": 2,
+        "recent_signal_score": 16,
+        "snapshot_date": "2026-08-26",
+        "extremes_are_sample_relative": true,
+        "recent_signal_note": "评论数为公开评论页第0页的近30天下限；库存流出是公开库存信号，不等同平台订单。"
+      },
+      "economics_anchor": {
+        "plid": "94157470",
+        "url": "https://www.takealot.com/bragg-5-zone-gel-memory-foam-mattress-topper/PLID94157470",
+        "source_sheet": "展胜",
+        "source_row": 1012,
+        "name": "7区凝胶记忆棉床垫加厚垫",
+        "workbook_observation": "工作簿只用于箱规、成本和缓存海运利润；旧评论不计入近期需求，近30天结论只认雷达库存流出和带日期评论。",
+        "length_cm": 28.0,
+        "width_cm": 28.0,
+        "height_cm": 57.0,
+        "unit_cbm": 0.044688,
+        "purchase_rmb": 122.0,
+        "selling_price_zar": 1499.0,
+        "sea_profit_rmb": 169.7182,
+        "sea_margin": 0.294374396264176,
+        "review_proxy_count": 0,
+        "electrical_status": "provisionally_non_electric",
+        "electrical_evidence": "按商品标题、类目和工作簿结构判断，不含插头、电池或充电部件；下单前仍须复核BOM和包装清单。",
+        "profit_basis": "工作簿海运利润缓存只代表该锚点方案，不等于每条竞品利润；上新前复核采购价、箱规、汇率、佣金和头程。",
+        "source_profit_currency": "RMB",
+        "risk_tags": [
+          "压缩回弹",
+          "尺寸适配",
+          "气味售后"
+        ]
+      },
+      "representatives": [
+        {
+          "plid": "90996832",
+          "url": "https://www.takealot.com/dreamy-comfort-convoluted-foam-egg-box-mattress-topper/PLID90996832",
+          "roles": [
+            "low_price",
+            "most_reviewed"
+          ]
+        },
+        {
+          "plid": "72474597",
+          "url": "https://www.takealot.com/rainbow-home-memory-foam-mattress-topper-bianca/PLID72474597",
+          "roles": [
+            "high_price"
+          ]
+        },
+        {
+          "plid": "101163624",
+          "url": "https://www.takealot.com/rainbow-home-icecool-topper-5-1cm-cool-gel-memory-foam-mattress-/PLID101163624",
+          "roles": [
+            "mid_market",
+            "recent_review_grower"
+          ]
+        },
+        {
+          "plid": "94157470",
+          "url": "https://www.takealot.com/bragg-5-zone-gel-memory-foam-mattress-topper/PLID94157470",
+          "roles": [
+            "recent_stock_mover",
+            "workbook_economics_anchor"
+          ]
+        },
+        {
+          "plid": "94872189",
+          "url": "https://www.takealot.com/memory-foam-mattress-topper-with-bamboo-cotton-cover/PLID94872189",
+          "roles": [
+            "recent_signal_backup"
+          ]
+        }
+      ]
+    },
+    {
+      "category_id": "executive-office-chairs",
+      "category_name": "行政经理办公椅",
+      "market_leaf_id": "26367",
+      "market_leaf_name": "Executive Chairs",
+      "cohort_basis": {
+        "scope": "2026-08-26 Takealot自然搜索候选池与已有雷达快照合并；新链接先监控，旧累计评论不作为近期需求。",
+        "sample_size": 11,
+        "recent_signal_link_count": 6,
+        "recent_signal_score": 23,
+        "snapshot_date": "2026-08-26",
+        "extremes_are_sample_relative": true,
+        "recent_signal_note": "评论数为公开评论页第0页的近30天下限；库存流出是公开库存信号，不等同平台订单。"
+      },
+      "economics_anchor": {
+        "plid": "99558432",
+        "url": "https://www.takealot.com/leather-office-chair-executive-manager-chair-computer-chair-desk/PLID99558432",
+        "source_sheet": "展胜",
+        "source_row": 1184,
+        "name": "高背行政经理办公椅",
+        "workbook_observation": "工作簿只用于箱规、成本和缓存海运利润；旧评论不计入近期需求，近30天结论只认雷达库存流出和带日期评论。",
+        "length_cm": 43.0,
+        "width_cm": 55.0,
+        "height_cm": 73.0,
+        "unit_cbm": 0.172645,
+        "purchase_rmb": 260.0,
+        "selling_price_zar": 2999.0,
+        "sea_profit_rmb": 57.5515,
+        "sea_margin": 0.0498945648549516,
+        "review_proxy_count": 0,
+        "electrical_status": "provisionally_non_electric",
+        "electrical_evidence": "按商品标题、类目和工作簿结构判断，不含插头、电池或充电部件；下单前仍须复核BOM和包装清单。",
+        "profit_basis": "工作簿海运利润缓存只代表该锚点方案，不等于每条竞品利润；上新前复核采购价、箱规、汇率、佣金和头程。",
+        "source_profit_currency": "RMB",
+        "risk_tags": [
+          "承重",
+          "气杆安全",
+          "皮面破损"
+        ]
+      },
+      "representatives": [
+        {
+          "plid": "97461902",
+          "url": "https://www.takealot.com/modern-mesh-office-chair/PLID97461902",
+          "roles": [
+            "low_price",
+            "most_reviewed"
+          ]
+        },
+        {
+          "plid": "102036988",
+          "url": "https://www.takealot.com/heavy-duty-executive-chair-pet-friendly-big-and-tall-office-chai/PLID102036988",
+          "roles": [
+            "high_price"
+          ]
+        },
+        {
+          "plid": "100813557",
+          "url": "https://www.takealot.com/office-chair-executive-leather-chair-180kg-for-heavy-people/PLID100813557",
+          "roles": [
+            "mid_market",
+            "recent_signal_backup"
+          ]
+        },
+        {
+          "plid": "101255888",
+          "url": "https://www.takealot.com/madala-luxury-highback-executive-office-chair-leg-rest-pu-leathe/PLID101255888",
+          "roles": [
+            "recent_review_grower"
+          ]
+        },
+        {
+          "plid": "99228194",
+          "url": "https://www.takealot.com/luxury-executive-chairman-management-boss-and-office-chairs/PLID99228194",
+          "roles": [
+            "recent_signal_backup"
+          ]
+        },
+        {
+          "plid": "99558432",
+          "url": "https://www.takealot.com/leather-office-chair-executive-manager-chair-computer-chair-desk/PLID99558432",
+          "roles": [
+            "recent_stock_mover",
+            "workbook_economics_anchor"
+          ]
+        }
+      ]
+    },
+    {
+      "category_id": "cat-litter-furniture",
+      "category_name": "隐藏式猫砂盆家具",
+      "market_leaf_id": "26714",
+      "market_leaf_name": "Litter Boxes",
+      "cohort_basis": {
+        "scope": "2026-08-26 Takealot自然搜索候选池与已有雷达快照合并；新链接先监控，旧累计评论不作为近期需求。",
+        "sample_size": 5,
+        "recent_signal_link_count": 2,
+        "recent_signal_score": 10,
+        "snapshot_date": "2026-08-26",
+        "extremes_are_sample_relative": true,
+        "recent_signal_note": "评论数为公开评论页第0页的近30天下限；库存流出是公开库存信号，不等同平台订单。"
+      },
+      "economics_anchor": {
+        "plid": "98519898",
+        "url": "https://www.takealot.com/cat-house-pet-house-double-door-wooden-cat-litter-box-enclosure-/PLID98519898",
+        "source_sheet": "展胜",
+        "source_row": 955,
+        "name": "双门木质猫砂盆隐藏柜",
+        "workbook_observation": "工作簿只用于箱规、成本和缓存海运利润；旧评论不计入近期需求，近30天结论只认雷达库存流出和带日期评论。",
+        "length_cm": 63.0,
+        "width_cm": 33.0,
+        "height_cm": 29.0,
+        "unit_cbm": 0.060291,
+        "purchase_rmb": 90.0,
+        "selling_price_zar": 1399.0,
+        "sea_profit_rmb": 122.6758,
+        "sea_margin": 0.227989306647605,
+        "review_proxy_count": 0,
+        "electrical_status": "provisionally_non_electric",
+        "electrical_evidence": "按商品标题、类目和工作簿结构判断，不含插头、电池或充电部件；下单前仍须复核BOM和包装清单。",
+        "profit_basis": "工作簿海运利润缓存只代表该锚点方案，不等于每条竞品利润；上新前复核采购价、箱规、汇率、佣金和头程。",
+        "source_profit_currency": "RMB",
+        "risk_tags": [
+          "板材受潮",
+          "装配",
+          "尺寸适配"
+        ]
+      },
+      "representatives": [
+        {
+          "plid": "98519898",
+          "url": "https://www.takealot.com/cat-house-pet-house-double-door-wooden-cat-litter-box-enclosure-/PLID98519898",
+          "roles": [
+            "low_price",
+            "most_reviewed",
+            "recent_stock_mover",
+            "recent_review_grower",
+            "workbook_economics_anchor"
+          ]
+        },
+        {
+          "plid": "102882469",
+          "url": "https://www.takealot.com/hidden-cat-litter-box-enclosure-with-ventilation-holes/PLID102882469",
+          "roles": [
+            "high_price"
+          ]
+        },
+        {
+          "plid": "98519897",
+          "url": "https://www.takealot.com/cat-house-wooden-cat-litter-box-enclosure-pet-house-fit-most-of-/PLID98519897",
+          "roles": [
+            "mid_market",
+            "recent_signal_backup"
+          ]
+        },
+        {
+          "plid": "103112863",
+          "url": "https://www.takealot.com/cat-house-cat-litter-cabinet-wooden-cat-litter-box-enclosure-fur/PLID103112863",
+          "roles": [
+            "recent_signal_backup"
+          ]
+        },
+        {
+          "plid": "102781374",
+          "url": "https://www.takealot.com/cat-litter-box-enclosure-furniture-waterproof-resin/PLID102781374",
+          "roles": [
+            "recent_signal_backup"
+          ]
+        }
+      ]
+    },
+    {
+      "category_id": "racing-wheel-stands",
+      "category_name": "赛车方向盘模拟器支架",
+      "market_leaf_id": "32989",
+      "market_leaf_name": "Racks & Mounts",
+      "cohort_basis": {
+        "scope": "2026-08-26 Takealot自然搜索候选池与已有雷达快照合并；新链接先监控，旧累计评论不作为近期需求。",
+        "sample_size": 20,
+        "recent_signal_link_count": 2,
+        "recent_signal_score": 7,
+        "snapshot_date": "2026-08-26",
+        "extremes_are_sample_relative": true,
+        "recent_signal_note": "评论数为公开评论页第0页的近30天下限；库存流出是公开库存信号，不等同平台订单。"
+      },
+      "economics_anchor": {
+        "plid": "95872719",
+        "url": "https://www.takealot.com/racing-simulator-steering-wheel-stand-mount-for-g27-g29-t300rs-t/PLID95872719",
+        "source_sheet": "展胜",
+        "source_row": 1153,
+        "name": "可折叠赛车方向盘模拟器支架",
+        "workbook_observation": "工作簿只用于箱规、成本和缓存海运利润；旧评论不计入近期需求，近30天结论只认雷达库存流出和带日期评论。",
+        "length_cm": 62.0,
+        "width_cm": 52.0,
+        "height_cm": 16.0,
+        "unit_cbm": 0.051584,
+        "purchase_rmb": 155.0,
+        "selling_price_zar": 1299.0,
+        "sea_profit_rmb": 46.0253,
+        "sea_margin": 0.0921214010777521,
+        "review_proxy_count": 0,
+        "electrical_status": "provisionally_non_electric",
+        "electrical_evidence": "按商品标题、类目和工作簿结构判断，不含插头、电池或充电部件；下单前仍须复核BOM和包装清单。",
+        "profit_basis": "工作簿海运利润缓存只代表该锚点方案，不等于每条竞品利润；上新前复核采购价、箱规、汇率、佣金和头程。",
+        "source_profit_currency": "RMB",
+        "risk_tags": [
+          "适配型号",
+          "支架稳定性",
+          "装配"
+        ]
+      },
+      "representatives": [
+        {
+          "plid": "95872719",
+          "url": "https://www.takealot.com/racing-simulator-steering-wheel-stand-mount-for-g27-g29-t300rs-t/PLID95872719",
+          "roles": [
+            "low_price",
+            "recent_stock_mover",
+            "recent_review_grower",
+            "workbook_economics_anchor"
+          ]
+        },
+        {
+          "plid": "102736761",
+          "url": "https://www.takealot.com/mbs-steering-wheel-stand-with-racing-simulator-cockpit-and-tv-mo/PLID102736761",
+          "roles": [
+            "high_price"
+          ]
+        },
+        {
+          "plid": "90409796",
+          "url": "https://www.takealot.com/racing-simulator-steering-wheel-stand-mount-for-pxn-racing-logit/PLID90409796",
+          "roles": [
+            "most_reviewed"
+          ]
+        },
+        {
+          "plid": "102146086",
+          "url": "https://www.takealot.com/racing-simulator-steering-wheel-stand-swivel-casters-with-brakes/PLID102146086",
+          "roles": [
+            "mid_market"
+          ]
+        },
+        {
+          "plid": "97794839",
+          "url": "https://www.takealot.com/foldable-racing-simulator-steering-wheel-stand-fully-adjustable-/PLID97794839",
+          "roles": [
+            "recent_signal_backup"
+          ]
+        },
+        {
+          "plid": "91514494",
+          "url": "https://www.takealot.com/racing-simulator-steering-wheel-stand/PLID91514494",
+          "roles": [
+            "recent_signal_backup"
+          ]
+        }
+      ]
+    },
+    {
+      "category_id": "hydraulic-floor-jacks",
+      "category_name": "液压卧式 / 手推千斤顶",
+      "market_leaf_id": "27573",
+      "market_leaf_name": "Jacks",
+      "cohort_basis": {
+        "scope": "2026-08-26 Takealot自然搜索候选池与已有雷达快照合并；新链接先监控，旧累计评论不作为近期需求。",
+        "sample_size": 27,
+        "recent_signal_link_count": 2,
+        "recent_signal_score": 6,
+        "snapshot_date": "2026-08-26",
+        "extremes_are_sample_relative": true,
+        "recent_signal_note": "评论数为公开评论页第0页的近30天下限；库存流出是公开库存信号，不等同平台订单。"
+      },
+      "economics_anchor": {
+        "plid": "95731105",
+        "url": "https://www.takealot.com/4-ton-hydraulic-horizontal-car-jack/PLID95731105",
+        "source_sheet": "展胜",
+        "source_row": 818,
+        "name": "4吨液压卧式汽车千斤顶",
+        "workbook_observation": "工作簿只用于箱规、成本和缓存海运利润；旧评论不计入近期需求，近30天结论只认雷达库存流出和带日期评论。",
+        "length_cm": 80.0,
+        "width_cm": 41.5,
+        "height_cm": 21.5,
+        "unit_cbm": 0.07138,
+        "purchase_rmb": 515.0,
+        "selling_price_zar": 3000.0,
+        "sea_profit_rmb": 26.3814,
+        "sea_margin": 0.0228638666666666,
+        "review_proxy_count": 0,
+        "electrical_status": "provisionally_non_electric",
+        "electrical_evidence": "按商品标题、类目和工作簿结构判断，不含插头、电池或充电部件；下单前仍须复核BOM和包装清单。",
+        "profit_basis": "工作簿海运利润缓存只代表该锚点方案，不等于每条竞品利润；上新前复核采购价、箱规、汇率、佣金和头程。",
+        "source_profit_currency": "RMB",
+        "risk_tags": [
+          "承重安全",
+          "液压漏油",
+          "净重运费"
+        ]
+      },
+      "representatives": [
+        {
+          "plid": "92830677",
+          "url": "https://www.takealot.com/hydraulic-jack-10ton-red/PLID92830677",
+          "roles": [
+            "low_price"
+          ]
+        },
+        {
+          "plid": "99310859",
+          "url": "https://www.takealot.com/4-ton-low-profile-hydraulic-floor-jack-heavy-duty/PLID99310859",
+          "roles": [
+            "high_price"
+          ]
+        },
+        {
+          "plid": "71786533",
+          "url": "https://www.takealot.com/2-ton-professional-hydraulic-floor-jack-car-tire-replacement-too/PLID71786533",
+          "roles": [
+            "most_reviewed"
+          ]
+        },
+        {
+          "plid": "95358183",
+          "url": "https://www.takealot.com/4-ton-hydraulic-garage-floor-jack-green/PLID95358183",
+          "roles": [
+            "mid_market",
+            "recent_review_grower"
+          ]
+        },
+        {
+          "plid": "95731105",
+          "url": "https://www.takealot.com/4-ton-hydraulic-horizontal-car-jack/PLID95731105",
+          "roles": [
+            "recent_stock_mover",
+            "workbook_economics_anchor"
+          ]
+        }
+      ]
+    },
+    {
+      "category_id": "gaming-chairs",
+      "category_name": "机械电竞椅",
+      "market_leaf_id": "26665",
+      "market_leaf_name": "Gaming Chairs",
+      "cohort_basis": {
+        "scope": "2026-08-26 Takealot自然搜索候选池与已有雷达快照合并；新链接先监控，旧累计评论不作为近期需求。",
+        "sample_size": 25,
+        "recent_signal_link_count": 3,
+        "recent_signal_score": 8,
+        "snapshot_date": "2026-08-26",
+        "extremes_are_sample_relative": true,
+        "recent_signal_note": "评论数为公开评论页第0页的近30天下限；库存流出是公开库存信号，不等同平台订单。"
+      },
+      "economics_anchor": {
+        "plid": "100050910",
+        "url": "https://www.takealot.com/deli-gaming-chair-with-leg-rest-w62xd61-5xh117-125cm/PLID100050910",
+        "source_sheet": "展胜",
+        "source_row": 674,
+        "name": "带脚托机械电竞椅",
+        "workbook_observation": "工作簿只用于箱规、成本和缓存海运利润；旧评论不计入近期需求，近30天结论只认雷达库存流出和带日期评论。",
+        "length_cm": 80.0,
+        "width_cm": 28.0,
+        "height_cm": 58.0,
+        "unit_cbm": 0.12992,
+        "purchase_rmb": 158.0,
+        "selling_price_zar": 1899.0,
+        "sea_profit_rmb": 54.9397,
+        "sea_margin": 0.0752202738283307,
+        "review_proxy_count": 0,
+        "electrical_status": "provisionally_non_electric",
+        "electrical_evidence": "按商品标题、类目和工作簿结构判断，不含插头、电池或充电部件；下单前仍须复核BOM和包装清单。",
+        "profit_basis": "工作簿海运利润缓存只代表该锚点方案，不等于每条竞品利润；上新前复核采购价、箱规、汇率、佣金和头程。",
+        "source_profit_currency": "RMB",
+        "risk_tags": [
+          "气杆安全",
+          "承重",
+          "皮面破损"
+        ]
+      },
+      "representatives": [
+        {
+          "plid": "100192912",
+          "url": "https://www.takealot.com/computer-chair-home-office-chair-desk-chairs-and-headrest-gaming/PLID100192912",
+          "roles": [
+            "low_price",
+            "recent_review_grower"
+          ]
+        },
+        {
+          "plid": "91768006",
+          "url": "https://www.takealot.com/cougar-terminator-gaming-chair-4d-armrests-black/PLID91768006",
+          "roles": [
+            "high_price"
+          ]
+        },
+        {
+          "plid": "96618658",
+          "url": "https://www.takealot.com/gaming-chair-with-footrest-computer-office-chair/PLID96618658",
+          "roles": [
+            "most_reviewed"
+          ]
+        },
+        {
+          "plid": "96018662",
+          "url": "https://www.takealot.com/gaming-chair-ergonomic-adjustable-recliner-computer-chair-with-f/PLID96018662",
+          "roles": [
+            "mid_market",
+            "recent_review_grower"
+          ]
+        },
+        {
+          "plid": "100050910",
+          "url": "https://www.takealot.com/deli-gaming-chair-with-leg-rest-w62xd61-5xh117-125cm/PLID100050910",
+          "roles": [
+            "recent_signal_backup",
+            "workbook_economics_anchor"
+          ]
+        },
+        {
+          "plid": "94398919",
+          "url": "https://www.takealot.com/ergonomic-gaming-chair-with-footrest-adjustable-pu-high-back-com/PLID94398919",
+          "roles": [
+            "recent_signal_backup"
+          ]
+        }
+      ]
+    },
+    {
+      "category_id": "rolling-cosmetic-trolleys",
+      "category_name": "专业拉杆化妆箱",
+      "market_leaf_id": "25061",
+      "market_leaf_name": "Cosmetic Cases",
+      "cohort_basis": {
+        "scope": "2026-08-26 Takealot自然搜索候选池与已有雷达快照合并；新链接先监控，旧累计评论不作为近期需求。",
+        "sample_size": 35,
+        "recent_signal_link_count": 2,
+        "recent_signal_score": 3,
+        "snapshot_date": "2026-08-26",
+        "extremes_are_sample_relative": true,
+        "recent_signal_note": "评论数为公开评论页第0页的近30天下限；库存流出是公开库存信号，不等同平台订单。"
+      },
+      "economics_anchor": {
+        "plid": "98502274",
+        "url": "https://www.takealot.com/alanes-3-in-1-aluminium-professional-rolling-cosmetic-trolley-ca/PLID98502274",
+        "source_sheet": "展胜",
+        "source_row": 809,
+        "name": "3合1铝制专业拉杆化妆箱",
+        "workbook_observation": "工作簿只用于箱规、成本和缓存海运利润；旧评论不计入近期需求，近30天结论只认雷达库存流出和带日期评论。",
+        "length_cm": 40.0,
+        "width_cm": 31.5,
+        "height_cm": 68.0,
+        "unit_cbm": 0.08568,
+        "purchase_rmb": 170.0,
+        "selling_price_zar": 1799.0,
+        "sea_profit_rmb": 86.6622,
+        "sea_margin": 0.125248304613674,
+        "review_proxy_count": 0,
+        "electrical_status": "provisionally_non_electric",
+        "electrical_evidence": "按商品标题、类目和工作簿结构判断，不含插头、电池或充电部件；下单前仍须复核BOM和包装清单。",
+        "profit_basis": "工作簿海运利润缓存只代表该锚点方案，不等于每条竞品利润；上新前复核采购价、箱规、汇率、佣金和头程。",
+        "source_profit_currency": "RMB",
+        "risk_tags": [
+          "拉杆轮组",
+          "锁扣",
+          "铝框磕碰"
+        ]
+      },
+      "representatives": [
+        {
+          "plid": "98508213",
+          "url": "https://www.takealot.com/makeup-train-case-trolley-cosmetic-case-trolley-tattoo-kit-beaut/PLID98508213",
+          "roles": [
+            "low_price",
+            "recent_review_grower"
+          ]
+        },
+        {
+          "plid": "102223204",
+          "url": "https://www.takealot.com/professional-rolling-cosmetic-train-case-black/PLID102223204",
+          "roles": [
+            "high_price"
+          ]
+        },
+        {
+          "plid": "51858142",
+          "url": "https://www.takealot.com/rolling-trolley-train-makeup-box-professional-makeup-beauty-salo/PLID51858142",
+          "roles": [
+            "most_reviewed"
+          ]
+        },
+        {
+          "plid": "98502274",
+          "url": "https://www.takealot.com/alanes-3-in-1-aluminium-professional-rolling-cosmetic-trolley-ca/PLID98502274",
+          "roles": [
+            "mid_market",
+            "recent_review_grower",
+            "workbook_economics_anchor"
+          ]
+        },
+        {
+          "plid": "96302510",
+          "url": "https://www.takealot.com/5-in-1-cosmetic-case-rolling-extra-large-trolley-makeup-travel-o/PLID96302510",
+          "roles": [
+            "recent_signal_backup"
+          ]
+        },
+        {
+          "plid": "102366873",
+          "url": "https://www.takealot.com/rolling-makeup-train-case-black-silver-large-capacity-cosmetic-t/PLID102366873",
+          "roles": [
+            "recent_signal_backup"
+          ]
+        }
+      ]
+    },
+    {
+      "category_id": "folding-sofa-beds",
+      "category_name": "成人折叠沙发床 / 卧椅",
+      "market_leaf_id": "28325",
+      "market_leaf_name": "Couches",
+      "cohort_basis": {
+        "scope": "2026-08-26 Takealot自然搜索候选池与已有雷达快照合并；新链接先监控，旧累计评论不作为近期需求。",
+        "sample_size": 30,
+        "recent_signal_link_count": 2,
+        "recent_signal_score": 3,
+        "snapshot_date": "2026-08-26",
+        "extremes_are_sample_relative": true,
+        "recent_signal_note": "评论数为公开评论页第0页的近30天下限；库存流出是公开库存信号，不等同平台订单。"
+      },
+      "economics_anchor": {
+        "plid": "100600212",
+        "url": "https://www.takealot.com/lomansa-folding-sofa-bed-convertible-sleeper-chair-with-pillow-foldable/PLID100600212",
+        "source_sheet": "展胜",
+        "source_row": 1195,
+        "name": "成人折叠沙发床",
+        "workbook_observation": "工作簿只用于箱规、成本和缓存海运利润；旧评论不计入近期需求，近30天结论只认雷达库存流出和带日期评论。",
+        "length_cm": 122.0,
+        "width_cm": 20.0,
+        "height_cm": 65.0,
+        "unit_cbm": 0.1586,
+        "purchase_rmb": 130.0,
+        "selling_price_zar": 2799.0,
+        "sea_profit_rmb": 186.5525,
+        "sea_margin": 0.173289210432297,
+        "review_proxy_count": 0,
+        "electrical_status": "provisionally_non_electric",
+        "electrical_evidence": "按商品标题、类目和工作簿结构判断，不含插头、电池或充电部件；下单前仍须复核BOM和包装清单。",
+        "profit_basis": "工作簿海运利润缓存只代表该锚点方案，不等于每条竞品利润；上新前复核采购价、箱规、汇率、佣金和头程。",
+        "source_profit_currency": "RMB",
+        "risk_tags": [
+          "承重",
+          "回弹",
+          "面料色差"
+        ]
+      },
+      "representatives": [
+        {
+          "plid": "103034342",
+          "url": "https://www.takealot.com/grey-corduroy-convertible-folding-sofa-bed-floor-sleeper-chair-w/PLID103034342",
+          "roles": [
+            "low_price"
+          ]
+        },
+        {
+          "plid": "100625651",
+          "url": "https://www.takealot.com/lomansa-convertible-sofa-bed-pull-out-loveseat-sleeper-sofa-2-in/PLID100625651",
+          "roles": [
+            "high_price"
+          ]
+        },
+        {
+          "plid": "73143021",
+          "url": "https://www.takealot.com/modern-comfortable-foldable-fabric-sleeper-couch-sofa-3-seater/PLID73143021",
+          "roles": [
+            "most_reviewed"
+          ]
+        },
+        {
+          "plid": "100600212",
+          "url": "https://www.takealot.com/lomansa-folding-sofa-bed-convertible-sleeper-chair-with-pillow-f/PLID100600212?colour_variant=Yellow",
+          "roles": [
+            "mid_market",
+            "recent_stock_mover",
+            "workbook_economics_anchor"
+          ]
+        },
+        {
+          "plid": "100260109",
+          "url": "https://www.takealot.com/soft-cloud-sofa-bed-4-in-1-fold-out-floor-lounger-and-sleeper-so/PLID100260109",
+          "roles": [
+            "recent_review_grower"
+          ]
+        },
+        {
+          "plid": "103031924",
+          "url": "https://www.takealot.com/folding-sofa-bed-single-sleeper-chair-convertible-couch-black-10/PLID103031924",
+          "roles": [
+            "recent_signal_backup"
+          ]
+        }
+      ]
+    },
+    {
+      "category_id": "printer-stands",
+      "category_name": "带储物打印机支架",
+      "market_leaf_id": "33315",
+      "market_leaf_name": "Printer Stands",
+      "cohort_basis": {
+        "scope": "2026-08-26 Takealot自然搜索候选池与已有雷达快照合并；新链接先监控，旧累计评论不作为近期需求。",
+        "sample_size": 9,
+        "recent_signal_link_count": 1,
+        "recent_signal_score": 3,
+        "snapshot_date": "2026-08-26",
+        "extremes_are_sample_relative": true,
+        "recent_signal_note": "评论数为公开评论页第0页的近30天下限；库存流出是公开库存信号，不等同平台订单。"
+      },
+      "economics_anchor": {
+        "plid": "99228034",
+        "url": "https://www.takealot.com/printer-stand-wood-printer-stand-open-organizer-shelf-mobile-hea/PLID99228034",
+        "source_sheet": "展胜",
+        "source_row": 1168,
+        "name": "三层带储物打印机支架",
+        "workbook_observation": "工作簿只用于箱规、成本和缓存海运利润；旧评论不计入近期需求，近30天结论只认雷达库存流出和带日期评论。",
+        "length_cm": 58.0,
+        "width_cm": 56.0,
+        "height_cm": 18.5,
+        "unit_cbm": 0.060088,
+        "purchase_rmb": 76.0,
+        "selling_price_zar": 1299.0,
+        "sea_profit_rmb": 104.4205,
+        "sea_margin": 0.209001709006928,
+        "review_proxy_count": 0,
+        "electrical_status": "provisionally_non_electric",
+        "electrical_evidence": "按商品标题、类目和工作簿结构判断，不含插头、电池或充电部件；下单前仍须复核BOM和包装清单。",
+        "profit_basis": "工作簿海运利润缓存只代表该锚点方案，不等于每条竞品利润；上新前复核采购价、箱规、汇率、佣金和头程。",
+        "source_profit_currency": "RMB",
+        "risk_tags": [
+          "板材承重",
+          "脚轮",
+          "装配"
+        ]
+      },
+      "representatives": [
+        {
+          "plid": "99560517",
+          "url": "https://www.takealot.com/double-tier-wooden-storage-rack-z-shaped-desktop-printer-stand/PLID99560517",
+          "roles": [
+            "low_price"
+          ]
+        },
+        {
+          "plid": "96473199",
+          "url": "https://www.takealot.com/stationery-office-durable-multi-layer-desktop-printer-stand-64cm/PLID96473199",
+          "roles": [
+            "high_price"
+          ]
+        },
+        {
+          "plid": "99228034",
+          "url": "https://www.takealot.com/printer-stand-wood-printer-stand-open-organizer-shelf-mobile-hea/PLID99228034",
+          "roles": [
+            "most_reviewed",
+            "mid_market",
+            "recent_stock_mover",
+            "recent_review_grower",
+            "workbook_economics_anchor"
+          ]
+        },
+        {
+          "plid": "100681663",
+          "url": "https://www.takealot.com/rolling-mobile-file-cabinet-printer-stand-with-2-drawer-open-sto/PLID100681663",
+          "roles": [
+            "recent_signal_backup"
+          ]
+        },
+        {
+          "plid": "102038686",
+          "url": "https://www.takealot.com/electrek-2-tier-desktop-organizer-samll-printer-stand/PLID102038686",
+          "roles": [
+            "recent_signal_backup"
+          ]
+        },
+        {
+          "plid": "102115713",
+          "url": "https://www.takealot.com/3-tier-printer-stand-desktop-printer-shelf-large-wood-storage-sh/PLID102115713",
+          "roles": [
+            "recent_signal_backup"
+          ]
+        }
+      ]
+    },
+    {
+      "category_id": "portable-camping-toilets",
+      "category_name": "非电动便携露营马桶",
+      "market_leaf_id": "25619",
+      "market_leaf_name": "Portable Toilets",
+      "cohort_basis": {
+        "scope": "2026-08-26 Takealot自然搜索候选池与已有雷达快照合并；新链接先监控，旧累计评论不作为近期需求。",
+        "sample_size": 18,
+        "recent_signal_link_count": 1,
+        "recent_signal_score": 4,
+        "snapshot_date": "2026-08-26",
+        "extremes_are_sample_relative": true,
+        "recent_signal_note": "评论数为公开评论页第0页的近30天下限；库存流出是公开库存信号，不等同平台订单。"
+      },
+      "economics_anchor": {
+        "plid": "54854665",
+        "url": "https://www.takealot.com/tentco-porta-potti-20l/PLID54854665",
+        "source_sheet": "展胜",
+        "source_row": 811,
+        "name": "20L非电动便携露营马桶",
+        "workbook_observation": "工作簿只用于箱规、成本和缓存海运利润；旧评论不计入近期需求，近30天结论只认雷达库存流出和带日期评论。",
+        "length_cm": 42.0,
+        "width_cm": 37.0,
+        "height_cm": 44.0,
+        "unit_cbm": 0.068376,
+        "purchase_rmb": 148.0,
+        "selling_price_zar": 1299.0,
+        "sea_profit_rmb": 8.9392,
+        "sea_margin": 0.0178921785989222,
+        "review_proxy_count": 0,
+        "electrical_status": "provisionally_non_electric",
+        "electrical_evidence": "按商品标题、类目和工作簿结构判断，不含插头、电池或充电部件；下单前仍须复核BOM和包装清单。",
+        "profit_basis": "工作簿海运利润缓存只代表该锚点方案，不等于每条竞品利润；上新前复核采购价、箱规、汇率、佣金和头程。",
+        "source_profit_currency": "RMB",
+        "risk_tags": [
+          "密封防漏",
+          "卫生售后",
+          "低毛利"
+        ]
+      },
+      "representatives": [
+        {
+          "plid": "93525280",
+          "url": "https://www.takealot.com/portable-toilet-camping-toilet-foldable-outdoor-toilet-travel-to/PLID93525280",
+          "roles": [
+            "low_price"
+          ]
+        },
+        {
+          "plid": "90330369",
+          "url": "https://www.takealot.com/portable-camping-toilet-10-20l/PLID90330369",
+          "roles": [
+            "high_price"
+          ]
+        },
+        {
+          "plid": "54854665",
+          "url": "https://www.takealot.com/tentco-porta-potti-20l/PLID54854665",
+          "roles": [
+            "most_reviewed",
+            "mid_market",
+            "recent_stock_mover",
+            "recent_review_grower",
+            "workbook_economics_anchor"
+          ]
+        },
+        {
+          "plid": "95904877",
+          "url": "https://www.takealot.com/seaflo-portable-toilet-10l/PLID95904877",
+          "roles": [
+            "recent_signal_backup"
+          ]
+        },
+        {
+          "plid": "98045376",
+          "url": "https://www.takealot.com/portable-toilet-10-20l/PLID98045376",
+          "roles": [
+            "recent_signal_backup"
+          ]
+        },
+        {
+          "plid": "95904878",
+          "url": "https://www.takealot.com/seaflo-portable-toilet-20l/PLID95904878",
+          "roles": [
+            "recent_signal_backup"
+          ]
+        }
+      ]
+    }
+  ],
+  "retained_watchlist": [
+    {
+      "plid": "94055978",
+      "url": "https://www.takealot.com/aluminum-motorcycle-top-box-tail-case-with-quick-release-base-pl/PLID94055978?colour_variant=Black",
+      "name": "铝制摩托车顶箱尾箱 45L",
+      "retention_reason": "已在上一版加入雷达，但尚未纳入本轮近期多链接类目组合；继续采集，不进入当前上新建议。"
+    },
+    {
+      "plid": "96433543",
+      "url": "https://www.takealot.com/multifunctional-new-baby-feeding-high-chair-foldable-and-adjusta/PLID96433543",
+      "name": "可折叠可调节婴儿餐椅",
+      "retention_reason": "已在上一版加入雷达，但尚未纳入本轮近期多链接类目组合；继续采集，不进入当前上新建议。"
+    },
+    {
+      "plid": "95911182",
+      "url": "https://www.takealot.com/dog-ramp-for-small-to-med-dogs-and-cats-non-slip-carpet/PLID95911182",
+      "name": "宠物防滑木质坡道",
+      "retention_reason": "已在上一版加入雷达，但尚未纳入本轮近期多链接类目组合；继续采集，不进入当前上新建议。"
+    },
+    {
+      "plid": "66198810",
+      "url": "https://www.takealot.com/nuvo-italia-folding-desk-100cm-wide-no-assembly/PLID66198810",
+      "name": "100cm 折叠桌",
+      "retention_reason": "已在上一版加入雷达，但尚未纳入本轮近期多链接类目组合；继续采集，不进入当前上新建议。"
+    },
+    {
+      "plid": "94906655",
+      "url": "https://www.takealot.com/dhhu-double-swing-egg-chair-set/PLID94906655",
+      "name": "双人蛋形吊椅",
+      "retention_reason": "已在上一版加入雷达，但尚未纳入本轮近期多链接类目组合；继续采集，不进入当前上新建议。"
+    },
+    {
+      "plid": "90233107",
+      "url": "https://www.takealot.com/baby-dining-chair-children-multifunctional-foldable-high-chair-g/PLID90233107",
+      "name": "多功能折叠婴儿餐椅",
+      "retention_reason": "已在上一版加入雷达，但尚未纳入本轮近期多链接类目组合；继续采集，不进入当前上新建议。"
+    },
+    {
+      "plid": "97279753",
+      "url": "https://www.takealot.com/indoor-and-outdoor-rattan-patio-basket-chairs-with-uv-resistant/PLID97279753",
+      "name": "室内外藤编庭院篮椅",
+      "retention_reason": "已在上一版加入雷达，但尚未纳入本轮近期多链接类目组合；继续采集，不进入当前上新建议。"
+    },
+    {
+      "plid": "99589379",
+      "url": "https://www.takealot.com/8-in-1-wooden-montessori-climbing-toys-with-slide-swing-rock-wal/PLID99589379",
+      "name": "8合1木制蒙特梭利攀爬玩具",
+      "retention_reason": "已在上一版加入雷达，但尚未纳入本轮近期多链接类目组合；继续采集，不进入当前上新建议。"
+    },
+    {
+      "plid": "95795578",
+      "url": "https://www.takealot.com/foldable-professional-makeup-director-chair-with-head-rest-porta/PLID95795578?colour_variant=Pink",
+      "name": "可折叠专业化妆导演椅",
+      "retention_reason": "已在上一版加入雷达，但尚未纳入本轮近期多链接类目组合；继续采集，不进入当前上新建议。"
+    },
+    {
+      "plid": "96344604",
+      "url": "https://www.takealot.com/drawer-storage-rack-organizer/PLID96344604",
+      "name": "抽屉式储物整理架",
+      "retention_reason": "已在上一版加入雷达，但尚未纳入本轮近期多链接类目组合；继续采集，不进入当前上新建议。"
+    }
+  ]
+}

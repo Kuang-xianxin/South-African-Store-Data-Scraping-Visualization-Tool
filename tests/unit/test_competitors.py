@@ -16,6 +16,9 @@ from takealot_ops.competitors.api import (
     CompetitorNotFoundError,
     CompetitorPageValidationError,
     CompetitorPublicClient,
+    _normalise_api_desktop_href,
+    _offer_target,
+    _public_offer_seller,
     extract_plid,
 )
 from takealot_ops.competitors.domain import (
@@ -23,6 +26,7 @@ from takealot_ops.competitors.domain import (
     CompetitorProduct,
     CompetitorReviewRecord,
     CompetitorVariant,
+    OfferStockObservation,
     PreviousObservation,
     StockProbeResult,
     VariantStockObservation,
@@ -54,6 +58,59 @@ from takealot_ops.storage.models import (
 
 async def _fake_delay(self: object, a: float, b: float) -> None:
     pass
+
+
+@pytest.mark.parametrize(
+    ("raw_url", "expected_url"),
+    [
+        (
+            "https://www.takealot.com/item/PLID72107717?colour_variant=Pink & Grey",
+            "https://www.takealot.com/item/PLID72107717?colour_variant=Pink+%26+Grey",
+        ),
+        (
+            "https://www.takealot.com/item/PLID93642090?colour_variant=Brown&size=+1.00",
+            "https://www.takealot.com/item/PLID93642090?colour_variant=Brown&size=%2B1.00",
+        ),
+        (
+            "https://www.takealot.com/item/PLID94443568?colour_variant=White ",
+            "https://www.takealot.com/item/PLID94443568?colour_variant=White+",
+        ),
+        (
+            "https://www.takealot.com/item/PLID1?colour_variant=Sahara & Storm Grey&size=600.0 mm",
+            "https://www.takealot.com/item/PLID1?colour_variant=Sahara+%26+Storm+Grey&size=600.0+mm",
+        ),
+    ],
+)
+def test_api_desktop_href_encodes_literal_variant_values(
+    raw_url: str,
+    expected_url: str,
+) -> None:
+    assert _normalise_api_desktop_href(raw_url) == expected_url
+
+
+def test_public_offer_seller_requires_boolean_takealot_flag() -> None:
+    assert _public_offer_seller(
+        {
+            "is_takealot": "false",
+            "seller": {"seller_id": "42", "display_name": "Seller"},
+        }
+    ) == {"seller_id": "42", "display_name": "Seller"}
+
+
+def test_offer_target_preserves_significant_trailing_variant_space() -> None:
+    url, plid = _offer_target(
+        {},
+        fallback_url=(
+            "https://www.takealot.com/item/PLID95108967?"
+            "colour_variant=Grey Ultra 3 in 1 "
+        ),
+    )
+
+    assert plid == "95108967"
+    assert url == (
+        "https://www.takealot.com/item/PLID95108967?"
+        "colour_variant=Grey+Ultra+3+in+1+"
+    )
 
 
 def _failing_browser_stack(
@@ -140,7 +197,7 @@ async def test_public_client_uses_conservative_warmup_delay() -> None:
         await client.start()
         await client.close()
 
-    delay.assert_awaited_once_with(4.0, 7.0)
+    delay.assert_awaited_once_with(3.0, 5.0)
     context.close.assert_awaited_once()
     browser.close.assert_awaited_once()
     playwright.stop.assert_awaited_once()
@@ -187,6 +244,18 @@ async def test_collector_retries_after_persisting_failed_stock_probe(
         is_add_to_cart_available=True,
         image_url=None,
     )
+    follower_offers = tuple(
+        CompetitorOffer(
+            selected=False,
+            sku=f"FOLLOWER-SKU-{index}",
+            seller_id=f"follower-seller-{index}",
+            seller_name=f"Follower Seller {index}",
+            price=100.0 + index,
+            stock_status="In stock",
+            is_follower_offer=True,
+        )
+        for index in range(1, 4)
+    )
     product = CompetitorProduct(
         plid="12345678",
         url=url,
@@ -210,6 +279,7 @@ async def test_collector_retries_after_persisting_failed_stock_probe(
                 stock_status="In stock",
                 is_buybox=True,
             ),
+            *follower_offers,
         ),
         variants=(variant,),
     )
@@ -218,6 +288,12 @@ async def test_collector_retries_after_persisting_failed_stock_probe(
         exact=False,
         method="failed",
         note="购物车未完整加载",
+    )
+    exact_stock = StockProbeResult(
+        quantity=5,
+        exact=True,
+        method="anonymous-cart-limit",
+        note="已确认5件",
     )
     client = MagicMock()
     client.fetch_product = AsyncMock(return_value=product)
@@ -235,7 +311,10 @@ async def test_collector_retries_after_persisting_failed_stock_probe(
         AsyncMock(
             return_value=(
                 [VariantStockObservation(variant=variant, stock=failed_stock)],
-                [],
+                [
+                    OfferStockObservation(offer=offer, stock=exact_stock)
+                    for offer in follower_offers
+                ],
             )
         ),
     ):
@@ -244,6 +323,10 @@ async def test_collector_retries_after_persisting_failed_stock_probe(
     assert result.succeeded is False
     assert result.retryable is True
     assert result.failure_kind == "stock-unprobed"
+    assert result.message.startswith(
+        "商品与评论快照已保存，有1个变体/4个卖家报价，"
+        "其中1个报价库存仍未探测；"
+    )
     assert "失败原因：默认款（SKU SKU-1）：购物车未完整加载" in result.message
     assert "已加入本轮其他链接结束后的库存复探" in result.message
     assert stages == [
@@ -1188,7 +1271,18 @@ async def test_public_client_parses_product_offers_and_all_review_pages() -> Non
                                     "status": "In stock",
                                     "is_in_stock": True,
                                 },
-                            }
+                            },
+                            {
+                                "id": "other-buying-option-PLATFORM-SKU",
+                                "product_id": "PLATFORM-SKU",
+                                "price": 210,
+                                "is_takealot": True,
+                                "seller": None,
+                                "stock_availability": {
+                                    "status": "In stock",
+                                    "is_in_stock": True,
+                                },
+                            },
                         ]
                     }
                 ]
@@ -1245,7 +1339,7 @@ async def test_public_client_parses_product_offers_and_all_review_pages() -> Non
     assert product.category_path[-1].category_id == "1234"
     assert product.category_path[-1].category_type == "category"
     assert product.category_path[-1].slug == "small-appliances-1234"
-    assert len(product.offers) == 3
+    assert len(product.offers) == 4
     assert product.offers[0].plid == "123"
     assert product.offers[0].url == "https://www.takealot.com/example/PLID123"
     assert product.offers[0].offer_id == "offer-1"
@@ -1269,6 +1363,10 @@ async def test_public_client_parses_product_offers_and_all_review_pages() -> Non
     assert product.offers[0].identity_key == "offer:offer-1"
     assert product.offers[1].identity_key == "offer:offer-3"
     assert product.offers[2].identity_key == "offer:other-buying-option-sku-2"
+    assert product.offers[3].sku == "PLATFORM-SKU"
+    assert product.offers[3].seller_id == "takealot-retail"
+    assert product.offers[3].seller_name == "Takealot"
+    assert product.offers[3].identity_key == "offer:other-buying-option-platform-sku"
     discovered = _discovered_offer_targets(
         product,
         submitted_url="https://www.takealot.com/example/PLID123",
@@ -1294,7 +1392,7 @@ async def test_public_client_uses_conservative_review_page_delay() -> None:
     with (
         patch(
             "takealot_ops.competitors.api.random.uniform",
-            return_value=3.5,
+            return_value=2.0,
         ) as random_delay,
         patch(
             "takealot_ops.competitors.api.asyncio.sleep",
@@ -1304,8 +1402,8 @@ async def test_public_client_uses_conservative_review_page_delay() -> None:
         reviews = await client.fetch_all_reviews("123")
 
     assert reviews == []
-    random_delay.assert_called_once_with(2.0, 5.0)
-    sleep.assert_awaited_once_with(3.5)
+    random_delay.assert_called_once_with(1.0, 3.0)
+    sleep.assert_awaited_once_with(2.0)
 
 
 async def test_public_client_enumerates_variants_under_one_plid() -> None:
@@ -1424,8 +1522,8 @@ async def test_public_client_enumerates_variants_under_one_plid() -> None:
     ]
     assert product.sku == "SKU-Left"
     assert variant_delay.await_args_list == [
-        call(3.0, 6.0),
-        call(3.0, 6.0),
+        call(2.5, 4.0),
+        call(2.5, 4.0),
     ]
 
 

@@ -47,12 +47,16 @@ test("keeps the title ordering rule concise and gates decision parameters", () =
   assert.match(typesSource, /same_type_validation_controlled_aliases\?: string\[\];/);
 });
 
-test("shows title-bound decision controls without long policy introductions", () => {
+test("shows title suggestions before decision controls and analysis evidence", () => {
+  const titleSuggestionIndex = pageSource.indexOf("建议主标题（三种打法）");
   const decisionSectionIndex = pageSource.indexOf("决策参数人工确认");
   const analysisOnlyIndex = pageSource.indexOf('<template v-if="analysis">');
+  const imageEvidenceIndex = pageSource.indexOf("1 · 隔离图片观察");
 
-  assert.ok(decisionSectionIndex > 0);
+  assert.ok(titleSuggestionIndex > 0);
+  assert.ok(decisionSectionIndex > titleSuggestionIndex);
   assert.ok(analysisOnlyIndex > decisionSectionIndex);
+  assert.ok(imageEvidenceIndex > analysisOnlyIndex);
   assert.doesNotMatch(pageSource, /decision-parameter-policy/);
   assert.doesNotMatch(pageSource, /product-fact-policy/);
   assert.doesNotMatch(pageSource, /本区随当前选中的 Offer 变体切换/);

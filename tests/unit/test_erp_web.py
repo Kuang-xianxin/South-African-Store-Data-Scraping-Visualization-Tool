@@ -31,12 +31,14 @@ from takealot_ops.erp.web import (
     _aggregate_logistics_payloads,
     _aggregate_platform_warehouse_payloads,
     _aggregate_store_revenue_series,
+    _load_own_store_returns,
     create_app,
 )
 from takealot_ops.logistics.service import LogisticsOverviewService
 from takealot_ops.storage.migrations import create_schema
 from takealot_ops.storage.models import (
     CollectionRun,
+    CompetitorPersonalWatchlist,
     CompetitorTarget,
     CompetitorSnapshot,
     DailyReportRun,
@@ -138,6 +140,39 @@ def test_store_revenue_series_returns_available_sum_for_partial_coverage() -> No
     ]
 
 
+def test_store_revenue_series_scopes_pending_reconciliation_to_failure_date() -> None:
+    points = _aggregate_store_revenue_series(
+        {
+            "current": [
+                {"metric_date": "2026-08-05", "ordered_revenue": 100},
+                {"metric_date": "2026-08-06", "ordered_revenue": 120},
+            ],
+        },
+        store_states={
+            "current": {
+                "2026-08-05": {
+                    "source_kind": "takealot_sales_api",
+                    "verified_at": "2026-08-07T02:00:00",
+                },
+                "2026-08-06": {
+                    "source_kind": "takealot_sales_api",
+                    "verified_at": "2026-08-07T02:00:00",
+                },
+            },
+        },
+        reconciliation_by_store={
+            "current": {
+                "status": "pending",
+                "period_end_business_date": "2026-08-06",
+            },
+        },
+        completed_through=date(2026, 8, 6),
+    )
+
+    assert [point["data_status"] for point in points] == ["verified", "pending"]
+    assert [point["pending_reconciliation_store_count"] for point in points] == [0, 1]
+
+
 def _bootstrap(client: TestClient) -> dict[str, object]:
     response = client.post(
         "/api/auth/bootstrap",
@@ -188,6 +223,7 @@ def test_competitor_detail_requests_only_the_selected_plid(
     def load_detail_dataset(_root: Path, **kwargs):
         calls.append(kwargs)
         return SimpleNamespace(
+            current=pd.DataFrame(),
             history=pd.DataFrame(),
             reviews=pd.DataFrame(),
             variants=pd.DataFrame(),
@@ -259,6 +295,9 @@ def test_competitor_detail_requests_only_the_selected_plid(
 
     assert response.status_code == 200
     assert response.json() == {
+        "current_item": {"plid": "101163999"},
+        "monitoring_target": None,
+        "personal_watchlist_item": None,
         "category_path": [
             {
                 "name": "Camping & Outdoor",
@@ -314,8 +353,6 @@ def test_competitor_detail_requests_only_the_selected_plid(
         {
             "plid": "101163999",
             "own_store_codes": {"current"},
-            "start_date": date(2026, 8, 1),
-            "end_date": date(2026, 8, 14),
             "engine": app.state.read_engine,
         }
     ]
@@ -326,6 +363,244 @@ def test_competitor_detail_requests_only_the_selected_plid(
     assert isinstance(profitability_calls[0]["cost_as_of"], date)
     assert isinstance(profitability_calls[0]["fee_window_end"], date)
     assert profitability_calls[0]["engine"] is app.state.read_engine
+
+
+def test_competitor_detail_returns_the_selected_current_radar_item(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    database_path = tmp_path / "competitor-current-detail.db"
+    monkeypatch.setenv(
+        "TAKEALOT_DATABASE_URL",
+        f"sqlite:///{database_path.as_posix()}",
+    )
+
+    def load_detail_dataset(_root: Path, **_kwargs):
+        return SimpleNamespace(
+            current=pd.DataFrame(
+                [
+                    {
+                        "plid": "96392763",
+                        "商品": "Modern Double Bowl Stainless Steel Sink",
+                        "来源": "competitor",
+                        "采集时间": "2026-08-26T09:00:00+02:00",
+                    }
+                ]
+            ),
+            history=pd.DataFrame(),
+            reviews=pd.DataFrame(),
+            variants=pd.DataFrame(),
+            category_paths={},
+            store_current=pd.DataFrame(),
+            store_history=pd.DataFrame(),
+        )
+
+    monkeypatch.setattr(
+        "takealot_ops.erp.web._load_competitor_dataset",
+        load_detail_dataset,
+    )
+    app = create_app(tmp_path)
+
+    with TestClient(app, client=("127.0.0.1", 50000)) as client:
+        issued = _bootstrap(client)
+        now = datetime(2026, 8, 26, 7, tzinfo=UTC)
+        engine = create_engine(f"sqlite:///{database_path.as_posix()}")
+        with Session(engine) as session, session.begin():
+            session.add(
+                CompetitorTarget(
+                    plid="96392763",
+                    offer_group_plid="96392763",
+                    url="https://www.takealot.com/p/PLID96392763",
+                    title="Modern Double Bowl Stainless Steel Sink",
+                    active=True,
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+            session.add(
+                CompetitorPersonalWatchlist(
+                    user_id=int(issued["user"]["id"]),
+                    plid="96392763",
+                    added_at=now,
+                )
+            )
+        response = client.get(
+            "/api/competitors/96392763?own_store_scope=all"
+        )
+        engine.dispose()
+
+    assert response.status_code == 200
+    assert response.json()["current_item"] == {
+        "plid": "96392763",
+        "商品": "Modern Double Bowl Stainless Steel Sink",
+        "来源": "competitor",
+        "采集时间": "2026-08-26T09:00:00+02:00",
+    }
+    assert response.json()["monitoring_target"] == {
+        "plid": "96392763",
+        "offer_group_plid": "96392763",
+        "url": "https://www.takealot.com/p/PLID96392763",
+        "title": "Modern Double Bowl Stainless Steel Sink",
+        "created_at": "2026-08-26T07:00:00",
+        "updated_at": "2026-08-26T07:00:00",
+        "has_history": False,
+    }
+    assert response.json()["personal_watchlist_item"] == {
+        "plid": "96392763",
+        "added_at": "2026-08-26T07:00:00",
+        "source": "competitor",
+        "library_ids": [],
+    }
+    assert response.json()["history"] == []
+
+
+def test_own_store_returns_loads_all_history_without_truncating_or_widening_scope(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    database_url = f"sqlite:///{(tmp_path / 'own-return-history.db').as_posix()}"
+    monkeypatch.setenv("TAKEALOT_DATABASE_URL", database_url)
+    engine = create_engine(database_url)
+    create_schema(engine)
+    captured_at = datetime.now(UTC)
+    through = captured_at.date() + timedelta(days=1)
+    for store_code in ("current", "store-02", "hidden"):
+        with store_scope(store_code), Session(engine) as session, session.begin():
+            session.add(
+                OfferCurrent(
+                    offer_id=f"offer-{store_code}",
+                    sku="SKU-HISTORY",
+                    productline_id="101190808",
+                    quantity_returned_30_days={"current": 1, "store-02": 3, "hidden": 99}[store_code],
+                    captured_at=captured_at,
+                )
+            )
+            session.add(
+                ReturnItem(
+                    seller_return_id=f"8078263-{store_code}",
+                    offer_id=f"offer-{store_code}",
+                    sku="SKU-HISTORY",
+                    quantity=1,
+                    return_date=datetime(2026, 7, 18),
+                    customer_comment="The grinding plate cracked. Please replace the part",
+                    captured_at=captured_at,
+                    raw_payload={},
+                )
+            )
+            session.add(
+                CollectionRun(
+                    run_id=f"returns-{store_code}",
+                    run_type="returns",
+                    scope_date=through,
+                    started_at=captured_at,
+                    finished_at=captured_at,
+                    status="success",
+                    counts={
+                        "records": 1,
+                        "requested_start_ordinal": date(2026, 8, 1).toordinal(),
+                        "requested_end_ordinal": through.toordinal(),
+                    },
+                )
+            )
+    with store_scope("current"), Session(engine) as session, session.begin():
+        session.add_all(
+            ReturnItem(
+                seller_return_id=f"recent-{index:02d}",
+                offer_id="offer-current",
+                sku="SKU-HISTORY",
+                quantity=1,
+                return_date=datetime(2026, 8, 25),
+                customer_comment="The holes of the stand bracket are not aligning with machine holes",
+                captured_at=captured_at,
+                raw_payload={},
+            )
+            for index in range(21)
+        )
+        session.add(
+            OfferSnapshot(
+                offer_id="offer-archived",
+                sku="SKU-ARCHIVED",
+                productline_id="101190808",
+                snapshot_date=captured_at.date(),
+                captured_at=captured_at,
+            )
+        )
+        session.add_all(
+            [
+                ReturnItem(
+                    seller_return_id="archived-return",
+                    offer_id="offer-archived",
+                    quantity=2,
+                    return_date=datetime(2024, 1, 1),
+                    captured_at=captured_at,
+                    raw_payload={},
+                ),
+                ReturnItem(
+                    seller_return_id="undated-return",
+                    offer_id="offer-current",
+                    quantity=1,
+                    return_date=None,
+                    captured_at=captured_at,
+                    raw_payload={},
+                ),
+                ReturnItem(
+                    seller_return_id="other-product-return",
+                    offer_id="offer-other",
+                    sku="SKU-HISTORY",
+                    quantity=99,
+                    return_date=datetime(2026, 8, 25),
+                    captured_at=captured_at,
+                    raw_payload={},
+                ),
+            ]
+        )
+
+    payload = _load_own_store_returns(
+        tmp_path,
+        plid="101190808",
+        own_store_codes={"current", "store-02"},
+        engine=engine,
+    )
+
+    assert payload["date_scope"] == "all_collected"
+    assert len(payload["items"]) == payload["total"] == 25
+    assert payload["summary"]["return_units"] == 26
+    assert payload["offer_returned_30_days"]["units"] == 4
+    assert {row["store_code"] for row in payload["items"]} == {"current", "store-02"}
+    assert len({row["store_scope_key"] for row in payload["items"]}) == 25
+    assert "other-product-return" not in {row["seller_return_id"] for row in payload["items"]}
+    assert payload["items"][-1]["seller_return_id"] == "undated-return"
+    assert payload["range_start"] == "2024-01-01"
+    assert payload["data_status"] == "partial"
+    assert all(status["data_status"] == "partial" for status in payload["store_statuses"])
+    assert "不代表平台全部历史完整" in payload["source_notice"]
+
+    for store_code in ("current", "store-02"):
+        with store_scope(store_code), Session(engine) as session, session.begin():
+            run = session.scalar(select(CollectionRun))
+            assert run is not None
+            run.counts = {
+                **run.counts,
+                "requested_start_ordinal": date(2024, 1, 1).toordinal(),
+            }
+    covered = _load_own_store_returns(
+        tmp_path,
+        plid="101190808",
+        own_store_codes={"current", "store-02"},
+        engine=engine,
+    )
+    assert {status["store_code"]: status["data_status"] for status in covered["store_statuses"]} == {
+        "current": "partial",  # Undated records cannot have verified date coverage.
+        "store-02": "collected",
+    }
+
+    empty = _load_own_store_returns(
+        tmp_path, plid="101190808", own_store_codes=set(), engine=engine
+    )
+    assert empty["items"] == []
+    assert empty["data_status"] == "uncollected"
+    assert empty["date_scope"] == "all_collected"
+    engine.dispose()
 
 
 def test_returns_route_exposes_detail_and_collection_coverage(
@@ -374,6 +649,18 @@ def test_returns_route_exposes_detail_and_collection_coverage(
                 )
             )
             session.add(
+                ReturnItem(
+                    seller_return_id="seller-return-before-range",
+                    offer_id="offer-return-1",
+                    sku="SKU-RETURN-1",
+                    return_reference_number="RRN-ROUTE-OLD",
+                    quantity=1,
+                    return_date=datetime(2026, 7, 18),
+                    captured_at=captured_at,
+                    raw_payload={},
+                )
+            )
+            session.add(
                 CollectionRun(
                     run_id="returns-route-run",
                     run_type="returns",
@@ -387,6 +674,77 @@ def test_returns_route_exposes_detail_and_collection_coverage(
                         "requested_end_ordinal": date(2026, 8, 17).toordinal(),
                     },
                     error=None,
+                )
+            )
+            session.add(
+                LogisticsProviderSnapshot(
+                    provider="takealot_removal_orders",
+                    fetched_at=captured_at,
+                    payload={
+                        "connected": True,
+                        "orders": [
+                            {
+                                "stage": "pickup_ready",
+                                "removal_order_id": "88",
+                                "reference": "12345678",
+                                "order_type": "Returns Removal Order",
+                                "order_type_id": 3,
+                                "status": "Ready for Pickup",
+                                "status_id": 8,
+                                "warehouse_id": "JHB",
+                                "total_weight_grams": 2400,
+                                "total_handling_fee_cents": 1250,
+                                "disposal_date": (
+                                    datetime.now(UTC).date() + timedelta(days=2)
+                                ).isoformat(),
+                                "days_until_expiry": 2,
+                                "expired": False,
+                                "has_booking": True,
+                                "pickup_date_start": "2026-08-17T08:00:00+02:00",
+                                "pickup_date_end": "2026-08-17T12:00:00+02:00",
+                                "quantity_requested": 2,
+                                "quantity_prepared": 2,
+                                "quantity_collected": 2,
+                                "items": [
+                                    {
+                                        "sku": "SKU-RETURN-1",
+                                        "product_title": "Return Route Product",
+                                        "handling_fee_cents": 1250,
+                                        "seller_return_ids": ["seller-return-1"],
+                                        "return_reference_numbers": ["RRN-ROUTE-1"],
+                                        "quantity_requested": 2,
+                                        "quantity_prepared": 2,
+                                        "quantity_collected": 2,
+                                        "has_item_mismatch": False,
+                                    }
+                                ],
+                            }
+                        ],
+                    },
+                )
+            )
+            session.add(
+                LogisticsProviderSnapshot(
+                    provider="w8",
+                    fetched_at=captured_at,
+                    payload={
+                        "connected": True,
+                        "return_orders": [
+                            {
+                                "order_no": "RB-ROUTE-1",
+                                "status": "已上架",
+                                "po_references": ["12345678"],
+                                "items": [
+                                    {
+                                        "platform_sku": "SKU-RETURN-1",
+                                        "inbound_quantity": 2,
+                                        "total_shelf_quantity": 2,
+                                        "inbound_date": "2026-08-17 09:00:00",
+                                    }
+                                ],
+                            }
+                        ],
+                    },
                 )
             )
         engine.dispose()
@@ -405,7 +763,53 @@ def test_returns_route_exposes_detail_and_collection_coverage(
     assert payload["total"] == 1
     assert payload["items"][0]["return_reason_label"] == "商品有缺陷或损坏"
     assert payload["items"][0]["product_title"] == "Return Route Product"
+    lifecycle = payload["items"][0]["removal_lifecycle"]
+    assert lifecycle["po_reference"] == "12345678"
+    assert lifecycle["expiry_status"] == "expiring"
+    assert lifecycle["can_collect"] is True
+    assert lifecycle["collection_status"] == "fully_collected"
+    assert lifecycle["w8"]["disposition"] == "shelved"
+    assert payload["summary"]["removal_lifecycle"]["w8_shelved_units"] == 2
+    assert payload["removal_order_tracking"]["data_status"] == "synced"
+    assert payload["removal_orders"]["data_status"] == "synced"
+    assert payload["removal_orders"]["counts"] == {
+        "total": 1,
+        "submitted": 0,
+        "pickup_ready": 1,
+        "closed": 0,
+    }
+    assert payload["removal_orders"]["items"][0]["reference"] == "12345678"
+    assert payload["removal_orders"]["items"][0]["total_weight_grams"] == 2400
+    assert payload["removal_orders"]["items"][0]["items"][0]["w8"][
+        "disposition"
+    ] == "shelved"
+    assert "列表不受退货日期和筛选影响" in payload["removal_orders"]["source_notice"]
     assert payload["store_statuses"][0]["record_count"] == 1
+
+
+def test_removal_sync_disabled_is_bounded_and_keeps_erp_session(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    database_path = tmp_path / "returns-removal-disabled.db"
+    monkeypatch.setenv(
+        "TAKEALOT_DATABASE_URL",
+        f"sqlite:///{database_path.as_posix()}",
+    )
+    monkeypatch.setenv("TAKEALOT_PORTAL_BFF_ENABLED", "false")
+    app = create_app(tmp_path)
+
+    with TestClient(app, client=("127.0.0.1", 50000)) as client:
+        session = _bootstrap(client)
+        response = client.post(
+            "/api/erp/returns/removal-orders/sync",
+            headers={"X-CSRF-Token": str(session["csrf_token"])},
+        )
+        still_authenticated = client.get("/api/auth/session")
+
+    assert response.status_code == 503
+    assert "Seller Portal" in response.json()["detail"]
+    assert still_authenticated.status_code == 200
 
 
 def test_personal_watchlist_overview_projects_only_visible_membership_plids(
@@ -1170,7 +1574,11 @@ def test_product_thumbnail_is_authenticated_and_rejects_untrusted_hosts(
         )
         response = client.get(
             "/api/erp/product-thumbnail",
-            params={"image_url": TRUSTED_PRODUCT_IMAGE_URL, "size": 640},
+            params={
+                "image_url": TRUSTED_PRODUCT_IMAGE_URL,
+                "size": 640,
+                "image_retry": 2,
+            },
         )
 
         assert response.status_code == 200
@@ -1947,9 +2355,9 @@ def test_store_summary_compares_only_accessible_connected_stores(
                 "covered_store_count": 2,
                 "store_count": 2,
                 "missing_store_count": 0,
-                "data_status": "pending",
+                "data_status": "revised",
                 "source_verified_store_count": 2,
-                "pending_reconciliation_store_count": 1,
+                "pending_reconciliation_store_count": 0,
                 "unverified_source_store_count": 0,
                 "revised_store_count": 1,
                 "revision_count": 1,
@@ -2698,6 +3106,138 @@ def test_competitor_batch_metadata_is_idempotent_and_logged(
     assert "batch_event batch=batch-1 event=auto_resume completed=2 total=5 pending=3" in log_text
 
 
+def test_competitor_batch_status_separates_confirmed_invalid_detail(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    class ConfirmedInvalidCollector:
+        def __init__(self, **_: object) -> None:
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_: object) -> None:
+            pass
+
+        async def collect(self, *_: object, **__: object) -> CompetitorCollectionResult:
+            return CompetitorCollectionResult(
+                plid="12345678",
+                title=None,
+                succeeded=False,
+                message="确认失效",
+                failure_kind="confirmed-invalid",
+            )
+
+    database_path = tmp_path / "erp.db"
+    monkeypatch.setenv(
+        "TAKEALOT_DATABASE_URL",
+        f"sqlite:///{database_path.as_posix()}",
+    )
+    monkeypatch.setattr(
+        "takealot_ops.erp.web.CompetitorCollector",
+        ConfirmedInvalidCollector,
+    )
+    app = create_app(tmp_path)
+
+    with TestClient(app, client=("127.0.0.1", 50000)) as client:
+        session = _bootstrap(client)
+        collect_response = client.post(
+            "/api/competitors/collect",
+            headers={"X-CSRF-Token": str(session["csrf_token"])},
+            json={
+                "url": "https://www.takealot.com/example/PLID12345678",
+                "batch_id": "batch-terminal",
+                "client_id": "client-terminal",
+                "request_id": "request-terminal",
+                "item_index": 0,
+                "total_items": 1,
+            },
+        )
+        status_response = client.get(
+            "/api/competitors/batch-status",
+            params={
+                "include_details": "true",
+                "result_page": 1,
+                "error_page": 1,
+                "terminal_error_page": 1,
+                "page_size": 50,
+            },
+        )
+
+    assert collect_response.status_code == 410
+    assert status_response.status_code == 200
+    status = status_response.json()
+    assert status["error_count"] == 0
+    assert status["errors"] == []
+    assert status["terminal_error_count"] == 1
+    assert [row["plid"] for row in status["terminal_errors"]] == ["12345678"]
+
+
+def test_competitor_collection_logs_are_structured_by_round_and_admin_only(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    database_path = tmp_path / "erp.db"
+    monkeypatch.setenv(
+        "TAKEALOT_DATABASE_URL",
+        f"sqlite:///{database_path.as_posix()}",
+    )
+    round_dir = tmp_path / "logs" / "competitor-rounds"
+    round_dir.mkdir(parents=True)
+    (round_dir / "batch-visible.log").write_text(
+        "2026-08-22 10:05:00,000 INFO batch_event batch=batch-visible "
+        "event=completed completed=10 total=10 pending=0 succeeded=9 failed=0 "
+        "terminal=1 user=kxx source=manual result_count=9 error_count=1 "
+        "stock_probe=True visible_browser=False wall_elapsed_seconds=300 "
+        "reason=本轮完成\n",
+        encoding="utf-8",
+    )
+    app = create_app(tmp_path)
+
+    with TestClient(app, client=("127.0.0.1", 50000)) as admin:
+        session = _bootstrap(admin)
+        _create_operator(
+            admin,
+            str(session["csrf_token"]),
+            username="operator.logs",
+        )
+        response = admin.get(
+            "/api/competitors/collection-logs",
+            params={"batch_id": "batch-visible"},
+        )
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["selected_batch_id"] == "batch-visible"
+        assert "content" not in payload
+        assert payload["rounds"][0]["batch_id"] == "batch-visible"
+        assert payload["selected_round"]["status"] == "completed"
+        assert payload["selected_round"]["completed"] == 10
+        assert payload["selected_round"]["succeeded"] == 9
+        assert payload["selected_round"]["terminal"] == 1
+        assert payload["selected_round"]["reason"] == "本轮完成"
+        assert admin.get(
+            "/api/competitors/collection-logs",
+            params={"batch_id": "batch-missing"},
+        ).status_code == 404
+        assert admin.get(
+            "/api/competitors/collection-logs",
+            params={"batch_id": "../outside"},
+        ).status_code == 422
+
+    with TestClient(app, client=("127.0.0.1", 50001)) as operator:
+        login = operator.post(
+            "/api/auth/login",
+            json={
+                "username": "operator.logs",
+                "password": "operator-password-123",
+            },
+        )
+        assert login.status_code == 200
+        forbidden = operator.get("/api/competitors/collection-logs")
+        assert forbidden.status_code == 403
+
+
 def test_erp_reuses_and_recycles_hidden_competitor_browser(
     tmp_path: Path,
     monkeypatch,
@@ -2915,6 +3455,17 @@ def test_manual_stop_cancels_active_request_and_closes_shared_browser(
         assert cancelled_requests == ["request-stop"]
         assert browser_close_calls == [True]
         assert cleanup_order == ["cancel", "close", "release"]
+        summary_response = client.get(
+            "/api/competitors/collection-logs",
+            params={"batch_id": "batch-stop"},
+        )
+        assert summary_response.status_code == 200
+        stopped_round = summary_response.json()["selected_round"]
+        assert stopped_round["status"] == "stopped"
+        assert stopped_round["latest_event"] == "manual_stop"
+        assert stopped_round["completed_at"] is not None
+        assert stopped_round["reason"] == ""
+        assert "content" not in summary_response.json()
 
 
 def test_manual_stop_releases_batch_when_scheduled_journal_write_fails(
@@ -3110,6 +3661,108 @@ def test_loopback_schedule_starts_visible_batch_and_kxx_can_stop_it(
         )
         assert stopped_again.status_code == 200
         assert stopped_again.json()["status"]["active"] is False
+
+
+def test_kxx_can_resume_scheduled_network_pause_without_new_batch(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    database_path = tmp_path / "scheduled-network-resume.db"
+    monkeypatch.setenv(
+        "TAKEALOT_DATABASE_URL",
+        f"sqlite:///{database_path.as_posix()}",
+    )
+    batch_id = "scheduled-20260901-network-pause"
+    batch_status: dict[str, object] = {
+        "active": True,
+        "batch_id": batch_id,
+        "owner_username": "scheduled-task",
+        "owner_display_name": "每日 09:00 自动任务",
+        "source": "scheduled",
+        "event": "scheduled_pause",
+        "completed": 2,
+        "total": 5,
+        "pending": 3,
+        "succeeded": 0,
+        "failed": 2,
+        "terminal": 0,
+        "reason": "连续2条网络连接失败，自动暂停后续爬",
+    }
+    runner_status: dict[str, object] = {
+        "run_status": "paused",
+        "batch_id": batch_id,
+        "wait_kind": "network",
+        "resume_after": "2026-09-01T02:20:00+00:00",
+        "network_resume_available": True,
+        "network_resume_pending": 3,
+        "resume_available": False,
+        "resumable_pending": 0,
+    }
+    resume_calls: list[tuple[str, str]] = []
+
+    def shared_status(_self, **_kwargs: object) -> dict[str, object]:
+        return dict(batch_status)
+
+    def scheduled_status(_self) -> dict[str, object]:
+        return dict(runner_status)
+
+    async def resume_network_pause(
+        _self,
+        resumed_batch_id: str,
+        *,
+        resumed_by: str,
+    ) -> dict[str, object]:
+        resume_calls.append((resumed_batch_id, resumed_by))
+        runner_status.update(
+            {
+                "run_status": "running",
+                "wait_kind": None,
+                "resume_after": None,
+                "network_resume_available": False,
+                "network_resume_pending": 0,
+            }
+        )
+        batch_status.update(
+            {
+                "event": "resume",
+                "reason": "kxx 已手动提前继续同一 09:00 自动批次",
+            }
+        )
+        return dict(batch_status)
+
+    monkeypatch.setattr(CollectionBatchRegistry, "status", shared_status)
+    monkeypatch.setattr(
+        "takealot_ops.erp.web.ScheduledCompetitorBatchRunner.status",
+        scheduled_status,
+    )
+    monkeypatch.setattr(
+        "takealot_ops.erp.web.ScheduledCompetitorBatchRunner.resume_network_pause",
+        resume_network_pause,
+    )
+    app = create_app(tmp_path)
+
+    with TestClient(app, client=("127.0.0.1", 50000)) as client:
+        session = _bootstrap(client)
+        headers = {"X-CSRF-Token": str(session["csrf_token"])}
+
+        paused = client.get("/api/competitors/batch-status")
+        assert paused.status_code == 200
+        assert paused.json()["scheduled_network_resume_available"] is True
+        assert paused.json()["scheduled_network_resume_pending"] == 3
+
+        resumed = client.post(
+            "/api/competitors/batch-resume",
+            headers=headers,
+            json={"batch_id": batch_id},
+        )
+
+        assert resumed.status_code == 200
+        assert resume_calls == [(batch_id, "kxx")]
+        resumed_status = resumed.json()["status"]
+        assert resumed_status["batch_id"] == batch_id
+        assert resumed_status["event"] == "resume"
+        assert resumed_status["scheduled_network_resume_available"] is False
+        assert resumed_status["scheduled_auto_resume_at"] is None
 
 
 def test_kxx_changes_scheduled_visible_browser_from_the_next_link(

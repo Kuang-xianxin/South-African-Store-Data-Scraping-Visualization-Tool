@@ -45,7 +45,6 @@ test("keeps identifier matching as substring-only", () => {
 
 test("all product-name search pages use the shared fuzzy matcher", () => {
   const directMatcherPages = [
-    "ProductsPage.vue",
     "KeywordTrafficPage.vue",
     "SearchRankingPage.vue",
     "QuadrantsPage.vue",

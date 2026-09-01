@@ -141,10 +141,19 @@ test("sales component uses bars and contains no line-chart rendering contract", 
 
   assert.match(component, /class="own-sales-bar"/);
   assert.match(component, /条形图显示/);
+  assert.match(component, /@click="setRecentRange\(7\)"/);
+  assert.match(component, /近7天/);
+  assert.match(component, /@click="setRecentRange\(15\)"/);
+  assert.match(component, /近15天/);
   assert.match(component, /近30天/);
+  assert.match(component, /@click="setRecentRange\(60\)"/);
+  assert.match(component, /近60天/);
   assert.match(component, /近90天/);
-  assert.match(component, /按周汇总/);
-  assert.match(component, /aggregateOwnStoreSalesPoints/);
+  assert.match(component, /按日展示/);
+  assert.match(
+    component,
+    /aggregateOwnStoreSalesPoints\(filteredPoints\.value, "day"\)/,
+  );
   assert.match(component, /下单件数（整数）/);
   assert.match(component, /已覆盖日期均为 0 件/);
   assert.match(component, /完整 0 件基线/);
@@ -152,7 +161,7 @@ test("sales component uses bars and contains no line-chart rendering contract", 
   assert.match(component, /class="own-sales-active-band"/);
   assert.doesNotMatch(
     component,
-    /geometry\.segments|own-sales-line|own-sales-point|折线显示|折线图/,
+    /geometry\.segments|own-sales-line|own-sales-point|折线显示|折线图|按周汇总|按月汇总|周期不完整/,
   );
 });
 
@@ -191,6 +200,16 @@ test("automatic aggregation keeps short ranges daily and condenses long ranges",
   assert.equal(aggregateOwnStoreSalesPoints(makePoints(46)).granularity, "week");
   assert.equal(aggregateOwnStoreSalesPoints(makePoints(420)).granularity, "week");
   assert.equal(aggregateOwnStoreSalesPoints(makePoints(421)).granularity, "month");
+});
+
+test("explicit daily display keeps long ranges at one bucket per Beijing date", () => {
+  const aggregation = aggregateOwnStoreSalesPoints(makePoints(421), "day");
+
+  assert.equal(aggregation.granularity, "day");
+  assert.equal(aggregation.buckets.length, 421);
+  assert.ok(
+    aggregation.buckets.every((bucket) => bucket.startDate === bucket.endDate),
+  );
 });
 
 test("weekly buckets sum only known values and retain coverage evidence", () => {
@@ -256,6 +275,14 @@ test("weekly buckets sum only known values and retain coverage evidence", () => 
 
 test("recent range shortcuts are inclusive and clamp to the available start", () => {
   const bounds = { start: "2026-01-01", end: "2026-08-18" };
+  assert.deepEqual(getOwnStoreSalesRecentRange(bounds, 7), {
+    start: "2026-08-12",
+    end: "2026-08-18",
+  });
+  assert.deepEqual(getOwnStoreSalesRecentRange(bounds, 15), {
+    start: "2026-08-04",
+    end: "2026-08-18",
+  });
   assert.deepEqual(getOwnStoreSalesRecentRange(bounds, 30), {
     start: "2026-07-20",
     end: "2026-08-18",
@@ -264,6 +291,16 @@ test("recent range shortcuts are inclusive and clamp to the available start", ()
     start: "2026-05-21",
     end: "2026-08-18",
   });
+  assert.deepEqual(getOwnStoreSalesRecentRange(bounds, 60), {
+    start: "2026-06-20",
+    end: "2026-08-18",
+  });
+  for (const days of [7, 15, 30, 60, 90]) {
+    const range = getOwnStoreSalesRecentRange({ start: "2025-01-01", end: "2025-04-10" }, days);
+    assert.equal(filterOwnStoreSalesPoints(makePoints(100), range.start, range.end).length, days);
+    const shortBounds = { start: "2026-08-16", end: "2026-08-18" };
+    assert.deepEqual(getOwnStoreSalesRecentRange(shortBounds, days), shortBounds);
+  }
   assert.deepEqual(
     getOwnStoreSalesRecentRange({ start: "2026-08-01", end: "2026-08-18" }, 30),
     { start: "2026-08-01", end: "2026-08-18" },

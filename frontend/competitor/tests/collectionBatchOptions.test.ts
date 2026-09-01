@@ -5,6 +5,7 @@ import test from "node:test";
 import {
   SHARED_BATCH_CHECKPOINT_YIELD_REASON,
   activeSharedBatchSupersedesLocalCheckpoint,
+  canResumeScheduledNetworkPause,
   canUpdateVisibleBrowserForBatch,
   scheduledRetryWaitLabel,
   stoppedScheduledBatchResumeCount,
@@ -102,6 +103,44 @@ test("scheduled retry wait shows round, pending count, and live countdown", () =
       Date.parse("2026-08-19T02:02:33.000Z"),
     ),
     null,
+  );
+});
+
+test("only kxx sees manual continue during a scheduled network pause", () => {
+  const status = {
+    active: true,
+    batch_id: "scheduled-20260901-example",
+    event: "scheduled_pause",
+    source: "scheduled" as const,
+    scheduled_wait_kind: "network" as const,
+    scheduled_network_resume_available: true,
+  };
+
+  assert.equal(canResumeScheduledNetworkPause(true, status), true);
+  assert.equal(canResumeScheduledNetworkPause(false, status), false);
+  assert.equal(
+    canResumeScheduledNetworkPause(true, {
+      active: status.active,
+      batch_id: status.batch_id,
+      event: status.event,
+      source: status.source,
+      scheduled_wait_kind: status.scheduled_wait_kind,
+    }),
+    false,
+  );
+  assert.equal(
+    canResumeScheduledNetworkPause(true, {
+      ...status,
+      scheduled_wait_kind: "pending_retry",
+    }),
+    false,
+  );
+  assert.equal(
+    canResumeScheduledNetworkPause(true, {
+      ...status,
+      scheduled_network_resume_available: false,
+    }),
+    false,
   );
 });
 
@@ -210,6 +249,10 @@ test("competitor admin control resumes the server checkpoint instead of starting
   );
   assert.match(competitorsPageSource, /全员同步等待重试/);
   assert.match(competitorsPageSource, /正在等待安全复核间隔，届时自动续爬/);
+  assert.match(competitorsPageSource, /@click="resumePausedScheduledCollection"/);
+  assert.match(competitorsPageSource, /立即继续采集/);
+  assert.match(competitorsPageSource, /原自动续爬倒计时已取消/);
+  assert.doesNotMatch(competitorsPageSource, /手动提前继续网络暂停自动批次/);
   assert.match(competitorsPageSource, /showLocalCollectionAlert/);
   assert.match(competitorsPageSource, /suspendStoredCollectionCheckpoint/);
   assert.match(competitorsPageSource, /v-if="showLocalCollectionAlert"/);

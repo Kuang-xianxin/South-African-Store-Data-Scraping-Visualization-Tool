@@ -1,4 +1,5 @@
 import type {
+  CompetitorDateRange,
   CompetitorItem,
   CompetitorOfferItem,
   OwnStoreTrafficPoint,
@@ -44,6 +45,48 @@ export type CompetitorOfferSort =
   | "price_asc"
   | "stock_asc"
   | "default";
+
+export function needsFullCompetitorHistory(
+  startDate: string,
+  endDate: string,
+  available: Pick<CompetitorDateRange, "available_start" | "available_end">,
+): boolean {
+  return Boolean(
+    (startDate && (!available.available_start || startDate > available.available_start))
+    || (endDate && (!available.available_end || endDate < available.available_end)),
+  );
+}
+
+export function getCompetitorHistoryDateBounds(
+  history: CompetitorItem[],
+): { start: string; end: string } | null {
+  let first = Infinity;
+  let last = -Infinity;
+  for (const snapshot of history) {
+    const timestamp = parseUtcDateTime(snapshot.采集时间);
+    if (!Number.isFinite(timestamp)) continue;
+    first = Math.min(first, timestamp);
+    last = Math.max(last, timestamp);
+  }
+  if (!Number.isFinite(first)) return null;
+  const chinaDate = (timestamp: number) =>
+    new Date(timestamp + 8 * 60 * 60 * 1_000).toISOString().slice(0, 10);
+  return { start: chinaDate(first), end: chinaDate(last) };
+}
+
+export function filterCompetitorHistoryByDate(
+  history: CompetitorItem[],
+  startDate: string,
+  endDate: string,
+): CompetitorItem[] {
+  const [start, end] = startDate <= endDate ? [startDate, endDate] : [endDate, startDate];
+  const startAt = Date.parse(`${start}T00:00:00+08:00`);
+  const endExclusive = Date.parse(`${end}T00:00:00+08:00`) + 24 * 60 * 60 * 1_000;
+  return history.filter((snapshot) => {
+    const timestamp = parseUtcDateTime(snapshot.采集时间);
+    return Number.isFinite(timestamp) && timestamp >= startAt && timestamp < endExclusive;
+  });
+}
 
 function normalizedIdentity(value: string | null | undefined): string {
   return String(value ?? "").trim().replace(/\s+/g, " ").toLocaleLowerCase();
@@ -160,7 +203,7 @@ export function alignOwnStoreTrafficTrendToOfferTrend(
   const offerIndexByCapturedAt = new Map(
     offerTrend.map((point, index) => [point.capturedAtMs, index]),
   );
-  return trafficTrend.flatMap((point) => {
+  const aligned = trafficTrend.flatMap((point) => {
     const alignedOfferIndex = offerIndexByCapturedAt.get(point.capturedAtMs);
     return alignedOfferIndex === undefined
       ? []
@@ -170,6 +213,10 @@ export function alignOwnStoreTrafficTrendToOfferTrend(
           alignedOfferIndex,
         }];
   });
+  const firstTitleIndex = aligned.findIndex((point) => Boolean(point.title));
+  return aligned.map((point, index) => index === firstTitleIndex
+    ? { ...point, title_changed: false, previous_title: null }
+    : point);
 }
 
 export function nearestObservedOwnStoreTrafficPoint(
@@ -212,8 +259,8 @@ export function offerIntervalInventoryMovement(
   const sourceTimeline = history
     .slice()
     .sort((left, right) => {
-      const leftTime = Date.parse(left.采集时间);
-      const rightTime = Date.parse(right.采集时间);
+      const leftTime = parseUtcDateTime(left.采集时间);
+      const rightTime = parseUtcDateTime(right.采集时间);
       const safeLeftTime = Number.isFinite(leftTime) ? leftTime : left.快照ID;
       const safeRightTime = Number.isFinite(rightTime) ? rightTime : right.快照ID;
       return safeLeftTime - safeRightTime || left.快照ID - right.快照ID;

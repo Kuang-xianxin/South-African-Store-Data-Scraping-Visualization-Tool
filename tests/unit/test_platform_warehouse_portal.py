@@ -11,6 +11,7 @@ from takealot_ops.platform_warehouse.portal import (
     PortalAmbiguousWriteError,
     PortalAuthenticationError,
     PortalDisabledError,
+    PortalError,
     PortalSessionRegistry,
     TakealotPortalClient,
 )
@@ -21,7 +22,7 @@ from takealot_ops.storage.migrations import (
     create_engine_for_database_url,
     create_schema,
 )
-from takealot_ops.storage.models import OfferCurrent
+from takealot_ops.storage.models import LogisticsProviderSnapshot, OfferCurrent
 from takealot_ops.storage.store_context import store_scope
 
 
@@ -101,6 +102,54 @@ def test_portal_client_uses_review_and_create_contract_without_retry() -> None:
     assert create_post[2]["task_type_id"] == 22
 
 
+def test_portal_client_limits_full_removal_module_reads_to_exact_paths() -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, json={"results": [], "total": 0})
+
+    client = TakealotPortalClient(
+        _portal_settings(),
+        client_factory=_mock_factory(handler),
+    )
+
+    client.removal_orders(
+        "token",
+        "pickup_ready",
+        page_number=2,
+        page_size=100,
+    )
+    client.removal_order_items(
+        "token",
+        "closed",
+        "88-safe",
+        page_number=1,
+        page_size=500,
+    )
+
+    assert requests[0].url.path == "/v2/removal_order/pickup_ready"
+    assert "order_type_ids" not in requests[0].url.params
+    assert requests[0].url.params["page_number"] == "2"
+    assert requests[1].url.path == "/v2/removal_order/closed/88-safe/items"
+    assert requests[1].url.params["page_size"] == "500"
+    with pytest.raises(PortalError, match="removal_order_id"):
+        client.removal_order_items(
+            "token",
+            "closed",
+            "88/unsafe",
+            page_number=1,
+            page_size=100,
+        )
+    with pytest.raises(PortalError, match="状态路径"):
+        client.removal_orders(  # type: ignore[arg-type]
+            "token",
+            "arbitrary",
+            page_number=1,
+            page_size=100,
+        )
+
+
 def test_portal_write_network_failure_is_ambiguous_and_not_retried() -> None:
     calls = 0
 
@@ -125,6 +174,7 @@ class _FakePortalClient:
         self.writes: list[tuple[str, int | None]] = []
         self.login_count = 0
         self.whoami_failures = 0
+        self.removal_reads: list[str] = []
 
     def login(self, email: str, password: str) -> dict[str, Any]:
         assert email == "seller@example.com"
@@ -167,6 +217,23 @@ class _FakePortalClient:
     def default_reference(self, token: str, facility_code: str) -> str:
         assert facility_code == "JHB-DC"
         return "ERP-JHB-001"
+
+    def removal_orders(
+        self,
+        token: str,
+        stage: str,
+        *,
+        page_number: int,
+        page_size: int,
+    ) -> dict[str, Any]:
+        assert token == "memory-only-token"
+        assert page_number == 1
+        assert page_size == 100
+        self.removal_reads.append(stage)
+        return {"results": [], "total": 0}
+
+    def removal_order_items(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        raise AssertionError("empty removal-order fixture has no item calls")
 
     def create_replenishment(
         self, token: str, request_params: dict[str, Any]
@@ -525,3 +592,43 @@ def test_portal_store_allowlist_blocks_other_stores_before_login(
         assert service.portal_settings.is_store_enabled() is True
         assert service.portal_login("seller@example.com", "secret")["authenticated"] is True
     assert fake.login_count == 1
+
+
+def test_removal_order_sync_authenticates_reads_and_persists_safe_snapshot(
+    tmp_path, monkeypatch
+) -> None:
+    database_url = f"sqlite:///{(tmp_path / 'removal-sync.db').as_posix()}"
+    monkeypatch.setenv("TAKEALOT_DATABASE_URL", database_url)
+    monkeypatch.setenv("TAKEALOT_PORTAL_BFF_ENABLED", "true")
+    monkeypatch.setenv("TAKEALOT_PORTAL_ENABLED_STORES", "current")
+    engine = create_engine_for_database_url(database_url)
+    create_schema(engine)
+    engine.dispose()
+    fake = _FakePortalClient()
+    service = PlatformWarehouseService(
+        tmp_path,
+        portal_registry=PortalSessionRegistry(fake),  # type: ignore[arg-type]
+        credential_store=_FakeCredentialStore(
+            PortalCredential("seller@example.com", "secret")
+        ),
+    )
+
+    with store_scope("current"):
+        result = service.sync_return_removal_orders()
+
+    assert result["state"] == "synced"
+    assert result["order_count"] == 0
+    assert fake.removal_reads == ["submitted", "pickup_ready", "closed"]
+    engine = create_engine_for_database_url(database_url)
+    try:
+        with store_scope("current"), Session(engine) as session:
+            snapshot = session.get(
+                LogisticsProviderSnapshot,
+                ("current", "takealot_removal_orders"),
+            )
+        assert snapshot is not None
+        assert snapshot.payload["connected"] is True
+        assert snapshot.payload["order_type_filter"] == "All"
+        assert snapshot.payload["order_type_ids"] == [1, 2, 3]
+    finally:
+        engine.dispose()

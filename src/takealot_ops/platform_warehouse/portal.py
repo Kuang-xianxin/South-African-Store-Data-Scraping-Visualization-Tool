@@ -1,7 +1,7 @@
-"""Narrow, safety-first client for Takealot Seller Portal shipment operations.
+"""Narrow, safety-first client for approved Takealot Seller Portal operations.
 
-This module intentionally exposes only the shipment calls required by the ERP.  It does
-not accept arbitrary URLs, does not persist credentials/tokens, and never retries writes.
+This module exposes only exact shipment paths and read-only removal-order paths required
+by the ERP.  It does not accept arbitrary URLs, persist credentials/tokens, or retry writes.
 """
 
 from __future__ import annotations
@@ -9,13 +9,14 @@ from __future__ import annotations
 import hashlib
 import hmac
 import os
+import re
 import threading
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Literal
-from urllib.parse import quote, urljoin
+from urllib.parse import quote, urlencode, urljoin
 
 import httpx
 
@@ -23,6 +24,7 @@ from takealot_ops.settings import TakealotPortalSettings
 
 
 PortalAction = Literal["confirm_po", "confirm_shipped", "archive"]
+RemovalOrderStage = Literal["submitted", "pickup_ready", "closed"]
 
 
 class PortalError(RuntimeError):
@@ -140,6 +142,54 @@ class TakealotPortalClient:
         if len(reference) < 4 or len(reference) > 200:
             raise PortalError("Takealot 未返回有效的 Shipment reference")
         return reference
+
+    def removal_orders(
+        self,
+        token: str,
+        stage: RemovalOrderStage,
+        *,
+        page_number: int,
+        page_size: int,
+    ) -> Mapping[str, Any]:
+        """Read one exact Manage Removal Orders list for every portal order type."""
+        safe_stage = _removal_order_stage(stage)
+        query = urlencode(
+            {
+                "page_number": _bounded_page(page_number),
+                "page_size": _bounded_page_size(page_size),
+            }
+        )
+        return self._request_json(
+            "GET",
+            f"/v2/removal_order/{safe_stage}?{query}",
+            token=token,
+        )
+
+    def removal_order_items(
+        self,
+        token: str,
+        stage: RemovalOrderStage,
+        removal_order_id: str,
+        *,
+        page_number: int,
+        page_size: int,
+    ) -> Mapping[str, Any]:
+        """Read exact item identities used to link a PO back to ``/returns``."""
+        safe_stage = _removal_order_stage(stage)
+        safe_order_id = str(removal_order_id).strip()
+        if not re.fullmatch(r"[A-Za-z0-9_-]{1,100}", safe_order_id):
+            raise PortalError("Takealot removal_order_id 格式无效")
+        query = urlencode(
+            {
+                "page_number": _bounded_page(page_number),
+                "page_size": _bounded_page_size(page_size, maximum=500),
+            }
+        )
+        return self._request_json(
+            "GET",
+            f"/v2/removal_order/{safe_stage}/{safe_order_id}/items?{query}",
+            token=token,
+        )
 
     def review_shipments(
         self,
@@ -289,7 +339,7 @@ class TakealotPortalClient:
         accepted_statuses: set[int] | None = None,
     ) -> Mapping[str, Any]:
         if not self._settings.enabled:
-            raise PortalDisabledError("Takealot Seller Portal 写入总开关当前关闭")
+            raise PortalDisabledError("Takealot Seller Portal 接入总开关当前关闭")
         _validate_path(path)
         headers = {"Accept": "application/json"}
         if token:
@@ -494,6 +544,32 @@ def _validate_path(path: str) -> None:
     joined = urljoin("https://seller-api.takealot.com/", path.lstrip("/"))
     if not path.startswith("/") or not joined.startswith("https://seller-api.takealot.com/"):
         raise PortalError("Seller Portal 请求路径不在固定主机范围内")
+
+
+def _removal_order_stage(value: str) -> RemovalOrderStage:
+    if value not in {"submitted", "pickup_ready", "closed"}:
+        raise PortalError("Takealot 移除单状态路径不在允许范围内")
+    return value  # type: ignore[return-value]
+
+
+def _bounded_page(value: Any) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError) as exc:
+        raise PortalError("Takealot 移除单页码格式无效") from exc
+    if parsed < 1 or parsed > 100:
+        raise PortalError("Takealot 移除单页码超出允许范围")
+    return parsed
+
+
+def _bounded_page_size(value: Any, *, maximum: int = 100) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError) as exc:
+        raise PortalError("Takealot 移除单分页大小格式无效") from exc
+    if parsed < 1 or parsed > maximum:
+        raise PortalError("Takealot 移除单分页大小超出允许范围")
+    return parsed
 
 
 def _task_id(payload: Mapping[str, Any]) -> int:

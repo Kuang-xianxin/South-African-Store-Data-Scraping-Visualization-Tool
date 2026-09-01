@@ -497,6 +497,7 @@ class LogisticsOverviewService:
             "outbound_statuses": _status_counts(outbound),
             "recent_inbound": [_inbound_projection(row) for row in _recent(inbound)[:10]],
             "recent_outbound": [_outbound_projection(row) for row in _recent(outbound)[:10]],
+            "return_orders": [_return_order_projection(row) for row in returned],
             "warnings": warnings,
             "_raw_inbound": inbound,
         }
@@ -690,6 +691,58 @@ def _outbound_projection(row: Mapping[str, Any]) -> dict[str, Any]:
         "total_quantity": _as_int(row.get("totalQty")) or 0,
         "has_document": bool(_text(row.get("podPath"))),
     }
+
+
+def _return_order_projection(row: Mapping[str, Any]) -> dict[str, Any]:
+    """Persist only fields needed to prove W8 receipt, shelving, or damage."""
+    remark = _text(row.get("remark"))
+    return {
+        "order_no": _text(row.get("orderNo")),
+        "status": _text(row.get("statusName")) or _text(row.get("status")) or "未标记",
+        "created_at": _text(row.get("createDateStr")) or _text(row.get("createDate")),
+        "expected_arrival_at": _text(row.get("expectedArrivalTimeStr"))
+        or _text(row.get("expectedArrivalTime")),
+        "inbound_date": _text(row.get("inboundDateStr")) or _text(row.get("inboundDate")),
+        "shelf_date": _text(row.get("shelfDateStr")) or _text(row.get("shelfDate")),
+        "returned_type": _text(row.get("returnedTypeName")),
+        "waybill_no": _text(row.get("waybillNo")) or _text(row.get("newWaybillNo")),
+        "po_references": _w8_reference_tokens(remark),
+        "items": [
+            {
+                "platform_sku": _text(item.get("sku")) or None,
+                "company_sku": _text(item.get("sysSku")) or None,
+                "product_name": _text(item.get("skuCname"))
+                or _text(item.get("skuEname"))
+                or None,
+                "returned_quantity": _as_int(item.get("returnedNum")),
+                "inbound_quantity": _as_int(item.get("inboundNum")),
+                "pending_shelf_quantity": _as_int(item.get("pendingShelfNum")),
+                "shelf_quantity": _as_int(item.get("shelfNum")),
+                "total_shelf_quantity": _as_int(item.get("totalShelfNum")),
+                "defective_quantity": _as_int(item.get("defectiveNum")),
+                "total_defective_quantity": _as_int(item.get("totalDefectiveNum")),
+                "inbound_date": _text(item.get("inboundDateStr"))
+                or _text(item.get("inboundDate"))
+                or None,
+                "shelf_date": _text(item.get("shelfDateStr"))
+                or _text(item.get("shelfDate"))
+                or None,
+                "finished": item.get("finishFlag") is True
+                or str(item.get("finishFlag") or "").strip() == "1",
+            }
+            for item in _mapping_list(row.get("items"))
+        ],
+    }
+
+
+def _w8_reference_tokens(value: str) -> list[str]:
+    """Keep only explicit long numeric PO tokens; dates and fuzzy text never match."""
+    return sorted(
+        {
+            re.sub(r"[^A-Z0-9]", "", match.group(0).upper())
+            for match in re.finditer(r"(?<!\d)\d{6,}(?!\d)", value)
+        }
+    )
 
 
 def _shipment_sort_key(row: Mapping[str, Any]) -> tuple[str, int]:

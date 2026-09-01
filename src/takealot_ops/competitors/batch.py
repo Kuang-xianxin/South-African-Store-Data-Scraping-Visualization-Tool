@@ -5,10 +5,12 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 from collections import OrderedDict
 from collections.abc import Awaitable, Callable
 from dataclasses import asdict, dataclass, field, replace
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, timedelta, timezone
+from functools import lru_cache
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from threading import RLock
@@ -17,6 +19,30 @@ from typing import Any, Generic, TypeVar
 
 T = TypeVar("T")
 COLLECTION_STALE_AFTER = timedelta(minutes=2)
+COLLECTION_BATCH_ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
+COLLECTION_BATCH_LOG_PATTERN = re.compile(
+    rf"(?:^|\s)batch=(?P<batch_id>{COLLECTION_BATCH_ID_PATTERN.pattern})(?=\s|$)"
+)
+COLLECTION_ROUND_SUMMARY_READ_BYTES = 256 * 1024
+COLLECTION_LOG_TIMEZONE = timezone(timedelta(hours=8))
+COLLECTION_LOG_LINE_PATTERN = re.compile(
+    r"^(?P<timestamp>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d{3}) "
+    r"(?P<level>[A-Z]+) (?P<message>.*)$"
+)
+COLLECTION_LOG_FIELD_PATTERN = re.compile(
+    r"(?P<key>[a-z_]+)=(?P<value>\S+)"
+)
+COLLECTION_ROUND_REASON_EVENTS = frozenset(
+    {
+        "completed",
+        "manual_stop",
+        "network_pause",
+        "paused",
+        "pending_retry_wait",
+        "process_shutdown",
+        "restore_completed_pending",
+    }
+)
 NONBLOCKING_PAUSE_REASON_PREFIXES = (
     "监控清单新增了 ",
     "PLID",
@@ -25,6 +51,310 @@ NONBLOCKING_PAUSE_REASON_PREFIXES = (
 
 class CollectionBatchBusyError(RuntimeError):
     """Raised when another browser already owns the global collection slot."""
+
+
+class PerBatchCollectionLogHandler(logging.Handler):
+    """Mirror batch-scoped collection records into one append-only file per round."""
+
+    def __init__(self, directory: Path, *, max_open_files: int = 8) -> None:
+        super().__init__(level=logging.INFO)
+        self.directory = directory.resolve()
+        self.directory.mkdir(parents=True, exist_ok=True)
+        self._max_open_files = max(1, max_open_files)
+        self._handlers: OrderedDict[str, logging.FileHandler] = OrderedDict()
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            match = COLLECTION_BATCH_LOG_PATTERN.search(record.getMessage())
+            if match is None:
+                return
+            batch_id = match.group("batch_id")
+            handler = self._handlers.pop(batch_id, None)
+            if handler is None:
+                handler = logging.FileHandler(
+                    self.directory / f"{batch_id}.log",
+                    mode="a",
+                    encoding="utf-8",
+                    delay=True,
+                )
+                if self.formatter is not None:
+                    handler.setFormatter(self.formatter)
+            self._handlers[batch_id] = handler
+            while len(self._handlers) > self._max_open_files:
+                _, expired = self._handlers.popitem(last=False)
+                expired.close()
+            handler.emit(record)
+            handler.flush()
+        except Exception:
+            self.handleError(record)
+
+    def setFormatter(self, fmt: logging.Formatter | None) -> None:  # noqa: N802
+        super().setFormatter(fmt)
+        for handler in self._handlers.values():
+            handler.setFormatter(fmt)
+
+    def flush(self) -> None:
+        for handler in self._handlers.values():
+            handler.flush()
+
+    def close(self) -> None:
+        try:
+            for handler in self._handlers.values():
+                handler.close()
+            self._handlers.clear()
+        finally:
+            super().close()
+
+
+def read_collection_round_summaries(
+    project_root: Path,
+    *,
+    current_batch_id: str | None = None,
+    selected_batch_id: str | None = None,
+    max_rounds: int = 50,
+) -> dict[str, object]:
+    """Return one structured aggregate summary per collection round."""
+    if selected_batch_id is not None and COLLECTION_BATCH_ID_PATTERN.fullmatch(
+        selected_batch_id
+    ) is None:
+        raise ValueError("批次编号格式无效")
+
+    round_limit = max(1, min(max_rounds, 100))
+    round_dir = (project_root / "logs" / "competitor-rounds").resolve()
+    catalog: list[tuple[float, dict[str, object]]] = []
+    if round_dir.exists():
+        for path in round_dir.glob("*.log"):
+            batch_id = path.name.removesuffix(".log")
+            if COLLECTION_BATCH_ID_PATTERN.fullmatch(batch_id) is None:
+                continue
+            resolved = path.resolve()
+            if resolved.parent != round_dir or not resolved.is_file():
+                continue
+            try:
+                stat = resolved.stat()
+            except OSError:
+                continue
+            summary = dict(
+                _cached_collection_round_summary(
+                    str(resolved),
+                    stat.st_size,
+                    stat.st_mtime_ns,
+                )
+            )
+            summary.update(
+                {
+                    "batch_id": batch_id,
+                    "modified_at": datetime.fromtimestamp(
+                        stat.st_mtime,
+                        UTC,
+                    ).isoformat(),
+                    "size_bytes": stat.st_size,
+                    "current": batch_id == current_batch_id,
+                }
+            )
+            catalog.append(
+                (
+                    stat.st_mtime,
+                    summary,
+                )
+            )
+    catalog.sort(key=lambda item: (item[0], str(item[1]["batch_id"])), reverse=True)
+    all_rounds = [item[1] for item in catalog]
+    rounds_by_id = {str(item["batch_id"]): item for item in all_rounds}
+
+    effective_batch_id = selected_batch_id
+    if effective_batch_id is None:
+        effective_batch_id = (
+            current_batch_id
+            if current_batch_id in rounds_by_id
+            else str(all_rounds[0]["batch_id"])
+            if all_rounds
+            else None
+        )
+    if selected_batch_id is not None and effective_batch_id not in rounds_by_id:
+        raise FileNotFoundError(f"未找到批次 {selected_batch_id} 的独立日志")
+
+    visible_rounds = all_rounds[:round_limit]
+    if (
+        effective_batch_id is not None
+        and effective_batch_id in rounds_by_id
+        and all(str(item["batch_id"]) != effective_batch_id for item in visible_rounds)
+    ):
+        visible_rounds.append(rounds_by_id[effective_batch_id])
+
+    return {
+        "current_batch_id": current_batch_id,
+        "selected_batch_id": effective_batch_id,
+        "rounds": visible_rounds,
+        "total_rounds": len(all_rounds),
+        "selected_round": (
+            rounds_by_id.get(effective_batch_id)
+            if effective_batch_id is not None
+            else None
+        ),
+        "updated_at": datetime.now(UTC).isoformat(),
+    }
+
+
+@lru_cache(maxsize=256)
+def _cached_collection_round_summary(
+    path_text: str,
+    size: int,
+    modified_ns: int,
+) -> dict[str, object]:
+    """Parse only the latest aggregate event; immutable files reuse the cached summary."""
+    del modified_ns
+    path = Path(path_text)
+    start = max(0, size - COLLECTION_ROUND_SUMMARY_READ_BYTES)
+    with path.open("rb") as handle:
+        handle.seek(start)
+        raw = handle.read(COLLECTION_ROUND_SUMMARY_READ_BYTES)
+    text = raw.decode("utf-8", errors="replace")
+    if start:
+        _, separator, text = text.partition("\n")
+        if not separator:
+            text = ""
+    for line in reversed(text.splitlines()):
+        summary = _collection_round_summary_from_line(line)
+        if summary is not None:
+            return summary
+    return _empty_collection_round_summary()
+
+
+def _collection_round_summary_from_line(line: str) -> dict[str, object] | None:
+    match = COLLECTION_LOG_LINE_PATTERN.match(line)
+    if match is None:
+        return None
+    message = match.group("message")
+    if message.startswith("round_event "):
+        event_kind = "round_event"
+        payload = message.removeprefix("round_event ")
+    elif message.startswith("batch_event "):
+        event_kind = "batch_event"
+        payload = message.removeprefix("batch_event ")
+    else:
+        return None
+    structured, separator, reason = payload.partition(" reason=")
+    fields = {
+        field.group("key"): field.group("value")
+        for field in COLLECTION_LOG_FIELD_PATTERN.finditer(structured)
+    }
+    event = _optional_log_text(fields.get("event"))
+    event_at = datetime.strptime(
+        match.group("timestamp"),
+        "%Y-%m-%d %H:%M:%S,%f",
+    ).replace(tzinfo=COLLECTION_LOG_TIMEZONE)
+    elapsed_seconds = _optional_log_float(fields.get("wall_elapsed_seconds"))
+    retry_round, retry_round_limit = _optional_log_fraction(
+        fields.get("retry_round")
+    )
+    started_at = (
+        event_at - timedelta(seconds=elapsed_seconds)
+        if elapsed_seconds is not None
+        else event_at
+        if event == "start"
+        else None
+    )
+    return {
+        "source": _optional_log_text(fields.get("source"))
+        or ("scheduled" if event_kind == "round_event" else "manual"),
+        "round_number": _optional_log_int(fields.get("round")),
+        "revision": _optional_log_int(fields.get("revision")),
+        "trigger_date": _optional_log_text(fields.get("trigger_date")),
+        "status": _collection_round_status(event),
+        "latest_event": event,
+        "started_at": started_at.isoformat() if started_at is not None else None,
+        "completed_at": (
+            event_at.isoformat() if event in {"completed", "manual_stop"} else None
+        ),
+        "summary_updated_at": event_at.isoformat(),
+        "elapsed_seconds": elapsed_seconds,
+        "completed": _optional_log_int(fields.get("completed")),
+        "total": _optional_log_int(fields.get("total")),
+        "pending": _optional_log_int(fields.get("pending")),
+        "succeeded": _optional_log_int(
+            fields.get("succeeded_total") or fields.get("succeeded")
+        ),
+        "failed": _optional_log_int(fields.get("failed")),
+        "terminal": _optional_log_int(fields.get("terminal")),
+        "retry_round": retry_round,
+        "retry_round_limit": retry_round_limit,
+        "reason": (
+            reason.strip()
+            if separator and event in COLLECTION_ROUND_REASON_EVENTS
+            else ""
+        ),
+    }
+
+
+def _collection_round_status(event: str | None) -> str:
+    if event == "completed":
+        return "completed"
+    if event in {"manual_stop"}:
+        return "stopped"
+    if event in {"network_pause", "paused"}:
+        return "paused"
+    if event in {"pending_retry_wait", "restore_completed_pending"}:
+        return "retry_wait"
+    if event == "process_shutdown":
+        return "waiting_resume"
+    if event is not None:
+        return "running"
+    return "unknown"
+
+
+def _empty_collection_round_summary() -> dict[str, object]:
+    return {
+        "source": None,
+        "round_number": None,
+        "revision": None,
+        "trigger_date": None,
+        "status": "unknown",
+        "latest_event": None,
+        "started_at": None,
+        "completed_at": None,
+        "summary_updated_at": None,
+        "elapsed_seconds": None,
+        "completed": None,
+        "total": None,
+        "pending": None,
+        "succeeded": None,
+        "failed": None,
+        "terminal": None,
+        "retry_round": None,
+        "retry_round_limit": None,
+        "reason": "",
+    }
+
+
+def _optional_log_text(value: str | None) -> str | None:
+    if value is None or value == "-":
+        return None
+    return value
+
+
+def _optional_log_int(value: str | None) -> int | None:
+    try:
+        return int(value) if value is not None and value != "-" else None
+    except ValueError:
+        return None
+
+
+def _optional_log_float(value: str | None) -> float | None:
+    try:
+        return float(value) if value is not None and value != "-" else None
+    except ValueError:
+        return None
+
+
+def _optional_log_fraction(value: str | None) -> tuple[int | None, int | None]:
+    if value is None or value == "-":
+        return None, None
+    current, separator, limit = value.partition("/")
+    return (
+        _optional_log_int(current),
+        _optional_log_int(limit) if separator else None,
+    )
 
 
 @dataclass
@@ -80,6 +410,7 @@ class CollectionBatchRegistry:
         include_details: bool = True,
         result_offset: int = 0,
         error_offset: int = 0,
+        terminal_error_offset: int = 0,
         detail_limit: int | None = None,
     ) -> dict[str, object]:
         with self._lock:
@@ -88,6 +419,7 @@ class CollectionBatchRegistry:
                 include_details=include_details,
                 result_offset=result_offset,
                 error_offset=error_offset,
+                terminal_error_offset=terminal_error_offset,
                 detail_limit=detail_limit,
             )
 
@@ -261,6 +593,7 @@ class CollectionBatchRegistry:
         title: str | None,
         message: str,
         succeeded: bool,
+        failure_kind: str | None = None,
     ) -> None:
         """Publish per-link results so a scheduled batch has the same visible detail."""
         if not batch_id or not plid:
@@ -289,6 +622,11 @@ class CollectionBatchRegistry:
                         "plid": plid,
                         "url": url,
                         "message": message,
+                        "state": (
+                            "terminal"
+                            if failure_kind == "confirmed-invalid"
+                            else "retry"
+                        ),
                     }
                 )
             self._state.updated_at = _utc_iso()
@@ -479,28 +817,42 @@ class CollectionBatchRegistry:
         include_details: bool,
         result_offset: int = 0,
         error_offset: int = 0,
+        terminal_error_offset: int = 0,
         detail_limit: int | None = None,
     ) -> dict[str, object]:
         """Return a bounded wire projection without copying hidden task history."""
         result_count = len(self._state.results)
-        error_count = len(self._state.errors)
+        retry_errors = [
+            item for item in self._state.errors if item.get("state") != "terminal"
+        ]
+        terminal_errors = [
+            item for item in self._state.errors if item.get("state") == "terminal"
+        ]
+        error_count = len(retry_errors)
+        terminal_error_count = len(terminal_errors)
         if include_details:
             if detail_limit is None:
                 results = self._state.results
-                errors = self._state.errors
+                errors = retry_errors
+                projected_terminal_errors = terminal_errors
             else:
                 safe_limit = max(0, detail_limit)
                 safe_result_offset = max(0, result_offset)
                 safe_error_offset = max(0, error_offset)
+                safe_terminal_error_offset = max(0, terminal_error_offset)
                 results = self._state.results[
                     safe_result_offset : safe_result_offset + safe_limit
                 ]
-                errors = self._state.errors[
+                errors = retry_errors[
                     safe_error_offset : safe_error_offset + safe_limit
+                ]
+                projected_terminal_errors = terminal_errors[
+                    safe_terminal_error_offset : safe_terminal_error_offset + safe_limit
                 ]
         else:
             results = []
             errors = []
+            projected_terminal_errors = []
         projected = replace(
             self._state,
             results=results,
@@ -509,6 +861,8 @@ class CollectionBatchRegistry:
         payload = asdict(projected)
         payload["result_count"] = result_count
         payload["error_count"] = error_count
+        payload["terminal_errors"] = projected_terminal_errors
+        payload["terminal_error_count"] = terminal_error_count
         return payload
 
     def start_link(
@@ -820,13 +1174,15 @@ class CollectionRequestCoordinator(Generic[T]):
 
 
 def configure_collection_logger(project_root: Path) -> logging.Logger:
-    """Create one rotating competitor collection log for the project."""
+    """Create the aggregate log and one detailed append-only log per batch round."""
     log_dir = project_root / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
     target = (log_dir / "competitor-collection.log").resolve()
+    round_dir = (log_dir / "competitor-rounds").resolve()
     logger = logging.getLogger(f"takealot_ops.competitors.collection.{abs(hash(str(target)))}")
     logger.setLevel(logging.INFO)
     logger.propagate = False
+    formatter = logging.Formatter("%(asctime)s %(levelname)s %(message)s")
     if not any(
         isinstance(handler, logging.FileHandler) and Path(handler.baseFilename).resolve() == target
         for handler in logger.handlers
@@ -837,6 +1193,14 @@ def configure_collection_logger(project_root: Path) -> logging.Logger:
             backupCount=3,
             encoding="utf-8",
         )
-        handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+        handler.setFormatter(formatter)
         logger.addHandler(handler)
+    if not any(
+        isinstance(handler, PerBatchCollectionLogHandler)
+        and handler.directory == round_dir
+        for handler in logger.handlers
+    ):
+        round_handler = PerBatchCollectionLogHandler(round_dir)
+        round_handler.setFormatter(formatter)
+        logger.addHandler(round_handler)
     return logger

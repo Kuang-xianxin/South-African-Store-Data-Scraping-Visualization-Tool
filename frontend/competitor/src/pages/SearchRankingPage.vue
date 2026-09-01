@@ -1743,6 +1743,97 @@ function errorMessage(caught: unknown, fallback: string) {
             <template v-if="detail.latest_attempt.error">原因：{{ detail.latest_attempt.error }}</template>
           </p>
 
+          <section v-if="analysis" class="title-review title-review-priority">
+            <div class="section-heading">
+              <div><p>THREE TITLE PLAYBOOKS · RESULT FIRST</p><h3>建议主标题（三种打法）</h3></div>
+              <span>{{ validationStatusLabel(analysis.title_validation?.status) }}</span>
+            </div>
+            <article class="current-title-panel">
+              <p>本次分析时标题</p>
+              <strong>{{ analysis.source_title }}</strong>
+              <small v-if="currentTitleChangedSinceAnalysis">
+                当前 Offer 标题已变为“{{ selectedProduct.title }}”。以下建议仍基于上方分析时标题，需重新分析后再采用。
+              </small>
+            </article>
+            <div class="title-strategy-grid">
+              <article
+                v-for="(strategy, index) in titleStrategies"
+                :key="strategy.strategy"
+                class="title-strategy-card"
+                :class="[strategy.strategy, { unavailable: !strategy.available }]"
+              >
+                <header>
+                  <span class="strategy-number">0{{ index + 1 }}</span>
+                  <div>
+                    <p>建议打法</p>
+                    <h4>{{ strategy.label }}</h4>
+                  </div>
+                </header>
+                <strong class="suggested-title">
+                  {{ strategy.available && strategy.title ? strategy.title : "本轮暂无达标方案" }}
+                </strong>
+                <p class="strategy-explanation">{{ strategy.explanation }}</p>
+                <small v-if="strategy.strategy === 'contiguous_core'" class="strategy-boundary">
+                  完整短语优先是低风险写法，不代表平台公开了连续词组加权规则。
+                </small>
+                <small v-else-if="strategy.strategy === 'hot_term_coverage'" class="strategy-boundary">
+                  优先覆盖不同完整根词入口；每个词都必须来自当时平台扩展并通过类目页验证。扩展顺序不是公开搜索量。
+                </small>
+                <small v-else class="strategy-boundary">
+                  入选前必须实际搜到本商品，并通过按窄形态标题词核算的首页低竞争门槛；
+                  未获当前标题或运营人工确认事实支持的材质、尺寸、受众、兼容性或功效声明会被拦截。
+                </small>
+                <div class="strategy-evidence">
+                  <span>证据词</span>
+                  <div v-if="strategy.evidence_keywords.length">
+                    <em v-for="keyword in strategy.evidence_keywords" :key="keyword">{{ keyword }}</em>
+                  </div>
+                  <small v-else>本轮暂无可用证据词</small>
+                </div>
+              </article>
+            </div>
+            <p class="title-format-note">
+              商品类型优先，规格参数默认后置；原主标题已有的自有品牌保留在最前，不从模型或竞品标题猜品牌。
+            </p>
+            <article
+              v-if="analysis.title_validation?.matched_strategy || analysis.title_validation?.matched_suggestion"
+              class="matched-strategy-note"
+            >
+              <p>修改后复采归属</p>
+              <strong>
+                上一轮实际采用：{{ titleStrategyLabel(analysis.title_validation.matched_strategy) }}
+              </strong>
+              <span v-if="analysis.title_validation.matched_suggestion">
+                {{ analysis.title_validation.matched_suggestion }}
+              </span>
+              <small>下方位次变化只验证这个历史标题，不代表本轮三张候选卡已经采用。</small>
+            </article>
+            <div
+              v-if="analysis.title_validation?.comparisons?.length"
+              class="movement-list"
+            >
+              <span v-for="row in analysis.title_validation.comparisons" :key="row.keyword">
+                {{ row.keyword }}：#{{ row.before_rank }} → #{{ row.after_rank }}
+                （{{ row.delta > 0 ? `前移 ${row.delta}` : row.delta < 0 ? `后移 ${-row.delta}` : "不变" }}）
+              </span>
+            </div>
+            <p
+              v-if="analysis.title_validation?.missing_baseline_keywords?.length || analysis.title_validation?.missing_keywords?.length"
+              class="comparison-warning"
+            >
+              <template v-if="analysis.title_validation?.missing_baseline_keywords?.length">
+                以下目标词上轮没有可量化的自然位：{{ analysis.title_validation.missing_baseline_keywords.join(" / ") }}。
+              </template>
+              <template v-if="analysis.title_validation?.missing_keywords?.length">
+                以下基线词本轮没有取得可比自然位：{{ analysis.title_validation.missing_keywords.join(" / ") }}。
+              </template>
+              因此本轮只报告证据不足，不判断标题已带来前移。
+            </p>
+            <p class="causality-note">
+              标题建议需复采验证；排名变化不等同因果。
+            </p>
+          </section>
+
           <section v-if="decisionParameterProfile" class="decision-parameter-section">
             <div class="section-heading decision-parameter-heading">
               <div>
@@ -2225,97 +2316,6 @@ function errorMessage(caught: unknown, fallback: string) {
                 不计分：{{ analysis.title_score.non_scoring_signals.map((item) => item.label).join("、") }}。
               </small>
               <small class="score-limitations">{{ analysis.title_score.limitations.join(" ") }}</small>
-            </section>
-
-            <section class="title-review">
-              <div class="section-heading">
-                <div><p>THREE TITLE PLAYBOOKS</p><h3>主标题三种打法</h3></div>
-                <span>{{ validationStatusLabel(analysis.title_validation?.status) }}</span>
-              </div>
-              <article class="current-title-panel">
-                <p>本次分析时标题</p>
-                <strong>{{ analysis.source_title }}</strong>
-                <small v-if="currentTitleChangedSinceAnalysis">
-                  当前 Offer 标题已变为“{{ selectedProduct.title }}”。以下建议仍基于上方分析时标题，需重新分析后再采用。
-                </small>
-              </article>
-              <div class="title-strategy-grid">
-                <article
-                  v-for="(strategy, index) in titleStrategies"
-                  :key="strategy.strategy"
-                  class="title-strategy-card"
-                  :class="[strategy.strategy, { unavailable: !strategy.available }]"
-                >
-                  <header>
-                    <span class="strategy-number">0{{ index + 1 }}</span>
-                    <div>
-                      <p>建议打法</p>
-                      <h4>{{ strategy.label }}</h4>
-                    </div>
-                  </header>
-                  <strong class="suggested-title">
-                    {{ strategy.available && strategy.title ? strategy.title : "本轮暂无达标方案" }}
-                  </strong>
-                  <p class="strategy-explanation">{{ strategy.explanation }}</p>
-                  <small v-if="strategy.strategy === 'contiguous_core'" class="strategy-boundary">
-                    完整短语优先是低风险写法，不代表平台公开了连续词组加权规则。
-                  </small>
-                  <small v-else-if="strategy.strategy === 'hot_term_coverage'" class="strategy-boundary">
-                    优先覆盖不同完整根词入口；每个词都必须来自当时平台扩展并通过类目页验证。扩展顺序不是公开搜索量。
-                  </small>
-                  <small v-else class="strategy-boundary">
-                    入选前必须实际搜到本商品，并通过按窄形态标题词核算的首页低竞争门槛；
-                    未获当前标题或运营人工确认事实支持的材质、尺寸、受众、兼容性或功效声明会被拦截。
-                  </small>
-                  <div class="strategy-evidence">
-                    <span>证据词</span>
-                    <div v-if="strategy.evidence_keywords.length">
-                      <em v-for="keyword in strategy.evidence_keywords" :key="keyword">{{ keyword }}</em>
-                    </div>
-                    <small v-else>本轮暂无可用证据词</small>
-                  </div>
-                </article>
-              </div>
-              <p class="title-format-note">
-                商品类型优先，规格参数默认后置。
-              </p>
-              <article
-                v-if="analysis.title_validation?.matched_strategy || analysis.title_validation?.matched_suggestion"
-                class="matched-strategy-note"
-              >
-                <p>修改后复采归属</p>
-                <strong>
-                  上一轮实际采用：{{ titleStrategyLabel(analysis.title_validation.matched_strategy) }}
-                </strong>
-                <span v-if="analysis.title_validation.matched_suggestion">
-                  {{ analysis.title_validation.matched_suggestion }}
-                </span>
-                <small>下方位次变化只验证这个历史标题，不代表本轮三张候选卡已经采用。</small>
-              </article>
-              <div
-                v-if="analysis.title_validation?.comparisons?.length"
-                class="movement-list"
-              >
-                <span v-for="row in analysis.title_validation.comparisons" :key="row.keyword">
-                  {{ row.keyword }}：#{{ row.before_rank }} → #{{ row.after_rank }}
-                  （{{ row.delta > 0 ? `前移 ${row.delta}` : row.delta < 0 ? `后移 ${-row.delta}` : "不变" }}）
-                </span>
-              </div>
-              <p
-                v-if="analysis.title_validation?.missing_baseline_keywords?.length || analysis.title_validation?.missing_keywords?.length"
-                class="comparison-warning"
-              >
-                <template v-if="analysis.title_validation?.missing_baseline_keywords?.length">
-                  以下目标词上轮没有可量化的自然位：{{ analysis.title_validation.missing_baseline_keywords.join(" / ") }}。
-                </template>
-                <template v-if="analysis.title_validation?.missing_keywords?.length">
-                  以下基线词本轮没有取得可比自然位：{{ analysis.title_validation.missing_keywords.join(" / ") }}。
-                </template>
-                因此本轮只报告证据不足，不判断标题已带来前移。
-              </p>
-              <p class="causality-note">
-                标题建议需复采验证；排名变化不等同因果。
-              </p>
             </section>
 
             <section class="history-section" v-if="detail?.history.length">

@@ -1,8 +1,10 @@
+from datetime import date
 from decimal import Decimal
 
 from takealot_ops.competitors.service import (
     _InventoryTurnoverObservation,
     _period_inventory_turnover,
+    _recent_observed_sales_units,
 )
 
 
@@ -12,12 +14,14 @@ def _observation(
     *,
     exact: bool = True,
     scope: str = "same-offer",
+    display_date: date | None = None,
 ) -> _InventoryTurnoverObservation:
     return _InventoryTurnoverObservation(
         scope=(scope,),
         stock_quantity=stock,
         stock_exact=exact,
         price=Decimal(price) if price is not None else None,
+        display_date=display_date,
     )
 
 
@@ -109,3 +113,22 @@ def test_period_turnover_keeps_units_but_withholds_amount_when_movement_price_is
     assert result.replenishment_units == 0
     assert result.replenishment_value == 0.0
     assert result.turnover_value is None
+
+
+def test_recent_observed_sales_windows_include_both_dates_and_share_latest_anchor() -> None:
+    observations = [
+        _observation(300, "100", display_date=date(2026, 5, 1)),
+        _observation(280, "100", display_date=date(2026, 6, 1)),
+        _observation(320, "100", display_date=date(2026, 7, 1)),
+        _observation(270, "100", display_date=date(2026, 8, 1)),
+        _observation(300, "100", display_date=date(2026, 8, 10)),
+        _observation(290, "100", display_date=date(2026, 8, 15)),
+        _observation(280, "100", display_date=date(2026, 8, 22)),
+        _observation(270, "100", display_date=date(2026, 8, 23)),
+        _observation(260, "100", display_date=date(2026, 8, 29)),
+    ]
+
+    windows, through_date = _recent_observed_sales_units(observations)
+
+    assert through_date == date(2026, 8, 29)
+    assert windows == {"7": 10, "15": 30, "30": 40, "60": 90, "90": 90}

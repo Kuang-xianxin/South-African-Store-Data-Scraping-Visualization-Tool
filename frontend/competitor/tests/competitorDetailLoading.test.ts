@@ -23,6 +23,19 @@ test("reuses a bounded detail cache for repeated card opens", () => {
   assert.match(pageSource, /cacheCompetitorDetail\(cacheKey, result\);/);
 });
 
+test("competitor images retry transient proxy failures before showing a placeholder", () => {
+  assert.match(pageSource, /const competitorImageRetryDelaysMs = \[500, 1_500\] as const;/);
+  assert.match(pageSource, /function retryCompetitorImage\(/);
+  assert.match(pageSource, /image\.dataset\.imageRetryAttempt/);
+  assert.match(pageSource, /image\.src = competitorImageUrl\(url, nextAttempt\);/);
+  assert.match(pageSource, /failedCompetitorImages\.value = new Set\(\);/);
+  assert.equal(
+    [...pageSource.matchAll(/@error="retryCompetitorImage\(\$event, /g)].length,
+    6,
+  );
+  assert.doesNotMatch(pageSource, /@error="markCompetitorImageFailed\(/);
+});
+
 test("the shared product detail modal always exposes the persisted category path", () => {
   assert.match(pageSource, /class="competitor-category-path"/);
   assert.match(pageSource, /商品具体类目/);
@@ -84,6 +97,44 @@ test("standalone own-link detail loads its full local evidence concurrently", ()
   assert.match(pageSource, /<Teleport to="body" :disabled="props\.detailOnly">/);
   assert.match(apiSource, /ownStoreScope: OwnStoreScope = "current",\s+signal\?: AbortSignal/);
   assert.match(apiSource, /\/api\/competitors\/\$\{plid\}\$\{suffix\}`?, \{ signal \}/);
+});
+
+test("embedded radar detail reuses the full modal without loading or navigating the radar page", () => {
+  assert.match(pageSource, /embeddedDetailOnly\?: boolean/);
+  assert.match(pageSource, /payload\.current_item\?\.plid === plid/);
+  assert.match(pageSource, /async function openRequestedEmbeddedDetail/);
+  assert.match(pageSource, /loadRequestedEmbeddedDetail\(plid, startDate, endDate, scope\)/);
+  assert.match(pageSource, /embeddedDetailItem\.value = item;\s+openProductModal\(item\);/);
+  assert.match(pageSource, /targets\.value = result\.monitoring_target/);
+  assert.match(pageSource, /personalWatchlistItems\.value = result\.personal_watchlist_item/);
+  const embeddedMount = pageSource.slice(
+    pageSource.indexOf("if (props.embeddedDetailOnly)"),
+    pageSource.indexOf("const initialRequests"),
+  );
+  assert.doesNotMatch(embeddedMount, /loadTargets\(/);
+  assert.match(pageSource, /v-if="!props\.detailOnly && !props\.embeddedDetailOnly"/);
+  assert.match(pageSource, /class="competitor-modal competitor-product-detail-modal embedded-detail-loading-modal"/);
+  assert.match(pageSource, /emit\("detail-closed"\)/);
+  assert.doesNotMatch(
+    pageSource.slice(
+      pageSource.indexOf("async function openRequestedEmbeddedDetail"),
+      pageSource.indexOf("function closeProductModal"),
+    ),
+    /window\.location|location\.hash|competitorDetailPageHref/,
+  );
+});
+
+test("embedded radar detail prefetch reuses a bounded short-lived request cache", () => {
+  assert.match(pageSource, /requestedDetailPrefetchPlid\?: string/);
+  assert.match(pageSource, /requestedDetailPrefetchRevision\?: number/);
+  assert.match(pageSource, /const requestedEmbeddedDetailCacheLimit = 12/);
+  assert.match(pageSource, /const requestedEmbeddedDetailCacheTtlMs = 15_000/);
+  assert.match(pageSource, /requestedEmbeddedDetailCache\.get\(key\)/);
+  assert.match(pageSource, /requestedEmbeddedDetailRequests\.get\(key\)/);
+  assert.match(pageSource, /async function prefetchRequestedEmbeddedDetail/);
+  assert.match(pageSource, /await loadRequestedEmbeddedDetail\(/);
+  assert.match(pageSource, /\(\) => props\.requestedDetailPrefetchRevision \?\? 0/);
+  assert.match(pageSource, /void prefetchRequestedEmbeddedDetail\(revision, plid\)/);
 });
 
 test("standalone own-link detail groups its modules behind an accessible tab bar", () => {

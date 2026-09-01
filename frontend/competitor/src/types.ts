@@ -54,6 +54,11 @@ export interface CompetitorOfferItem extends ProductMasterIdentity {
   最新Offer库存状态?: "有货" | "没货" | "未探测" | null;
 }
 
+export type CompetitorObservedSalesWindowKey = "7" | "15" | "30" | "60" | "90";
+export type CompetitorObservedSalesWindows = Partial<
+  Record<CompetitorObservedSalesWindowKey, number | null>
+>;
+
 export interface CompetitorItem {
   来源: "competitor" | "own_store";
   快照ID: number;
@@ -92,6 +97,9 @@ export interface CompetitorItem {
   周期补货量: number | null;
   周期补货货值: number | null;
   周期库存周转金额: number | null;
+  /** Exact-stock decreases in fixed windows; an observation signal, not order sales. */
+  近期观察售出?: CompetitorObservedSalesWindows;
+  近期观察售出截至?: string | null;
   新增评论: number | null;
   新增好评: number | null;
   新增差评: number | null;
@@ -443,6 +451,7 @@ export interface OwnStoreSalesSeries {
   store_name: string;
   plid: string;
   offer_ids: string[];
+  image_url: string | null;
   skus: string[];
   listing_date: string;
   listing_date_source: "platform" | "first_observed";
@@ -489,6 +498,62 @@ export interface ReturnFilterOption {
   count: number;
 }
 
+export interface ReturnRemovalW8Lifecycle {
+  match_status: "linked" | "unlinked" | "ambiguous";
+  message: string;
+  order_no: string | null;
+  platform_sku: string | null;
+  company_sku: string | null;
+  status: string | null;
+  forecast_quantity: number;
+  inbound_quantity: number | null;
+  received: boolean | null;
+  inbound_date: string | null;
+  shelf_date: string | null;
+  pending_shelf_quantity: number;
+  shelved_quantity: number;
+  defective_quantity: number;
+  disposition:
+    | "awaiting_receipt"
+    | "pending_shelf"
+    | "shelved"
+    | "defective"
+    | "mixed"
+    | "received_unresolved"
+    | "unknown";
+}
+
+export interface ReturnRemovalLifecycle {
+  linked: boolean;
+  link_basis: "seller_return_id" | "return_reference_number" | "unknown" | null;
+  stage: "not_applicable" | "pending_creation" | "unlinked" | "submitted" | "pickup_ready" | "closed";
+  po_reference: string | null;
+  removal_order_id: string | null;
+  instruction_id: string | null;
+  status: string | null;
+  removal_reason: string | null;
+  expiry_status: "active" | "expiring" | "expired" | "unknown";
+  disposal_date: string | null;
+  days_until_expiry: number | null;
+  can_collect: boolean | null;
+  has_booking: boolean | null;
+  pickup_date_start: string | null;
+  pickup_date_end: string | null;
+  date_submitted: string | null;
+  date_closed: string | null;
+  quantity_requested: number | null;
+  quantity_prepared: number | null;
+  quantity_collected: number | null;
+  collection_status: "fully_collected" | "partly_collected" | "not_collected" | "unknown";
+  order_quantity_requested: number | null;
+  order_quantity_prepared: number | null;
+  order_quantity_collected: number | null;
+  order_collection_status: "fully_collected" | "partly_collected" | "not_collected" | "unknown";
+  item_mismatch: boolean;
+  message?: string;
+  w8: ReturnRemovalW8Lifecycle;
+}
+
 export interface SellerReturnItem {
   seller_return_id: string;
   order_id: string | null;
@@ -518,6 +583,24 @@ export interface SellerReturnItem {
   store_code: string;
   store_name: string;
   store_scope_key: string;
+  removal_lifecycle?: ReturnRemovalLifecycle;
+}
+
+export interface ReturnRemovalLifecycleSummary {
+  relevant_count: number;
+  pending_creation_count: number;
+  linked_po_count: number;
+  ready_count: number;
+  collectable_count: number;
+  expired_count: number;
+  expiring_count: number;
+  booked_count: number;
+  fully_collected_count: number;
+  w8_received_count: number;
+  w8_pending_shelf_units: number;
+  w8_shelved_units: number;
+  w8_defective_units: number;
+  unknown_after_pickup_count: number;
 }
 
 export interface ReturnSummary {
@@ -528,6 +611,142 @@ export interface ReturnSummary {
   sellable_stock_units: number;
   removal_order_units: number;
   transaction_total_incl_vat: number;
+  removal_lifecycle?: ReturnRemovalLifecycleSummary;
+}
+
+export interface ReturnRemovalTrackingStoreStatus {
+  store_code: string;
+  store_name: string;
+  data_status: "synced" | "uncollected";
+  synced_at: string | null;
+  order_count: number;
+  message: string;
+}
+
+export interface ReturnRemovalOrderTracking {
+  data_status: "synced" | "partial" | "uncollected";
+  store_statuses: ReturnRemovalTrackingStoreStatus[];
+  w8: {
+    data_status: "synced" | "uncollected";
+    synced_at: string | null;
+    return_order_count: number;
+    message: string;
+  };
+}
+
+export interface ReturnRemovalOrderReturnInformation {
+  id: string | null;
+  rrn: string | null;
+  seller_return_id: string | null;
+  has_item_mismatch: boolean | null;
+  created_at: string | null;
+  modified_at: string | null;
+}
+
+export interface ReturnRemovalOrderItem {
+  removal_order_id: string | null;
+  removal_order_item_id: string | null;
+  offer_id: string | null;
+  sku: string | null;
+  tsin_id: string | null;
+  product_title: string | null;
+  image_url: string | null;
+  product_url: string | null;
+  offer_status: string | null;
+  offer_status_id: number | null;
+  storage_fee_eligible: boolean | null;
+  warehouse_id: string | null;
+  seller_return_ids: string[];
+  return_reference_numbers: string[];
+  return_informations: ReturnRemovalOrderReturnInformation[];
+  has_item_mismatch: boolean;
+  quantity_requested: number | null;
+  quantity_prepared: number | null;
+  quantity_collected: number | null;
+  handling_fee_cents: number | null;
+  collection_status: "fully_collected" | "partly_collected" | "not_collected" | "unknown";
+  w8: ReturnRemovalW8Lifecycle;
+}
+
+export interface ReturnRemovalOrder {
+  store_code: string;
+  store_name: string;
+  store_scope_key: string;
+  synced_at: string | null;
+  stage: "submitted" | "pickup_ready" | "closed";
+  stage_label: "Submitted" | "Ready For Pickup" | "Closed" | string;
+  removal_order_id: string;
+  instruction_id: string | null;
+  reference: string | null;
+  order_type: string | null;
+  order_type_id: number | null;
+  status: string | null;
+  status_id: number | null;
+  removal_reason: string | null;
+  date_submitted: string | null;
+  ship_by_date: string | null;
+  disposal_date: string | null;
+  pickup_date_start: string | null;
+  pickup_date_end: string | null;
+  date_closed: string | null;
+  days_until_expiry: number | null;
+  expired: boolean | null;
+  hide_booking: boolean | null;
+  has_booking: boolean | null;
+  missed: boolean | null;
+  urgent: boolean | null;
+  quantity_requested: number | null;
+  quantity_prepared: number | null;
+  quantity_collected: number | null;
+  number_of_boxes: number | null;
+  boxes: number | null;
+  total_offers: number | null;
+  total_weight_grams: number | null;
+  total_handling_fee_cents: number | null;
+  warehouse_id: string | null;
+  returns_region_id: string | null;
+  returns_facility_code: string | null;
+  returns_leadtime_days: number | null;
+  failure_reason: string | null;
+  expiry_status: "active" | "expiring" | "expired" | "unknown";
+  can_collect: boolean | null;
+  collection_status: "fully_collected" | "partly_collected" | "not_collected" | "unknown";
+  items: ReturnRemovalOrderItem[];
+  w8_summary: {
+    item_count: number;
+    matched_item_count: number;
+    received_item_count: number;
+    awaiting_receipt_item_count: number;
+    unresolved_item_count: number;
+    pending_shelf_units: number;
+    shelved_units: number;
+    defective_units: number;
+  };
+}
+
+export interface ReturnRemovalOrdersModule {
+  data_status: "synced" | "partial" | "uncollected";
+  counts: {
+    total: number;
+    submitted: number;
+    pickup_ready: number;
+    closed: number;
+  };
+  items: ReturnRemovalOrder[];
+  warnings: string[];
+  source_notice: string;
+}
+
+export interface ReturnRemovalSyncResult {
+  state: "synced" | "otp_required";
+  synced_at?: string;
+  order_count?: number;
+  counts?: Record<string, number>;
+  warnings?: string[];
+  portal: {
+    requires_otp: boolean;
+    otp_destination?: string | null;
+  };
 }
 
 export interface ReturnCollectionStoreStatus {
@@ -554,6 +773,7 @@ export interface OfferReturnedCounter {
 }
 
 export interface ReturnsPayload {
+  date_scope?: "range" | "all_collected";
   range_start: string;
   range_end: string;
   date_basis: "Africa/Johannesburg";
@@ -563,6 +783,8 @@ export interface ReturnsPayload {
   store_statuses: ReturnCollectionStoreStatus[];
   offer_returned_30_days: OfferReturnedCounter;
   summary: ReturnSummary;
+  removal_order_tracking?: ReturnRemovalOrderTracking;
+  removal_orders?: ReturnRemovalOrdersModule;
   filters: {
     reasons: ReturnFilterOption[];
     outcomes: ReturnFilterOption[];
@@ -647,6 +869,9 @@ export interface OwnStoreProfitabilityPayload {
 }
 
 export interface CompetitorDetail {
+  current_item?: CompetitorItem | null;
+  monitoring_target?: CompetitorTargetItem | null;
+  personal_watchlist_item?: CompetitorPersonalWatchlistItem | null;
   category_path: CompetitorCategoryBreadcrumb[];
   history: CompetitorItem[];
   reviews: ReviewItem[];
@@ -978,34 +1203,6 @@ export interface StoreOverviewPayload {
   sales_revenue_completed_through: string;
   sales_reconciliation: SalesReconciliationSummary;
   stores: StoreOverviewItem[];
-}
-
-export interface ProductsPayload {
-  latest_metric_date: string | null;
-  store_scope?: OwnStoreScope;
-  store_count?: number;
-  store_metric_dates?: Record<string, string | null>;
-  items: ProductItem[];
-}
-
-export interface ProductCostConversion {
-  base_currency: "CNY";
-  quote_currency: "ZAR";
-  cost_rmb: number | null;
-  cost_zar: number | null;
-  rate: number | null;
-  rate_date: string | null;
-  fetched_at: string | null;
-  source: string;
-  status: "converted" | "stale" | "missing_cost" | "unavailable";
-  message: string;
-}
-
-export interface ProductDetailPayload {
-  identity: ProductMasterIdentity & Record<string, unknown>;
-  kpis: Record<string, number | string | null>;
-  history: ProductItem[];
-  cost_conversion: ProductCostConversion;
 }
 
 export type AnomalyProductType =
@@ -2605,6 +2802,294 @@ export interface SearchRankingDetailPayload {
   analysis: SearchRankingAnalysis | null;
   latest_attempt: SearchRankingAnalysisSummary | null;
   history: SearchRankingAnalysisSummary[];
+}
+
+export interface ContainerSelectionLink {
+  store_code: string;
+  store_name: string;
+  plid: string;
+  offer_ids: string[];
+  image_url: string | null;
+  listing_date: string | null;
+  listing_age_days: number | null;
+  lifecycle: string;
+  lifecycle_label: string;
+  ordered_units: number;
+  known_days: number;
+  verified_days: number;
+  partial_days: number;
+  missing_days: number;
+  monthly_velocity: number;
+  exposure_adjusted_monthly_velocity: number;
+  forecast_monthly_units: number;
+  recent_30_units: number;
+  recent_30_known_days: number;
+  recent_data_ready: boolean;
+  recent_monthly_velocity: number;
+  previous_30_units: number;
+  previous_30_known_days: number;
+  previous_data_ready: boolean;
+  previous_monthly_velocity: number;
+  recent_vs_previous_change_percentage: number | null;
+  observed_inventory_days: number;
+  buyable_observed_days: number;
+  buyable_observation_ratio: number | null;
+  inventory: {
+    platform_available_stock: number;
+    seller_available_stock: number;
+    sellable_stock: number;
+    stock_in_receiving: number;
+    stock_on_way: number;
+    sellable_now: boolean;
+  };
+}
+
+export interface ContainerSelectionReplenishmentItem {
+  rank: number;
+  company_sku: string;
+  product_name: string;
+  plids: string[];
+  image_url: string | null;
+  image_store_code: string | null;
+  source: {
+    workbook: string;
+    sheet: string;
+    row: number;
+    measured: boolean;
+  };
+  electrical: {
+    status: string;
+    qualified: boolean;
+    evidence: string;
+  };
+  logistics: {
+    length_cm: number;
+    width_cm: number;
+    height_cm: number;
+    carton_weight_kg: number;
+    units_per_carton: number;
+    unit_cbm: number;
+    cbm_per_100_units: number;
+    sea_freight_rmb: number;
+  };
+  sales: {
+    window_start: string;
+    window_end: string;
+    ordered_units: number;
+    monthly_velocity: number | null;
+    forecast_monthly_units: number | null;
+    known_link_count: number;
+    link_count: number;
+    recent_30_units: number;
+    recent_known_link_count: number;
+    recent_monthly_velocity: number | null;
+    previous_30_units: number;
+    previous_known_link_count: number;
+    previous_monthly_velocity: number | null;
+    recent_vs_previous_change_percentage: number | null;
+    recent_velocity_bright: boolean;
+    decision_window_note: string;
+    links: ContainerSelectionLink[];
+  };
+  inventory: {
+    platform_available_stock: number;
+    seller_available_stock: number;
+    sellable_stock: number;
+    stock_in_receiving: number;
+    stock_on_way: number;
+    sellable_now: boolean;
+    stock_cover_days: number | null;
+  };
+  profit: {
+    status: string;
+    calculated_offer_count: number;
+    profit_positive: boolean;
+    minimum_profit_rmb: number | null;
+    maximum_profit_rmb: number | null;
+    minimum_margin_percentage: number | null;
+    note: string;
+  };
+  recommendation: {
+    status: string;
+    label: string;
+    reason: string;
+    target_cover_days: number | null;
+    target_demand_units: number | null;
+    clearance_window_days: number | null;
+    clearance_units: number | null;
+    recommended_units: number;
+    recommended_cartons: number;
+    recommended_cbm: number;
+  };
+  risk_tags: string[];
+  priority_score: number;
+}
+
+export interface ContainerSelectionRadarRepresentative {
+  plid: string;
+  url: string;
+  name: string;
+  roles: string[];
+  role_labels: string[];
+  current: {
+    title: string | null;
+    image_url: string | null;
+    price_zar: number | null;
+    stock_status: string | null;
+    stock_quantity: number | null;
+    stock_exact: boolean;
+    review_count_total: number | null;
+    rating: number | null;
+  };
+  monitoring: {
+    active: boolean;
+    status: string;
+    label: string;
+    added_at: string | null;
+    added_by: string | null;
+    snapshot_count: number;
+    recent_snapshot_count: number;
+    first_snapshot_at: string | null;
+    latest_snapshot_at: string | null;
+    baseline_days: number;
+    baseline_ready: boolean;
+    recent_stock_outflow: number;
+    recent_observed_sales?: CompetitorObservedSalesWindows;
+    recent_observed_sales_through?: string | null;
+    recent_dated_review_count: number;
+    latest_review_date: string | null;
+    recent_review_delta_from_snapshots: number | null;
+    recent_signal_score: number;
+    recent_signal: boolean;
+    qualified_recent_signal: boolean;
+    signal_note: string;
+  };
+}
+
+export interface ContainerSelectionRadarCategory {
+  category_id: string;
+  category_name: string;
+  market_leaf_id: string;
+  market_leaf_name: string;
+  cohort_basis: {
+    scope: string;
+    sample_size: number;
+    recent_signal_link_count: number;
+    recent_signal_score: number;
+    snapshot_date: string;
+    extremes_are_sample_relative: true;
+  };
+  economics_anchor: {
+    plid: string;
+    url: string;
+    name: string;
+    workbook_observation: string | null;
+    workbook_observation_is_recent_demand: false;
+    purchase_rmb: number;
+    selling_price_zar: number;
+    sea_profit_rmb: number;
+    sea_margin_percentage: number;
+    formula_version: string;
+    source_sheet: string;
+    source_row: number;
+    unit_cbm: number;
+    cbm_per_100_units: number;
+    length_cm: number;
+    width_cm: number;
+    height_cm: number;
+    electrical_status: string;
+    electrical_evidence: string;
+    risk_tags: string[];
+  };
+  monitoring: {
+    status: string;
+    label: string;
+    representative_count: number;
+    active_link_count: number;
+    baseline_ready_link_count: number;
+    recent_signal_link_count: number;
+    qualified_recent_signal_link_count: number;
+    recent_signal_score: number;
+    recent_dated_review_count: number;
+    recent_review_link_count: number;
+    latest_review_date: string | null;
+    recent_stock_outflow: number;
+    window_start: string;
+    window_end: string;
+    signal_note: string;
+  };
+  decision: {
+    status: string;
+    label: string;
+    note: string;
+  };
+  representatives: ContainerSelectionRadarRepresentative[];
+}
+
+export interface ContainerSelectionRetainedRadarItem extends ContainerSelectionRadarRepresentative {
+  retention_reason: string;
+  decision: {
+    status: "retained_monitor";
+    label: string;
+    note: string;
+  };
+}
+
+export interface ContainerSelectionPayload {
+  generated_at: string;
+  as_of: string;
+  date_basis: string;
+  selection_batch_id: string;
+  scope: {
+    store_codes: string[];
+    store_count: number;
+    label: string;
+  };
+  policy: {
+    electrified_volume_limit_percent: number;
+    own_min_unit_cbm: number;
+    new_min_unit_cbm: number;
+    sales_window_days: number;
+    replenishment_cover_days: number;
+    clearance_window_days: number;
+    recent_sales_window_days: number;
+    comparison_sales_window_days: number;
+    minimum_recent_monthly_units: number;
+    strong_recent_monthly_units: number;
+    maximum_recent_decline_ratio: number;
+    minimum_representatives_per_category: number;
+    minimum_recent_signal_links: number;
+    minimum_recent_signal_score: number;
+    minimum_known_days_per_link: number;
+    minimum_radar_baseline_days: number;
+    minimum_radar_snapshots: number;
+    formula_version: string;
+    formula_note: string;
+  };
+  exchange_rate: {
+    status: string;
+    rate: number | null;
+    rate_date: string | null;
+    fetched_at: string | null;
+    source: string;
+  };
+  summary: {
+    own_profile_count: number;
+    replenishment_count: number;
+    recommended_units: number;
+    recommended_cbm: number;
+    radar_category_count: number;
+    radar_link_count: number;
+    radar_active_link_count: number;
+    radar_recent_hot_category_count: number;
+    radar_opening_review_count: number;
+    radar_waiting_category_count: number;
+    retained_watchlist_count: number;
+  };
+  replenishment_items: ContainerSelectionReplenishmentItem[];
+  radar_categories: ContainerSelectionRadarCategory[];
+  retained_watchlist: ContainerSelectionRetainedRadarItem[];
+  evidence_notes: string[];
 }
 
 export type UserRole = "viewer" | "operator" | "selection" | "admin";

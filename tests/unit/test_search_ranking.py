@@ -2660,6 +2660,39 @@ def test_title_colour_parameter_never_leads_a_supported_core_phrase() -> None:
     assert suggestion.endswith("Blue")
 
 
+@pytest.mark.parametrize(
+    ("source_title", "keyword", "expected_title"),
+    [
+        (
+            "WOVIBO Sewing Machine With Presser Feet And Tools",
+            "sewing machine",
+            "WOVIBO Sewing Machine With Presser Feet And Tools",
+        ),
+        (
+            "Curtain Rod Black Iron NEXOHOGAR 150 cm",
+            "curtain rod",
+            "NEXOHOGAR Curtain Rod Iron Black 150 cm",
+        ),
+        (
+            "NEXOHOGARHeight Adjustable Desk Walnut Fine Living",
+            "adjustable desk",
+            "NEXOHOGARHeight Adjustable Desk Walnut Fine Living",
+        ),
+        (
+            "Toilet Safety Frame NEXOHOGART",
+            "toilet safety frame",
+            "NEXOHOGART Toilet Safety Frame",
+        ),
+    ],
+)
+def test_supported_core_reordering_keeps_source_title_brand_first(
+    source_title: str,
+    keyword: str,
+    expected_title: str,
+) -> None:
+    assert _build_title_suggestion(source_title, [keyword]) == expected_title
+
+
 def test_cat_storage_core_and_platform_litter_query_generate_two_title_tactics() -> None:
     source_title = "Blue Cat Foldable Villa Cat Storage Box With Scratching Pad"
     storage_result = replace(
@@ -2731,6 +2764,77 @@ def test_cat_storage_core_and_platform_litter_query_generate_two_title_tactics()
     assert strategies[1]["evidence_keywords"] == ["cat litter box"]
     assert "platform_root_expansion" in strategies[1]["evidence"]["journey_types"]
     assert all(str(strategy["title"] or "").endswith("Blue") for strategy in strategies[:2])
+
+
+@pytest.mark.parametrize(
+    ("source_title", "brand", "expected_title"),
+    [
+        (
+            "Soly Sombras Blue Cat Foldable Villa Cat Storage Box With Scratching Pad",
+            "Soly Sombras",
+            "Soly Sombras Cat Storage Box With Scratching Pad Foldable Blue",
+        ),
+        (
+            "Blue Cat Foldable Villa Cat Storage Box With Scratching Pad WOVIBO",
+            "WOVIBO",
+            "WOVIBO Cat Storage Box With Scratching Pad Foldable Blue",
+        ),
+    ],
+)
+def test_identity_cleanup_preserves_source_title_brand(
+    source_title: str,
+    brand: str,
+    expected_title: str,
+) -> None:
+    strategies = _build_title_strategies(
+        source_title=source_title,
+        accepted_keywords=["cat storage box"],
+        hot_term_keywords=["cat litter box"],
+        opportunity_keywords=[],
+        validated_core_keywords=["cat storage box", "cat litter box"],
+    )
+
+    assert strategies[0]["title"] == expected_title
+    assert all(
+        brand.casefold() in str(strategy["title"] or "").casefold()
+        for strategy in strategies[:2]
+    )
+
+
+def test_all_available_title_strategies_keep_source_brand_first() -> None:
+    strategies = _build_title_strategies(
+        source_title="WOVIBO Foldable Cat Bed Cat House",
+        accepted_keywords=["cat bed"],
+        hot_term_keywords=["cat house"],
+        opportunity_keywords=["foldable cat house"],
+        validated_core_keywords=["cat bed", "cat house"],
+    )
+
+    assert all(strategy["available"] is True for strategy in strategies)
+    assert all(
+        str(strategy["title"] or "").startswith("WOVIBO ")
+        for strategy in strategies
+    )
+
+
+def test_source_title_feature_prefix_is_not_promoted_as_a_brand() -> None:
+    strategies = _build_title_strategies(
+        source_title=(
+            "Foldable Blue Cat Villa Cat Storage Box With Scratching Pad"
+        ),
+        accepted_keywords=["cat storage box"],
+        hot_term_keywords=[],
+        opportunity_keywords=[],
+        validated_core_keywords=["cat storage box"],
+    )
+
+    assert strategies[0]["title"] == (
+        "Cat Storage Box With Scratching Pad Foldable Blue"
+    )
+    assert search_ranking_service._source_title_brand_tokens(
+        "PREMIUM Foldable Blue Cat Villa Cat Storage Box With Scratching Pad",
+        "cat storage box",
+    ) == []
 
 
 def test_page_majority_never_unlocks_an_unsupported_smart_identity_claim() -> None:

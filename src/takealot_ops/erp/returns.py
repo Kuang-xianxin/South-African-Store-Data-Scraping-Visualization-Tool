@@ -43,17 +43,18 @@ RETURN_OUTCOME_LABELS: dict[str, str] = {
 def load_store_return_rows(
     session: Session,
     *,
-    start_date: date,
-    end_date: date,
+    start_date: date | None = None,
+    end_date: date | None = None,
     plid: str | None = None,
 ) -> list[dict[str, Any]]:
-    """Return normalized rows for one already-selected store scope."""
-    range_start = datetime.combine(start_date, time.min, tzinfo=SAST)
-    range_end = datetime.combine(end_date + timedelta(days=1), time.min, tzinfo=SAST)
-    statement = select(ReturnItem).where(
-        ReturnItem.return_date >= range_start,
-        ReturnItem.return_date < range_end,
-    )
+    """Read one store's local history, optionally bounded by SAST business dates."""
+    statement = select(ReturnItem)
+    if start_date is not None:
+        range_start = datetime.combine(start_date, time.min, tzinfo=SAST)
+        statement = statement.where(ReturnItem.return_date >= range_start)
+    if end_date is not None:
+        range_end = datetime.combine(end_date + timedelta(days=1), time.min, tzinfo=SAST)
+        statement = statement.where(ReturnItem.return_date < range_end)
 
     plid_identities: list[OfferCurrent | OfferSnapshot] = []
     if plid is not None:
@@ -249,6 +250,10 @@ def filter_return_rows(
     filtered: list[dict[str, Any]] = []
     for source in rows:
         row = dict(source)
+        raw_lifecycle = row.get("removal_lifecycle")
+        lifecycle: Mapping[str, Any] = (
+            raw_lifecycle if isinstance(raw_lifecycle, Mapping) else {}
+        )
         if normalized_reason and row.get("return_reason") != normalized_reason:
             continue
         statuses = {
@@ -274,6 +279,9 @@ def filter_return_rows(
                 row.get("order_id"),
                 row.get("customer_comment"),
                 row.get("store_name"),
+                lifecycle.get("po_reference"),
+                lifecycle.get("removal_order_id"),
+                lifecycle.get("instruction_id"),
             ),
         ):
             continue

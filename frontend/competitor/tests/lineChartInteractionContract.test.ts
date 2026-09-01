@@ -41,9 +41,12 @@ test("overview revenue and traffic details follow the pointer and clear on chart
   assert.match(overviewSource, /周期末失败 · \{\{ trafficSlotLabel/);
 });
 
-test("overview revenue line discloses pending reconciliation and immutable source audit", () => {
+test("overview revenue line keeps store alerts separate from date-level audit", () => {
   assert.match(overviewSource, /storeData\.sales_reconciliation\.pending_store_count/);
   assert.match(overviewSource, /class="revenue-line reconciliation-pending"/);
+  assert.match(overviewSource, /仅对应失败业务日与来源未建档日以橙色显示/);
+  assert.match(overviewSource, /不把当前店铺级待核验状态铺到全部历史日期/);
+  assert.match(overviewSource, /revenuePendingStatus\(activeRevenueDot\.point\)/);
   assert.match(overviewSource, /class="revenue-line revised"/);
   assert.match(overviewSource, /销售额日终后历史修订记录/);
   assert.match(overviewSource, /业务日内正常累计和第一次日终基线不计纠偏/);
@@ -81,13 +84,44 @@ test("competitor three-panel line chart keeps a fixed detail panel with pointer 
   assert.match(competitorsSource, /class="competitor-offer-period-metric"/);
   assert.match(competitorsSource, /区间内售出件数/);
   assert.match(competitorsSource, /区间内补货件数/);
-  assert.match(competitorsSource, /offerIntervalSalesUnits\(detail\.value\.history, selectedOffer\.value\)/);
-  assert.match(competitorsSource, /offerIntervalReplenishmentUnits\(detail\.value\.history, selectedOffer\.value\)/);
+  assert.match(competitorsSource, /offerIntervalSalesUnits\(filteredOfferTrendHistory\.value, selectedOffer\.value\)/);
+  assert.match(competitorsSource, /offerIntervalReplenishmentUnits\(filteredOfferTrendHistory\.value, selectedOffer\.value\)/);
   assert.doesNotMatch(competitorsSource, /class="offer-trend-line halo"/);
   assert.match(competitorsSource, /panel\.missingBridgeSegments/);
   assert.match(competitorsSource, /offer-trend-line missing-bridge/);
   assert.doesNotMatch(sharedStyles, /\.offer-trend-line\.halo/);
   assert.match(sharedStyles, /\.offer-trend-line\.missing-bridge/);
+});
+
+test("offer charts share a Beijing range selector while official sales keep their own dates", () => {
+  assert.match(competitorsSource, /v-for="days in \[7, 15, 30, 60, 90\]"/);
+  assert.match(competitorsSource, /@click="setRecentOfferTrendRange\(days\)"/);
+  assert.match(competitorsSource, /@click="resetOfferTrendDateRange"/);
+  assert.match(competitorsSource, /@input="updateOfferTrendRangeStart"/);
+  assert.match(competitorsSource, /@input="updateOfferTrendRangeEnd"/);
+  assert.match(competitorsSource, /buildCompetitorOfferTrend\(filteredOfferTrendHistory\.value, selectedOffer\.value\)/);
+  assert.match(competitorsSource, /alignOwnStoreTrafficTrendToOfferTrend\(\s*selectedOwnTrafficTrend\.value,\s*selectedOfferTrend\.value/);
+  assert.match(competitorsSource, /watch\(\[selectedOfferKey, filteredOfferTrendHistory\]/);
+  const dateHandlers = competitorsSource.slice(
+    competitorsSource.indexOf("function clampOfferTrendDate("),
+    competitorsSource.indexOf("function offerTrendXAtTime("),
+  );
+  assert.doesNotMatch(dateHandlers, /appliedStartDate|appliedEndDate|fetchCompetitorDetail|detail\.value\s*=/);
+  assert.match(competitorsSource, /<OwnStoreSalesChart[\s\S]*?:series="detail\.own_store_sales"/);
+  assert.doesNotMatch(ownStoreSalesSource, /offerTrendRange/);
+});
+
+test("restricted detail ranges load full chart history with scope guards without replacing other detail data", () => {
+  const fullHistoryLoader = competitorsSource.slice(
+    competitorsSource.indexOf("async ([modalOpen, needsFullHistory, detailKey, scopeKey]"),
+    competitorsSource.indexOf("[detailModalOpen, offerTrendScopeKey, offerTrendAvailableStart, offerTrendAvailableEnd]"),
+  );
+  assert.match(fullHistoryLoader, /if \(!modalOpen \|\| !needsFullHistory \|\| !selectedPlid\.value\) return;/);
+  assert.match(fullHistoryLoader, /cachedCompetitorDetail\(cacheKey\)/);
+  assert.match(fullHistoryLoader, /fetchCompetitorDetail\(\s*selectedPlid\.value,\s*undefined,\s*undefined,\s*detailOwnStoreScope\.value,\s*controller\.signal/);
+  assert.match(fullHistoryLoader, /onCleanup\(\(\) => \{\s*cancelled = true;\s*controller\.abort\(\)/);
+  assert.match(fullHistoryLoader, /if \(cancelled\) return;\s*offerTrendFullDetail\.value = result;/);
+  assert.doesNotMatch(fullHistoryLoader, /\bdetail\.value\s*=|appliedStartDate\.value\s*=|appliedEndDate\.value\s*=/);
 });
 
 test("own-store official sales bars sit below comments and preserve zero versus missing evidence", () => {
@@ -99,9 +133,10 @@ test("own-store official sales bars sit below comments and preserve zero versus 
   assert.match(ownStoreSalesSource, /国内自然日（北京时间）/);
   assert.match(ownStoreSalesSource, /@pointermove="handlePointer"/);
   assert.match(ownStoreSalesSource, /@keydown\.left\.prevent="stepPoint\(-1\)"/);
-  assert.match(ownStoreSalesSource, /橙色柱为已有小计；缺失日期不补 0/);
+  assert.match(ownStoreSalesSource, /橙色柱为截至采集值；缺失日期不补 0/);
   assert.match(ownStoreSalesSource, /完整 0 件基线/);
-  assert.match(ownStoreSalesSource, /截至采集 \/ 周期不完整/);
+  assert.match(ownStoreSalesSource, /按日展示/);
+  assert.match(ownStoreSalesSource, /截至采集/);
   assert.match(ownStoreSalesSource, /class="own-sales-bar"/);
   assert.doesNotMatch(ownStoreSalesSource, /class="own-sales-line"/);
   assert.doesNotMatch(ownStoreSalesSource, /overflow-x\s*:\s*(?:auto|scroll)/);

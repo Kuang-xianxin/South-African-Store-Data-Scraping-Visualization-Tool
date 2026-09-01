@@ -14,15 +14,16 @@ test("thumbnail URLs carry the active store for native image requests", async (t
   const source =
     "http://takealot.s3.amazonaws.com/covers_images/example/s.file";
   const thumbnail = new URL(
-    productThumbnailUrl(source, PRODUCT_IMAGE_SIZE.detail),
+    productThumbnailUrl(source, PRODUCT_IMAGE_SIZE.list),
     "http://erp.local",
   );
 
   assert.equal(thumbnail.origin, "http://erp.local");
   assert.equal(thumbnail.pathname, "/api/erp/product-thumbnail");
   assert.equal(thumbnail.searchParams.get("image_url"), source);
-  assert.equal(thumbnail.searchParams.get("size"), "640");
+  assert.equal(thumbnail.searchParams.get("size"), "192");
   assert.equal(thumbnail.searchParams.get("store_code"), "store-03");
+  assert.equal(thumbnail.searchParams.get("image_retry"), null);
 
   const rowScopedThumbnail = new URL(
     productThumbnailUrl(source, PRODUCT_IMAGE_SIZE.list, " Store-05 "),
@@ -30,6 +31,13 @@ test("thumbnail URLs carry the active store for native image requests", async (t
   );
   assert.equal(rowScopedThumbnail.searchParams.get("size"), "192");
   assert.equal(rowScopedThumbnail.searchParams.get("store_code"), "store-05");
+
+  const retriedThumbnail = new URL(
+    productThumbnailUrl(source, PRODUCT_IMAGE_SIZE.list, undefined, 2),
+    "http://erp.local",
+  );
+  assert.equal(retriedThumbnail.searchParams.get("image_retry"), "2");
+  assert.equal(retriedThumbnail.searchParams.get("store_code"), "store-03");
 
   setActiveStoreCode("current");
   assert.equal(productThumbnailUrl(""), "");
