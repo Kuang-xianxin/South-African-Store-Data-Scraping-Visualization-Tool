@@ -10,11 +10,11 @@ import {
 } from "vue";
 
 import { ApiRequestError, fetchContainerSelection } from "../api";
+import CompetitorObservedSalesMetrics from "../components/CompetitorObservedSalesMetrics.vue";
 import { ownStoreDetailPageHref } from "../moduleNavigation";
 import { PRODUCT_IMAGE_SIZE, productThumbnailUrl } from "../productImages";
 import { formatChinaDateTime } from "../time";
 import type {
-  CompetitorObservedSalesWindowKey,
   ContainerSelectionLink,
   ContainerSelectionPayload,
   ContainerSelectionRadarCategory,
@@ -48,7 +48,6 @@ const search = ref("");
 const expandedSku = ref("");
 const expandedRadarCategoryIds = ref<Set<string>>(new Set());
 const failedImageKeys = ref<Set<string>>(new Set());
-const stockOutflowWindowDays = [7, 15, 30, 60, 90] as const;
 const radarDetailPlid = ref("");
 const radarDetailRevision = ref(0);
 const radarDetailPrefetchPlid = ref("");
@@ -255,23 +254,6 @@ function number(value: number | null | undefined, digits = 0): string {
     maximumFractionDigits: digits,
     minimumFractionDigits: digits,
   }).format(value);
-}
-
-function observedStockOutflow(
-  item: ContainerSelectionRadarRepresentative,
-  days: typeof stockOutflowWindowDays[number],
-): number | null {
-  const key = String(days) as CompetitorObservedSalesWindowKey;
-  const value = item.monitoring.recent_observed_sales?.[key];
-  return typeof value === "number" ? value : null;
-}
-
-function observedStockOutflowLabel(
-  item: ContainerSelectionRadarRepresentative,
-  days: typeof stockOutflowWindowDays[number],
-): string {
-  const value = observedStockOutflow(item, days);
-  return value === null ? "数据不足" : `流出 ${number(value)}`;
 }
 
 function money(value: number | null | undefined, currency: "R" | "¥" = "¥"): string {
@@ -746,7 +728,7 @@ onBeforeUnmount(() => {
                     <th>代表链接</th>
                     <th>当前价格 / 市场结构</th>
                     <th>近30天评论日期</th>
-                    <th>库存观察流出（7/15/30/60/90天）</th>
+                    <th>库存观察流出（件）</th>
                     <th>监控基线</th>
                     <th>平台</th>
                   </tr>
@@ -805,20 +787,12 @@ onBeforeUnmount(() => {
                       <small>最新 {{ item.monitoring.latest_review_date || "—" }}</small>
                     </td>
                     <td class="stock-outflow-cell">
-                      <div class="stock-outflow-windows" aria-label="近期库存观察流出">
-                        <div v-for="days in stockOutflowWindowDays" :key="days">
-                          <span>近{{ days }}天</span>
-                          <strong :class="{ unavailable: observedStockOutflow(item, days) === null }">
-                            {{ observedStockOutflowLabel(item, days) }}
-                          </strong>
-                        </div>
-                      </div>
-                      <small>
-                        {{ item.monitoring.recent_observed_sales_through
-                          ? `截至 ${item.monitoring.recent_observed_sales_through}`
-                          : "暂无可用库存日期" }}
-                      </small>
-                      <small>库存观察，不等同订单</small>
+                      <CompetitorObservedSalesMetrics
+                        :values="item.monitoring.recent_observed_sales"
+                        :through-date="item.monitoring.recent_observed_sales_through"
+                        compact
+                        embedded
+                      />
                     </td>
                     <td>
                       <span class="status-pill" :class="monitoringTone(item.monitoring.status)">
@@ -1513,41 +1487,7 @@ dd {
 }
 
 .stock-outflow-cell {
-  min-width: 150px;
-}
-
-.stock-outflow-windows {
-  display: grid;
-  gap: 4px;
-  margin-bottom: 6px;
-}
-
-.stock-outflow-windows > div {
-  display: grid;
-  grid-template-columns: 48px minmax(0, 1fr);
-  align-items: baseline;
-  gap: 6px;
-}
-
-.stock-outflow-windows span {
-  color: #718179;
-  font-size: 10px;
-}
-
-.stock-outflow-windows strong {
-  font-size: 12px;
-  white-space: nowrap;
-}
-
-.stock-outflow-windows strong.unavailable {
-  color: #849088;
-  font-weight: 600;
-}
-
-.stock-outflow-cell > small {
-  display: block;
-  margin-top: 3px;
-  font-size: 9px;
+  min-width: 132px;
 }
 
 .representative-table tr:last-child td {

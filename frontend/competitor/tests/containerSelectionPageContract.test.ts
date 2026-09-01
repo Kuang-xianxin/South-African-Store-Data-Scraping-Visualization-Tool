@@ -8,6 +8,10 @@ const pageSource = readFileSync(
 );
 const appSource = readFileSync(new URL("../src/App.vue", import.meta.url), "utf8");
 const apiSource = readFileSync(new URL("../src/api.ts", import.meta.url), "utf8");
+const observedSalesSource = readFileSync(
+  new URL("../src/components/CompetitorObservedSalesMetrics.vue", import.meta.url),
+  "utf8",
+);
 
 test("container selection separates replenishment decisions from radar monitoring", () => {
   assert.match(pageSource, /补货建议/);
@@ -26,22 +30,26 @@ test("container selection separates replenishment decisions from radar monitorin
 });
 
 test("representative rows show all fixed stock-outflow windows only in the target column", () => {
-  assert.match(pageSource, /const stockOutflowWindowDays = \[7, 15, 30, 60, 90\] as const/);
-  assert.match(pageSource, /库存观察流出（7\/15\/30\/60\/90天）/);
+  assert.match(pageSource, /import CompetitorObservedSalesMetrics/);
+  assert.match(pageSource, /库存观察流出（件）/);
   assert.match(pageSource, /class="stock-outflow-cell"/);
   assert.equal(
-    [...pageSource.matchAll(/v-for="days in stockOutflowWindowDays"/g)].length,
+    [...pageSource.matchAll(/<CompetitorObservedSalesMetrics/g)].length,
     1,
   );
   const outflowColumn = pageSource.slice(
     pageSource.indexOf('class="stock-outflow-cell"'),
     pageSource.indexOf('<td>', pageSource.indexOf('class="stock-outflow-cell"')),
   );
-  assert.match(outflowColumn, /observedStockOutflowLabel\(item, days\)/);
+  assert.match(outflowColumn, /:values="item\.monitoring\.recent_observed_sales"/);
   assert.match(outflowColumn, /item\.monitoring\.recent_observed_sales_through/);
-  assert.match(outflowColumn, /数据不足|暂无可用库存日期/);
-  assert.match(outflowColumn, /库存观察，不等同订单/);
+  assert.match(outflowColumn, /compact[\s\S]*embedded/);
   assert.doesNotMatch(outflowColumn, /recent_signal_score/);
+  assert.doesNotMatch(pageSource, /stockOutflowWindowDays|observedStockOutflowLabel/);
+  assert.match(observedSalesSource, /const windowDays = \[7, 15, 30, 60, 90\] as const/);
+  assert.match(observedSalesSource, /<dt>\{\{ days \}\}天：<\/dt>/);
+  assert.match(observedSalesSource, /数据不足/);
+  assert.match(observedSalesSource, /库存观察 · 不等同订单/);
 });
 
 test("new-product monitoring keeps stacked category cards with independent link toggles", () => {

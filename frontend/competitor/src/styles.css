@@ -3065,20 +3065,19 @@ textarea.link-input-error-pulse {
 
 .competitor-observed-sales {
   display: grid;
-  gap: 7px;
+  justify-self: start;
+  gap: 6px;
+  width: min(100%, 176px);
   margin-top: 10px;
-  padding: 9px 10px;
+  padding: 8px 10px;
   border: 1px solid #dce8df;
-  border-radius: 10px;
+  border-radius: 9px;
   background: #f7faf8;
 }
 
 .competitor-observed-sales > header {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 4px 10px;
+  display: grid;
+  gap: 2px;
 }
 
 .competitor-observed-sales > header strong {
@@ -3087,65 +3086,74 @@ textarea.link-input-error-pulse {
 }
 
 .competitor-observed-sales > header span,
-.competitor-observed-sales > p {
+.competitor-observed-sales > footer {
   color: var(--muted);
   font-size: 0.58rem;
   line-height: 1.4;
 }
 
-.competitor-observed-sales-grid {
+.competitor-observed-sales-list {
   display: grid;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
-  gap: 6px;
-}
-
-.competitor-observed-sales-grid > div {
-  display: grid;
-  gap: 2px;
-  min-width: 0;
-  padding: 6px 7px;
-  border-radius: 8px;
-  background: #eaf4ed;
-}
-
-.competitor-observed-sales-grid small {
-  color: var(--muted);
-  font-size: 0.56rem;
-  font-weight: 800;
-}
-
-.competitor-observed-sales-grid strong {
-  color: #145d36;
-  font-size: 0.72rem;
-  line-height: 1.25;
-  overflow-wrap: anywhere;
-}
-
-.competitor-observed-sales-grid > .unavailable {
-  background: #f0f2f1;
-}
-
-.competitor-observed-sales-grid > .unavailable strong {
-  color: #7d8982;
-  font-size: 0.62rem;
-}
-
-.competitor-observed-sales > p {
+  gap: 1px;
+  width: 100%;
   margin: 0;
 }
 
-.competitor-observed-sales.compact {
-  gap: 5px;
-  margin-top: 2px;
-  padding: 7px;
-}
-
-.competitor-observed-sales.compact .competitor-observed-sales-grid {
+.competitor-observed-sales-list > div {
+  display: grid;
+  grid-template-columns: 44px max-content;
+  align-items: baseline;
+  justify-content: start;
   gap: 4px;
+  min-width: 0;
+  min-height: 19px;
 }
 
-.competitor-observed-sales.compact .competitor-observed-sales-grid > div {
-  padding: 5px 4px;
+.competitor-observed-sales-list dt {
+  color: var(--muted);
+  font-size: 0.62rem;
+  font-weight: 800;
+  white-space: nowrap;
+}
+
+.competitor-observed-sales-list dd {
+  margin: 0;
+  color: #145d36;
+  font-size: 0.72rem;
+  font-variant-numeric: tabular-nums;
+  font-weight: 850;
+  line-height: 1.25;
+  text-align: left;
+  white-space: nowrap;
+}
+
+.competitor-observed-sales-list > .unavailable dd {
+  color: #7d8982;
+  font-size: 0.58rem;
+  font-weight: 650;
+}
+
+.competitor-observed-sales > footer {
+  display: grid;
+  gap: 1px;
+  padding-top: 4px;
+  border-top: 1px solid #e3ebe5;
+}
+
+.competitor-observed-sales.compact {
+  gap: 4px;
+  width: min(100%, 152px);
+  margin-top: 2px;
+  padding: 6px 8px;
+}
+
+.competitor-observed-sales.embedded {
+  width: 100%;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
 }
 
 .competitor-offer-workbench > .competitor-observed-sales {

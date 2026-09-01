@@ -8,10 +8,12 @@ const props = withDefaults(defineProps<{
   values?: CompetitorObservedSalesWindows;
   throughDate?: string | null;
   compact?: boolean;
+  embedded?: boolean;
 }>(), {
   values: () => ({}),
   throughDate: null,
   compact: false,
+  embedded: false,
 });
 
 const windowDays = [7, 15, 30, 60, 90] as const;
@@ -23,30 +25,35 @@ function observedUnits(days: typeof windowDays[number]): number | null {
 
 function observedUnitsLabel(days: typeof windowDays[number]): string {
   const value = observedUnits(days);
-  return value === null ? "数据不足" : `${value.toLocaleString("zh-CN")} 件`;
+  return value === null ? "数据不足" : value.toLocaleString("zh-CN");
 }
 </script>
 
 <template>
   <section
     class="competitor-observed-sales"
-    :class="{ compact }"
+    :class="{ compact, embedded }"
     aria-label="近期库存观察售出"
   >
-    <header>
-      <strong>近期库存观察售出</strong>
+    <header v-if="!embedded">
+      <strong>近期库存观察售出（件）</strong>
       <span>{{ throughDate ? `截至 ${throughDate}` : "暂无可用库存日期" }}</span>
     </header>
-    <div class="competitor-observed-sales-grid">
+    <dl class="competitor-observed-sales-list">
       <div
         v-for="days in windowDays"
         :key="days"
         :class="{ unavailable: observedUnits(days) === null }"
       >
-        <small>近{{ days }}天</small>
-        <strong>{{ observedUnitsLabel(days) }}</strong>
+        <dt>{{ days }}天：</dt>
+        <dd>{{ observedUnitsLabel(days) }}</dd>
       </div>
-    </div>
-    <p>按同一库存身份的精确下降累计，不等同 Takealot 实际订单销量。</p>
+    </dl>
+    <footer>
+      <span v-if="embedded">
+        {{ throughDate ? `截至 ${throughDate}` : "暂无可用库存日期" }}
+      </span>
+      <span>库存观察 · 不等同订单</span>
+    </footer>
   </section>
 </template>

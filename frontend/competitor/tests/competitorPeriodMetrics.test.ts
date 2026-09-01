@@ -21,6 +21,7 @@ const observedSalesSource = readFileSync(
   new URL("../src/components/CompetitorObservedSalesMetrics.vue", import.meta.url),
   "utf8",
 );
+const stylesSource = readFileSync(new URL("../src/styles.css", import.meta.url), "utf8");
 
 function competitor(
   plid: string,
@@ -89,14 +90,22 @@ test("personal watchlist reranks from refreshed interval metrics", () => {
   );
 });
 
-test("all radar cards and the line-chart detail expose the same five observed-sales windows", () => {
+test("all radar cards and the line-chart detail use the same compact vertical observed-sales card", () => {
   assert.deepEqual(
     [...observedSalesSource.matchAll(/const windowDays = \[([^\]]+)\]/g)]
       .map((match) => match[1]?.replace(/\s/g, "")),
     ["7,15,30,60,90"],
   );
   assert.match(observedSalesSource, /近期库存观察售出/);
-  assert.match(observedSalesSource, /不等同 Takealot 实际订单销量/);
+  assert.match(observedSalesSource, /<dl class="competitor-observed-sales-list">/);
+  assert.match(observedSalesSource, /<dt>\{\{ days \}\}天：<\/dt>/);
+  assert.match(observedSalesSource, /<dd>\{\{ observedUnitsLabel\(days\) \}\}<\/dd>/);
+  assert.match(observedSalesSource, /库存观察 · 不等同订单/);
+  assert.match(observedSalesSource, /embedded\?: boolean/);
+  assert.match(stylesSource, /\.competitor-observed-sales-list > div \{[\s\S]*grid-template-columns: 44px max-content[\s\S]*justify-content: start/);
+  assert.match(stylesSource, /\.competitor-observed-sales-list dd \{[\s\S]*text-align: left/);
+  assert.match(stylesSource, /\.competitor-observed-sales\.embedded/);
+  assert.doesNotMatch(stylesSource, /competitor-observed-sales-grid/);
   assert.equal(
     pageSource.match(/<CompetitorObservedSalesMetrics/g)?.length,
     4,
