@@ -365,6 +365,64 @@ def test_competitor_detail_requests_only_the_selected_plid(
     assert profitability_calls[0]["engine"] is app.state.read_engine
 
 
+def test_competitor_overview_attaches_persisted_category_paths_to_cards(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    database_path = tmp_path / "competitor-card-categories.db"
+    monkeypatch.setenv(
+        "TAKEALOT_DATABASE_URL",
+        f"sqlite:///{database_path.as_posix()}",
+    )
+    category_path = [
+        {
+            "name": "Home & Kitchen",
+            "id": "10",
+            "type": "department",
+            "slug": "home-kitchen",
+        },
+        {
+            "name": "Bathroom Safety",
+            "id": "4321",
+            "type": "category",
+            "slug": "bathroom-safety-4321",
+        },
+    ]
+
+    def load_overview_dataset(_root: Path, **_kwargs):
+        return SimpleNamespace(
+            current=pd.DataFrame(
+                [
+                    {
+                        "plid": "101163999",
+                        "商品": "Raised Toilet Seat",
+                        "来源": "competitor",
+                    }
+                ]
+            ),
+            store_current=pd.DataFrame(),
+            category_paths={"101163999": category_path},
+            own_follower_events=[],
+            date_range_payload=lambda: {},
+        )
+
+    monkeypatch.setattr(
+        "takealot_ops.erp.web._load_competitor_dataset",
+        load_overview_dataset,
+    )
+    app = create_app(tmp_path)
+
+    with TestClient(app, client=("127.0.0.1", 50000)) as client:
+        _bootstrap(client)
+        response = client.get("/api/competitors?include_own_store=false")
+
+    assert response.status_code == 200
+    assert response.json()["items"][0]["类目路径"] == category_path
+    assert [
+        item["name"] for item in response.json()["items"][0]["类目路径"]
+    ] == ["Home & Kitchen", "Bathroom Safety"]
+
+
 def test_competitor_detail_returns_the_selected_current_radar_item(
     tmp_path: Path,
     monkeypatch,
@@ -840,6 +898,7 @@ def test_personal_watchlist_overview_projects_only_visible_membership_plids(
                 else pd.DataFrame()
             ),
             store_current=pd.DataFrame(),
+            category_paths={},
             own_follower_events=[],
             date_range_payload=lambda: {
                 "available_start": "2026-08-01",
@@ -900,7 +959,7 @@ def test_personal_watchlist_overview_projects_only_visible_membership_plids(
 
     assert response.status_code == 200
     assert response.json()["items"] == [
-        {"plid": "12345678", "商品": "Hydrated competitor"}
+        {"plid": "12345678", "商品": "Hydrated competitor", "类目路径": []}
     ]
     assert response.json()["own_follower_events"] == []
     assert calls == [

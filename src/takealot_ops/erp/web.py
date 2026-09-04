@@ -3524,7 +3524,7 @@ def create_app(project_root: Path | None = None) -> FastAPI:
     ) -> dict[str, object]:
         own_store_codes = _own_store_codes_for_request(request, own_store_scope)
         cache_key = (
-            "competitors-list-v5",
+            "competitors-list-v6",
             tuple(sorted(own_store_codes)),
             start_date.isoformat() if start_date else None,
             end_date.isoformat() if end_date else None,
@@ -3542,11 +3542,17 @@ def create_app(project_root: Path | None = None) -> FastAPI:
                 engine=read_engine,
             )
             return {
-                "items": frame_records(dataset.current),
-                "store_items": _product_master_competitor_store_records(
-                    root,
-                    frame_records(dataset.store_current),
-                    engine=read_engine,
+                "items": _competitor_card_category_records(
+                    frame_records(dataset.current),
+                    dataset.category_paths,
+                ),
+                "store_items": _competitor_card_category_records(
+                    _product_master_competitor_store_records(
+                        root,
+                        frame_records(dataset.store_current),
+                        engine=read_engine,
+                    ),
+                    dataset.category_paths,
                 ),
                 "own_follower_events": dataset.own_follower_events,
                 "date_range": dataset.date_range_payload(),
@@ -3567,7 +3573,7 @@ def create_app(project_root: Path | None = None) -> FastAPI:
         """Return only the scope-dependent private-store radar partition."""
         own_store_codes = _own_store_codes_for_request(request, own_store_scope)
         cache_key = (
-            "competitors-own-store-v4",
+            "competitors-own-store-v5",
             tuple(sorted(own_store_codes)),
             start_date.isoformat() if start_date else None,
             end_date.isoformat() if end_date else None,
@@ -3586,10 +3592,13 @@ def create_app(project_root: Path | None = None) -> FastAPI:
                 engine=read_engine,
             )
             return {
-                "store_items": _product_master_competitor_store_records(
-                    root,
-                    frame_records(dataset.store_current),
-                    engine=read_engine,
+                "store_items": _competitor_card_category_records(
+                    _product_master_competitor_store_records(
+                        root,
+                        frame_records(dataset.store_current),
+                        engine=read_engine,
+                    ),
+                    dataset.category_paths,
                 ),
                 "date_range": dataset.date_range_payload(),
             }
@@ -3841,7 +3850,7 @@ def create_app(project_root: Path | None = None) -> FastAPI:
         user = request.state.erp_user
         own_store_codes = _own_store_codes_for_request(request, "all")
         cache_key = (
-            "competitor-personal-overview-v4",
+            "competitor-personal-overview-v5",
             user.id,
             tuple(sorted(own_store_codes)),
             start_date.isoformat() if start_date else None,
@@ -3864,11 +3873,17 @@ def create_app(project_root: Path | None = None) -> FastAPI:
                 engine=read_engine,
             )
             return {
-                "items": frame_records(dataset.current),
-                "store_items": _product_master_competitor_store_records(
-                    root,
-                    frame_records(dataset.store_current),
-                    engine=read_engine,
+                "items": _competitor_card_category_records(
+                    frame_records(dataset.current),
+                    dataset.category_paths,
+                ),
+                "store_items": _competitor_card_category_records(
+                    _product_master_competitor_store_records(
+                        root,
+                        frame_records(dataset.store_current),
+                        engine=read_engine,
+                    ),
+                    dataset.category_paths,
                 ),
                 "own_follower_events": [],
                 "date_range": dataset.date_range_payload(),
@@ -7334,6 +7349,24 @@ def _product_master_records(
     finally:
         if owned_engine:
             read_engine.dispose()
+
+
+def _competitor_card_category_records(
+    records: Sequence[Mapping[str, Any]],
+    category_paths: Mapping[str, Sequence[Mapping[str, str | None]]],
+) -> list[dict[str, Any]]:
+    """Attach persisted broad-to-specific category paths to read-only card rows."""
+
+    enriched: list[dict[str, Any]] = []
+    for record in records:
+        item = dict(record)
+        plid = str(item.get("plid") or "").strip()
+        item["类目路径"] = [
+            dict(breadcrumb)
+            for breadcrumb in category_paths.get(plid, ())
+        ]
+        enriched.append(item)
+    return enriched
 
 
 def _product_master_competitor_store_records(

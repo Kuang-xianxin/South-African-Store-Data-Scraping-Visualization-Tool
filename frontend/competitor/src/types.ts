@@ -65,6 +65,8 @@ export interface CompetitorItem {
   plid: string;
   商品: string;
   图片: string | null;
+  /** Persisted Takealot breadcrumb evidence, ordered from broad to specific. */
+  类目路径?: CompetitorCategoryBreadcrumb[];
   采集时间: string;
   当前卖家: string | null;
   价格: number | null;

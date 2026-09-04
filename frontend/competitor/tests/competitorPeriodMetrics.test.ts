@@ -139,12 +139,37 @@ test("all radar cards use the vertical observed-sales card and wide cards keep i
     2,
   );
   assert.equal(pageSource.match(/最新评论数（PLID 共用）/g)?.length, 3);
-  assert.equal(pageSource.match(/<small[^>]*>首次监控/g)?.length, 3);
+  assert.equal(pageSource.match(/class="competitor-first-monitored-badge/g)?.length, 3);
+  assert.equal(pageSource.match(/<small>首次监控<\/small>/g)?.length, 3);
+  assert.doesNotMatch(
+    pageSource,
+    /最新评论数（PLID 共用）[\s\S]{0,180}?首次监控/,
+  );
+  assert.equal(
+    pageSource.match(/class="competitor-card-category(?: is-compact)?"/g)?.length,
+    3,
+  );
+  assert.equal(pageSource.match(/aria-label="商品类目层级"/g)?.length, 3);
+  assert.equal(pageSource.match(/类目待采集 · 后续成功采集后补齐/g)?.length, 3);
+  assert.match(pageSource, /competitorCategoryLevelLabel\(index: number, total: number\)/);
+  assert.match(pageSource, /if \(total <= 1 \|\| index === total - 1\) return "精确类目"/);
+  assert.match(pageSource, /if \(index === 0\) return "大类"/);
+  assert.doesNotMatch(pageSource, /competitorOperatingSignals\(item\)/);
+  assert.match(
+    stylesSource,
+    /\.competitor-first-monitored-badge \{[\s\S]*background: linear-gradient\(135deg, #edf5ff, #dcecff\)/,
+  );
+  assert.match(
+    stylesSource,
+    /\.competitor-card-category li \{[\s\S]*grid-template-columns: 48px minmax\(0, 1fr\)/,
+  );
+  assert.match(stylesSource, /\.competitor-card-category li:not\(:last-child\)::after/);
   assert.match(pageSource, /latestReviewCountLabel\(card\.competitor\)/);
   assert.equal(pageSource.match(/latestReviewCountLabel\(item\)/g)?.length, 2);
   assert.match(typesSource, /首次监控时间\?: string \| null/);
   assert.match(typesSource, /最新评论数\?: number \| null/);
   assert.match(typesSource, /最新评论获取时间\?: string \| null/);
+  assert.match(typesSource, /类目路径\?: CompetitorCategoryBreadcrumb\[\]/);
 });
 
 test("stock-decrease filtering includes sales that were later replenished", () => {

@@ -6294,6 +6294,16 @@ function latestReviewCountLabel(item: CompetitorItem): string {
   return value === null ? "数据不足" : `${value.toLocaleString("zh-CN")} 条`;
 }
 
+function competitorCategoryPath(item: CompetitorItem | null | undefined) {
+  return (item?.类目路径 ?? []).filter((breadcrumb) => breadcrumb.name.trim());
+}
+
+function competitorCategoryLevelLabel(index: number, total: number): string {
+  if (total <= 1 || index === total - 1) return "精确类目";
+  if (index === 0) return "大类";
+  return `${index + 1} 级`;
+}
+
 function formatRmb(value: number | null | undefined) {
   return value === null || value === undefined
     ? "—"
@@ -7424,6 +7434,13 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
                     || personalWatchlistFallbackTitle(card)
                 }}
               </h4>
+              <span
+                v-if="card.competitor"
+                class="competitor-first-monitored-badge is-compact"
+              >
+                <small>首次监控</small>
+                <strong>{{ formatChinaDateTime(card.competitor.首次监控时间 ?? null) }}</strong>
+              </span>
               <div class="personal-watchlist-library-chips">
                 <span
                   v-for="libraryName in personalWatchlistLibraryNames(card)"
@@ -7457,6 +7474,23 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
               <p v-else>
                 未在采集队列，可重新提交链接。
               </p>
+              <div class="competitor-card-category is-compact" aria-label="商品类目层级">
+                <span>商品类目</span>
+                <ol v-if="competitorCategoryPath(card.competitor).length">
+                  <li
+                    v-for="(category, categoryIndex) in competitorCategoryPath(card.competitor)"
+                    :key="`${category.id || category.slug || category.name}-${categoryIndex}`"
+                  >
+                    <small>
+                      {{ competitorCategoryLevelLabel(categoryIndex, competitorCategoryPath(card.competitor).length) }}
+                    </small>
+                    <strong>{{ category.name }}</strong>
+                  </li>
+                </ol>
+                <p v-else class="competitor-card-category-empty">
+                  类目待采集 · 后续成功采集后补齐
+                </p>
+              </div>
               <div v-if="card.competitor" class="personal-watchlist-product-metrics">
                 <span>
                   <small>当前价格</small>
@@ -7473,10 +7507,6 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
                 <span>
                   <small>最近采集</small>
                   <strong>{{ formatChinaDateTime(card.competitor.采集时间) }}</strong>
-                </span>
-                <span>
-                  <small>首次监控</small>
-                  <strong>{{ formatChinaDateTime(card.competitor.首次监控时间 ?? null) }}</strong>
                 </span>
                 <span>
                   <small>最新评论数（PLID 共用）</small>
@@ -9558,7 +9588,13 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
                     </div>
                   </div>
                 </div>
-                <span class="competitor-status-open">新标签页查看完整详情 →</span>
+                <div class="competitor-status-header-actions">
+                  <span class="competitor-first-monitored-badge">
+                    <small>首次监控</small>
+                    <strong>{{ formatChinaDateTime(item.首次监控时间 ?? null) }}</strong>
+                  </span>
+                  <span class="competitor-status-open">新标签页查看完整详情 →</span>
+                </div>
               </header>
               <div class="competitor-status-summary">
                 <div>
@@ -9578,25 +9614,26 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
                   <strong>{{ formatCurrency(item.周期销售额) }}</strong>
                   <small>{{ periodInventoryTurnoverLabel(item) }}</small>
                 </div>
-                <div>
-                  <span>跟卖状态</span>
-                  <div class="signal-labels">
-                    <strong
-                      v-for="signal in competitorOperatingSignals(item)"
-                      :key="signal"
-                      class="signal-label price-signal"
-                      :class="priceSignalClass(signal)"
-                    >{{ signal }}</strong>
-                  </div>
-                  <small v-if="!competitorOperatingSignals(item).length">
-                    当前区间没有保留的经营信号
-                  </small>
-                  <small>{{ item.区间快照数 ?? 0 }} 次跟卖观察</small>
+                <div class="competitor-card-category" aria-label="商品类目层级">
+                  <span>商品类目</span>
+                  <ol v-if="competitorCategoryPath(item).length">
+                    <li
+                      v-for="(category, categoryIndex) in competitorCategoryPath(item)"
+                      :key="`${category.id || category.slug || category.name}-${categoryIndex}`"
+                    >
+                      <small>
+                        {{ competitorCategoryLevelLabel(categoryIndex, competitorCategoryPath(item).length) }}
+                      </small>
+                      <strong>{{ category.name }}</strong>
+                    </li>
+                  </ol>
+                  <p v-else class="competitor-card-category-empty">
+                    类目待采集 · 后续成功采集后补齐
+                  </p>
                 </div>
                 <div>
                   <span>最新评论数（PLID 共用）</span>
                   <strong>{{ latestReviewCountLabel(item) }}</strong>
-                  <small>首次监控 {{ formatChinaDateTime(item.首次监控时间 ?? null) }}</small>
                   <small v-if="item.最新评论获取时间">
                     评论更新 {{ formatChinaDateTime(item.最新评论获取时间) }} · 区间末评分 {{ item.评分 ?? "—" }}
                   </small>
@@ -9709,7 +9746,13 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
                   <p>{{ followerSellerCount(item) }} 个卖家 · {{ item.跟卖报价.length }} 个变体 / 报价 · 主卖家 {{ item.当前卖家 || "未知" }}</p>
                 </div>
               </div>
-              <span class="competitor-status-open">查看卖家库存 →</span>
+              <div class="competitor-status-header-actions">
+                <span class="competitor-first-monitored-badge">
+                  <small>首次监控</small>
+                  <strong>{{ formatChinaDateTime(item.首次监控时间 ?? null) }}</strong>
+                </span>
+                <span class="competitor-status-open">查看卖家库存 →</span>
+              </div>
             </header>
 
             <div class="competitor-status-summary">
@@ -9738,25 +9781,26 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
                 <strong>{{ formatCurrency(item.周期销售额) }}</strong>
                 <small>{{ periodInventoryTurnoverLabel(item) }}</small>
               </div>
-              <div>
-                <span>经营信号</span>
-                <div class="signal-labels">
-                  <strong
-                    v-for="signal in competitorOperatingSignals(item)"
-                    :key="signal"
-                    class="signal-label price-signal"
-                    :class="priceSignalClass(signal)"
-                  >{{ signal }}</strong>
-                </div>
-                <small v-if="!competitorOperatingSignals(item).length">当前区间没有保留的经营信号</small>
-                <small v-if="item.价格变化 !== null">
-                  价格变化 {{ formatSignedCurrency(item.价格变化) }}
-                </small>
+              <div class="competitor-card-category" aria-label="商品类目层级">
+                <span>商品类目</span>
+                <ol v-if="competitorCategoryPath(item).length">
+                  <li
+                    v-for="(category, categoryIndex) in competitorCategoryPath(item)"
+                    :key="`${category.id || category.slug || category.name}-${categoryIndex}`"
+                  >
+                    <small>
+                      {{ competitorCategoryLevelLabel(categoryIndex, competitorCategoryPath(item).length) }}
+                    </small>
+                    <strong>{{ category.name }}</strong>
+                  </li>
+                </ol>
+                <p v-else class="competitor-card-category-empty">
+                  类目待采集 · 后续成功采集后补齐
+                </p>
               </div>
               <div>
                 <span>最新评论数（PLID 共用）</span>
                 <strong>{{ latestReviewCountLabel(item) }}</strong>
-                <small>首次监控 {{ formatChinaDateTime(item.首次监控时间 ?? null) }}</small>
                 <small v-if="item.最新评论获取时间">
                   评论更新 {{ formatChinaDateTime(item.最新评论获取时间) }} · 区间末评分 {{ item.评分 ?? "—" }}
                 </small>

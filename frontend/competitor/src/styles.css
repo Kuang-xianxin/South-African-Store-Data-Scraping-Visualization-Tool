@@ -2177,6 +2177,39 @@ textarea.link-input-error-pulse {
   line-height: 1.35;
 }
 
+.competitor-first-monitored-badge {
+  display: inline-grid;
+  align-self: start;
+  gap: 1px;
+  min-width: 132px;
+  padding: 6px 10px;
+  border: 1px solid #a7c9f4;
+  border-radius: 10px;
+  background: linear-gradient(135deg, #edf5ff, #dcecff);
+  color: #0b4f9c;
+  box-shadow: 0 5px 14px rgba(34, 103, 183, 0.12);
+  line-height: 1.25;
+}
+
+.competitor-first-monitored-badge small {
+  color: #3976ba;
+  font-size: 0.56rem;
+  font-weight: 800;
+}
+
+.competitor-first-monitored-badge strong {
+  color: #083f80;
+  font-size: 0.68rem;
+  font-weight: 900;
+  overflow-wrap: anywhere;
+}
+
+.competitor-first-monitored-badge.is-compact {
+  width: fit-content;
+  min-width: 0;
+  padding: 5px 8px;
+}
+
 .personal-watchlist-product-body > p {
   margin: 0;
   color: var(--muted);
@@ -3024,6 +3057,14 @@ textarea.link-input-error-pulse {
   font-weight: 800;
 }
 
+.competitor-status-header-actions {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+}
+
 .competitor-status-summary {
   display: grid;
   grid-template-columns: repeat(5, minmax(0, 1fr)) minmax(152px, 176px);
@@ -3218,6 +3259,95 @@ textarea.link-input-error-pulse {
 
 .competitor-status-summary .signal-label {
   margin: 0;
+}
+
+.competitor-card-category > span,
+.competitor-status-summary > .competitor-card-category > span {
+  color: #486455;
+  font-size: 0.61rem;
+  font-weight: 850;
+}
+
+.competitor-card-category ol {
+  display: grid;
+  gap: 0;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.competitor-card-category li {
+  position: relative;
+  display: grid;
+  grid-template-columns: 48px minmax(0, 1fr);
+  align-items: start;
+  gap: 6px;
+  min-width: 0;
+  padding: 1px 0 7px 12px;
+}
+
+.competitor-card-category li:last-child {
+  padding-bottom: 0;
+}
+
+.competitor-card-category li::before {
+  position: absolute;
+  top: 6px;
+  left: 1px;
+  width: 6px;
+  height: 6px;
+  border: 2px solid #4d8a69;
+  border-radius: 50%;
+  background: #fff;
+  content: "";
+}
+
+.competitor-card-category li:not(:last-child)::after {
+  position: absolute;
+  top: 14px;
+  bottom: -1px;
+  left: 4px;
+  width: 1px;
+  background: #bdd3c5;
+  content: "";
+}
+
+.competitor-card-category li > small,
+.competitor-status-summary .competitor-card-category li > small {
+  color: #6f7c74;
+  font-size: 0.54rem;
+  font-weight: 750;
+  line-height: 1.4;
+}
+
+.competitor-card-category li > strong,
+.competitor-status-summary .competitor-card-category li > strong {
+  min-width: 0;
+  color: #183d2b;
+  font-size: 0.65rem;
+  font-weight: 800;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+.competitor-card-category-empty {
+  margin: 0;
+  color: #8a6a31;
+  font-size: 0.6rem;
+  line-height: 1.45;
+}
+
+.competitor-card-category.is-compact {
+  display: grid;
+  gap: 6px;
+  padding: 8px 9px;
+  border: 1px solid #d7e5dc;
+  border-radius: 9px;
+  background: #f7faf8;
+}
+
+.competitor-card-category.is-compact li {
+  grid-template-columns: 48px minmax(0, 1fr);
 }
 
 .competitor-offer-roster {
@@ -7983,6 +8113,20 @@ button {
 
   .competitor-status-open {
     display: none;
+  }
+
+  .competitor-status-header {
+    flex-wrap: wrap;
+  }
+
+  .competitor-status-header-actions {
+    width: 100%;
+    justify-content: flex-start;
+    padding-left: 64px;
+  }
+
+  .competitor-status-header-actions .competitor-first-monitored-badge {
+    min-width: 0;
   }
 
   .competitor-status-summary {
