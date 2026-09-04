@@ -17,7 +17,7 @@
     "test:competitor-detail": "node --experimental-strip-types --test tests/competitorDetailLoading.test.ts",
     "test:competitor-profitability": "node --experimental-strip-types --test tests/competitorProfitability.test.ts",
     "test:competitor-offers": "node --experimental-strip-types --test tests/competitorOfferHistory.test.ts",
-    "test:own-store-sales": "node --experimental-strip-types --test tests/ownStoreSalesChart.test.ts",
+    "test:own-store-sales": "node --experimental-strip-types --test tests/ownStoreSalesChart.test.ts tests/ownStoreSalesSummary.test.ts",
     "test:line-charts": "node --experimental-strip-types --test tests/lineChartInteractionContract.test.ts",
     "test:date-viewport": "node --experimental-strip-types --test tests/dateViewport.test.ts",
     "test:collection-client": "node --experimental-strip-types --test tests/collectionClientClaim.test.ts",

@@ -27,6 +27,12 @@ export interface CompetitorOfferItem extends ProductMasterIdentity {
   库存精确: boolean;
   库存方式: string;
   库存说明: string | null;
+  /** Exact-stock decreases across every variant observed for this seller. */
+  卖家近期观察售出?: CompetitorObservedSalesWindows;
+  卖家近期观察售出截至?: string | null;
+  /** Exact-stock decreases for this exact seller/SKU/variant offer identity. */
+  变体近期观察售出?: CompetitorObservedSalesWindows;
+  变体近期观察售出截至?: string | null;
   条件: string | null;
   变体键: string;
   变体: string;
@@ -107,6 +113,14 @@ export interface CompetitorItem {
   /** Exact-stock decreases in fixed windows; an observation signal, not order sales. */
   近期观察售出?: CompetitorObservedSalesWindows;
   近期观察售出截至?: string | null;
+  /** Official Seller Sales across every own Offer in the selected store scope. */
+  自有官方销量?: CompetitorObservedSalesWindows;
+  自有官方销量截至?: string | null;
+  自有官方销量店铺数?: number;
+  自有官方销量Offer数?: number;
+  /** Exact-stock decreases across all non-own follower offers for this PLID. */
+  跟卖近期观察售出?: CompetitorObservedSalesWindows;
+  跟卖近期观察售出截至?: string | null;
   新增评论: number | null;
   新增好评: number | null;
   新增差评: number | null;
@@ -456,12 +470,14 @@ export interface OwnStoreSalesPoint {
 export interface OwnStoreSalesSeries {
   store_code: string;
   store_name: string;
+  store_count?: number;
   plid: string;
   offer_ids: string[];
   image_url: string | null;
   skus: string[];
   listing_date: string;
   listing_date_source: "platform" | "first_observed";
+  listing_at: string | null;
   through_date: string;
   date_basis: "Asia/Shanghai";
   source_date_basis: "Africa/Johannesburg";
@@ -472,6 +488,11 @@ export interface OwnStoreSalesSeries {
   coverage_start: string | null;
   coverage_end: string | null;
   points: OwnStoreSalesPoint[];
+}
+
+export interface OwnStoreVariantSalesSeries extends OwnStoreSalesSeries {
+  offer_id: string;
+  sku: string | null;
 }
 
 export interface OwnStoreTrafficPoint {
@@ -884,6 +905,8 @@ export interface CompetitorDetail {
   reviews: ReviewItem[];
   variants: CompetitorVariantItem[];
   own_store_sales: OwnStoreSalesSeries[];
+  own_store_sales_scope?: OwnStoreSalesSeries | null;
+  own_store_variant_sales: OwnStoreVariantSalesSeries[];
   own_store_traffic: OwnStoreTrafficSeries[];
   own_store_returns: ReturnsPayload;
   own_store_profitability: OwnStoreProfitabilityPayload;

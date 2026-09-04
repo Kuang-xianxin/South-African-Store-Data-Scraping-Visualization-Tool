@@ -60,7 +60,14 @@ from takealot_ops.competitors.listings import (
     parse_competitor_listing_source,
     preview_competitor_listing,
 )
-from takealot_ops.competitors.own_store_sales import build_own_store_sales_series
+from takealot_ops.competitors.own_store_sales import (
+    OWN_STORE_SALES_WINDOW_DAYS,
+    aggregate_own_store_sales_series,
+    build_own_store_sales_detail,
+    build_own_store_sales_series,
+    build_own_store_sales_series_bulk,
+    summarize_own_store_sales_windows,
+)
 from takealot_ops.competitors.own_store_traffic import (
     build_own_store_traffic_series,
 )
@@ -3524,7 +3531,7 @@ def create_app(project_root: Path | None = None) -> FastAPI:
     ) -> dict[str, object]:
         own_store_codes = _own_store_codes_for_request(request, own_store_scope)
         cache_key = (
-            "competitors-list-v6",
+            "competitors-list-v8",
             tuple(sorted(own_store_codes)),
             start_date.isoformat() if start_date else None,
             end_date.isoformat() if end_date else None,
@@ -3547,9 +3554,15 @@ def create_app(project_root: Path | None = None) -> FastAPI:
                     dataset.category_paths,
                 ),
                 "store_items": _competitor_card_category_records(
-                    _product_master_competitor_store_records(
+                    _own_store_sales_comparison_records(
                         root,
-                        frame_records(dataset.store_current),
+                        _product_master_competitor_store_records(
+                            root,
+                            frame_records(dataset.store_current),
+                            engine=read_engine,
+                        ),
+                        own_store_codes=own_store_codes,
+                        through=datetime.now(ZoneInfo("Asia/Shanghai")).date(),
                         engine=read_engine,
                     ),
                     dataset.category_paths,
@@ -3573,7 +3586,7 @@ def create_app(project_root: Path | None = None) -> FastAPI:
         """Return only the scope-dependent private-store radar partition."""
         own_store_codes = _own_store_codes_for_request(request, own_store_scope)
         cache_key = (
-            "competitors-own-store-v5",
+            "competitors-own-store-v6",
             tuple(sorted(own_store_codes)),
             start_date.isoformat() if start_date else None,
             end_date.isoformat() if end_date else None,
@@ -3593,9 +3606,15 @@ def create_app(project_root: Path | None = None) -> FastAPI:
             )
             return {
                 "store_items": _competitor_card_category_records(
-                    _product_master_competitor_store_records(
+                    _own_store_sales_comparison_records(
                         root,
-                        frame_records(dataset.store_current),
+                        _product_master_competitor_store_records(
+                            root,
+                            frame_records(dataset.store_current),
+                            engine=read_engine,
+                        ),
+                        own_store_codes=own_store_codes,
+                        through=datetime.now(ZoneInfo("Asia/Shanghai")).date(),
                         engine=read_engine,
                     ),
                     dataset.category_paths,
@@ -3850,7 +3869,7 @@ def create_app(project_root: Path | None = None) -> FastAPI:
         user = request.state.erp_user
         own_store_codes = _own_store_codes_for_request(request, "all")
         cache_key = (
-            "competitor-personal-overview-v5",
+            "competitor-personal-overview-v7",
             user.id,
             tuple(sorted(own_store_codes)),
             start_date.isoformat() if start_date else None,
@@ -3878,9 +3897,15 @@ def create_app(project_root: Path | None = None) -> FastAPI:
                     dataset.category_paths,
                 ),
                 "store_items": _competitor_card_category_records(
-                    _product_master_competitor_store_records(
+                    _own_store_sales_comparison_records(
                         root,
-                        frame_records(dataset.store_current),
+                        _product_master_competitor_store_records(
+                            root,
+                            frame_records(dataset.store_current),
+                            engine=read_engine,
+                        ),
+                        own_store_codes=own_store_codes,
+                        through=datetime.now(ZoneInfo("Asia/Shanghai")).date(),
                         engine=read_engine,
                     ),
                     dataset.category_paths,
@@ -5224,8 +5249,8 @@ def create_app(project_root: Path | None = None) -> FastAPI:
                 if personal_item is not None
                 else None
             )
-        own_store_sales = (
-            _load_own_store_sales(
+        own_store_sales_detail = (
+            _load_own_store_sales_detail(
                 root,
                 plid=plid,
                 own_store_codes=own_store_codes,
@@ -5233,7 +5258,10 @@ def create_app(project_root: Path | None = None) -> FastAPI:
                 engine=read_engine,
             )
             if store_item is not None
-            else []
+            else {"link_series": [], "variant_series": []}
+        )
+        own_store_sales_scope = aggregate_own_store_sales_series(
+            own_store_sales_detail["link_series"]
         )
         own_store_traffic = (
             _load_own_store_traffic(
@@ -5269,7 +5297,9 @@ def create_app(project_root: Path | None = None) -> FastAPI:
             "history": frame_records(history),
             "reviews": frame_records(reviews),
             "variants": frame_records(variants),
-            "own_store_sales": own_store_sales,
+            "own_store_sales": own_store_sales_detail["link_series"],
+            "own_store_sales_scope": own_store_sales_scope,
+            "own_store_variant_sales": own_store_sales_detail["variant_series"],
             "own_store_traffic": own_store_traffic,
             "own_store_returns": own_store_returns,
             "own_store_profitability": (
@@ -7419,6 +7449,85 @@ def _product_master_competitor_store_records(
     return copied
 
 
+def _own_store_sales_comparison_records(
+    project_root: Path,
+    records: Sequence[Mapping[str, Any]],
+    *,
+    own_store_codes: set[str],
+    through: date,
+    engine: Engine | None = None,
+) -> list[dict[str, Any]]:
+    """Attach fixed official-sales totals to all private-link cards in bulk."""
+
+    copied = [dict(record) for record in records]
+    plids = {
+        str(record.get("plid") or "").strip()
+        for record in copied
+        if str(record.get("plid") or "").strip()
+    }
+    empty_windows = {"7": None, "15": None, "30": None, "60": None, "90": None}
+    if not copied or not plids or not own_store_codes:
+        for record in copied:
+            record.update(
+                {
+                    "自有官方销量": dict(empty_windows),
+                    "自有官方销量截至": None,
+                    "自有官方销量店铺数": 0,
+                    "自有官方销量Offer数": 0,
+                }
+            )
+        return copied
+
+    settings = DashboardSettings.from_env(project_root)
+    window_start = through - timedelta(days=max(OWN_STORE_SALES_WINDOW_DAYS) - 1)
+    path = sqlite_database_path(settings.database_url)
+    if path is not None and not path.exists():
+        series_by_plid: dict[str, list[dict[str, Any]]] = {}
+    else:
+        owned_engine = engine is None
+        read_engine = engine or create_read_only_erp_engine(settings.database_url)
+        try:
+            with Session(read_engine) as session:
+                series_by_plid = build_own_store_sales_series_bulk(
+                    session,
+                    plids=plids,
+                    store_codes=own_store_codes,
+                    through=through,
+                    start=window_start,
+                )
+        except SQLAlchemyError:
+            series_by_plid = {}
+        finally:
+            if owned_engine:
+                read_engine.dispose()
+
+    for record in copied:
+        plid = str(record.get("plid") or "").strip()
+        aggregate = aggregate_own_store_sales_series(
+            series_by_plid.get(plid, []),
+            start=window_start,
+        )
+        if aggregate is None:
+            record.update(
+                {
+                    "自有官方销量": dict(empty_windows),
+                    "自有官方销量截至": None,
+                    "自有官方销量店铺数": 0,
+                    "自有官方销量Offer数": 0,
+                }
+            )
+            continue
+        record.update(
+            {
+                "自有官方销量": summarize_own_store_sales_windows(aggregate),
+                "自有官方销量截至": aggregate["through_date"],
+                "自有官方销量店铺数": int(aggregate.get("store_count") or 0),
+                "自有官方销量Offer数": len(aggregate.get("offer_ids") or []),
+            }
+        )
+    return copied
+
+
 def _load_own_store_returns(
     project_root: Path,
     *,
@@ -7743,6 +7852,35 @@ def _load_own_store_sales(
     try:
         with Session(read_engine) as session:
             return build_own_store_sales_series(
+                session,
+                plid=plid,
+                store_codes=own_store_codes,
+                through=through,
+            )
+    finally:
+        if owned_engine:
+            read_engine.dispose()
+
+
+def _load_own_store_sales_detail(
+    project_root: Path,
+    *,
+    plid: str,
+    own_store_codes: set[str],
+    through: date,
+    engine: Engine | None = None,
+) -> dict[str, list[dict[str, Any]]]:
+    if not own_store_codes:
+        return {"link_series": [], "variant_series": []}
+    settings = DashboardSettings.from_env(project_root)
+    path = sqlite_database_path(settings.database_url)
+    if path is not None and not path.exists():
+        return {"link_series": [], "variant_series": []}
+    owned_engine = engine is None
+    read_engine = engine or create_read_only_erp_engine(settings.database_url)
+    try:
+        with Session(read_engine) as session:
+            return build_own_store_sales_detail(
                 session,
                 plid=plid,
                 store_codes=own_store_codes,

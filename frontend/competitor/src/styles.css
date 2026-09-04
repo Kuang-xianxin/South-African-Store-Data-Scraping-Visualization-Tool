@@ -1860,7 +1860,6 @@ textarea.link-input-error-pulse {
 }
 
 .personal-watchlist-board-heading,
-.personal-watchlist-product-actions,
 .personal-watchlist-pagination {
   display: flex;
   align-items: center;
@@ -2266,22 +2265,65 @@ textarea.link-input-error-pulse {
   font-size: 0.65rem;
 }
 
-.personal-watchlist-product-actions {
-  align-items: flex-end;
-  flex-wrap: wrap;
+.personal-watchlist-product-footer {
+  display: grid;
+  grid-template-columns: minmax(220px, 242px) minmax(0, 1fr);
+  align-items: start;
+  gap: 8px;
   margin-top: 2px;
 }
 
-.personal-watchlist-product-actions > span {
-  flex: 1 1 100%;
+.personal-watchlist-product-footer > .competitor-observed-sales.compact {
+  width: 100%;
+  margin: 0;
+}
+
+.personal-watchlist-product-footer > .own-store-sales-comparison {
+  width: 100%;
+  margin: 0;
+}
+
+.personal-watchlist-product-footer .personal-watchlist-product-actions {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  align-content: start;
+  align-items: stretch;
+  gap: 6px;
+  min-width: 0;
+  margin: 0;
+}
+
+.personal-watchlist-added-at {
+  display: grid;
+  gap: 1px;
+  min-width: 0;
+  padding: 6px 8px;
+  border-radius: 8px;
+  background: #f2f6f2;
+  line-height: 1.35;
+}
+
+.personal-watchlist-added-at small {
   color: var(--muted);
-  font-size: 0.58rem;
+  font-size: 0.54rem;
+}
+
+.personal-watchlist-added-at strong {
+  min-width: 0;
+  color: #315c47;
+  font-size: 0.59rem;
+  font-weight: 800;
+  overflow-wrap: anywhere;
 }
 
 .personal-watchlist-product-actions button {
-  flex: 1 1 auto;
+  width: 100%;
+  min-width: 0;
+  min-height: 30px;
   padding: 7px 9px;
   font-size: 0.62rem;
+  line-height: 1.25;
+  white-space: normal;
 }
 
 .personal-watchlist-empty-state {
@@ -3067,7 +3109,7 @@ textarea.link-input-error-pulse {
 
 .competitor-status-summary {
   display: grid;
-  grid-template-columns: repeat(5, minmax(0, 1fr)) minmax(152px, 176px);
+  grid-template-columns: repeat(5, minmax(0, 1fr)) minmax(220px, 250px);
   gap: 0;
   padding-top: 10px;
   border-top: 1px solid #e4e9e5;
@@ -3124,6 +3166,19 @@ textarea.link-input-error-pulse {
 .competitor-observed-sales > header strong {
   color: #17633b;
   font-size: 0.68rem;
+}
+
+.competitor-observed-sales-heading {
+  display: grid;
+  gap: 1px;
+  min-width: 0;
+}
+
+.competitor-observed-sales-heading small {
+  color: #547064;
+  font-size: 0.56rem;
+  font-weight: 700;
+  line-height: 1.35;
 }
 
 .competitor-observed-sales > header span,
@@ -3188,6 +3243,128 @@ textarea.link-input-error-pulse {
   padding: 6px 8px;
 }
 
+.own-store-sales-comparison {
+  display: grid;
+  align-self: start;
+  justify-self: end;
+  gap: 5px;
+  width: min(100%, 242px);
+  margin: 0;
+  padding: 7px 8px;
+  border: 1px solid #d5e4d9;
+  border-radius: 9px;
+  background: linear-gradient(135deg, #f4f9f5 0%, #f7f9fc 100%);
+}
+
+.own-store-sales-comparison > header {
+  display: grid;
+  gap: 1px;
+}
+
+.own-store-sales-comparison > header strong {
+  color: #17633b;
+  font-size: 0.68rem;
+}
+
+.own-store-sales-comparison > header span,
+.own-store-sales-comparison > footer {
+  color: var(--muted);
+  font-size: 0.52rem;
+  line-height: 1.35;
+}
+
+.own-store-sales-comparison table {
+  width: 100%;
+  border-collapse: collapse;
+  table-layout: fixed;
+  font-variant-numeric: tabular-nums;
+}
+
+.own-store-sales-comparison th,
+.own-store-sales-comparison td {
+  min-width: 0;
+  padding: 2px 3px;
+  text-align: right;
+  vertical-align: middle;
+}
+
+.own-store-sales-comparison thead th {
+  color: #5d6e64;
+  font-size: 0.53rem;
+  font-weight: 750;
+  line-height: 1.2;
+}
+
+.own-store-sales-comparison thead th:first-child,
+.own-store-sales-comparison tbody th {
+  width: 40px;
+  text-align: left;
+}
+
+.own-store-sales-comparison thead strong,
+.own-store-sales-comparison thead small {
+  display: block;
+}
+
+.own-store-sales-comparison thead th:nth-child(2) strong {
+  color: #17633b;
+}
+
+.own-store-sales-comparison thead th:nth-child(3) strong {
+  color: #285c86;
+}
+
+.own-store-sales-comparison thead small {
+  margin-top: 1px;
+  overflow: hidden;
+  color: #7b8780;
+  font-size: 0.46rem;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.own-store-sales-comparison tbody tr {
+  border-top: 1px solid #e5ebe7;
+}
+
+.own-store-sales-comparison tbody th {
+  color: var(--muted);
+  font-size: 0.58rem;
+  white-space: nowrap;
+}
+
+.own-store-sales-comparison tbody td {
+  color: #145d36;
+  font-size: 0.69rem;
+  font-weight: 850;
+  white-space: nowrap;
+}
+
+.own-store-sales-comparison tbody td:nth-child(3) {
+  color: #285c86;
+}
+
+.own-store-sales-comparison tbody td.unavailable {
+  color: #7d8982;
+  font-size: 0.5rem;
+  font-weight: 650;
+}
+
+.own-store-sales-comparison > footer {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1px 6px;
+  padding-top: 4px;
+  border-top: 1px solid #e3ebe5;
+}
+
+.own-store-sales-comparison > footer small {
+  grid-column: 1 / -1;
+  color: #8a6130;
+  font-size: 0.49rem;
+}
+
 .competitor-observed-sales.embedded {
   width: 100%;
   margin: 0;
@@ -3205,8 +3382,193 @@ textarea.link-input-error-pulse {
   margin: 0;
 }
 
+.competitor-status-summary > .own-store-sales-comparison {
+  width: calc(100% - 12px);
+  max-width: 238px;
+}
+
 .competitor-offer-workbench > .competitor-observed-sales {
+  width: 100%;
   margin: 0 0 10px;
+  padding: 9px 12px;
+}
+
+.competitor-offer-workbench > .competitor-observed-sales.competitor-variant-observed-sales {
+  border-color: #cfdae7;
+  background: #f4f7fb;
+}
+
+.competitor-offer-workbench > .competitor-observed-sales.competitor-variant-observed-sales > header strong {
+  color: #285c86;
+}
+
+.competitor-offer-workbench > .competitor-observed-sales.competitor-follower-observed-sales {
+  border-color: #ead9b9;
+  background: #fffaf0;
+}
+
+.competitor-offer-workbench > .competitor-observed-sales.competitor-follower-observed-sales > header strong {
+  color: #8a5a05;
+}
+
+.competitor-offer-workbench > .competitor-observed-sales > header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 2px 12px;
+}
+
+.competitor-offer-workbench > .competitor-observed-sales .competitor-observed-sales-list {
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 0;
+  padding: 7px 0;
+  border: 1px solid #e3ebe5;
+  border-radius: 8px;
+  background: #fff;
+}
+
+.competitor-offer-workbench > .competitor-observed-sales .competitor-observed-sales-list > div {
+  grid-template-columns: minmax(0, 1fr);
+  align-content: center;
+  justify-content: stretch;
+  justify-items: center;
+  gap: 2px;
+  min-height: 38px;
+  padding: 0 8px;
+  border-left: 1px solid #e3ebe5;
+}
+
+.competitor-offer-workbench > .competitor-observed-sales .competitor-observed-sales-list > div:first-child {
+  border-left: 0;
+}
+
+.competitor-offer-workbench > .competitor-observed-sales .competitor-observed-sales-list dd {
+  text-align: center;
+}
+
+.competitor-offer-workbench > .competitor-observed-sales > footer {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 2px 10px;
+}
+
+.own-store-sales-overview {
+  display: grid;
+  gap: 6px;
+  width: 100%;
+  margin: 0 0 10px;
+  padding: 9px 12px;
+  border: 1px solid #cfe0d4;
+  border-radius: 9px;
+  background: #f4f9f5;
+}
+
+.own-store-sales-overview-variant {
+  border-color: #cfdae7;
+  background: #f4f7fb;
+}
+
+.own-store-sales-overview-variant > header strong {
+  color: #285c86;
+}
+
+.own-store-sales-overview > header,
+.own-store-sales-overview > footer {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 2px 12px;
+}
+
+.own-store-sales-overview > header strong {
+  color: #17633b;
+  font-size: 0.72rem;
+}
+
+.own-store-sales-overview > header span,
+.own-store-sales-overview > footer,
+.own-store-sales-overview-empty {
+  color: var(--muted);
+  font-size: 0.58rem;
+  line-height: 1.45;
+}
+
+.own-store-sales-overview-list {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(78px, 1fr)) minmax(104px, 1.15fr) minmax(168px, 1.75fr);
+  gap: 0;
+  width: 100%;
+  margin: 0;
+  padding: 7px 0;
+  overflow-x: auto;
+  overscroll-behavior-inline: contain;
+  border: 1px solid #dce8df;
+  border-radius: 8px;
+  background: #fff;
+  scrollbar-width: thin;
+}
+
+.own-store-sales-overview-list > div {
+  display: grid;
+  align-content: center;
+  justify-items: center;
+  gap: 3px;
+  min-width: 0;
+  min-height: 58px;
+  padding: 0 8px;
+  border-left: 1px solid #e3ebe5;
+  text-align: center;
+}
+
+.own-store-sales-overview-list > div:first-child {
+  border-left: 0;
+}
+
+.own-store-sales-overview-list dt {
+  color: var(--muted);
+  font-size: 0.61rem;
+  font-weight: 800;
+  white-space: nowrap;
+}
+
+.own-store-sales-overview-list dd {
+  margin: 0;
+  color: #145d36;
+  font-size: 0.78rem;
+  font-variant-numeric: tabular-nums;
+  font-weight: 850;
+  line-height: 1.25;
+  white-space: nowrap;
+}
+
+.own-store-sales-overview-list small {
+  color: #728078;
+  font-size: 0.52rem;
+  line-height: 1.35;
+}
+
+.own-store-sales-overview-list > .incomplete dd {
+  color: #a45b1d;
+}
+
+.own-store-sales-overview-listing dd {
+  font-size: 0.68rem;
+}
+
+.own-store-sales-overview > footer {
+  justify-content: flex-end;
+  padding-top: 4px;
+  border-top: 1px solid #e3ebe5;
+}
+
+.own-store-sales-overview-empty {
+  padding: 9px 10px;
+  border-radius: 8px;
+  background: #fff;
 }
 
 .competitor-status-summary small,
@@ -7867,6 +8229,27 @@ button {
     grid-template-columns: 74px minmax(0, 1fr);
   }
 
+  .personal-watchlist-product-footer {
+    grid-template-columns: 1fr;
+  }
+
+  .personal-watchlist-product-footer > .competitor-observed-sales.compact {
+    width: min(100%, 152px);
+  }
+
+  .personal-watchlist-product-footer > .own-store-sales-comparison {
+    width: min(100%, 242px);
+  }
+
+  .personal-watchlist-product-footer .personal-watchlist-product-actions {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .personal-watchlist-added-at,
+  .personal-watchlist-product-actions > .danger {
+    grid-column: 1 / -1;
+  }
+
   .personal-watchlist-product-image {
     width: 74px;
     height: 74px;
@@ -8132,6 +8515,13 @@ button {
   .competitor-status-summary {
     grid-template-columns: repeat(2, minmax(0, 1fr));
     gap: 9px 0;
+  }
+
+  .competitor-status-summary > .own-store-sales-comparison {
+    grid-column: 1 / -1;
+    justify-self: stretch;
+    width: 100%;
+    max-width: none;
   }
 
   .competitor-status-summary > div:nth-child(odd) {

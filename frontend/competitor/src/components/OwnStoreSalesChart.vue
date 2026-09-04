@@ -327,7 +327,7 @@ function activePeriodLabel(): string {
           <strong>{{ selectedSeries.covered_days }} 天</strong>
         </div>
         <div :class="{ warning: selectedSeries.partial_days > 0 }">
-          <small>日内截至采集</small>
+          <small>尚未完整（截至采集）</small>
           <strong>{{ selectedSeries.partial_days }} 天</strong>
         </div>
         <div :class="{ warning: selectedSeries.missing_days > 0 }">

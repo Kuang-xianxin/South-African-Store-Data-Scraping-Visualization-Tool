@@ -35,6 +35,7 @@ from takealot_ops.competitors.stock import skipped_stock_probe
 from takealot_ops.competitors.web import create_app
 from takealot_ops.storage.migrations import create_schema
 from takealot_ops.storage.models import (
+    CompetitorSnapshot,
     CompetitorTarget,
     ErpStore,
     OfferCurrent,
@@ -292,6 +293,17 @@ def test_own_store_variant_family_keeps_one_plid_card_and_exact_variant_images(
                     total_stock=36,
                     captured_at=captured_at,
                 ),
+                OfferCurrent(
+                    offer_id="offer-black-alias",
+                    productline_id=plid,
+                    tsin_id="TSIN-BLACK",
+                    sku="STORE-SKU-BLACK",
+                    title="Infrared Sauna Blanket Family - Black",
+                    image_url=black_image,
+                    selling_price=1330,
+                    total_stock=4,
+                    captured_at=captured_at,
+                ),
                 StoreOfferBaseline(
                     display_date=date(2026, 8, 10),
                     offer_id="offer-black",
@@ -314,6 +326,18 @@ def test_own_store_variant_family_keeps_one_plid_card_and_exact_variant_images(
                     selling_price=1360,
                     status="buyable",
                     total_stock=36,
+                    captured_at=captured_at,
+                ),
+                StoreOfferBaseline(
+                    display_date=date(2026, 8, 10),
+                    offer_id="offer-black-alias",
+                    productline_id=plid,
+                    sku="STORE-SKU-BLACK",
+                    title="Infrared Sauna Blanket Family - Black",
+                    image_url=black_image,
+                    selling_price=1330,
+                    status="buyable",
+                    total_stock=4,
                     captured_at=captured_at,
                 ),
             ]
@@ -347,14 +371,36 @@ def test_own_store_variant_family_keeps_one_plid_card_and_exact_variant_images(
     assert item["商品"] == "Infrared Sauna Blanket Family"
     assert item["图片"] == black_image
     seller_api_offers = [offer for offer in item["对比报价"] if offer["报价来源"] == "seller_api"]
-    assert len(seller_api_offers) == 2
+    assert len(seller_api_offers) == 3
     assert {offer["TSIN"]: offer["图片"] for offer in seller_api_offers} == {
         "TSIN-BLACK": black_image,
         "TSIN-GREY": grey_image,
     }
+    assert {offer["TSIN"]: offer["变体"] for offer in seller_api_offers} == {
+        "TSIN-BLACK": "Black",
+        "TSIN-GREY": "Grey",
+    }
+    assert {
+        offer["offer_id"]: offer["变体"] for offer in seller_api_offers
+    } == {
+        "offer-black": "Black",
+        "offer-black-alias": "Black",
+        "offer-grey": "Grey",
+    }
     assert {row["变体"]: row["图片"] for row in dataset.variants.to_dict(orient="records")} == {
         "Black": black_image,
         "Grey": grey_image,
+    }
+    history_seller_api_offers = [
+        offer
+        for row in dataset.store_history.to_dict(orient="records")
+        for offer in row["对比报价"]
+        if offer["报价来源"] == "seller_api"
+    ]
+    assert {offer["offer_id"]: offer["变体"] for offer in history_seller_api_offers} == {
+        "offer-black": "Black",
+        "offer-black-alias": "Black",
+        "offer-grey": "Grey",
     }
 
 
@@ -1314,6 +1360,141 @@ def test_own_store_product_without_public_snapshot_waits_for_first_check(
     assert "等待后台轮巡首次检查" in item["判断说明"]
 
 
+def test_own_store_follower_sales_excludes_every_known_own_offer(
+    tmp_path: Path,
+) -> None:
+    engine = create_engine(
+        f"sqlite:///{(tmp_path / 'own-follower-sales.db').as_posix()}"
+    )
+    create_schema(engine)
+    plid = "88776655"
+    url = f"https://www.takealot.com/example/PLID{plid}"
+    snapshots = (
+        (datetime(2026, 8, 20, 8, tzinfo=UTC), (5, 4, 1)),
+        (datetime(2026, 8, 22, 8, tzinfo=UTC), (3, 3, 3)),
+    )
+
+    with store_scope("current"), Session(engine) as session, session.begin():
+        session.add(
+            OfferCurrent(
+                offer_id="own-offer",
+                productline_id=plid,
+                sku="OWN-SKU",
+                title="Own Follower Comparison",
+                selling_price=100,
+                status="buyable",
+                total_stock=3,
+                created_at=snapshots[0][0],
+                captured_at=snapshots[-1][0],
+            )
+        )
+        for captured_at, own_stock in (
+            (snapshots[0][0], 5),
+            (snapshots[-1][0], 3),
+        ):
+            session.add(
+                StoreOfferBaseline(
+                    display_date=captured_at.date(),
+                    offer_id="own-offer",
+                    productline_id=plid,
+                    sku="OWN-SKU",
+                    title="Own Follower Comparison",
+                    image_url=None,
+                    selling_price=100,
+                    status="buyable",
+                    total_stock=own_stock,
+                    captured_at=captured_at,
+                )
+            )
+
+        identities = (
+            ("own-offer", "own-seller", "Our Store", "OWN-SKU", False),
+            ("follower-red", "seller-red", "Follower Red", "FOLLOW-RED", True),
+            ("follower-blue", "seller-blue", "Follower Blue", "FOLLOW-BLUE", True),
+        )
+        for collected_at, quantities in snapshots:
+            offers = []
+            for identity, quantity in zip(identities, quantities, strict=True):
+                offer_id, seller_id, seller_name, sku, is_follower = identity
+                offers.append(
+                    {
+                        "selected": offer_id == "own-offer",
+                        "sku": sku,
+                        "seller_id": seller_id,
+                        "seller_name": seller_name,
+                        "price": 100.0,
+                        "stock_status": "In stock" if quantity else "Out of stock",
+                        "is_buybox": offer_id == "own-offer",
+                        "is_leadtime": False,
+                        "plid": plid,
+                        "url": url,
+                        "offer_id": offer_id,
+                        "condition": None,
+                        "variant_key": f"colour={offer_id}",
+                        "variant_label": offer_id,
+                        "identity_key": f"offer:{offer_id}",
+                        "is_follower_offer": is_follower,
+                        "stock_state": "有货" if quantity else "没货",
+                        "stock_quantity": quantity,
+                        "stock_exact": True,
+                        "stock_method": "test-exact-stock",
+                        "stock_note": "test exact stock",
+                    }
+                )
+            session.add(
+                CompetitorSnapshot(
+                    plid=plid,
+                    collected_at=collected_at,
+                    url=url,
+                    title="Own Follower Comparison",
+                    image_url=None,
+                    category_path=None,
+                    sku="OWN-SKU",
+                    seller_id="own-seller",
+                    seller_name="Our Store",
+                    price=100,
+                    stock_status="In stock",
+                    stock_quantity=sum(quantities),
+                    stock_exact=True,
+                    stock_method="test-aggregate-stock",
+                    stock_note="test aggregate stock",
+                    review_count=0,
+                    fetched_review_count=0,
+                    rating=0,
+                    positive_reviews=0,
+                    neutral_reviews=0,
+                    negative_reviews=0,
+                    lifetime_sales_min=0,
+                    lifetime_sales_max=0,
+                    previous_snapshot_id=None,
+                    observed_stock_outflow=None,
+                    review_delta=None,
+                    period_sales_min=None,
+                    period_sales_max=None,
+                    trend_label="test",
+                    trend_note="test",
+                    offers=offers,
+                )
+            )
+
+    dataset = load_competitor_dataset(engine, plids={plid})
+    engine.dispose()
+
+    item = dataset.store_current.iloc[0]
+    assert item["跟卖近期观察售出"] == {
+        "7": 1,
+        "15": 1,
+        "30": 1,
+        "60": 1,
+        "90": 1,
+    }
+    assert item["跟卖近期观察售出截至"] == date(2026, 8, 22)
+    offers = {offer["offer_id"]: offer for offer in item["跟卖报价"]}
+    assert set(offers) == {"follower-red", "follower-blue"}
+    assert offers["follower-red"]["变体近期观察售出"]["7"] == 1
+    assert offers["follower-blue"]["变体近期观察售出"]["7"] == 0
+
+
 def test_own_store_follower_history_keeps_dates_after_seller_disappears(
     tmp_path: Path,
 ) -> None:
@@ -1802,6 +1983,207 @@ def test_competitor_signals_recompute_from_oldest_and_latest_in_date_range(
     assert recent_offers["offer-up"]["库存信号"] == "恢复有货"
     assert recent_range.selected_start_date == date(2026, 7, 23)
     assert recent_range.selected_end_date == date(2026, 7, 24)
+
+
+def test_observed_sales_separates_link_seller_and_variant_scopes(
+    tmp_path: Path,
+) -> None:
+    engine = create_engine(f"sqlite:///{(tmp_path / 'observed-sales-scopes.db').as_posix()}")
+    create_schema(engine)
+    plid = "87654321"
+    url = f"https://www.takealot.com/example/PLID{plid}"
+    identities = (
+        ("offer-a-red", "seller-a", "Seller A", "SKU-A-RED", "colour=red", "Red"),
+        ("offer-a-blue", "seller-a", "Seller A", "SKU-A-BLUE", "colour=blue", "Blue"),
+        ("offer-b-black", "seller-b", "Seller B", "SKU-B-BLACK", "colour=black", "Black"),
+        ("offer-b-green", "seller-b", "Seller B", "SKU-B-GREEN", "colour=green", "Green"),
+    )
+    snapshots = (
+        (datetime(2026, 8, 20, 8, tzinfo=UTC), (3, 1, 4, 0)),
+        (datetime(2026, 8, 21, 8, tzinfo=UTC), (2, 2, 2, 2)),
+        (datetime(2026, 8, 22, 8, tzinfo=UTC), (2, 2, 2, 2)),
+    )
+
+    with Session(engine) as session, session.begin():
+        session.add(
+            CompetitorTarget(
+                plid=plid,
+                offer_group_plid=plid,
+                url=url,
+                title="Observed Sales Scope Product",
+                active=True,
+                created_at=snapshots[0][0],
+                updated_at=snapshots[-1][0],
+            )
+        )
+        for collected_at, quantities in snapshots:
+            offers = []
+            for identity, quantity in zip(identities, quantities, strict=True):
+                offer_id, seller_id, seller_name, sku, variant_key, variant_label = identity
+                offers.append(
+                    {
+                        "selected": offer_id == "offer-a-red",
+                        "sku": sku,
+                        "seller_id": seller_id,
+                        "seller_name": seller_name,
+                        "price": 100.0,
+                        "stock_status": "In stock" if quantity else "Out of stock",
+                        "is_buybox": True,
+                        "is_leadtime": False,
+                        "plid": plid,
+                        "url": url,
+                        "offer_id": offer_id,
+                        "condition": None,
+                        "variant_key": variant_key,
+                        "variant_label": variant_label,
+                        "identity_key": f"offer:{offer_id}",
+                        "is_follower_offer": False,
+                        "stock_state": "有货" if quantity else "没货",
+                        "stock_quantity": quantity,
+                        "stock_exact": True,
+                        "stock_method": "test-exact-stock",
+                        "stock_note": "test exact stock",
+                    }
+                )
+            session.add(
+                CompetitorSnapshot(
+                    plid=plid,
+                    collected_at=collected_at,
+                    url=url,
+                    title="Observed Sales Scope Product",
+                    image_url=None,
+                    category_path=None,
+                    sku="SKU-A-RED",
+                    seller_id="seller-a",
+                    seller_name="Seller A",
+                    price=100,
+                    stock_status="In stock",
+                    stock_quantity=sum(quantities),
+                    stock_exact=True,
+                    stock_method="test-aggregate-stock",
+                    stock_note="aggregate stock intentionally stays unchanged",
+                    review_count=0,
+                    fetched_review_count=0,
+                    rating=None,
+                    positive_reviews=0,
+                    neutral_reviews=0,
+                    negative_reviews=0,
+                    lifetime_sales_min=0,
+                    lifetime_sales_max=0,
+                    previous_snapshot_id=None,
+                    observed_stock_outflow=None,
+                    review_delta=None,
+                    period_sales_min=None,
+                    period_sales_max=None,
+                    trend_label="test",
+                    trend_note="test",
+                    offers=offers,
+                )
+            )
+
+    dataset = load_competitor_dataset(engine, plids={plid})
+    engine.dispose()
+
+    item = dataset.current.iloc[0]
+    assert item["近期观察售出"] == {
+        "7": 3,
+        "15": 3,
+        "30": 3,
+        "60": 3,
+        "90": 3,
+    }
+    assert item["近期观察售出截至"] == date(2026, 8, 22)
+    offers = {offer["offer_id"]: offer for offer in item["对比报价"]}
+    for offer_id in ("offer-a-red", "offer-a-blue"):
+        assert offers[offer_id]["卖家近期观察售出"] == {
+            "7": 1,
+            "15": 1,
+            "30": 1,
+            "60": 1,
+            "90": 1,
+        }
+        assert offers[offer_id]["卖家近期观察售出截至"] == date(2026, 8, 22)
+    for offer_id in ("offer-b-black", "offer-b-green"):
+        assert offers[offer_id]["卖家近期观察售出"] == {
+            "7": 2,
+            "15": 2,
+            "30": 2,
+            "60": 2,
+            "90": 2,
+        }
+        assert offers[offer_id]["卖家近期观察售出截至"] == date(2026, 8, 22)
+    assert offers["offer-a-red"]["变体近期观察售出"]["7"] == 1
+    assert offers["offer-a-blue"]["变体近期观察售出"]["7"] == 0
+    assert offers["offer-b-black"]["变体近期观察售出"]["7"] == 2
+    assert offers["offer-b-green"]["变体近期观察售出"]["7"] == 0
+    assert {
+        offer["变体近期观察售出截至"] for offer in offers.values()
+    } == {date(2026, 8, 22)}
+
+
+def test_link_observed_sales_does_not_fallback_without_offer_identity(
+    tmp_path: Path,
+) -> None:
+    engine = create_engine(f"sqlite:///{(tmp_path / 'legacy-observed-sales.db').as_posix()}")
+    create_schema(engine)
+    product = CompetitorProduct(
+        plid="76543210",
+        url="https://www.takealot.com/example/PLID76543210",
+        title="Legacy Aggregate Only",
+        image_url=None,
+        sku="LEGACY-SKU",
+        seller_id="legacy-seller",
+        seller_name="Legacy Seller",
+        price=100,
+        stock_status="In stock",
+        is_leadtime=False,
+        review_count=0,
+        rating=0,
+        offers=(),
+        variants=(),
+    )
+    for collected_at, quantity in (
+        (datetime(2026, 8, 20, 8, tzinfo=UTC), 10),
+        (datetime(2026, 8, 21, 8, tzinfo=UTC), 5),
+    ):
+        stock = StockProbeResult(
+            quantity=quantity,
+            exact=True,
+            method="legacy-aggregate-only",
+            note="no offer identities",
+        )
+        with Session(engine) as session, session.begin():
+            repository = CompetitorRepository(session)
+            previous = repository.latest_compatible_snapshot(product)
+            repository.save_observation(
+                product=product,
+                reviews=[],
+                review_summary=summarize_reviews([]),
+                stock=stock,
+                variant_stocks=[],
+                offer_stocks=[],
+                lifetime_sales=estimate_lifetime_sales(0),
+                signal=analyze_sales_signal(
+                    previous,
+                    current_stock_quantity=quantity,
+                    current_stock_exact=True,
+                    current_review_count=0,
+                ),
+                collected_at=collected_at,
+            )
+
+    dataset = load_competitor_dataset(engine, plids={product.plid})
+    engine.dispose()
+
+    item = dataset.current.iloc[0]
+    assert item["近期观察售出"] == {
+        "7": None,
+        "15": None,
+        "30": None,
+        "60": None,
+        "90": None,
+    }
+    assert item["近期观察售出截至"] is None
 
 
 def test_schema_upgrade_backfills_competitor_offer_groups(tmp_path: Path) -> None:

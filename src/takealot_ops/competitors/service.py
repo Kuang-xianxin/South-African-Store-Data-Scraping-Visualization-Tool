@@ -157,6 +157,18 @@ class _PeriodInventoryTurnover:
     turnover_value: float | None = None
 
 
+_ObservedSalesMetric = tuple[dict[str, int | None], date | None]
+
+
+@dataclass(frozen=True)
+class _ScopedOfferObservedSales:
+    """Fixed-window observed sales for one link, its sellers, and exact offers."""
+
+    link: _ObservedSalesMetric
+    sellers: dict[str, _ObservedSalesMetric]
+    offers: dict[str, _ObservedSalesMetric]
+
+
 OBSERVED_SALES_WINDOW_DAYS = (7, 15, 30, 60, 90)
 
 
@@ -1194,6 +1206,7 @@ def load_competitor_dataset(
                 variant.seller_id or "",
             )
         }
+    seller_api_variant_labels = _seller_api_variant_labels_by_scope(variants)
     stale_stock_by_plid: dict[str, CompetitorSnapshot] = {}
     for plid, latest in latest_by_plid.items():
         if latest.stock_quantity is not None:
@@ -1235,12 +1248,19 @@ def load_competitor_dataset(
             interval,
             variant_signatures=variant_signatures,
         )
-        recent_observed_sales, recent_observed_sales_through = (
-            _snapshot_recent_observed_sales_units(
-                all_snapshots_by_plid[plid],
-                variant_signatures=variant_signatures,
-            )
+        scoped_observed_sales = _snapshot_scoped_recent_observed_sales_units(
+            all_snapshots_by_plid[plid],
+            variants_by_snapshot=variants_by_snapshot,
         )
+        if scoped_observed_sales is None:
+            recent_observed_sales: dict[str, int | None] = {
+                str(days): None for days in OBSERVED_SALES_WINDOW_DAYS
+            }
+            recent_observed_sales_through = None
+        else:
+            recent_observed_sales, recent_observed_sales_through = (
+                scoped_observed_sales.link
+            )
         price_start, price_change, price_signal = _interval_price_signal(oldest, latest)
         offer_rows = _interval_offer_rows(
             oldest,
@@ -1248,6 +1268,8 @@ def load_competitor_dataset(
             oldest_variants=variants_by_snapshot.get(oldest.id, []),
             latest_variants=variants_by_snapshot.get(latest.id, []),
         )
+        if scoped_observed_sales is not None:
+            _attach_scoped_recent_observed_sales(offer_rows, scoped_observed_sales)
         current_rows.append(
             _snapshot_row(
                 latest,
@@ -1342,8 +1364,10 @@ def load_competitor_dataset(
             store_names_by_code=store_names_by_code,
             own_offer_ids_by_plid=own_offer_ids_by_plid,
             own_skus_by_plid=own_skus_by_plid,
+            variants_by_snapshot=variants_by_snapshot,
             follower_timelines=store_follower_timelines,
             store_tsin_by_offer=store_tsin_by_offer,
+            variant_labels_by_scope=seller_api_variant_labels,
         )
     )
     store_history = (
@@ -1356,6 +1380,8 @@ def load_competitor_dataset(
                 store_names_by_code=store_names_by_code,
                 own_offer_ids_by_plid=own_offer_ids_by_plid,
                 own_skus_by_plid=own_skus_by_plid,
+                store_tsin_by_offer=store_tsin_by_offer,
+                variant_labels_by_scope=seller_api_variant_labels,
             )
         )
         if include_detail_frames
@@ -1897,6 +1923,104 @@ def _indexed_snapshot_offers(
     return [(key, indexed[key]) for key in order], ambiguous
 
 
+def _seller_observed_sales_scope_key(
+    *,
+    seller_id: object,
+    seller_name: object,
+    offer_identity: str,
+) -> str:
+    normalized_name = _normalized_offer_scope(seller_name)
+    known_name = normalized_name not in {"", "未知卖家".casefold(), "unknown seller"}
+    if known_name and not normalized_name.startswith("卖家id ".casefold()):
+        return f"name:{normalized_name}"
+    normalized_id = _normalized_offer_scope(seller_id)
+    if normalized_id:
+        return f"id:{normalized_id}"
+    return f"offer:{offer_identity}"
+
+
+def _snapshot_scoped_recent_observed_sales_units(
+    snapshots: list[CompetitorSnapshot],
+    *,
+    variants_by_snapshot: Mapping[int, list[CompetitorVariantSnapshot]],
+    excluded_offer_ids: set[str] | None = None,
+    excluded_skus: set[str] | None = None,
+) -> _ScopedOfferObservedSales | None:
+    """Calculate fixed windows before aggregating exact offer movements upward."""
+
+    all_observations: list[_InventoryTurnoverObservation] = []
+    observations_by_seller: dict[str, list[_InventoryTurnoverObservation]] = {}
+    observations_by_offer: dict[str, list[_InventoryTurnoverObservation]] = {}
+    for snapshot in sorted(snapshots, key=lambda row: (row.collected_at, row.id)):
+        indexed_offers, ambiguous = _indexed_snapshot_offers(
+            snapshot,
+            variants_by_snapshot.get(snapshot.id, []),
+        )
+        for offer_key, offer in indexed_offers:
+            if _public_offer_is_own(
+                offer,
+                own_offer_ids=excluded_offer_ids or set(),
+                own_skus=excluded_skus or set(),
+            ):
+                continue
+            identity = _offer_identity_from_mapping(offer)
+            if identity is None:
+                continue
+            price = _offer_price(offer)
+            observation = _InventoryTurnoverObservation(
+                scope=(identity,),
+                stock_quantity=_offer_stock_quantity(offer),
+                stock_exact=bool(offer.get("stock_exact")) and offer_key not in ambiguous,
+                price=Decimal(str(price)) if price is not None else None,
+                display_date=_competitor_display_date(snapshot.collected_at),
+            )
+            seller_key = _seller_observed_sales_scope_key(
+                seller_id=offer.get("seller_id"),
+                seller_name=offer.get("seller_name"),
+                offer_identity=identity,
+            )
+            all_observations.append(observation)
+            observations_by_seller.setdefault(seller_key, []).append(observation)
+            observations_by_offer.setdefault(identity, []).append(observation)
+
+    if not all_observations:
+        return None
+    return _ScopedOfferObservedSales(
+        link=_recent_observed_sales_units(all_observations),
+        sellers={
+            key: _recent_observed_sales_units(observations)
+            for key, observations in observations_by_seller.items()
+        },
+        offers={
+            key: _recent_observed_sales_units(observations)
+            for key, observations in observations_by_offer.items()
+        },
+    )
+
+
+def _attach_scoped_recent_observed_sales(
+    offer_rows: list[dict[str, object]],
+    metrics: _ScopedOfferObservedSales,
+) -> None:
+    for offer in offer_rows:
+        offer_key = str(offer.get("报价键") or "").strip()
+        if not offer_key:
+            continue
+        seller_key = _seller_observed_sales_scope_key(
+            seller_id=offer.get("卖家ID"),
+            seller_name=offer.get("卖家"),
+            offer_identity=offer_key,
+        )
+        seller_metric = metrics.sellers.get(seller_key)
+        if seller_metric is not None:
+            offer["卖家近期观察售出"] = seller_metric[0]
+            offer["卖家近期观察售出截至"] = seller_metric[1]
+        variant_metric = metrics.offers.get(offer_key)
+        if variant_metric is not None:
+            offer["变体近期观察售出"] = variant_metric[0]
+            offer["变体近期观察售出截至"] = variant_metric[1]
+
+
 def _interval_offer_rows(
     oldest: CompetitorSnapshot,
     latest: CompetitorSnapshot,
@@ -2255,12 +2379,41 @@ def _seller_api_offer_rows(
     baselines: list[StoreOfferPoint],
     *,
     store_names_by_code: dict[str, str],
+    store_tsin_by_offer: Mapping[tuple[str, str], str] | None = None,
+    variant_labels_by_scope: Mapping[tuple[str, str], str] | None = None,
     raw_history: bool = False,
 ) -> list[dict[str, object]]:
     """Project every Seller API refresh into the same quote shape as public sellers."""
     by_identity: dict[tuple[str, str], list[StoreOfferPoint]] = {}
     for row in baselines:
         by_identity.setdefault((row.store_code, row.offer_id), []).append(row)
+
+    seller_skus_by_plid: dict[str, set[str]] = {}
+    direct_labels_by_identity: dict[tuple[str, str], str] = {}
+    labels_by_tsin: dict[str, set[str]] = {}
+    labels_by_scope = variant_labels_by_scope or {}
+    tsin_by_offer = store_tsin_by_offer or {}
+    for identity, history in by_identity.items():
+        latest = max(history, key=lambda row: (row.display_date, row.captured_at, row.id))
+        plid = str(latest.productline_id or "").strip()
+        sku = _normalized_offer_scope(latest.sku)
+        if plid and sku:
+            seller_skus_by_plid.setdefault(plid, set()).add(sku)
+        direct_label = next(
+            (
+                labels_by_scope[(plid, scope)]
+                for value in (identity[1], latest.sku)
+                if (scope := _normalized_offer_scope(value))
+                and (plid, scope) in labels_by_scope
+            ),
+            None,
+        )
+        if direct_label is None:
+            continue
+        direct_labels_by_identity[identity] = direct_label
+        tsin = str(tsin_by_offer.get(identity) or "").strip()
+        if tsin:
+            labels_by_tsin.setdefault(tsin, set()).add(direct_label)
 
     rows: list[dict[str, object]] = []
     for (store_code, offer_id), history in sorted(by_identity.items()):
@@ -2322,6 +2475,19 @@ def _seller_api_offer_rows(
             else "没货"
         )
         store_name = store_names_by_code.get(store_code, store_code)
+        plid = str(latest.productline_id or "").strip()
+        tsin = str(tsin_by_offer.get((store_code, offer_id)) or "").strip()
+        variant_label = direct_labels_by_identity.get((store_code, offer_id))
+        tsin_labels = labels_by_tsin.get(tsin, set())
+        if variant_label is None and len(tsin_labels) == 1:
+            variant_label = next(iter(tsin_labels))
+        if variant_label is None:
+            seller_title = " ".join(str(latest.title or "").split())
+            variant_label = (
+                seller_title
+                if len(seller_skus_by_plid.get(plid, set())) > 1 and seller_title
+                else "默认款"
+            )
         stock_note = (
             "Seller API最新刷新："
             f"总库存 {latest.total_stock if latest.total_stock is not None else '—'}，"
@@ -2338,6 +2504,7 @@ def _seller_api_offer_rows(
                 "卖家ID": store_code,
                 "卖家": store_name,
                 "SKU": latest.sku,
+                "TSIN": tsin or None,
                 "图片": latest.image_url,
                 "价格": latest_price,
                 "库存状态": stock_state,
@@ -2348,7 +2515,7 @@ def _seller_api_offer_rows(
                 "库存说明": stock_note,
                 "条件": "自有 Offer",
                 "变体键": f"seller-api:{store_code}:{offer_id}",
-                "变体": f"SKU {latest.sku}" if latest.sku else f"Offer {offer_id}",
+                "变体": variant_label,
                 "是否主报价": False,
                 "是否变体主报价": False,
                 "plid": str(latest.productline_id or ""),
@@ -2584,8 +2751,10 @@ def _store_snapshot_rows(
     store_names_by_code: dict[str, str],
     own_offer_ids_by_plid: dict[str, set[str]],
     own_skus_by_plid: dict[str, set[str]],
+    variants_by_snapshot: Mapping[int, list[CompetitorVariantSnapshot]],
     follower_timelines: dict[str, dict[str, object]],
     store_tsin_by_offer: dict[tuple[str, str], str],
+    variant_labels_by_scope: Mapping[tuple[str, str], str],
 ) -> list[dict[str, object]]:
     """Build own-store cards from every Seller API refresh plus follower offers."""
     current_offers_by_plid: dict[str, list[ConnectedStoreOffer]] = {}
@@ -2641,6 +2810,8 @@ def _store_snapshot_rows(
         own_offer_rows = _seller_api_offer_rows(
             plid_baselines,
             store_names_by_code=store_names_by_code,
+            store_tsin_by_offer=store_tsin_by_offer,
+            variant_labels_by_scope=variant_labels_by_scope,
         )
         for own_offer_row in own_offer_rows:
             current_offer_state = current_offer_by_identity.get(
@@ -2737,6 +2908,12 @@ def _store_snapshot_rows(
         latest_observation = observations[0] if observations else None
         oldest_observation = observations[-1] if observations else None
         all_observations = all_followers_by_plid.get(plid, [])
+        follower_observed_sales = _snapshot_scoped_recent_observed_sales_units(
+            all_observations,
+            variants_by_snapshot=variants_by_snapshot,
+            excluded_offer_ids=own_offer_ids_by_plid.get(plid, set()),
+            excluded_skus=own_skus_by_plid.get(plid, set()),
+        )
         latest_review_observation = max(
             all_observations,
             key=lambda row: (row.collected_at, row.id),
@@ -2758,6 +2935,11 @@ def _store_snapshot_rows(
             if latest_observation is not None and oldest_observation is not None
             else []
         )
+        if follower_observed_sales is not None:
+            _attach_scoped_recent_observed_sales(
+                follower_rows,
+                follower_observed_sales,
+            )
         has_followers = bool(follower_rows)
         follower_timeline = follower_timelines.get(plid, {})
         captured_at = max(row.captured_at for row in own_offers)
@@ -2855,6 +3037,16 @@ def _store_snapshot_rows(
                 "周期库存周转金额": inventory_turnover.turnover_value,
                 "近期观察售出": recent_observed_sales,
                 "近期观察售出截至": recent_observed_sales_through,
+                "跟卖近期观察售出": (
+                    follower_observed_sales.link[0]
+                    if follower_observed_sales is not None
+                    else {str(days): None for days in OBSERVED_SALES_WINDOW_DAYS}
+                ),
+                "跟卖近期观察售出截至": (
+                    follower_observed_sales.link[1]
+                    if follower_observed_sales is not None
+                    else None
+                ),
                 "新增评论": (
                     max(0, latest_observation.review_count - oldest_observation.review_count)
                     if latest_observation is not None
@@ -2959,11 +3151,15 @@ def _store_baseline_history_row(
     baselines: list[StoreOfferPoint],
     *,
     store_names_by_code: dict[str, str],
+    store_tsin_by_offer: Mapping[tuple[str, str], str],
+    variant_labels_by_scope: Mapping[tuple[str, str], str],
 ) -> dict[str, object]:
     latest = max(baselines, key=lambda row: (row.captured_at, row.id))
     own_rows = _seller_api_offer_rows(
         baselines,
         store_names_by_code=store_names_by_code,
+        store_tsin_by_offer=store_tsin_by_offer,
+        variant_labels_by_scope=variant_labels_by_scope,
         raw_history=True,
     )
     return {
@@ -3041,6 +3237,8 @@ def _store_history_rows(
     store_names_by_code: dict[str, str],
     own_offer_ids_by_plid: dict[str, set[str]],
     own_skus_by_plid: dict[str, set[str]],
+    store_tsin_by_offer: Mapping[tuple[str, str], str],
+    variant_labels_by_scope: Mapping[tuple[str, str], str],
 ) -> list[dict[str, object]]:
     """Return separate real Seller API and public-observation history points."""
     baseline_groups: dict[tuple[str, datetime], list[StoreOfferPoint]] = {}
@@ -3059,6 +3257,8 @@ def _store_history_rows(
             plid,
             rows,
             store_names_by_code=store_names_by_code,
+            store_tsin_by_offer=store_tsin_by_offer,
+            variant_labels_by_scope=variant_labels_by_scope,
         )
         for (plid, _), rows in baseline_groups.items()
     ]
@@ -3141,6 +3341,27 @@ def _display_variant_label(label: str) -> str:
         display_value = _variant_scalar_value(value)
         normalized_parts.append(f"{title}：{display_value}" if display_value else title)
     return " / ".join(part for part in normalized_parts if part) or "默认变体"
+
+
+def _seller_api_variant_labels_by_scope(
+    variants: list[CompetitorVariantSnapshot],
+) -> dict[tuple[str, str], str]:
+    """Keep the newest readable public variant label for each PLID and offer scope."""
+    labels: dict[tuple[str, str], str] = {}
+    for variant in sorted(
+        variants,
+        key=lambda row: (row.collected_at, row.id),
+        reverse=True,
+    ):
+        plid = str(variant.plid or "").strip()
+        scope = _normalized_offer_scope(variant.sku)
+        if not plid or not scope:
+            continue
+        label = _display_variant_label(variant.variant_label)
+        if label in {"默认款", "默认变体"}:
+            continue
+        labels.setdefault((plid, scope), label)
+    return labels
 
 
 def _variant_scalar_value(value: object) -> str | None:

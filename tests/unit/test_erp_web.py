@@ -32,6 +32,7 @@ from takealot_ops.erp.web import (
     _aggregate_platform_warehouse_payloads,
     _aggregate_store_revenue_series,
     _load_own_store_returns,
+    _own_store_sales_comparison_records,
     create_app,
 )
 from takealot_ops.logistics.service import LogisticsOverviewService
@@ -248,10 +249,10 @@ def test_competitor_detail_requests_only_the_selected_plid(
 
     def load_sales(_root: Path, **kwargs):
         sales_calls.append(kwargs)
-        return []
+        return {"link_series": [], "variant_series": []}
 
     monkeypatch.setattr(
-        "takealot_ops.erp.web._load_own_store_sales",
+        "takealot_ops.erp.web._load_own_store_sales_detail",
         load_sales,
     )
 
@@ -310,6 +311,8 @@ def test_competitor_detail_requests_only_the_selected_plid(
         "reviews": [],
         "variants": [],
         "own_store_sales": [],
+        "own_store_sales_scope": None,
+        "own_store_variant_sales": [],
         "own_store_traffic": [],
         "own_store_returns": {"data_status": "collected", "items": []},
         "own_store_profitability": {
@@ -340,6 +343,7 @@ def test_competitor_detail_requests_only_the_selected_plid(
     assert sales_calls[0]["own_store_codes"] == {"current"}
     assert isinstance(sales_calls[0]["through"], date)
     assert sales_calls[0]["engine"] is app.state.read_engine
+    assert set(sales_calls[0]) == {"plid", "own_store_codes", "through", "engine"}
     assert traffic_calls == [
         {
             "plid": "101163999",
@@ -421,6 +425,94 @@ def test_competitor_overview_attaches_persisted_category_paths_to_cards(
     assert [
         item["name"] for item in response.json()["items"][0]["类目路径"]
     ] == ["Home & Kitchen", "Bathroom Safety"]
+
+
+def test_own_store_sales_comparison_matches_the_visible_store_scope(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database_path = tmp_path / "own-sales-comparison.db"
+    database_path.touch()
+    monkeypatch.setenv(
+        "TAKEALOT_DATABASE_URL",
+        f"sqlite:///{database_path.as_posix()}",
+    )
+    calls: list[dict[str, object]] = []
+
+    def load_bulk(_session: Session, **kwargs):
+        calls.append(kwargs)
+        return {
+            "scope-plid": [
+                {
+                    "store_code": "store-a",
+                    "store_name": "Store A",
+                    "plid": "scope-plid",
+                    "offer_ids": ["offer-a"],
+                    "skus": ["SKU-A"],
+                    "listing_date": "2026-08-01",
+                    "listing_date_source": "platform",
+                    "listing_at": "2026-08-01T09:00:00+08:00",
+                    "through_date": "2026-08-03",
+                    "points": [
+                        {
+                            "date": "2026-08-03",
+                            "ordered_units": 1,
+                            "data_status": "verified",
+                            "revision_count": 1,
+                        }
+                    ],
+                },
+                {
+                    "store_code": "store-b",
+                    "store_name": "Store B",
+                    "plid": "scope-plid",
+                    "offer_ids": ["offer-b"],
+                    "skus": ["SKU-B"],
+                    "listing_date": "2026-08-01",
+                    "listing_date_source": "platform",
+                    "listing_at": "2026-08-01T10:00:00+08:00",
+                    "through_date": "2026-08-03",
+                    "points": [
+                        {
+                            "date": "2026-08-03",
+                            "ordered_units": 2,
+                            "data_status": "verified",
+                            "revision_count": 1,
+                        }
+                    ],
+                },
+            ]
+        }
+
+    monkeypatch.setattr(
+        "takealot_ops.erp.web.build_own_store_sales_series_bulk",
+        load_bulk,
+    )
+
+    records = _own_store_sales_comparison_records(
+        tmp_path,
+        [{"plid": "scope-plid"}],
+        own_store_codes={"store-a", "store-b"},
+        through=date(2026, 8, 3),
+    )
+
+    assert calls == [
+        {
+            "plids": {"scope-plid"},
+            "store_codes": {"store-a", "store-b"},
+            "through": date(2026, 8, 3),
+            "start": date(2026, 8, 3) - timedelta(days=89),
+        }
+    ]
+    assert records == [
+        {
+            "plid": "scope-plid",
+            "自有官方销量": {"7": 3, "15": 3, "30": 3, "60": 3, "90": 3},
+            "自有官方销量截至": "2026-08-03",
+            "自有官方销量店铺数": 2,
+            "自有官方销量Offer数": 2,
+        }
+    ]
 
 
 def test_competitor_detail_returns_the_selected_current_radar_item(

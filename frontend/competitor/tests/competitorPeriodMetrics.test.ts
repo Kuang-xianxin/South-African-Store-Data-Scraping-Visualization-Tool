@@ -21,6 +21,10 @@ const observedSalesSource = readFileSync(
   new URL("../src/components/CompetitorObservedSalesMetrics.vue", import.meta.url),
   "utf8",
 );
+const ownSalesComparisonSource = readFileSync(
+  new URL("../src/components/OwnStoreSalesComparisonMetrics.vue", import.meta.url),
+  "utf8",
+);
 const stylesSource = readFileSync(new URL("../src/styles.css", import.meta.url), "utf8");
 const typesSource = readFileSync(new URL("../src/types.ts", import.meta.url), "utf8");
 
@@ -91,7 +95,7 @@ test("personal watchlist reranks from refreshed interval metrics", () => {
   );
 });
 
-test("all radar cards use the vertical observed-sales card and wide cards keep it in the metric row", () => {
+test("radar cards use link totals while seller workbench separates seller and variant totals", () => {
   assert.deepEqual(
     [...observedSalesSource.matchAll(/const windowDays = \[([^\]]+)\]/g)]
       .map((match) => match[1]?.replace(/\s/g, "")),
@@ -103,12 +107,30 @@ test("all radar cards use the vertical observed-sales card and wide cards keep i
   assert.match(observedSalesSource, /<dd>\{\{ observedUnitsLabel\(days\) \}\}<\/dd>/);
   assert.match(observedSalesSource, /库存观察 · 不等同订单/);
   assert.match(observedSalesSource, /embedded\?: boolean/);
+  assert.match(observedSalesSource, /title\?: string/);
+  assert.match(observedSalesSource, /contextLabel\?: string \| null/);
   assert.match(stylesSource, /\.competitor-observed-sales-list > div \{[\s\S]*grid-template-columns: 44px max-content[\s\S]*justify-content: start/);
   assert.match(stylesSource, /\.competitor-observed-sales-list dd \{[\s\S]*text-align: left/);
   assert.match(stylesSource, /\.competitor-observed-sales\.embedded/);
   assert.match(
     stylesSource,
-    /\.competitor-status-summary \{[\s\S]*grid-template-columns: repeat\(5, minmax\(0, 1fr\)\) minmax\(152px, 176px\)/,
+    /\.competitor-offer-workbench > \.competitor-observed-sales \{[\s\S]*width: 100%/,
+  );
+  assert.match(
+    stylesSource,
+    /\.competitor-offer-workbench > \.competitor-observed-sales \.competitor-observed-sales-list \{[\s\S]*grid-template-columns: repeat\(5, minmax\(0, 1fr\)\)/,
+  );
+  assert.match(
+    stylesSource,
+    /\.competitor-offer-workbench > \.competitor-observed-sales \.competitor-observed-sales-list > div \{[\s\S]*grid-template-columns: minmax\(0, 1fr\)[\s\S]*justify-items: center/,
+  );
+  assert.match(
+    stylesSource,
+    /\.competitor-offer-workbench > \.competitor-observed-sales\.competitor-variant-observed-sales \{[\s\S]*background: #f4f7fb/,
+  );
+  assert.match(
+    stylesSource,
+    /\.competitor-status-summary \{[\s\S]*grid-template-columns: repeat\(5, minmax\(0, 1fr\)\) minmax\(220px, 250px\)/,
   );
   assert.match(
     stylesSource,
@@ -117,30 +139,45 @@ test("all radar cards use the vertical observed-sales card and wide cards keep i
   assert.doesNotMatch(stylesSource, /competitor-observed-sales-grid/);
   assert.equal(
     pageSource.match(/<CompetitorObservedSalesMetrics/g)?.length,
-    4,
+    5,
   );
   assert.match(pageSource, /:values="card\.competitor\?\.近期观察售出"/);
+  assert.match(pageSource, /全部卖家 · 全部变体/);
   assert.equal(
     pageSource.match(/:values="item\.近期观察售出"/g)?.length,
-    2,
+    1,
   );
-  assert.match(
+  assert.equal(pageSource.match(/<OwnStoreSalesComparisonMetrics/g)?.length, 2);
+  assert.match(pageSource, /:own-values="item\.自有官方销量"/);
+  assert.match(pageSource, /:follower-values="item\.跟卖近期观察售出"/);
+  assert.match(pageSource, /:own-values="card\.competitor\.自有官方销量"/);
+  assert.match(pageSource, /:follower-values="card\.competitor\.跟卖近期观察售出"/);
+  assert.match(ownSalesComparisonSource, /自有官方/);
+  assert.match(ownSalesComparisonSource, /跟卖观察/);
+  assert.match(ownSalesComparisonSource, /Seller Sales；跟卖为库存观察，不等同订单/);
+  assert.match(ownSalesComparisonSource, /const windowDays = \[7, 15, 30, 60, 90\]/);
+  assert.match(pageSource, /:values="selectedOffer\?\.卖家近期观察售出"/);
+  assert.match(pageSource, /:values="selectedOffer\?\.变体近期观察售出"/);
+  assert.match(pageSource, /title="当前卖家全部变体库存观察售出（件）"/);
+  assert.match(pageSource, /title="当前变体单独库存观察售出（件）"/);
+  assert.doesNotMatch(
     pageSource,
     /:values="detail\.current_item\?\.近期观察售出 \?\? selected\.近期观察售出"/,
   );
   assert.equal(
     pageSource.match(/class="competitor-status-observed-sales"/g)?.length,
-    2,
+    1,
   );
   assert.equal(
     [...pageSource.matchAll(
       /class="competitor-status-observed-sales"[\s\S]{0,260}?\/>\s*<\/div>\s*<\/article>/g,
     )].length,
-    2,
+    1,
   );
   assert.equal(pageSource.match(/最新评论数（PLID 共用）/g)?.length, 3);
   assert.equal(pageSource.match(/class="competitor-first-monitored-badge/g)?.length, 3);
   assert.equal(pageSource.match(/<small>首次监控<\/small>/g)?.length, 3);
+  assert.equal(pageSource.match(/<small[^>]*>首次监控/g)?.length, 3);
   assert.doesNotMatch(
     pageSource,
     /最新评论数（PLID 共用）[\s\S]{0,180}?首次监控/,
@@ -170,6 +207,18 @@ test("all radar cards use the vertical observed-sales card and wide cards keep i
   assert.match(typesSource, /最新评论数\?: number \| null/);
   assert.match(typesSource, /最新评论获取时间\?: string \| null/);
   assert.match(typesSource, /类目路径\?: CompetitorCategoryBreadcrumb\[\]/);
+  assert.match(typesSource, /卖家近期观察售出\?: CompetitorObservedSalesWindows/);
+  assert.match(typesSource, /变体近期观察售出\?: CompetitorObservedSalesWindows/);
+  assert.match(typesSource, /自有官方销量\?: CompetitorObservedSalesWindows/);
+  assert.match(typesSource, /跟卖近期观察售出\?: CompetitorObservedSalesWindows/);
+  assert.match(
+    stylesSource,
+    /\.competitor-status-summary > \.own-store-sales-comparison \{[\s\S]*max-width: 238px/,
+  );
+  assert.match(
+    stylesSource,
+    /\.competitor-status-summary > \.own-store-sales-comparison \{[\s\S]*grid-column: 1 \/ -1/,
+  );
 });
 
 test("stock-decrease filtering includes sales that were later replenished", () => {

@@ -6,8 +6,11 @@ from sqlalchemy import create_engine, event, select
 from sqlalchemy.orm import Session
 
 from takealot_ops.competitors.own_store_sales import (
+    aggregate_own_store_sales_series,
+    build_own_store_sales_detail,
     build_own_store_sales_series,
     build_own_store_sales_series_bulk,
+    summarize_own_store_sales_windows,
 )
 from takealot_ops.storage.migrations import create_schema
 from takealot_ops.storage.models import (
@@ -152,6 +155,7 @@ def test_series_aggregates_own_offers_and_keeps_missing_days_distinct_from_zero(
     assert series["offer_ids"] == ["offer-a1", "offer-a2"]
     assert series["listing_date"] == "2026-08-02"
     assert series["listing_date_source"] == "platform"
+    assert series["listing_at"] == "2026-08-02T07:00:00+08:00"
     assert series["total_ordered_units"] == 3
     assert series["covered_days"] == 2
     assert series["missing_days"] == 2
@@ -162,6 +166,74 @@ def test_series_aggregates_own_offers_and_keeps_missing_days_distinct_from_zero(
         "missing",
         "missing",
     ]
+    engine.dispose()
+
+
+def test_detail_series_keeps_each_current_offer_separate_from_the_link_total() -> None:
+    engine = _engine()
+    with store_scope("store-a"), Session(engine) as session, session.begin():
+        session.add_all(
+            [
+                OfferCurrent(
+                    offer_id="offer-red",
+                    productline_id="variant-plid",
+                    sku="SKU-RED",
+                    created_at=datetime(2026, 8, 1, 23, tzinfo=UTC),
+                    captured_at=datetime(2026, 8, 5, 1, tzinfo=UTC),
+                ),
+                OfferCurrent(
+                    offer_id="offer-blue",
+                    productline_id="variant-plid",
+                    sku="SKU-BLUE",
+                    created_at=datetime(2026, 8, 3, 1, tzinfo=UTC),
+                    captured_at=datetime(2026, 8, 5, 1, tzinfo=UTC),
+                ),
+                SaleItem(
+                    order_item_id="order-red",
+                    order_date=datetime(2026, 8, 2, 1, tzinfo=UTC),
+                    sales_day=date(2026, 8, 2),
+                    offer_id="offer-red",
+                    quantity=2,
+                    raw_payload={},
+                ),
+                SaleItem(
+                    order_item_id="order-blue",
+                    order_date=datetime(2026, 8, 3, 1, tzinfo=UTC),
+                    sales_day=date(2026, 8, 3),
+                    offer_id="offer-blue",
+                    quantity=5,
+                    raw_payload={},
+                ),
+                *(_state(date(2026, 8, day)) for day in range(1, 5)),
+            ]
+        )
+
+    with Session(engine) as session:
+        payload = build_own_store_sales_detail(
+            session,
+            plid="variant-plid",
+            store_codes={"store-a"},
+            through=date(2026, 8, 4),
+        )
+
+    assert len(payload["link_series"]) == 1
+    assert payload["link_series"][0]["total_ordered_units"] == 7
+    variants = {series["offer_id"]: series for series in payload["variant_series"]}
+    assert set(variants) == {"offer-red", "offer-blue"}
+    assert variants["offer-red"]["sku"] == "SKU-RED"
+    assert variants["offer-red"]["listing_date"] == "2026-08-02"
+    assert variants["offer-red"]["total_ordered_units"] == 2
+    assert [point["ordered_units"] for point in variants["offer-red"]["points"]] == [
+        2,
+        0,
+        0,
+    ]
+    assert variants["offer-blue"]["sku"] == "SKU-BLUE"
+    assert variants["offer-blue"]["listing_date"] == "2026-08-03"
+    assert variants["offer-blue"]["total_ordered_units"] == 5
+    assert [
+        point["ordered_units"] for point in variants["offer-blue"]["points"]
+    ] == [5, 0]
     engine.dispose()
 
 
@@ -233,10 +305,144 @@ def test_bulk_series_matches_single_plid_results_with_fewer_queries() -> None:
             through=date(2026, 8, 5),
         )
         bulk_query_count = query_count
+        bounded = build_own_store_sales_series_bulk(
+            session,
+            plids={"123", "456"},
+            store_codes={"store-a", "store-b"},
+            through=date(2026, 8, 5),
+            start=date(2026, 8, 3),
+        )
 
     assert bulk == singles
     assert bulk_query_count < single_query_count
+    assert [
+        point["date"] for point in bounded["123"][0]["points"]
+    ] == ["2026-08-03", "2026-08-04", "2026-08-05"]
+    assert bounded["123"][0]["total_ordered_units"] == 0
+    assert bounded["456"][0]["total_ordered_units"] == 3
     engine.dispose()
+
+
+def test_scope_aggregate_combines_visible_stores_and_marks_incomplete_days() -> None:
+    first_store = {
+        "store_code": "store-a",
+        "store_name": "Store A",
+        "plid": "scope-plid",
+        "offer_ids": ["offer-a"],
+        "image_url": None,
+        "skus": ["SKU-A"],
+        "listing_date": "2026-08-01",
+        "listing_date_source": "platform",
+        "listing_at": "2026-08-01T09:00:00+08:00",
+        "through_date": "2026-08-03",
+        "date_basis": "Asia/Shanghai",
+        "source_date_basis": "Africa/Johannesburg",
+        "total_ordered_units": 3,
+        "covered_days": 3,
+        "partial_days": 0,
+        "missing_days": 0,
+        "coverage_start": "2026-08-01",
+        "coverage_end": "2026-08-03",
+        "points": [
+            {
+                "date": "2026-08-01",
+                "ordered_units": 1,
+                "data_status": "verified",
+                "revision_count": 1,
+            },
+            {
+                "date": "2026-08-02",
+                "ordered_units": 1,
+                "data_status": "verified",
+                "revision_count": 1,
+            },
+            {
+                "date": "2026-08-03",
+                "ordered_units": 1,
+                "data_status": "verified",
+                "revision_count": 1,
+            },
+        ],
+    }
+    second_store = {
+        **first_store,
+        "store_code": "store-b",
+        "store_name": "Store B",
+        "offer_ids": ["offer-b"],
+        "skus": ["SKU-B"],
+        "listing_date": "2026-08-02",
+        "listing_at": "2026-08-02T10:00:00+08:00",
+        "total_ordered_units": 2,
+        "covered_days": 1,
+        "missing_days": 1,
+        "coverage_start": "2026-08-02",
+        "coverage_end": "2026-08-02",
+        "points": [
+            {
+                "date": "2026-08-02",
+                "ordered_units": 2,
+                "data_status": "verified",
+                "revision_count": 2,
+            },
+            {
+                "date": "2026-08-03",
+                "ordered_units": None,
+                "data_status": "missing",
+                "revision_count": 0,
+            },
+        ],
+    }
+
+    aggregate = aggregate_own_store_sales_series([first_store, second_store])
+
+    assert aggregate is not None
+    assert aggregate["store_code"] == "__scope__"
+    assert aggregate["store_count"] == 2
+    assert aggregate["offer_ids"] == ["offer-a", "offer-b"]
+    assert aggregate["skus"] == ["SKU-A", "SKU-B"]
+    assert aggregate["total_ordered_units"] == 5
+    assert aggregate["covered_days"] == 2
+    assert aggregate["partial_days"] == 1
+    assert aggregate["missing_days"] == 0
+    assert aggregate["points"] == [
+        {
+            "date": "2026-08-01",
+            "ordered_units": 1,
+            "data_status": "verified",
+            "revision_count": 1,
+        },
+        {
+            "date": "2026-08-02",
+            "ordered_units": 3,
+            "data_status": "verified",
+            "revision_count": 3,
+        },
+        {
+            "date": "2026-08-03",
+            "ordered_units": 1,
+            "data_status": "partial",
+            "revision_count": 1,
+        },
+    ]
+    assert summarize_own_store_sales_windows(aggregate) == {
+        "7": 5,
+        "15": 5,
+        "30": 5,
+        "60": 5,
+        "90": 5,
+    }
+    bounded_aggregate = aggregate_own_store_sales_series(
+        [first_store, second_store],
+        start=date(2026, 8, 2),
+    )
+    assert bounded_aggregate is not None
+    assert bounded_aggregate["listing_date"] == "2026-08-01"
+    assert bounded_aggregate["series_start_date"] == "2026-08-02"
+    assert bounded_aggregate["total_ordered_units"] == 4
+    assert [point["date"] for point in bounded_aggregate["points"]] == [
+        "2026-08-02",
+        "2026-08-03",
+    ]
 
 
 def test_series_falls_back_to_earliest_local_record_and_accepts_source_proof() -> None:
@@ -293,6 +499,7 @@ def test_series_falls_back_to_earliest_local_record_and_accepts_source_proof() -
 
     assert payload[0]["listing_date"] == "2026-08-03"
     assert payload[0]["listing_date_source"] == "first_observed"
+    assert payload[0]["listing_at"] == "2026-08-03T01:00:00+08:00"
     assert payload[0]["coverage_start"] == "2026-08-03"
     assert payload[0]["points"] == [
         {

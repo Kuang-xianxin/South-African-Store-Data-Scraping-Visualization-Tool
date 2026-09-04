@@ -2,6 +2,8 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, shallowRef, watch } from "vue";
 
 import OwnStoreSalesChart from "../components/OwnStoreSalesChart.vue";
+import OwnStoreSalesComparisonMetrics from "../components/OwnStoreSalesComparisonMetrics.vue";
+import OwnStoreSalesSummary from "../components/OwnStoreSalesSummary.vue";
 import CompetitorObservedSalesMetrics from "../components/CompetitorObservedSalesMetrics.vue";
 import CompetitorCollectionLogViewer from "../components/CompetitorCollectionLogViewer.vue";
 import {
@@ -62,6 +64,7 @@ import {
   type OwnStoreTrafficTrendPoint,
 } from "../competitorOfferHistory";
 import { getOwnStoreSalesRecentRange } from "../ownStoreSalesChart";
+import { selectOwnStoreVariantSalesSeries } from "../ownStoreSalesSummary";
 import {
   COMPETITOR_OPERATING_SIGNAL_OPTIONS,
   competitorOperatingSignals,
@@ -540,6 +543,8 @@ const detail = shallowRef<CompetitorDetail>({
   reviews: [],
   variants: [],
   own_store_sales: [],
+  own_store_sales_scope: null,
+  own_store_variant_sales: [],
   own_store_traffic: [],
   own_store_returns: emptyOwnStoreReturns(),
   own_store_profitability: emptyOwnStoreProfitability(),
@@ -767,6 +772,35 @@ const selectedOwnSalesStoreCode = computed(() =>
     ? selectedOffer.value.卖家ID
     : null,
 );
+const selectedOwnScopeSales = computed(() =>
+  detail.value.own_store_sales_scope
+    ? [detail.value.own_store_sales_scope]
+    : detail.value.own_store_sales,
+);
+const selectedOwnScopeSalesContext = computed(() => {
+  const series = detail.value.own_store_sales_scope;
+  if (!series) return null;
+  return `${series.store_count ?? detail.value.own_store_sales.length} 店 · ${series.offer_ids.length} 个自有 Offer`;
+});
+const selectedOwnVariantSales = computed(() => {
+  if (
+    selected.value?.来源 !== "own_store"
+    || selectedOffer.value?.报价来源 !== "seller_api"
+  ) return [];
+  const series = selectOwnStoreVariantSalesSeries(
+    detail.value.own_store_variant_sales ?? [],
+    selectedOffer.value.offer_id,
+    selectedOwnSalesStoreCode.value,
+  );
+  return series ? [series] : [];
+});
+const selectedOwnVariantSalesContext = computed(() => {
+  if (selectedOffer.value?.报价来源 !== "seller_api") return null;
+  return [
+    selectedOffer.value.变体 || "默认款",
+    selectedOffer.value.SKU ? `SKU ${selectedOffer.value.SKU}` : "",
+  ].filter(Boolean).join(" · ");
+});
 const showOwnProfitabilityPanel = computed(() =>
   selected.value?.来源 === "own_store"
   && selectedOffer.value?.报价来源 === "seller_api",
@@ -814,6 +848,24 @@ const selectedSellerGroup = computed(() =>
 const selectedSellerGroupOffers = computed(() =>
   selectedSellerGroup.value?.offers ?? [],
 );
+const selectedSellerObservedSalesContext = computed(() => {
+  const group = selectedSellerGroup.value;
+  if (!group) return null;
+  return `${group.sellerName} · ${group.offers.length} 个当前变体 / 报价`;
+});
+const selectedVariantObservedSalesContext = computed(() => {
+  const offer = selectedOffer.value;
+  if (!offer) return null;
+  return [
+    offer.变体 || "默认款",
+    offer.SKU ? `SKU ${offer.SKU}` : "",
+    offer.卖家 || "",
+  ].filter(Boolean).join(" · ");
+});
+const allFollowerObservedSalesContext = computed(() => {
+  if (!selected.value) return null;
+  return `${followerSellerCount(selected.value)} 个跟卖卖家 · ${selected.value.跟卖报价.length} 个当前报价`;
+});
 const selectedOfferPosition = computed(() =>
   selectedSellerGroups.value.findIndex((group) => group.key === selectedSellerGroup.value?.key),
 );
@@ -2268,6 +2320,8 @@ watch(
         reviews: [],
         variants: [],
         own_store_sales: [],
+        own_store_sales_scope: null,
+        own_store_variant_sales: [],
         own_store_traffic: [],
         own_store_returns: emptyOwnStoreReturns(),
         own_store_profitability: emptyOwnStoreProfitability(),
@@ -7516,77 +7570,90 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
                   </small>
                 </span>
               </div>
-              <CompetitorObservedSalesMetrics
-                :values="card.competitor?.近期观察售出"
-                :through-date="card.competitor?.近期观察售出截至"
-                compact
-              />
-              <div class="personal-watchlist-product-actions">
-                <span>
-                  {{ card.personalMember ? "加入个人池" : "加入共享库" }}时间
-                  {{ formatChinaDateTime(card.addedAt) }}
-                </span>
-                <button
-                  v-if="card.competitor"
-                  type="button"
-                  class="secondary-button"
-                  @click.stop="openProductDetail(card.competitor, 'personal_watchlist')"
-                >
-                  {{
-                    card.competitor.来源 === "own_store"
-                      ? "新标签页查看商品详情"
-                      : "查看商品详情"
-                  }}
-                </button>
-                <button
-                  v-if="card.personalMember"
-                  type="button"
-                  class="secondary-button"
-                  @click.stop="openPersonalWatchlistCardLibraries(card)"
-                >
-                  设置类型库
-                </button>
-                <button
-                  v-if="
-                    !card.personalMember
-                    && (card.competitor || card.target)
-                  "
-                  type="button"
-                  class="secondary-button"
-                  :disabled="personalWatchlistBulkRemoving || Boolean(personalWatchlistBusyPlid)"
-                  @click.stop="addSharedCardToPersonalWatchlist(card)"
-                >加入我的监控池</button>
-                <button
-                  v-if="
-                    activePersonalWatchlistLibrary
-                    && canEditPersonalWatchlistLibrary(activePersonalWatchlistLibrary)
-                  "
-                  type="button"
-                  class="secondary-button danger-soft"
-                  :disabled="personalWatchlistBulkRemoving || Boolean(personalWatchlistBusyPlid)"
-                  @click.stop="removeCardFromActivePersonalWatchlistLibrary(card)"
-                >从此类型库移除</button>
-                <button
-                  v-if="props.isAdmin && card.target"
-                  type="button"
-                  class="secondary-button"
-                  @click.stop="openTargetActionForLink(card.plid, card.target.url)"
-                >
-                  监控队列操作
-                </button>
-                <button
-                  v-if="card.personalMember"
-                  type="button"
-                  class="secondary-button danger"
-                  :disabled="personalWatchlistBulkRemoving || Boolean(personalWatchlistBusyPlid)"
-                  @click.stop="removeFromPersonalWatchlist(card.plid)"
-                >
-                  {{
-                    personalWatchlistBusyPlid === card.plid
-                      ? "正在移除…"
-                      : "从个人池移除"
-                  }}
-                </button>
+              <div class="personal-watchlist-product-footer">
+                <OwnStoreSalesComparisonMetrics
+                  v-if="card.competitor?.来源 === 'own_store'"
+                  :own-values="card.competitor.自有官方销量"
+                  :own-through-date="card.competitor.自有官方销量截至"
+                  :follower-values="card.competitor.跟卖近期观察售出"
+                  :follower-through-date="card.competitor.跟卖近期观察售出截至"
+                  :own-context-label="`${card.competitor.自有官方销量店铺数 ?? 0}店 · ${card.competitor.自有官方销量Offer数 ?? 0} Offer`"
+                  :follower-context-label="`${followerSellerCount(card.competitor)}卖家 · ${card.competitor.跟卖报价.length} 报价`"
+                />
+                <CompetitorObservedSalesMetrics
+                  v-else
+                  :values="card.competitor?.近期观察售出"
+                  :through-date="card.competitor?.近期观察售出截至"
+                  context-label="全部卖家 · 全部变体"
+                  compact
+                />
+                <div class="personal-watchlist-product-actions">
+                  <span class="personal-watchlist-added-at">
+                    <small>{{ card.personalMember ? "加入个人池" : "加入共享库" }}时间</small>
+                    <strong>{{ formatChinaDateTime(card.addedAt) }}</strong>
+                  </span>
+                  <button
+                    v-if="card.competitor"
+                    type="button"
+                    class="secondary-button"
+                    @click.stop="openProductDetail(card.competitor, 'personal_watchlist')"
+                  >
+                    {{
+                      card.competitor.来源 === "own_store"
+                        ? "新标签页查看商品详情"
+                        : "查看商品详情"
+                    }}
+                  </button>
+                  <button
+                    v-if="card.personalMember"
+                    type="button"
+                    class="secondary-button"
+                    @click.stop="openPersonalWatchlistCardLibraries(card)"
+                  >
+                    设置类型库
+                  </button>
+                  <button
+                    v-if="
+                      !card.personalMember
+                      && (card.competitor || card.target)
+                    "
+                    type="button"
+                    class="secondary-button"
+                    :disabled="personalWatchlistBulkRemoving || Boolean(personalWatchlistBusyPlid)"
+                    @click.stop="addSharedCardToPersonalWatchlist(card)"
+                  >加入我的监控池</button>
+                  <button
+                    v-if="
+                      activePersonalWatchlistLibrary
+                      && canEditPersonalWatchlistLibrary(activePersonalWatchlistLibrary)
+                    "
+                    type="button"
+                    class="secondary-button danger-soft"
+                    :disabled="personalWatchlistBulkRemoving || Boolean(personalWatchlistBusyPlid)"
+                    @click.stop="removeCardFromActivePersonalWatchlistLibrary(card)"
+                  >从此类型库移除</button>
+                  <button
+                    v-if="props.isAdmin && card.target"
+                    type="button"
+                    class="secondary-button"
+                    @click.stop="openTargetActionForLink(card.plid, card.target.url)"
+                  >
+                    监控队列操作
+                  </button>
+                  <button
+                    v-if="card.personalMember"
+                    type="button"
+                    class="secondary-button danger"
+                    :disabled="personalWatchlistBulkRemoving || Boolean(personalWatchlistBusyPlid)"
+                    @click.stop="removeFromPersonalWatchlist(card.plid)"
+                  >
+                    {{
+                      personalWatchlistBusyPlid === card.plid
+                        ? "正在移除…"
+                        : "从个人池移除"
+                    }}
+                  </button>
+                </div>
               </div>
             </div>
           </article>
@@ -9639,11 +9706,13 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
                   </small>
                   <small v-else>公开评论尚未同步 · 区间末评分 {{ item.评分 ?? "—" }}</small>
                 </div>
-                <CompetitorObservedSalesMetrics
-                  class="competitor-status-observed-sales"
-                  :values="item.近期观察售出"
-                  :through-date="item.近期观察售出截至"
-                  compact
+                <OwnStoreSalesComparisonMetrics
+                  :own-values="item.自有官方销量"
+                  :own-through-date="item.自有官方销量截至"
+                  :follower-values="item.跟卖近期观察售出"
+                  :follower-through-date="item.跟卖近期观察售出截至"
+                  :own-context-label="`${item.自有官方销量店铺数 ?? 0}店 · ${item.自有官方销量Offer数 ?? 0} Offer`"
+                  :follower-context-label="`${followerSellerCount(item)}卖家 · ${item.跟卖报价.length} 报价`"
                 />
               </div>
             </article>
@@ -9810,6 +9879,7 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
                 class="competitor-status-observed-sales"
                 :values="item.近期观察售出"
                 :through-date="item.近期观察售出截至"
+                context-label="全部卖家 · 全部变体"
                 compact
               />
             </div>
@@ -10744,10 +10814,49 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
                   列表区间 {{ activeRangeLabel }} · 默认按库存净流出排序
                 </p>
 
-                <CompetitorObservedSalesMetrics
-                  :values="detail.current_item?.近期观察售出 ?? selected.近期观察售出"
-                  :through-date="detail.current_item?.近期观察售出截至 ?? selected.近期观察售出截至"
-                />
+                <template v-if="selected.来源 === 'own_store'">
+                  <OwnStoreSalesSummary
+                    :series="selectedOwnScopeSales"
+                    title="当前范围全部自有链接官方销量（件）"
+                    aria-label="当前范围全部自有店铺与Offer上架以来官方销量"
+                    :context-label="selectedOwnScopeSalesContext"
+                    source-label="Seller Sales · 当前范围全部自有店铺与 Offer · 从各链接上架日起读取"
+                  />
+                  <OwnStoreSalesSummary
+                    class="own-store-sales-overview-variant"
+                    :series="selectedOwnVariantSales"
+                    :preferred-store-code="selectedOwnSalesStoreCode"
+                    title="当前变体官方销量（件）"
+                    aria-label="当前选中自有变体上架以来官方销量"
+                    listing-label="变体上架时间"
+                    :context-label="selectedOwnVariantSalesContext"
+                    empty-message="当前报价暂无可按 Offer ID 精确匹配的 Seller Sales 变体销量。"
+                    source-label="Seller Sales · 仅统计当前 Offer ID · 从变体上架日起读取"
+                  />
+                  <CompetitorObservedSalesMetrics
+                    class="competitor-follower-observed-sales"
+                    :values="detail.current_item?.跟卖近期观察售出 ?? selected.跟卖近期观察售出"
+                    :through-date="detail.current_item?.跟卖近期观察售出截至 ?? selected.跟卖近期观察售出截至"
+                    title="全部跟卖报价库存观察售出（件）"
+                    :context-label="allFollowerObservedSalesContext"
+                  />
+                </template>
+                <template v-else>
+                  <CompetitorObservedSalesMetrics
+                    class="competitor-seller-observed-sales"
+                    :values="selectedOffer?.卖家近期观察售出"
+                    :through-date="selectedOffer?.卖家近期观察售出截至"
+                    title="当前卖家全部变体库存观察售出（件）"
+                    :context-label="selectedSellerObservedSalesContext"
+                  />
+                  <CompetitorObservedSalesMetrics
+                    class="competitor-variant-observed-sales"
+                    :values="selectedOffer?.变体近期观察售出"
+                    :through-date="selectedOffer?.变体近期观察售出截至"
+                    title="当前变体单独库存观察售出（件）"
+                    :context-label="selectedVariantObservedSalesContext"
+                  />
+                </template>
 
                 <div
                   v-if="selectedSellerGroups.length"
@@ -10808,7 +10917,7 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
                         @click="selectCompetitorOffer(offer)"
                       >
                         <span>
-                          <strong>{{ offer.变体 || "默认款" }}</strong>
+                          <strong>变体：{{ offer.变体 || "默认款" }}</strong>
                           <small>
                             {{ offer.报价来源 === "seller_api" ? "自有 Seller API" : "公开跟卖" }}
                             · SKU {{ offer.SKU || "未返回" }}
@@ -11130,8 +11239,7 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
                     </div>
                     <OwnStoreSalesChart
                       v-if="selected.来源 === 'own_store'"
-                      :series="detail.own_store_sales"
-                      :preferred-store-code="selectedOwnSalesStoreCode"
+                      :series="selectedOwnScopeSales"
                     />
                   </div>
                 </div>

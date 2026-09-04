@@ -97,6 +97,29 @@ test("the personal pool is a standalone top workspace with direct card location"
   );
 });
 
+test("personal watchlist uses the lower card space for metrics and actions", () => {
+  assert.match(
+    pageSource,
+    /<div class="personal-watchlist-product-footer">[\s\S]*?<CompetitorObservedSalesMetrics[\s\S]*?<div class="personal-watchlist-product-actions">/,
+  );
+  assert.match(
+    pageSource,
+    /class="personal-watchlist-added-at"[\s\S]*?<small>[\s\S]*?加入个人池[\s\S]*?<strong>/,
+  );
+  assert.match(
+    styleSource,
+    /\.personal-watchlist-product-footer\s*\{[^}]*display:\s*grid;[^}]*grid-template-columns:\s*minmax\(220px,\s*242px\)\s+minmax\(0,\s*1fr\);/,
+  );
+  assert.match(
+    styleSource,
+    /\.personal-watchlist-product-footer \.personal-watchlist-product-actions\s*\{[^}]*display:\s*grid;/,
+  );
+  assert.match(
+    styleSource,
+    /@media \(max-width: 560px\)\s*\{[\s\S]*?\.personal-watchlist-product-footer\s*\{[^}]*grid-template-columns:\s*1fr;/,
+  );
+});
+
 test("personal watchlist supports cross-page selection and safe bulk removal", () => {
   assert.match(pageSource, /const personalWatchlistSelectionMode = ref\(false\)/);
   assert.match(pageSource, /const selectedPersonalWatchlistPlids = ref<Set<string>>\(new Set\(\)\)/);

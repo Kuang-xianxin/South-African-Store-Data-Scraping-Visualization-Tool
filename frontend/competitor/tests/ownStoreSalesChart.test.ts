@@ -158,6 +158,8 @@ test("sales component uses bars and contains no line-chart rendering contract", 
   assert.match(component, /已覆盖日期均为 0 件/);
   assert.match(component, /完整 0 件基线/);
   assert.match(component, /缺失，不补 0/);
+  assert.match(component, /尚未完整（截至采集）/);
+  assert.doesNotMatch(component, /日内截至采集/);
   assert.match(component, /class="own-sales-active-band"/);
   assert.doesNotMatch(
     component,

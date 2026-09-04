@@ -7,11 +7,15 @@ import type {
 const props = withDefaults(defineProps<{
   values?: CompetitorObservedSalesWindows;
   throughDate?: string | null;
+  title?: string;
+  contextLabel?: string | null;
   compact?: boolean;
   embedded?: boolean;
 }>(), {
   values: () => ({}),
   throughDate: null,
+  title: "近期库存观察售出（件）",
+  contextLabel: null,
   compact: false,
   embedded: false,
 });
@@ -33,10 +37,13 @@ function observedUnitsLabel(days: typeof windowDays[number]): string {
   <section
     class="competitor-observed-sales"
     :class="{ compact, embedded }"
-    aria-label="近期库存观察售出"
+    :aria-label="title"
   >
     <header v-if="!embedded">
-      <strong>近期库存观察售出（件）</strong>
+      <span class="competitor-observed-sales-heading">
+        <strong>{{ title }}</strong>
+        <small v-if="contextLabel">{{ contextLabel }}</small>
+      </span>
       <span>{{ throughDate ? `截至 ${throughDate}` : "暂无可用库存日期" }}</span>
     </header>
     <dl class="competitor-observed-sales-list">

@@ -222,6 +222,14 @@ test("standalone own-link detail groups its modules behind an accessible tab bar
   );
 });
 
+test("shared seller offer cards label each readable variant name", () => {
+  assert.match(
+    pageSource,
+    /<strong>变体：\{\{ offer\.变体 \|\| "默认款" \}\}<\/strong>/,
+  );
+  assert.match(pageSource, /· SKU \{\{ offer\.SKU \|\| "未返回" \}\}/);
+});
+
 test("standalone own-link detail keeps its enlarged actions fixed at the viewport bottom", () => {
   const actionsIndex = pageSource.lastIndexOf('<div class="competitor-modal-actions">');
   const actionsSource = pageSource.slice(actionsIndex, actionsIndex + 520);

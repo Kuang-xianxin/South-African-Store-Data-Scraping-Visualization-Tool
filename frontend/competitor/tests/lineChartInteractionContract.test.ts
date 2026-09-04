@@ -107,7 +107,7 @@ test("offer charts share a Beijing range selector while official sales keep thei
     competitorsSource.indexOf("function offerTrendXAtTime("),
   );
   assert.doesNotMatch(dateHandlers, /appliedStartDate|appliedEndDate|fetchCompetitorDetail|detail\.value\s*=/);
-  assert.match(competitorsSource, /<OwnStoreSalesChart[\s\S]*?:series="detail\.own_store_sales"/);
+  assert.match(competitorsSource, /<OwnStoreSalesChart[\s\S]*?:series="selectedOwnScopeSales"/);
   assert.doesNotMatch(ownStoreSalesSource, /offerTrendRange/);
 });
 
