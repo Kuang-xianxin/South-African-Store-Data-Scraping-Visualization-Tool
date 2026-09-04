@@ -1299,6 +1299,8 @@ def create_app(project_root: Path | None = None) -> FastAPI:
             return response
         path = request.url.path
         if path.startswith("/assets/"):
+            if path.casefold().endswith(".css"):
+                response.headers["Content-Type"] = "text/css; charset=utf-8"
             response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
         elif path in {"/", "/index.html"}:
             response.headers["Cache-Control"] = "no-cache"
