@@ -95,7 +95,7 @@ test("personal watchlist reranks from refreshed interval metrics", () => {
   );
 });
 
-test("radar cards use link totals while seller workbench separates seller and variant totals", () => {
+test("radar and category cards use link totals while seller workbench separates seller and variant totals", () => {
   assert.deepEqual(
     [...observedSalesSource.matchAll(/const windowDays = \[([^\]]+)\]/g)]
       .map((match) => match[1]?.replace(/\s/g, "")),
@@ -139,15 +139,15 @@ test("radar cards use link totals while seller workbench separates seller and va
   assert.doesNotMatch(stylesSource, /competitor-observed-sales-grid/);
   assert.equal(
     pageSource.match(/<CompetitorObservedSalesMetrics/g)?.length,
-    5,
+    6,
   );
   assert.match(pageSource, /:values="card\.competitor\?\.近期观察售出"/);
   assert.match(pageSource, /全部卖家 · 全部变体/);
   assert.equal(
     pageSource.match(/:values="item\.近期观察售出"/g)?.length,
-    1,
+    2,
   );
-  assert.equal(pageSource.match(/<OwnStoreSalesComparisonMetrics/g)?.length, 2);
+  assert.equal(pageSource.match(/<OwnStoreSalesComparisonMetrics/g)?.length, 3);
   assert.match(pageSource, /:own-values="item\.自有官方销量"/);
   assert.match(pageSource, /:follower-values="item\.跟卖近期观察售出"/);
   assert.match(pageSource, /:own-values="card\.competitor\.自有官方销量"/);
@@ -174,9 +174,9 @@ test("radar cards use link totals while seller workbench separates seller and va
     )].length,
     1,
   );
-  assert.equal(pageSource.match(/最新评论数（PLID 共用）/g)?.length, 3);
-  assert.equal(pageSource.match(/class="competitor-first-monitored-badge/g)?.length, 3);
-  assert.equal(pageSource.match(/<small>首次监控<\/small>/g)?.length, 3);
+  assert.equal(pageSource.match(/最新评论数（PLID 共用）/g)?.length, 4);
+  assert.equal(pageSource.match(/class="competitor-first-monitored-badge/g)?.length, 4);
+  assert.equal(pageSource.match(/<small>首次监控<\/small>/g)?.length, 4);
   assert.doesNotMatch(
     pageSource,
     /最新评论数（PLID 共用）[\s\S]{0,180}?首次监控/,
@@ -203,7 +203,7 @@ test("radar cards use link totals while seller workbench separates seller and va
   assert.match(stylesSource, /\.competitor-card-category li > strong,[\s\S]*grid-column: 3/);
   assert.match(stylesSource, /\.competitor-card-category li:not\(:last-child\)::after/);
   assert.match(pageSource, /latestReviewCountLabel\(card\.competitor\)/);
-  assert.equal(pageSource.match(/latestReviewCountLabel\(item\)/g)?.length, 2);
+  assert.equal(pageSource.match(/latestReviewCountLabel\(item\)/g)?.length, 3);
   assert.match(typesSource, /首次监控时间\?: string \| null/);
   assert.match(typesSource, /最新评论数\?: number \| null/);
   assert.match(typesSource, /最新评论获取时间\?: string \| null/);

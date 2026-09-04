@@ -4930,7 +4930,7 @@ td small {
 
 .competitor-category-product-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 540px), 1fr));
   align-items: stretch;
   gap: 14px;
 }
@@ -4977,6 +4977,23 @@ td small {
   line-height: 1.35;
   overflow-wrap: anywhere;
   text-align: right;
+}
+
+.competitor-category-product-source-meta {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 9px;
+}
+
+.competitor-category-product-source-meta > span:first-child {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.competitor-category-product-source-meta > .competitor-first-monitored-badge {
+  flex: 0 0 auto;
 }
 
 .competitor-category-source-badge {
@@ -5066,6 +5083,11 @@ td small {
   -webkit-line-clamp: 2;
 }
 
+.competitor-category-product-copy > span + span {
+  color: #476757;
+  font-weight: 700;
+}
+
 .competitor-category-product-copy > em {
   color: #17613d;
   font-size: 0.62rem;
@@ -5075,6 +5097,63 @@ td small {
 
 .competitor-category-product-card.is-own-store .competitor-category-product-copy > em {
   color: #155ab9;
+}
+
+.competitor-category-product-metrics {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(128px, 1fr));
+  border-top: 1px solid #e1e9e3;
+  border-bottom: 1px solid #e1e9e3;
+}
+
+.competitor-category-product-card.is-own-store .competitor-category-product-metrics {
+  border-color: #b7d3f6;
+}
+
+.competitor-category-product-metrics > div {
+  display: grid;
+  min-width: 0;
+  align-content: start;
+  gap: 4px;
+  padding: 10px 11px;
+  border-right: 1px solid #e1e9e3;
+}
+
+.competitor-category-product-card.is-own-store .competitor-category-product-metrics > div {
+  border-color: #b7d3f6;
+}
+
+.competitor-category-product-metrics > div:last-child {
+  border-right: 0;
+}
+
+.competitor-category-product-metrics span,
+.competitor-category-product-metrics small {
+  color: #61776a;
+  font-size: 0.57rem;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+.competitor-category-product-metrics strong {
+  color: #102e20;
+  font-size: 0.76rem;
+  line-height: 1.25;
+  overflow-wrap: anywhere;
+}
+
+.competitor-category-product-metrics .stock-pill {
+  width: fit-content;
+}
+
+.competitor-category-product-sales {
+  padding: 11px 12px 12px;
+}
+
+.competitor-category-product-sales > .competitor-observed-sales,
+.competitor-category-product-sales > .own-store-sales-comparison {
+  width: 100%;
+  min-width: 0;
 }
 
 .competitor-category-platform-link {

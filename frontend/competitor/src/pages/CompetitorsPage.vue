@@ -2870,6 +2870,21 @@ function categoryItemSourceDescription(item: CompetitorItem): string {
   return `${stores.slice(0, 2).join(" · ")} 等 ${stores.length} 店`;
 }
 
+function categoryItemOfferSummary(item: CompetitorItem): string {
+  if (item.来源 === "own_store") {
+    return [
+      `${item.自有报价.length} 个自有 Offer`,
+      `${followerSellerCount(item)} 个跟卖卖家`,
+      `${ownStoreVariantCount(item)} 个自有变体`,
+    ].join(" · ");
+  }
+  return [
+    `${followerSellerCount(item)} 个卖家`,
+    `${item.跟卖报价.length} 个变体 / 报价`,
+    `主卖家 ${item.当前卖家 || "未知"}`,
+  ].join(" · ");
+}
+
 function categoryItemPathText(item: CompetitorItem): string {
   return competitorCategoryPath(item).map((category) => category.name).join(" › ");
 }
@@ -10267,7 +10282,13 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
                   >
                     {{ item.来源 === "own_store" ? "★ 自有链接" : "真正竞品" }}
                   </strong>
-                  <span>{{ categoryItemSourceDescription(item) }}</span>
+                  <span class="competitor-category-product-source-meta">
+                    <span>{{ categoryItemSourceDescription(item) }}</span>
+                    <span class="competitor-first-monitored-badge is-compact">
+                      <small>首次监控</small>
+                      <strong>{{ formatChinaDateTime(item.首次监控时间 ?? null) }}</strong>
+                    </span>
+                  </span>
                 </div>
                 <button
                   type="button"
@@ -10292,10 +10313,66 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
                   <span class="competitor-category-product-copy">
                     <small>PLID{{ item.plid }}</small>
                     <strong>{{ item.商品 }}</strong>
+                    <span>{{ categoryItemOfferSummary(item) }}</span>
                     <span>{{ categoryItemPathText(item) || "类目路径待采集" }}</span>
                     <em>{{ item.来源 === "own_store" ? "打开自有链接完整详情 →" : "弹出商品完整详情 →" }}</em>
                   </span>
                 </button>
+                <div class="competitor-category-product-metrics">
+                  <div>
+                    <span>{{ item.来源 === "own_store" ? "跟卖报价 / 自有最新价" : "报价区间 / 主报价" }}</span>
+                    <strong>{{ competitorOfferPriceRange(item) }}</strong>
+                    <small>
+                      {{ item.来源 === "own_store" ? "自有" : "主报价" }}
+                      {{ formatCurrency(item.价格) }}
+                    </small>
+                  </div>
+                  <div>
+                    <span>{{ item.来源 === "own_store" ? "Seller API 最新库存" : "主报价库存" }}</span>
+                    <strong
+                      class="stock-pill"
+                      :class="{
+                        exact: item.库存精确,
+                        unavailable: item.库存上限 === '没货',
+                      }"
+                    >{{ item.库存上限 }}</strong>
+                    <small v-if="item.库存参考过期 && item.上次成功库存">
+                      上次成功 {{ item.上次成功库存 }} · {{ formatChinaDateTime(item.上次成功库存时间) }}
+                    </small>
+                    <small v-else>{{ item.当前卖家 || "未知卖家" }}</small>
+                  </div>
+                  <div>
+                    <span>周期内销售额</span>
+                    <strong>{{ formatCurrency(item.周期销售额) }}</strong>
+                    <small>{{ periodInventoryTurnoverLabel(item) }}</small>
+                  </div>
+                  <div>
+                    <span>最新评论数（PLID 共用）</span>
+                    <strong>{{ latestReviewCountLabel(item) }}</strong>
+                    <small v-if="item.最新评论获取时间">
+                      评论更新 {{ formatChinaDateTime(item.最新评论获取时间) }} · 评分 {{ item.评分 ?? "—" }}
+                    </small>
+                    <small v-else>公开评论尚未同步 · 评分 {{ item.评分 ?? "—" }}</small>
+                  </div>
+                </div>
+                <div class="competitor-category-product-sales">
+                  <OwnStoreSalesComparisonMetrics
+                    v-if="item.来源 === 'own_store'"
+                    :own-values="item.自有官方销量"
+                    :own-through-date="item.自有官方销量截至"
+                    :follower-values="item.跟卖近期观察售出"
+                    :follower-through-date="item.跟卖近期观察售出截至"
+                    :own-context-label="`${item.自有官方销量店铺数 ?? 0}店 · ${item.自有官方销量Offer数 ?? 0} Offer`"
+                    :follower-context-label="`${followerSellerCount(item)}卖家 · ${item.跟卖报价.length} 报价`"
+                  />
+                  <CompetitorObservedSalesMetrics
+                    v-else
+                    :values="item.近期观察售出"
+                    :through-date="item.近期观察售出截至"
+                    context-label="全部卖家 · 全部变体"
+                    compact
+                  />
+                </div>
                 <a
                   class="competitor-category-platform-link"
                   :href="item.链接"

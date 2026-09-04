@@ -78,3 +78,21 @@ test("all three radar category hierarchies expose buttons and the catalog uses a
   assert.match(stylesSource, /\.competitor-category-product-card\.is-own-store/);
   assert.match(stylesSource, /\.competitor-category-source-badge\.is-own-store/);
 });
+
+test("category directory cards expose the radar card operating details", () => {
+  const cardStart = pageSource.indexOf('class="competitor-category-product-card"');
+  const cardEnd = pageSource.indexOf("</article>", cardStart);
+  const cardSource = pageSource.slice(cardStart, cardEnd);
+
+  assert.ok(cardStart >= 0 && cardEnd > cardStart);
+  assert.match(cardSource, /categoryItemOfferSummary\(item\)/);
+  assert.match(cardSource, /competitor-first-monitored-badge/);
+  assert.match(cardSource, /competitorOfferPriceRange\(item\)/);
+  assert.match(cardSource, /item\.库存上限/);
+  assert.match(cardSource, /item\.周期销售额/);
+  assert.match(cardSource, /latestReviewCountLabel\(item\)/);
+  assert.match(cardSource, /<OwnStoreSalesComparisonMetrics/);
+  assert.match(cardSource, /<CompetitorObservedSalesMetrics/);
+  assert.match(stylesSource, /\.competitor-category-product-metrics/);
+  assert.match(stylesSource, /\.competitor-category-product-sales/);
+});
