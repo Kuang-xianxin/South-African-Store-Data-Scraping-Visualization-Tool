@@ -29,10 +29,12 @@ test("competitor images retry transient proxy failures before showing a placehol
   assert.match(pageSource, /image\.dataset\.imageRetryAttempt/);
   assert.match(pageSource, /image\.src = competitorImageUrl\(url, nextAttempt\);/);
   assert.match(pageSource, /failedCompetitorImages\.value = new Set\(\);/);
-  assert.equal(
-    [...pageSource.matchAll(/@error="retryCompetitorImage\(\$event, /g)].length,
-    6,
-  );
+  const proxiedImageCount = [...pageSource.matchAll(/:src="competitorImageUrl\(/g)].length;
+  const retryingImageCount = [
+    ...pageSource.matchAll(/@error="retryCompetitorImage\(\$event, /g),
+  ].length;
+  assert.ok(proxiedImageCount > 0);
+  assert.equal(retryingImageCount, proxiedImageCount);
   assert.doesNotMatch(pageSource, /@error="markCompetitorImageFailed\(/);
 });
 

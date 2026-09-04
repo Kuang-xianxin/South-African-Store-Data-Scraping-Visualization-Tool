@@ -1,0 +1,80 @@
+import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import test from "node:test";
+
+import {
+  competitorCategoryIdentity,
+  competitorItemMatchesCategory,
+  mergeCompetitorCategoryCatalog,
+  type CompetitorCategoryCatalogItem,
+} from "../src/competitorCategoryMatches.ts";
+import type { CompetitorCategoryBreadcrumb } from "../src/types.ts";
+
+const pageSource = readFileSync(
+  new URL("../src/pages/CompetitorsPage.vue", import.meta.url),
+  "utf8",
+);
+const stylesSource = readFileSync(new URL("../src/styles.css", import.meta.url), "utf8");
+
+function category(
+  name: string,
+  id: string | null = null,
+  slug: string | null = null,
+  type: string | null = "department",
+): CompetitorCategoryBreadcrumb {
+  return { name, id, slug, type };
+}
+
+function item(
+  plid: string,
+  source: CompetitorCategoryCatalogItem["来源"],
+  path: CompetitorCategoryBreadcrumb[],
+): CompetitorCategoryCatalogItem {
+  return { plid, 来源: source, 商品: `Product ${plid}`, 类目路径: path };
+}
+
+test("matches every breadcrumb level by persisted category identity", () => {
+  const broad = category("Office & Stationery", "100");
+  const leaf = category("Screens", "104", "screens", "productline");
+  const product = item("A", "competitor", [broad, category("Office", "101"), leaf]);
+
+  assert.equal(competitorItemMatchesCategory(product, broad), true);
+  assert.equal(competitorItemMatchesCategory(product, leaf), true);
+  assert.equal(competitorItemMatchesCategory(product, category("Screens", "999")), false);
+});
+
+test("falls back from missing ids to normalized slug then type and name", () => {
+  assert.equal(
+    competitorCategoryIdentity(category("Screens", null, " Screens ", "productline")),
+    "slug:screens",
+  );
+  assert.equal(
+    competitorCategoryIdentity(category(" Screens ", null, null, " ProductLine ")),
+    "type-name:productline:screens",
+  );
+});
+
+test("deduplicates PLIDs, lets own-store evidence win, and lists own links first", () => {
+  const selected = category("Screens", "104");
+  const catalog = mergeCompetitorCategoryCatalog(
+    [item("A", "competitor", [selected]), item("B", "competitor", [selected])],
+    [item("A", "own_store", [selected]), item("C", "own_store", [selected])],
+  );
+
+  assert.deepEqual(catalog.map((entry) => `${entry.来源}:${entry.plid}`), [
+    "own_store:A",
+    "own_store:C",
+    "competitor:B",
+  ]);
+});
+
+test("all three radar category hierarchies expose buttons and the catalog uses all-store data", () => {
+  assert.equal(pageSource.match(/class="competitor-category-node-button"/g)?.length, 3);
+  assert.equal(pageSource.match(/@click\.stop="openCategoryModal\(category, \$event\)"/g)?.length, 3);
+  assert.match(pageSource, /class="competitor-modal competitor-category-modal"/);
+  assert.match(pageSource, /fetchOwnStoreCompetitors\([\s\S]*?"all"/);
+  assert.match(pageSource, /openCategoryProductDetail\(item\)/);
+  assert.match(pageSource, /自有链接/);
+  assert.match(stylesSource, /\.competitor-category-product-card\.is-own-store/);
+  assert.match(stylesSource, /\.competitor-category-source-badge\.is-own-store/);
+});

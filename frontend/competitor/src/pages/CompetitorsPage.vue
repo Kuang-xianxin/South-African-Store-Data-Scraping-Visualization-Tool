@@ -105,6 +105,10 @@ import {
   matchesCompetitorSearch,
 } from "../competitorSearch";
 import {
+  competitorItemMatchesCategory,
+  mergeCompetitorCategoryCatalog,
+} from "../competitorCategoryMatches";
+import {
   OWN_OFFER_LATEST_STATUS_OPTIONS,
   matchesOwnOfferLatestFilters,
   ownOfferLatestStatusLabel,
@@ -155,6 +159,7 @@ import {
 } from "../collectionBatchOptions";
 import type {
   CollectResult,
+  CompetitorCategoryBreadcrumb,
   CompetitorDateRange,
   CompetitorDetail,
   CompetitorItem,
@@ -529,6 +534,19 @@ const withStockProbe = ref(true);
 const visibleBrowser = ref(false);
 const competitors = shallowRef<CompetitorItem[]>([]);
 const storeCompetitors = shallowRef<CompetitorItem[]>([]);
+const categoryCatalogOwnStoreItems = shallowRef<CompetitorItem[]>([]);
+const categoryCatalogLoadedKey = ref("");
+const categoryCatalogLoading = ref(false);
+const categoryCatalogError = ref("");
+const categoryModalOpen = ref(false);
+const selectedCategory = ref<CompetitorCategoryBreadcrumb | null>(null);
+const categoryCatalogQuery = ref("");
+const categoryCatalogPage = ref(1);
+const categoryCatalogPageSize = 24;
+const categoryModalCloseButton = ref<HTMLButtonElement | null>(null);
+let categoryModalTrigger: HTMLElement | null = null;
+let categoryCatalogAbortController: AbortController | null = null;
+let categoryCatalogRequestId = 0;
 const personalWatchlistOverviewItems = shallowRef<CompetitorItem[]>([]);
 const personalWatchlistOverviewLoading = ref(true);
 const personalWatchlistOverviewFailed = ref(false);
@@ -735,6 +753,40 @@ const allCompetitorItems = computed(() => [
   ...storeCompetitors.value,
   ...competitors.value,
 ]);
+const categoryCatalogItems = computed(() => mergeCompetitorCategoryCatalog<CompetitorItem>(
+  competitors.value,
+  personalWatchlistOverviewItems.value,
+  storeCompetitors.value,
+  categoryCatalogOwnStoreItems.value,
+));
+const categoryCatalogMatches = computed(() => {
+  const category = selectedCategory.value;
+  if (!category) return [];
+  return categoryCatalogItems.value.filter((item) => (
+    competitorItemMatchesCategory(item, category)
+  ));
+});
+const filteredCategoryCatalogMatches = computed(() => {
+  const query = categoryCatalogQuery.value.trim().toLocaleLowerCase();
+  if (!query) return categoryCatalogMatches.value;
+  return categoryCatalogMatches.value.filter((item) => (
+    categoryCatalogSearchText(item).includes(query)
+  ));
+});
+const categoryCatalogOwnStoreCount = computed(() => (
+  categoryCatalogMatches.value.filter((item) => item.来源 === "own_store").length
+));
+const categoryCatalogCompetitorCount = computed(() => (
+  categoryCatalogMatches.value.length - categoryCatalogOwnStoreCount.value
+));
+const categoryCatalogPageCount = computed(() => Math.max(
+  1,
+  Math.ceil(filteredCategoryCatalogMatches.value.length / categoryCatalogPageSize),
+));
+const pagedCategoryCatalogMatches = computed(() => {
+  const start = (categoryCatalogPage.value - 1) * categoryCatalogPageSize;
+  return filteredCategoryCatalogMatches.value.slice(start, start + categoryCatalogPageSize);
+});
 const personalWatchlistCompetitorItems = computed(() => [
   ...allCompetitorItems.value,
   ...personalWatchlistOverviewItems.value,
@@ -2187,6 +2239,7 @@ onBeforeUnmount(() => {
   detachCollectionForSessionChange();
   overviewAbortController?.abort();
   ownStoreAbortController?.abort();
+  categoryCatalogAbortController?.abort();
   window.removeEventListener("keydown", handleWindowKeydown);
   window.removeEventListener("beforeunload", closeCollectionClientChannel);
   window.removeEventListener(
@@ -2262,6 +2315,12 @@ watch(competitorPageCount, (pageCount) => {
 });
 watch(storeCompetitorPageCount, (pageCount) => {
   if (storeCompetitorPage.value > pageCount) storeCompetitorPage.value = pageCount;
+});
+watch(categoryCatalogQuery, () => {
+  categoryCatalogPage.value = 1;
+});
+watch(categoryCatalogPageCount, (pageCount) => {
+  if (categoryCatalogPage.value > pageCount) categoryCatalogPage.value = pageCount;
 });
 
 function competitorDetailCacheKey(
@@ -2440,6 +2499,7 @@ watch(
   [
     detailModalOpen,
     () => selected.value !== null,
+    categoryModalOpen,
     targetListOpen,
     targetAuditOpen,
     targetActionOpen,
@@ -2449,6 +2509,7 @@ watch(
   ([
     detailOpen,
     detailSelected,
+    categoryDialogOpen,
     targetManagerOpen,
     targetAuditDialogOpen,
     targetActionDialogOpen,
@@ -2457,6 +2518,7 @@ watch(
   ]) => {
     document.body.style.overflow =
       (!props.detailOnly && detailOpen && detailSelected)
+        || categoryDialogOpen
         || embeddedDetailOpen
         || targetManagerOpen
         || targetAuditDialogOpen
@@ -2777,6 +2839,111 @@ function openProductDetail(
   if (!opened) {
     pageError.value = "浏览器阻止了自有链接详情新标签页，请允许此站点打开新标签页后重试。";
   }
+}
+
+function categoryCatalogSearchText(item: CompetitorItem): string {
+  return [
+    item.plid,
+    item.商品,
+    item.链接,
+    item.当前卖家 ?? "",
+    ...categoryItemStoreNames(item),
+    ...competitorCategoryPath(item).map((category) => category.name),
+  ].join(" ").toLocaleLowerCase();
+}
+
+function categoryItemStoreNames(item: CompetitorItem): string[] {
+  return [...new Set(
+    (item.自有报价 ?? [])
+      .map((offer) => offer.店铺.trim())
+      .filter(Boolean),
+  )];
+}
+
+function categoryItemSourceDescription(item: CompetitorItem): string {
+  if (item.来源 !== "own_store") {
+    return item.当前卖家 ? `主卖家 ${item.当前卖家}` : "系统真正竞品";
+  }
+  const stores = categoryItemStoreNames(item);
+  if (!stores.length) return "账号授权店铺的自有链接";
+  if (stores.length <= 2) return stores.join(" · ");
+  return `${stores.slice(0, 2).join(" · ")} 等 ${stores.length} 店`;
+}
+
+function categoryItemPathText(item: CompetitorItem): string {
+  return competitorCategoryPath(item).map((category) => category.name).join(" › ");
+}
+
+async function loadCategoryCatalogOwnStoreItems(): Promise<void> {
+  const cacheKey = ownStoreScopeCacheKey("all", "");
+  if (categoryCatalogLoadedKey.value === cacheKey) return;
+  const cachedOverview = ownStoreOverviewCache.get(cacheKey);
+  if (cachedOverview) {
+    categoryCatalogOwnStoreItems.value = cachedOverview.store_items;
+    categoryCatalogLoadedKey.value = cacheKey;
+    categoryCatalogError.value = "";
+    return;
+  }
+
+  const requestId = ++categoryCatalogRequestId;
+  categoryCatalogAbortController?.abort();
+  const controller = new AbortController();
+  categoryCatalogAbortController = controller;
+  categoryCatalogOwnStoreItems.value = [];
+  categoryCatalogLoading.value = true;
+  categoryCatalogError.value = "";
+  try {
+    const overview = await fetchOwnStoreCompetitors(
+      appliedStartDate.value,
+      appliedEndDate.value,
+      "all",
+      controller.signal,
+    );
+    if (requestId !== categoryCatalogRequestId) return;
+    categoryCatalogOwnStoreItems.value = overview.store_items;
+    categoryCatalogLoadedKey.value = cacheKey;
+    cacheScopeValue(ownStoreOverviewCache, cacheKey, overview);
+  } catch (error) {
+    if (requestId !== categoryCatalogRequestId || isAbortError(error)) return;
+    categoryCatalogError.value = error instanceof Error
+      ? error.message
+      : "读取账号全部授权店铺的自有链接失败";
+  } finally {
+    if (requestId === categoryCatalogRequestId) categoryCatalogLoading.value = false;
+    if (categoryCatalogAbortController === controller) {
+      categoryCatalogAbortController = null;
+    }
+  }
+}
+
+function openCategoryModal(
+  category: CompetitorCategoryBreadcrumb,
+  event: MouseEvent,
+): void {
+  categoryModalTrigger = event.currentTarget instanceof HTMLElement
+    ? event.currentTarget
+    : null;
+  selectedCategory.value = { ...category };
+  categoryCatalogQuery.value = "";
+  categoryCatalogPage.value = 1;
+  categoryCatalogError.value = "";
+  categoryModalOpen.value = true;
+  void nextTick(() => categoryModalCloseButton.value?.focus());
+  void loadCategoryCatalogOwnStoreItems();
+}
+
+function closeCategoryModal(): void {
+  categoryModalOpen.value = false;
+  selectedCategory.value = null;
+  categoryCatalogQuery.value = "";
+  categoryCatalogPage.value = 1;
+  const trigger = categoryModalTrigger;
+  categoryModalTrigger = null;
+  void nextTick(() => trigger?.focus());
+}
+
+function openCategoryProductDetail(item: CompetitorItem): void {
+  openProductDetail(item, item.来源 === "own_store" ? "personal_watchlist" : "radar");
 }
 
 let handledRequestedDetailRevision = 0;
@@ -3297,10 +3464,22 @@ function handleWindowKeydown(event: KeyboardEvent) {
     closeTargetList();
     return;
   }
-  if (detailModalOpen.value || props.embeddedDetailOnly) closeDetailView();
+  if (detailModalOpen.value || props.embeddedDetailOnly) {
+    closeDetailView();
+    return;
+  }
+  if (categoryModalOpen.value) closeCategoryModal();
 }
 
 async function loadOverview() {
+  ++categoryCatalogRequestId;
+  categoryCatalogAbortController?.abort();
+  categoryCatalogAbortController = null;
+  categoryCatalogOwnStoreItems.value = [];
+  categoryCatalogLoadedKey.value = "";
+  categoryCatalogLoading.value = false;
+  categoryCatalogError.value = "";
+  if (categoryModalOpen.value) closeCategoryModal();
   ownStoreOverviewCache.clear();
   failedCompetitorImages.value = new Set();
   const requestId = ++overviewRequestId;
@@ -7535,10 +7714,17 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
                     v-for="(category, categoryIndex) in competitorCategoryPath(card.competitor)"
                     :key="`${category.id || category.slug || category.name}-${categoryIndex}`"
                   >
-                    <small>
-                      {{ competitorCategoryLevelLabel(categoryIndex, competitorCategoryPath(card.competitor).length) }}
-                    </small>
-                    <strong>{{ category.name }}</strong>
+                    <button
+                      class="competitor-category-node-button"
+                      type="button"
+                      :aria-label="`查看 ${category.name} 类目的全部系统商品`"
+                      @click.stop="openCategoryModal(category, $event)"
+                    >
+                      <small>
+                        {{ competitorCategoryLevelLabel(categoryIndex, competitorCategoryPath(card.competitor).length) }}
+                      </small>
+                      <strong>{{ category.name }}</strong>
+                    </button>
                   </li>
                 </ol>
                 <p v-else class="competitor-card-category-empty">
@@ -9688,10 +9874,17 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
                       v-for="(category, categoryIndex) in competitorCategoryPath(item)"
                       :key="`${category.id || category.slug || category.name}-${categoryIndex}`"
                     >
-                      <small>
-                        {{ competitorCategoryLevelLabel(categoryIndex, competitorCategoryPath(item).length) }}
-                      </small>
-                      <strong>{{ category.name }}</strong>
+                      <button
+                        class="competitor-category-node-button"
+                        type="button"
+                        :aria-label="`查看 ${category.name} 类目的全部系统商品`"
+                        @click.stop="openCategoryModal(category, $event)"
+                      >
+                        <small>
+                          {{ competitorCategoryLevelLabel(categoryIndex, competitorCategoryPath(item).length) }}
+                        </small>
+                        <strong>{{ category.name }}</strong>
+                      </button>
                     </li>
                   </ol>
                   <p v-else class="competitor-card-category-empty">
@@ -9857,10 +10050,17 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
                     v-for="(category, categoryIndex) in competitorCategoryPath(item)"
                     :key="`${category.id || category.slug || category.name}-${categoryIndex}`"
                   >
-                    <small>
-                      {{ competitorCategoryLevelLabel(categoryIndex, competitorCategoryPath(item).length) }}
-                    </small>
-                    <strong>{{ category.name }}</strong>
+                    <button
+                      class="competitor-category-node-button"
+                      type="button"
+                      :aria-label="`查看 ${category.name} 类目的全部系统商品`"
+                      @click.stop="openCategoryModal(category, $event)"
+                    >
+                      <small>
+                        {{ competitorCategoryLevelLabel(categoryIndex, competitorCategoryPath(item).length) }}
+                      </small>
+                      <strong>{{ category.name }}</strong>
+                    </button>
                   </li>
                 </ol>
                 <p v-else class="competitor-card-category-empty">
@@ -9974,6 +10174,168 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
               重新读取
             </button>
           </div>
+        </section>
+      </div>
+    </Teleport>
+
+    <Teleport to="body">
+      <div
+        v-if="categoryModalOpen && selectedCategory"
+        class="competitor-modal-backdrop competitor-category-backdrop"
+        @click.self="closeCategoryModal"
+      >
+        <section
+          class="competitor-modal competitor-category-modal"
+          role="dialog"
+          aria-modal="true"
+          :aria-label="`${selectedCategory.name} 类目全部商品`"
+        >
+          <header class="competitor-modal-header competitor-category-modal-header">
+            <div>
+              <p class="section-kicker">CATEGORY PRODUCT DIRECTORY</p>
+              <h2>{{ selectedCategory.name }}</h2>
+              <span>
+                系统中类目路径包含此节点的全部商品链接 · 自有链接已置顶并用蓝色突出
+              </span>
+            </div>
+            <button
+              ref="categoryModalCloseButton"
+              type="button"
+              class="competitor-modal-close"
+              aria-label="关闭同类商品弹窗"
+              @click="closeCategoryModal"
+            >
+              ×
+            </button>
+          </header>
+
+          <div class="competitor-category-toolbar">
+            <div class="competitor-category-counts" aria-live="polite">
+              <strong>{{ categoryCatalogMatches.length }} 条同类链接</strong>
+              <span class="is-own-store">自有链接 {{ categoryCatalogOwnStoreCount }}</span>
+              <span>真正竞品 {{ categoryCatalogCompetitorCount }}</span>
+            </div>
+            <label>
+              <span>在当前类目中搜索</span>
+              <input
+                v-model="categoryCatalogQuery"
+                type="search"
+                placeholder="商品名、PLID、店铺或链接"
+              />
+            </label>
+          </div>
+
+          <div
+            v-if="categoryCatalogLoading"
+            class="competitor-category-load-state"
+            aria-live="polite"
+          >
+            正在补齐账号全部授权店铺的自有链接；真正竞品和已加载链接可先查看。
+          </div>
+          <div
+            v-else-if="categoryCatalogError"
+            class="competitor-category-load-state has-error"
+            role="alert"
+          >
+            全部授权店铺的自有链接暂未补齐：{{ categoryCatalogError }}。当前结果可能不完整。
+            <button type="button" class="quiet-button" @click="loadCategoryCatalogOwnStoreItems">
+              重新读取
+            </button>
+          </div>
+
+          <div class="competitor-category-results">
+            <div
+              v-if="!filteredCategoryCatalogMatches.length"
+              class="empty-state competitor-category-empty-state"
+            >
+              <strong>{{ categoryCatalogQuery ? "没有匹配搜索的商品" : "这个类目暂无系统商品" }}</strong>
+              <span>
+                {{ categoryCatalogQuery ? "请换一个商品名、PLID、店铺或链接关键词。" : "这里只按本地已采集的类目路径匹配，不会根据标题猜测类目。" }}
+              </span>
+            </div>
+            <div v-else class="competitor-category-product-grid">
+              <article
+                v-for="item in pagedCategoryCatalogMatches"
+                :key="`${item.来源}-${item.plid}`"
+                class="competitor-category-product-card"
+                :class="{ 'is-own-store': item.来源 === 'own_store' }"
+              >
+                <div class="competitor-category-product-source">
+                  <strong
+                    class="competitor-category-source-badge"
+                    :class="{ 'is-own-store': item.来源 === 'own_store' }"
+                  >
+                    {{ item.来源 === "own_store" ? "★ 自有链接" : "真正竞品" }}
+                  </strong>
+                  <span>{{ categoryItemSourceDescription(item) }}</span>
+                </div>
+                <button
+                  type="button"
+                  class="competitor-category-product-main"
+                  :aria-haspopup="item.来源 === 'competitor' ? 'dialog' : undefined"
+                  :aria-label="`查看 ${item.商品} 详情`"
+                  @click="openCategoryProductDetail(item)"
+                >
+                  <span class="competitor-product-image competitor-category-product-image">
+                    <img
+                      v-if="canShowCompetitorImage(item.图片)"
+                      :src="competitorImageUrl(item.图片)"
+                      :alt="`${item.商品} 商品图片`"
+                      width="192"
+                      height="192"
+                      loading="lazy"
+                      decoding="async"
+                      @error="retryCompetitorImage($event, item.图片)"
+                    />
+                    <span v-else>暂无图片</span>
+                  </span>
+                  <span class="competitor-category-product-copy">
+                    <small>PLID{{ item.plid }}</small>
+                    <strong>{{ item.商品 }}</strong>
+                    <span>{{ categoryItemPathText(item) || "类目路径待采集" }}</span>
+                    <em>{{ item.来源 === "own_store" ? "打开自有链接完整详情 →" : "弹出商品完整详情 →" }}</em>
+                  </span>
+                </button>
+                <a
+                  class="competitor-category-platform-link"
+                  :href="item.链接"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  @click.stop
+                >
+                  <span>{{ item.链接 }}</span>
+                  <strong>打开平台链接 ↗</strong>
+                </a>
+              </article>
+            </div>
+          </div>
+
+          <footer
+            v-if="filteredCategoryCatalogMatches.length"
+            class="competitor-category-pagination"
+          >
+            <button
+              type="button"
+              class="secondary-button"
+              :disabled="categoryCatalogPage <= 1"
+              @click="categoryCatalogPage -= 1"
+            >
+              上一页
+            </button>
+            <span>
+              第 {{ categoryCatalogPage }} / {{ categoryCatalogPageCount }} 页 · 本页
+              {{ pagedCategoryCatalogMatches.length }} 条 · 共
+              {{ filteredCategoryCatalogMatches.length }} 条
+            </span>
+            <button
+              type="button"
+              class="secondary-button"
+              :disabled="categoryCatalogPage >= categoryCatalogPageCount"
+              @click="categoryCatalogPage += 1"
+            >
+              下一页
+            </button>
+          </footer>
         </section>
       </div>
     </Teleport>
