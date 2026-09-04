@@ -177,7 +177,6 @@ test("radar cards use link totals while seller workbench separates seller and va
   assert.equal(pageSource.match(/最新评论数（PLID 共用）/g)?.length, 3);
   assert.equal(pageSource.match(/class="competitor-first-monitored-badge/g)?.length, 3);
   assert.equal(pageSource.match(/<small>首次监控<\/small>/g)?.length, 3);
-  assert.equal(pageSource.match(/<small[^>]*>首次监控/g)?.length, 3);
   assert.doesNotMatch(
     pageSource,
     /最新评论数（PLID 共用）[\s\S]{0,180}?首次监控/,
@@ -198,8 +197,10 @@ test("radar cards use link totals while seller workbench separates seller and va
   );
   assert.match(
     stylesSource,
-    /\.competitor-card-category li \{[\s\S]*grid-template-columns: 48px minmax\(0, 1fr\)/,
+    /\.competitor-card-category li \{[\s\S]*grid-template-columns: 18px 52px minmax\(0, 1fr\)/,
   );
+  assert.match(stylesSource, /\.competitor-card-category li > small,[\s\S]*grid-column: 2/);
+  assert.match(stylesSource, /\.competitor-card-category li > strong,[\s\S]*grid-column: 3/);
   assert.match(stylesSource, /\.competitor-card-category li:not\(:last-child\)::after/);
   assert.match(pageSource, /latestReviewCountLabel\(card\.competitor\)/);
   assert.equal(pageSource.match(/latestReviewCountLabel\(item\)/g)?.length, 2);

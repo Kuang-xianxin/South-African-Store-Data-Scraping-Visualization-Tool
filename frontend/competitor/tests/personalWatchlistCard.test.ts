@@ -97,7 +97,7 @@ test("the personal pool is a standalone top workspace with direct card location"
   );
 });
 
-test("personal watchlist uses the lower card space for metrics and actions", () => {
+test("personal watchlist cards adapt to their real container width without narrow action rails", () => {
   assert.match(
     pageSource,
     /<div class="personal-watchlist-product-footer">[\s\S]*?<CompetitorObservedSalesMetrics[\s\S]*?<div class="personal-watchlist-product-actions">/,
@@ -108,16 +108,21 @@ test("personal watchlist uses the lower card space for metrics and actions", () 
   );
   assert.match(
     styleSource,
-    /\.personal-watchlist-product-footer\s*\{[^}]*display:\s*grid;[^}]*grid-template-columns:\s*minmax\(220px,\s*242px\)\s+minmax\(0,\s*1fr\);/,
+    /\.personal-watchlist-product-grid\s*\{[^}]*grid-template-columns:\s*repeat\(auto-fit,\s*minmax\(min\(100%,\s*400px\),\s*1fr\)\);/,
   );
   assert.match(
     styleSource,
-    /\.personal-watchlist-product-footer \.personal-watchlist-product-actions\s*\{[^}]*display:\s*grid;/,
+    /\.personal-watchlist-product-footer\s*\{[^}]*display:\s*grid;[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\);/,
   );
   assert.match(
     styleSource,
-    /@media \(max-width: 560px\)\s*\{[\s\S]*?\.personal-watchlist-product-footer\s*\{[^}]*grid-template-columns:\s*1fr;/,
+    /\.personal-watchlist-product-footer \.personal-watchlist-product-actions\s*\{[^}]*display:\s*grid;[^}]*grid-template-columns:\s*repeat\(auto-fit,\s*minmax\(min\(100%,\s*132px\),\s*1fr\)\);/,
   );
+  assert.match(
+    styleSource,
+    /\.personal-watchlist-added-at\s*\{[^}]*grid-column:\s*1 \/ -1;[^}]*grid-template-columns:\s*auto minmax\(0,\s*1fr\);/,
+  );
+  assert.match(styleSource, /\.personal-watchlist-product-actions > \.danger\s*\{[^}]*grid-column:\s*1 \/ -1;/);
 });
 
 test("personal watchlist supports cross-page selection and safe bulk removal", () => {

@@ -2028,13 +2028,16 @@ textarea.link-input-error-pulse {
 
 .personal-watchlist-product-grid {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 12px;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 400px), 1fr));
+  gap: 16px;
+  width: 100%;
+  min-width: 0;
 }
 
 .personal-watchlist-product-card {
   display: grid;
   grid-template-columns: 88px minmax(0, 1fr);
+  align-items: start;
   gap: 13px;
   min-width: 0;
   padding: 13px;
@@ -2267,10 +2270,11 @@ textarea.link-input-error-pulse {
 
 .personal-watchlist-product-footer {
   display: grid;
-  grid-template-columns: minmax(220px, 242px) minmax(0, 1fr);
+  grid-template-columns: minmax(0, 1fr);
   align-items: start;
-  gap: 8px;
-  margin-top: 2px;
+  gap: 10px;
+  min-width: 0;
+  margin-top: 4px;
 }
 
 .personal-watchlist-product-footer > .competitor-observed-sales.compact {
@@ -2285,7 +2289,7 @@ textarea.link-input-error-pulse {
 
 .personal-watchlist-product-footer .personal-watchlist-product-actions {
   display: grid;
-  grid-template-columns: minmax(0, 1fr);
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 132px), 1fr));
   align-content: start;
   align-items: stretch;
   gap: 6px;
@@ -2295,9 +2299,13 @@ textarea.link-input-error-pulse {
 
 .personal-watchlist-added-at {
   display: grid;
-  gap: 1px;
+  grid-column: 1 / -1;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 4px 10px;
   min-width: 0;
-  padding: 6px 8px;
+  min-height: 32px;
+  padding: 7px 10px;
   border-radius: 8px;
   background: #f2f6f2;
   line-height: 1.35;
@@ -2313,17 +2321,22 @@ textarea.link-input-error-pulse {
   color: #315c47;
   font-size: 0.59rem;
   font-weight: 800;
-  overflow-wrap: anywhere;
+  text-align: right;
+  white-space: nowrap;
 }
 
 .personal-watchlist-product-actions button {
   width: 100%;
   min-width: 0;
-  min-height: 30px;
+  min-height: 34px;
   padding: 7px 9px;
   font-size: 0.62rem;
   line-height: 1.25;
   white-space: normal;
+}
+
+.personal-watchlist-product-actions > .danger {
+  grid-column: 1 / -1;
 }
 
 .personal-watchlist-empty-state {
@@ -3625,15 +3638,29 @@ textarea.link-input-error-pulse {
 
 .competitor-card-category > span,
 .competitor-status-summary > .competitor-card-category > span {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
   color: #486455;
   font-size: 0.61rem;
   font-weight: 850;
 }
 
+.competitor-card-category > span::before {
+  flex: 0 0 auto;
+  width: 8px;
+  height: 8px;
+  border: 3px solid #dcece2;
+  border-radius: 50%;
+  background: #3f805e;
+  box-shadow: 0 0 0 1px #8eb69d;
+  content: "";
+}
+
 .competitor-card-category ol {
   display: grid;
-  gap: 0;
-  margin: 0;
+  gap: 2px;
+  margin: 4px 0 0;
   padding: 0;
   list-style: none;
 }
@@ -3641,11 +3668,12 @@ textarea.link-input-error-pulse {
 .competitor-card-category li {
   position: relative;
   display: grid;
-  grid-template-columns: 48px minmax(0, 1fr);
-  align-items: start;
+  grid-template-columns: 18px 52px minmax(0, 1fr);
+  align-items: center;
   gap: 6px;
   min-width: 0;
-  padding: 1px 0 7px 12px;
+  min-height: 24px;
+  padding: 1px 0 5px;
 }
 
 .competitor-card-category li:last-child {
@@ -3653,22 +3681,31 @@ textarea.link-input-error-pulse {
 }
 
 .competitor-card-category li::before {
-  position: absolute;
-  top: 6px;
-  left: 1px;
-  width: 6px;
-  height: 6px;
+  position: relative;
+  z-index: 1;
+  grid-column: 1;
+  grid-row: 1;
+  justify-self: center;
+  width: 10px;
+  height: 10px;
+  box-sizing: border-box;
   border: 2px solid #4d8a69;
   border-radius: 50%;
-  background: #fff;
+  background: #eef7f1;
+  box-shadow: 0 0 0 3px #f7faf8;
   content: "";
+}
+
+.competitor-card-category li:last-child::before {
+  border-color: #17633b;
+  background: #d9ee72;
 }
 
 .competitor-card-category li:not(:last-child)::after {
   position: absolute;
-  top: 14px;
-  bottom: -1px;
-  left: 4px;
+  top: 17px;
+  bottom: -4px;
+  left: 8px;
   width: 1px;
   background: #bdd3c5;
   content: "";
@@ -3676,14 +3713,25 @@ textarea.link-input-error-pulse {
 
 .competitor-card-category li > small,
 .competitor-status-summary .competitor-card-category li > small {
-  color: #6f7c74;
+  display: inline-flex;
+  grid-column: 2;
+  align-items: center;
+  justify-content: center;
+  min-height: 20px;
+  padding: 2px 6px;
+  border-radius: 999px;
+  background: #e9f2ec;
+  color: #527060;
   font-size: 0.54rem;
-  font-weight: 750;
-  line-height: 1.4;
+  font-weight: 800;
+  line-height: 1.2;
+  text-align: center;
+  white-space: nowrap;
 }
 
 .competitor-card-category li > strong,
 .competitor-status-summary .competitor-card-category li > strong {
+  grid-column: 3;
   min-width: 0;
   color: #183d2b;
   font-size: 0.65rem;
@@ -3709,7 +3757,7 @@ textarea.link-input-error-pulse {
 }
 
 .competitor-card-category.is-compact li {
-  grid-template-columns: 48px minmax(0, 1fr);
+  grid-template-columns: 18px 52px minmax(0, 1fr);
 }
 
 .competitor-offer-roster {
@@ -8015,10 +8063,6 @@ button {
     grid-column: 1 / -1;
   }
 
-  .personal-watchlist-product-grid {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-
   .personal-watchlist-library-options {
     grid-template-columns: 1fr;
   }
@@ -8227,27 +8271,6 @@ button {
 
   .personal-watchlist-product-card {
     grid-template-columns: 74px minmax(0, 1fr);
-  }
-
-  .personal-watchlist-product-footer {
-    grid-template-columns: 1fr;
-  }
-
-  .personal-watchlist-product-footer > .competitor-observed-sales.compact {
-    width: min(100%, 152px);
-  }
-
-  .personal-watchlist-product-footer > .own-store-sales-comparison {
-    width: min(100%, 242px);
-  }
-
-  .personal-watchlist-product-footer .personal-watchlist-product-actions {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-
-  .personal-watchlist-added-at,
-  .personal-watchlist-product-actions > .danger {
-    grid-column: 1 / -1;
   }
 
   .personal-watchlist-product-image {
