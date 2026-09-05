@@ -6,6 +6,10 @@ const pageSource = readFileSync(
   new URL("../src/pages/CompetitorsPage.vue", import.meta.url),
   "utf8",
 );
+const radarCardSource = readFileSync(
+  new URL("../src/components/CompetitorRadarProductCard.vue", import.meta.url),
+  "utf8",
+);
 const apiSource = readFileSync(new URL("../src/api.ts", import.meta.url), "utf8");
 const styleSource = readFileSync(new URL("../src/styles.css", import.meta.url), "utf8");
 
@@ -80,7 +84,7 @@ test("only own-store cards leave the current page", () => {
   );
   assert.match(dispatcher, /openOwnStoreDetailTab\(\{/);
   assert.match(pageSource, /class="competitor-status-card own-store-card"[\s\S]*新标签页/);
-  assert.match(pageSource, /class="competitor-status-card"[\s\S]*aria-haspopup="dialog"/);
+  assert.match(radarCardSource, /class="competitor-status-card"[\s\S]*aria-haspopup="dialog"/);
 });
 
 test("standalone own-link detail loads its full local evidence concurrently", () => {

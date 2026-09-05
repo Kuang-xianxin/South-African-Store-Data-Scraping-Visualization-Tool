@@ -16,6 +16,11 @@ const pageSource = readFileSync(
   new URL("../src/pages/CompetitorsPage.vue", import.meta.url),
   "utf8",
 );
+const radarCardSource = readFileSync(
+  new URL("../src/components/CompetitorRadarProductCard.vue", import.meta.url),
+  "utf8",
+);
+const productCardSources = `${pageSource}\n${radarCardSource}`;
 const apiSource = readFileSync(new URL("../src/api.ts", import.meta.url), "utf8");
 const observedSalesSource = readFileSync(
   new URL("../src/components/CompetitorObservedSalesMetrics.vue", import.meta.url),
@@ -142,13 +147,13 @@ test("radar and category cards use link totals while seller workbench separates 
   );
   assert.doesNotMatch(stylesSource, /competitor-observed-sales-grid/);
   assert.equal(
-    pageSource.match(/<CompetitorObservedSalesMetrics/g)?.length,
+    productCardSources.match(/<CompetitorObservedSalesMetrics/g)?.length,
     6,
   );
   assert.match(pageSource, /:values="card\.competitor\?\.近期观察售出"/);
-  assert.match(pageSource, /全部卖家 · 全部变体/);
+  assert.match(productCardSources, /全部卖家 · 全部变体/);
   assert.equal(
-    pageSource.match(/:values="item\.近期观察售出"/g)?.length,
+    productCardSources.match(/:values="(?:item|props\.item)\.近期观察售出"/g)?.length,
     2,
   );
   assert.equal(pageSource.match(/<OwnStoreSalesComparisonMetrics/g)?.length, 3);
@@ -169,28 +174,28 @@ test("radar and category cards use link totals while seller workbench separates 
     /:values="detail\.current_item\?\.近期观察售出 \?\? selected\.近期观察售出"/,
   );
   assert.equal(
-    pageSource.match(/class="competitor-status-observed-sales"/g)?.length,
+    productCardSources.match(/class="competitor-status-observed-sales"/g)?.length,
     2,
   );
   assert.equal(
-    [...pageSource.matchAll(
+    [...productCardSources.matchAll(
       /<CompetitorObservedSalesMetrics[\s\S]{0,180}?class="competitor-status-observed-sales"/g,
     )].length,
     2,
   );
-  assert.equal(pageSource.match(/最新评论数（PLID 共用）/g)?.length, 4);
-  assert.equal(pageSource.match(/class="competitor-first-monitored-badge/g)?.length, 4);
-  assert.equal(pageSource.match(/<small>首次监控<\/small>/g)?.length, 4);
+  assert.equal(productCardSources.match(/最新评论数（PLID 共用）/g)?.length, 4);
+  assert.equal(productCardSources.match(/class="competitor-first-monitored-badge/g)?.length, 4);
+  assert.equal(productCardSources.match(/<small>首次监控<\/small>/g)?.length, 4);
   assert.doesNotMatch(
-    pageSource,
+    productCardSources,
     /最新评论数（PLID 共用）[\s\S]{0,180}?首次监控/,
   );
   assert.equal(
-    pageSource.match(/class="competitor-card-category(?: is-compact)?"/g)?.length,
+    productCardSources.match(/class="competitor-card-category(?: is-compact)?"/g)?.length,
     4,
   );
-  assert.equal(pageSource.match(/aria-label="商品类目层级"/g)?.length, 4);
-  assert.equal(pageSource.match(/类目待采集 · 后续成功采集后补齐/g)?.length, 4);
+  assert.equal(productCardSources.match(/aria-label="商品类目层级"/g)?.length, 4);
+  assert.equal(productCardSources.match(/类目待采集 · 后续成功采集后补齐/g)?.length, 4);
   assert.match(pageSource, /competitorCategoryLevelLabel\(index: number, total: number\)/);
   assert.match(pageSource, /if \(total <= 1 \|\| index === total - 1\) return "精确类目"/);
   assert.match(pageSource, /if \(index === 0\) return "大类"/);
@@ -207,7 +212,8 @@ test("radar and category cards use link totals while seller workbench separates 
   assert.match(stylesSource, /\.competitor-card-category li > strong,[\s\S]*grid-column: 3/);
   assert.match(stylesSource, /\.competitor-card-category li:not\(:last-child\)::after/);
   assert.match(pageSource, /latestReviewCountLabel\(card\.competitor\)/);
-  assert.equal(pageSource.match(/latestReviewCountLabel\(item\)/g)?.length, 3);
+  assert.equal(pageSource.match(/latestReviewCountLabel\(item\)/g)?.length, 2);
+  assert.match(radarCardSource, /latestReviewCountLabel\(props\.item\)/);
   assert.match(typesSource, /首次监控时间\?: string \| null/);
   assert.match(typesSource, /最新评论数\?: number \| null/);
   assert.match(typesSource, /最新评论获取时间\?: string \| null/);

@@ -3127,6 +3127,47 @@ textarea.link-input-error-pulse {
   gap: 8px;
 }
 
+.competitor-card-query-actions {
+  display: flex;
+  grid-column: 1 / -1;
+  justify-content: flex-start;
+  align-items: center;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+}
+
+.competitor-query-button {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  min-height: 30px;
+  padding: 6px 12px;
+  border: 1px solid #145d3e;
+  border-radius: 8px;
+  background: #176845;
+  color: #fff;
+  font: inherit;
+  font-size: 0.66rem;
+  font-weight: 850;
+  line-height: 1;
+  cursor: pointer;
+  box-shadow: 0 5px 12px rgba(23, 104, 69, 0.16);
+  transition: background 140ms ease, box-shadow 140ms ease, transform 140ms ease;
+}
+
+.competitor-query-button:hover {
+  background: #0f5336;
+  box-shadow: 0 7px 16px rgba(23, 104, 69, 0.24);
+  transform: translateY(-1px);
+}
+
+.competitor-query-button:focus-visible {
+  outline: 3px solid rgba(45, 130, 91, 0.24);
+  outline-offset: 2px;
+}
+
 .competitor-status-summary {
   display: grid;
   grid-template-columns: repeat(5, minmax(0, 1fr)) minmax(220px, 250px);
@@ -4883,6 +4924,25 @@ td small {
   background: #f4f8f5;
 }
 
+.competitor-match-backdrop {
+  z-index: 94;
+  padding: 12px;
+}
+
+.competitor-match-modal {
+  width: min(1520px, 100%);
+}
+
+.competitor-match-source-title {
+  max-width: min(1100px, calc(100vw - 180px));
+  overflow: hidden;
+  color: #183e2b;
+  font-size: 0.82rem;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .competitor-category-modal-header {
   position: relative;
   flex: 0 0 auto;
@@ -5016,6 +5076,23 @@ td small {
   grid-template-columns: minmax(0, 1fr);
   align-items: start;
   gap: 8px;
+}
+
+.competitor-match-result-list {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  align-items: start;
+  gap: 10px;
+}
+
+.competitor-match-load-notice {
+  margin: 0 0 10px;
+  color: #5a6c60;
+  font-size: 0.75rem;
+}
+
+.competitor-match-result-list > .competitor-status-card {
+  content-visibility: visible;
 }
 
 .competitor-category-product-card {

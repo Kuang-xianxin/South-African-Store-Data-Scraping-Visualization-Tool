@@ -14,6 +14,10 @@ const pageSource = readFileSync(
   new URL("../src/pages/CompetitorsPage.vue", import.meta.url),
   "utf8",
 );
+const radarCardSource = readFileSync(
+  new URL("../src/components/CompetitorRadarProductCard.vue", import.meta.url),
+  "utf8",
+);
 const stylesSource = readFileSync(new URL("../src/styles.css", import.meta.url), "utf8");
 
 function category(
@@ -69,8 +73,11 @@ test("deduplicates PLIDs, lets own-store evidence win, and lists own links first
 });
 
 test("all four radar category hierarchies expose buttons and the catalog uses all-store data", () => {
-  assert.equal(pageSource.match(/class="competitor-category-node-button"/g)?.length, 4);
-  assert.equal(pageSource.match(/@click\.stop="openCategoryModal\(category, \$event\)"/g)?.length, 4);
+  assert.equal(pageSource.match(/class="competitor-category-node-button"/g)?.length, 3);
+  assert.equal(radarCardSource.match(/class="competitor-category-node-button"/g)?.length, 1);
+  assert.equal(pageSource.match(/@click\.stop="openCategoryModal\(category, \$event\)"/g)?.length, 3);
+  assert.match(radarCardSource, /emit\('open-category', category, \$event\)/);
+  assert.match(pageSource, /@open-category="openCategoryModal"/);
   assert.match(pageSource, /class="competitor-modal competitor-category-modal"/);
   assert.match(pageSource, /fetchOwnStoreCompetitors\([\s\S]*?"all"/);
   assert.match(pageSource, /openCategoryProductDetail\(item\)/);
