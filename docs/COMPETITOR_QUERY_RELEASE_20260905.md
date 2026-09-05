@@ -28,4 +28,22 @@
 
 发布前绿版PID15316、蓝版PID15996。活动采集批次`scheduled-20260904-e5deb64cc879`处于running，revision38、round13、已尝试1277/2467。绿蓝公网HTTPS健康接口均HTTP200。采用保留旧哈希资源、备份并原子替换index的静态发布，不重启服务。
 
-部署后结果将在本节补充；截至本条记录尚未执行正式静态切换。
+2026-09-05北京时间19:09:47蓝版、19:12:04绿版已原子切换到同一发布包。包文件`release-dec258b.zip`的SHA-256为`9bf76f50f344de01615dae2e259babe7ea3211182cb9a08bd4397675879b2857`。源码提交`dec258b`已推送到`origin/codex/competitor-query-local`。
+
+| 入口 | 健康检查及26个发布文件 | CSS类型 |
+| --- | --- | --- |
+| 本机绿版 http://127.0.0.1:8501 | 27/27通过 | text/css |
+| LAN绿版 http://192.168.110.180:8501 | 27/27通过 | text/css |
+| 公网绿版 https://119.91.117.232 | 27/27通过 | text/css |
+| LAN蓝版 http://192.168.110.13:8502 | 27/27通过 | text/css |
+| 公网蓝版 https://119.91.117.232:8443 | 27/27通过 | text/css |
+
+全部请求使用正常TLS验证，未忽略证书错误。135/135项通过，无文件哈希不一致；蓝版健康仍标记`read-only-test / blue-laptop`。完整逐文件结果在证据目录的`green-http-verification.json`与`blue-http-verification.json`。
+
+绿版正式页面已使用现有登录会话再次验收：引用`index-2OCXkWeZ.js`；帐篷查询仍为2/37条；各卡片宽度与scrollWidth均1419px；鼠标和Enter均打开完整卖家连续对比、报价及价格/库存趋势详情；query层z-index95且详情打开时inert，详情层z-index100；关闭按钮和Escape均返回原结果并恢复焦点。控制台警告/错误为0。
+
+蓝版当前无有效登录态；新公司标题、登录页及全部文件已验证，但**未完成蓝版登录后的业务交互验收**。未索取、重置或绕过登录凭据。
+
+两端服务PID15316/15996保持不变。19:15复核同一采集批次仍running，revision38、round13保持，已尝试从发布前1277推进至1283/2467；本任务没有暂停/恢复/重启采集。
+
+回滚备份：绿版`outputs/competitor-query-20260905/green-index-before-dec258b.html`；蓝版`D:\TakealotHA\blue-green\release-backups\blue-index-before-competitor-query-dec258b-20260905.html`。旧哈希资源保留，必要时仅原子恢复对应旧首页；本次未执行回滚。
