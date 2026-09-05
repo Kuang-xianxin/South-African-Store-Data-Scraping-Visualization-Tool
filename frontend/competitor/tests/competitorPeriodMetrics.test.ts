@@ -96,6 +96,7 @@ test("personal watchlist reranks from refreshed interval metrics", () => {
 });
 
 test("radar and category cards use link totals while seller workbench separates seller and variant totals", () => {
+  const pageSource = readFileSync(new URL("../src/pages/CompetitorsPage.vue", import.meta.url), "utf8") + readFileSync(new URL("../src/components/CompetitorRadarCard.vue", import.meta.url), "utf8");
   assert.deepEqual(
     [...observedSalesSource.matchAll(/const windowDays = \[([^\]]+)\]/g)]
       .map((match) => match[1]?.replace(/\s/g, "")),

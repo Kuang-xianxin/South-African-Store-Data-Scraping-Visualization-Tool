@@ -71,9 +71,9 @@ test("a transient freshness request failure preserves the last known timestamps"
 });
 
 test("switching stores clears the previous store state and rejects stale responses", () => {
-  const storeWatcherBlock = appSource.slice(
-    appSource.indexOf("watch(\n  () => selectedStore.value?.code"),
-    appSource.indexOf("const activePageProps"),
+  const storeWatcherBlock = appSource.replace(/\r\n/g, "\n").slice(
+    appSource.replace(/\r\n/g, "\n").indexOf("watch(\n  () => selectedStore.value?.code"),
+    appSource.replace(/\r\n/g, "\n").indexOf("const activePageProps"),
   );
   assert.match(
     storeWatcherBlock,

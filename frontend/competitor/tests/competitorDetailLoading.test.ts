@@ -80,7 +80,7 @@ test("only own-store cards leave the current page", () => {
   );
   assert.match(dispatcher, /openOwnStoreDetailTab\(\{/);
   assert.match(pageSource, /class="competitor-status-card own-store-card"[\s\S]*新标签页/);
-  assert.match(pageSource, /class="competitor-status-card"[\s\S]*aria-haspopup="dialog"/);
+  assert.match(readFileSync(new URL("../src/components/CompetitorRadarCard.vue", import.meta.url), "utf8"), /class="competitor-status-card"[\s\S]*aria-haspopup="dialog"/);
 });
 
 test("standalone own-link detail loads its full local evidence concurrently", () => {

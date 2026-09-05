@@ -1,6 +1,8 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, shallowRef, watch } from "vue";
 
+import CompetitorRadarCard from "../components/CompetitorRadarCard.vue";
+import { findCompetitorMatches, type MatchSource, type MatchKind } from "../competitorMatching";
 import OwnStoreSalesChart from "../components/OwnStoreSalesChart.vue";
 import OwnStoreSalesComparisonMetrics from "../components/OwnStoreSalesComparisonMetrics.vue";
 import OwnStoreSalesSummary from "../components/OwnStoreSalesSummary.vue";
@@ -538,6 +540,13 @@ const categoryCatalogOwnStoreItems = shallowRef<CompetitorItem[]>([]);
 const categoryCatalogLoadedKey = ref("");
 const categoryCatalogLoading = ref(false);
 const categoryCatalogError = ref("");
+const competitorQuerySource = shallowRef<MatchSource | null>(null);
+const competitorQueryCloseButton = ref<HTMLButtonElement | null>(null);
+const competitorQueryPages = ref<Record<MatchKind, number>>({ near_identical: 1, same_demand: 1 });
+const competitorQueryPageSize = 8;
+const competitorQueryText = ref("");
+let competitorQueryTrigger: HTMLElement | null = null;
+let queryDetailTrigger: HTMLElement | null = null;
 const categoryModalOpen = ref(false);
 const selectedCategory = ref<CompetitorCategoryBreadcrumb | null>(null);
 const categoryCatalogQuery = ref("");
@@ -749,6 +758,8 @@ const ownFollowerHistoryOpen = ref(false);
 const failedCompetitorImages = ref<Set<string>>(new Set());
 const competitorImageRetryDelaysMs = [500, 1_500] as const;
 
+const radarCardPresentation = { formatCurrency, latestReviewCountLabel, competitorCategoryPath, competitorCategoryLevelLabel, periodInventoryTurnoverLabel, competitorOfferPriceRange, followerSellerCount };
+
 const allCompetitorItems = computed(() => [
   ...storeCompetitors.value,
   ...competitors.value,
@@ -759,6 +770,21 @@ const categoryCatalogItems = computed(() => mergeCompetitorCategoryCatalog<Compe
   storeCompetitors.value,
   categoryCatalogOwnStoreItems.value,
 ));
+const competitorQueryMatches = computed(() => competitorQuerySource.value
+  ? findCompetitorMatches(competitorQuerySource.value, categoryCatalogItems.value) : []);
+const competitorQueryGroups = computed(() => ([
+  { kind: "near_identical" as const, label: "几乎同款" },
+  { kind: "same_demand" as const, label: "满足相同需求的替代竞品" },
+]).map((group) => {
+  const query = competitorQueryText.value.trim().toLocaleLowerCase();
+  const matches = competitorQueryMatches.value.filter((match) => match.kind === group.kind
+    && (!query || categoryCatalogSearchText(match.item).includes(query)));
+  const pageCount = Math.max(1, Math.ceil(matches.length / competitorQueryPageSize));
+  const page = Math.min(competitorQueryPages.value[group.kind], pageCount);
+  return { ...group, total: matches.length, page, pageCount,
+    items: matches.slice((page - 1) * competitorQueryPageSize, page * competitorQueryPageSize) };
+}));
+watch(competitorQueryText, () => { competitorQueryPages.value = { near_identical: 1, same_demand: 1 }; });
 const categoryCatalogMatches = computed(() => {
   const category = selectedCategory.value;
   if (!category) return [];
@@ -2500,6 +2526,7 @@ watch(
     detailModalOpen,
     () => selected.value !== null,
     categoryModalOpen,
+    () => Boolean(competitorQuerySource.value),
     targetListOpen,
     targetAuditOpen,
     targetActionOpen,
@@ -2510,6 +2537,7 @@ watch(
     detailOpen,
     detailSelected,
     categoryDialogOpen,
+    queryDialogOpen,
     targetManagerOpen,
     targetAuditDialogOpen,
     targetActionDialogOpen,
@@ -2519,6 +2547,7 @@ watch(
     document.body.style.overflow =
       (!props.detailOnly && detailOpen && detailSelected)
         || categoryDialogOpen
+        || queryDialogOpen
         || embeddedDetailOpen
         || targetManagerOpen
         || targetAuditDialogOpen
@@ -2839,6 +2868,35 @@ function openProductDetail(
   if (!opened) {
     pageError.value = "浏览器阻止了自有链接详情新标签页，请允许此站点打开新标签页后重试。";
   }
+}
+
+function openCompetitorQuery(source: MatchSource, event: MouseEvent): void {
+  if (!competitorQuerySource.value) competitorQueryTrigger = event.currentTarget instanceof HTMLElement ? event.currentTarget : null;
+  competitorQuerySource.value = source;
+  competitorQueryText.value = "";
+  competitorQueryPages.value = { near_identical: 1, same_demand: 1 };
+  void nextTick(() => competitorQueryCloseButton.value?.focus({ preventScroll: true }));
+  void loadCategoryCatalogOwnStoreItems();
+}
+function closeCompetitorQuery(): void {
+  competitorQuerySource.value = null;
+  const trigger = competitorQueryTrigger;
+  competitorQueryTrigger = null;
+  void nextTick(() => trigger?.focus({ preventScroll: true }));
+}
+function openQueryProductDetail(item: CompetitorItem, event: MouseEvent | KeyboardEvent): void {
+  queryDetailTrigger = event.currentTarget instanceof HTMLElement ? event.currentTarget : null;
+  embeddedDetailItem.value = item;
+  openProductModal(item, "personal_watchlist");
+}
+function handleCompetitorQueryKeydown(event: KeyboardEvent): void {
+  if (event.key !== "Tab" || detailModalOpen.value) return;
+  const dialog = event.currentTarget as HTMLElement;
+  const buttons = [...dialog.querySelectorAll<HTMLElement>('button:not([disabled]), a[href], input, [tabindex="0"]')]
+    .filter((element) => element.getClientRects().length > 0);
+  const first = buttons[0], last = buttons.at(-1);
+  if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last?.focus(); }
+  else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus(); }
 }
 
 function categoryCatalogSearchText(item: CompetitorItem): string {
@@ -3340,6 +3398,9 @@ function closeDetailView(): void {
     return;
   }
   closeProductModal();
+  const trigger = queryDetailTrigger;
+  queryDetailTrigger = null;
+  void nextTick(() => trigger?.focus({ preventScroll: true }));
 }
 
 function handleDetailBackdropClick(): void {
@@ -3479,10 +3540,12 @@ function handleWindowKeydown(event: KeyboardEvent) {
     closeDetailView();
     return;
   }
+  if (competitorQuerySource.value) { closeCompetitorQuery(); return; }
   if (categoryModalOpen.value) closeCategoryModal();
 }
 
 async function loadOverview() {
+  if (competitorQuerySource.value) closeCompetitorQuery();
   ++categoryCatalogRequestId;
   categoryCatalogAbortController?.abort();
   categoryCatalogAbortController = null;
@@ -7785,6 +7848,8 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
                   compact
                 />
                 <div class="personal-watchlist-product-actions">
+                  <button type="button" class="secondary-button competitor-query-button"
+                    @click.stop="openCompetitorQuery(card.competitor ?? { plid: card.plid, 商品: personalWatchlistFallbackTitle(card) }, $event)">竞品查询</button>
                   <span class="personal-watchlist-added-at">
                     <small>{{ card.personalMember ? "加入个人池" : "加入共享库" }}时间</small>
                     <strong>{{ formatChinaDateTime(card.addedAt) }}</strong>
@@ -9797,8 +9862,8 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
               role="button"
               :aria-label="`在新标签页查看 ${item.商品} 及 ${followerSellerCount(item)} 个跟卖卖家`"
               @click="openProductDetail(item)"
-              @keydown.enter="openProductDetail(item)"
-              @keydown.space.prevent="openProductDetail(item)"
+              @keydown.enter.self="openProductDetail(item)"
+              @keydown.space.self.prevent="openProductDetail(item)"
             >
               <header class="competitor-status-header">
                 <div class="competitor-status-identity">
@@ -9853,6 +9918,8 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
                   </div>
                 </div>
                 <div class="competitor-status-header-actions">
+                    <button type="button" class="secondary-button competitor-query-button"
+                      @click.stop="openCompetitorQuery(item, $event)">竞品查询</button>
                   <span class="competitor-first-monitored-badge">
                     <small>首次监控</small>
                     <strong>{{ formatChinaDateTime(item.首次监控时间 ?? null) }}</strong>
@@ -9969,132 +10036,16 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
             <span>可以调整关键词、竞品店铺、个人监控池、库存状态或经营信号。</span>
           </div>
           <div v-else class="competitor-status-list">
-          <article
-            v-for="item in pagedCompetitors"
-            :key="item.plid"
-            :id="`competitor-row-${item.plid}`"
-            v-memo="[
-              item,
-              selectedPlid === item.plid,
-              personalWatchlistPlids.has(item.plid),
-              failedCompetitorImages.has(item.图片 || ''),
-            ]"
-            class="competitor-status-card"
-            :class="{
-              selected: selectedPlid === item.plid,
-            }"
-            tabindex="0"
-            role="button"
-            aria-haspopup="dialog"
-            :aria-label="`查看 ${item.商品} 及全部 ${item.跟卖报价.length} 个报价的详情`"
-            @click="openProductDetail(item)"
-            @keydown.enter="openProductDetail(item)"
-            @keydown.space.prevent="openProductDetail(item)"
-          >
-            <header class="competitor-status-header">
-              <div class="competitor-status-identity">
-                <div class="competitor-product-image competitor-status-image">
-                  <img
-                    v-if="canShowCompetitorImage(item.图片)"
-                    :src="competitorImageUrl(item.图片)"
-                    :alt="`${item.商品} 商品图片`"
-                    width="192"
-                    height="192"
-                    loading="lazy"
-                    decoding="async"
-                    @error="retryCompetitorImage($event, item.图片)"
-                  />
-                  <span v-else>暂无图片</span>
-                </div>
-                <div class="competitor-status-title">
-                  <div class="competitor-status-eyebrow">
-                    <span>PLID{{ item.plid }}</span>
-                    <span>{{ formatChinaDateTime(item.采集时间) }}</span>
-                    <strong
-                      v-if="personalWatchlistPlids.has(item.plid)"
-                      class="personal-watchlist-badge"
-                    >我的监控池</strong>
-                  </div>
-                  <h3>{{ item.商品 }}</h3>
-                  <p>{{ followerSellerCount(item) }} 个卖家 · {{ item.跟卖报价.length }} 个变体 / 报价 · 主卖家 {{ item.当前卖家 || "未知" }}</p>
-                </div>
-              </div>
-              <div class="competitor-status-header-actions">
-                <span class="competitor-first-monitored-badge">
-                  <small>首次监控</small>
-                  <strong>{{ formatChinaDateTime(item.首次监控时间 ?? null) }}</strong>
-                </span>
-                <span class="competitor-status-open">查看卖家库存 →</span>
-              </div>
-            </header>
-
-            <div class="competitor-status-summary">
-              <div>
-                <span>报价区间 / 主报价</span>
-                <strong>{{ competitorOfferPriceRange(item) }}</strong>
-                <small>主报价 {{ formatCurrency(item.价格) }}</small>
-              </div>
-              <div>
-                <span>主报价库存</span>
-                <strong
-                  class="stock-pill"
-                  :class="{
-                    exact: item.库存精确,
-                    unavailable: item.库存上限 === '没货',
-                  }"
-                >{{ item.库存上限 }}</strong>
-                <small v-if="item.库存参考过期 && item.上次成功库存">
-                  上次成功 {{ item.上次成功库存 }}
-                  · {{ formatChinaDateTime(item.上次成功库存时间) }}
-                </small>
-                <small v-else>{{ item.当前卖家 || "未知卖家" }}</small>
-              </div>
-              <div class="competitor-period-revenue">
-                <span>周期内销售额</span>
-                <strong>{{ formatCurrency(item.周期销售额) }}</strong>
-                <small>{{ periodInventoryTurnoverLabel(item) }}</small>
-              </div>
-              <div class="competitor-card-category" aria-label="商品类目层级">
-                <span>商品类目</span>
-                <ol v-if="competitorCategoryPath(item).length">
-                  <li
-                    v-for="(category, categoryIndex) in competitorCategoryPath(item)"
-                    :key="`${category.id || category.slug || category.name}-${categoryIndex}`"
-                  >
-                    <button
-                      class="competitor-category-node-button"
-                      type="button"
-                      :aria-label="`查看 ${category.name} 类目的全部系统商品`"
-                      @click.stop="openCategoryModal(category, $event)"
-                    >
-                      <small>
-                        {{ competitorCategoryLevelLabel(categoryIndex, competitorCategoryPath(item).length) }}
-                      </small>
-                      <strong>{{ category.name }}</strong>
-                    </button>
-                  </li>
-                </ol>
-                <p v-else class="competitor-card-category-empty">
-                  类目待采集 · 后续成功采集后补齐
-                </p>
-              </div>
-              <div>
-                <span>最新评论数（PLID 共用）</span>
-                <strong>{{ latestReviewCountLabel(item) }}</strong>
-                <small v-if="item.最新评论获取时间">
-                  评论更新 {{ formatChinaDateTime(item.最新评论获取时间) }} · 区间末评分 {{ item.评分 ?? "—" }}
-                </small>
-                <small v-else>公开评论尚未同步 · 区间末评分 {{ item.评分 ?? "—" }}</small>
-              </div>
-              <CompetitorObservedSalesMetrics
-                class="competitor-status-observed-sales"
-                :values="item.近期观察售出"
-                :through-date="item.近期观察售出截至"
-                context-label="全部卖家 · 全部变体"
-                compact
-              />
-            </div>
-          </article>
+          <CompetitorRadarCard
+            v-for="item in pagedCompetitors" :key="item.plid" :id="`competitor-row-${item.plid}`"
+            :item="item" :presentation="radarCardPresentation"
+            :class="{ selected: selectedPlid === item.plid }"
+            :personal-member="personalWatchlistPlids.has(item.plid)"
+            :show-image="canShowCompetitorImage(item.图片)" :image-url="competitorImageUrl(item.图片)"
+            @image-error="retryCompetitorImage($event, item.图片)"
+            @open="openProductDetail(item)" @query="openCompetitorQuery(item, $event)"
+            @category="openCategoryModal"
+          />
         </div>
         <div
           v-if="filteredCompetitors.length"
@@ -10189,9 +10140,63 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
       </div>
     </Teleport>
 
+
+    <Teleport to="body">
+      <div v-if="competitorQuerySource" class="competitor-modal-backdrop competitor-query-backdrop"
+        :inert="detailModalOpen" @click.self="closeCompetitorQuery">
+        <section class="competitor-modal competitor-query-modal" role="dialog" aria-modal="true"
+          aria-labelledby="competitor-query-title" @keydown="handleCompetitorQueryKeydown">
+          <header class="competitor-modal-header competitor-query-header">
+            <div><h2 id="competitor-query-title">竞品查询</h2>
+              <p>PLID{{ competitorQuerySource.plid }} · {{ competitorQuerySource.商品 }}</p>
+              <span>仅查询系统已有商品 · 匹配分为规则分，不代表同款概率</span>
+            </div>
+            <button ref="competitorQueryCloseButton" type="button" class="competitor-modal-close"
+              aria-label="关闭竞品查询" @click="closeCompetitorQuery">×</button>
+          </header>
+          <div class="competitor-query-toolbar">
+            <strong v-for="group in competitorQueryGroups" :key="group.kind">{{ group.label }} {{ group.total }}</strong>
+            <input v-model="competitorQueryText" aria-label="搜索竞品查询结果" placeholder="在结果中搜索商品或 PLID" />
+          </div>
+          <p v-if="categoryCatalogLoading || personalWatchlistOverviewLoading || loading"
+            class="competitor-category-load-state" role="status">正在补齐本地商品，当前结果尚不完整…</p>
+          <p v-else-if="categoryCatalogError || personalWatchlistOverviewFailed || pageError"
+            class="competitor-category-load-state has-error" role="status">部分商品读取失败，当前结果可能不完整。{{ categoryCatalogError }}</p>
+          <div class="competitor-query-results">
+            <section v-for="group in competitorQueryGroups" :key="group.kind" class="competitor-query-group"
+              :aria-label="group.label">
+              <h3>{{ group.label }} <small>{{ group.total }} 条</small></h3>
+              <p v-if="!group.items.length" class="competitor-query-empty">本地证据中暂无符合条件的结果；不会把证据不足的商品强行列为竞品。</p>
+              <div v-else class="competitor-status-list">
+                <div v-for="match in group.items" :key="match.item.plid" class="competitor-query-result">
+                  <div class="competitor-query-reason">
+                    <strong>{{ group.label }} · {{ match.score }} 分</strong><span>{{ match.reasons.join("；") }}</span>
+                  </div>
+                  <CompetitorRadarCard :item="match.item" :presentation="radarCardPresentation"
+                    :personal-member="personalWatchlistPlids.has(match.item.plid)"
+                    :show-image="canShowCompetitorImage(match.item.图片)" :image-url="competitorImageUrl(match.item.图片)"
+                    @image-error="retryCompetitorImage($event, match.item.图片)"
+                    @open="openQueryProductDetail(match.item, $event)"
+                    @query="openCompetitorQuery(match.item, $event)"
+                    @category="(category, event) => { closeCompetitorQuery(); openCategoryModal(category, event); }" />
+                </div>
+              </div>
+              <footer v-if="group.pageCount > 1" class="compact-pagination">
+                <button type="button" class="secondary-button" :disabled="group.page <= 1"
+                  @click="competitorQueryPages[group.kind] = group.page - 1">上一页</button>
+                <span>第 {{ group.page }} / {{ group.pageCount }} 页</span>
+                <button type="button" class="secondary-button" :disabled="group.page >= group.pageCount"
+                  @click="competitorQueryPages[group.kind] = group.page + 1">下一页</button>
+              </footer>
+            </section>
+          </div>
+        </section>
+      </div>
+    </Teleport>
     <Teleport to="body">
       <div
         v-if="categoryModalOpen && selectedCategory"
+        :inert="Boolean(competitorQuerySource) || detailModalOpen"
         class="competitor-modal-backdrop competitor-category-backdrop"
         @click.self="closeCategoryModal"
       >
@@ -10341,6 +10346,8 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
                     </div>
                   </div>
                   <div class="competitor-status-header-actions">
+                    <button type="button" class="secondary-button competitor-query-button"
+                      @click.stop="openCompetitorQuery(item, $event)">竞品查询</button>
                     <span class="competitor-first-monitored-badge">
                       <small>首次监控</small>
                       <strong>{{ formatChinaDateTime(item.首次监控时间 ?? null) }}</strong>
