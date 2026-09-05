@@ -102,18 +102,18 @@ test("category directory cards expose the radar card operating details", () => {
   assert.doesNotMatch(cardSource, /competitor-category-product-(?:main|metrics|sales)/);
 });
 
-test("radar and category directory cards share the compact responsive grid", () => {
+test("radar and category directory keep one compact card per row", () => {
   assert.match(
     stylesSource,
-    /\.competitor-status-list \{[\s\S]*grid-template-columns: repeat\(auto-fill, minmax\(min\(100%, 560px\), 1fr\)\)/,
+    /\.competitor-status-list \{[\s\S]*grid-template-columns: minmax\(0, 1fr\)[\s\S]*gap: 8px/,
   );
   assert.match(
     stylesSource,
-    /\.competitor-category-product-grid \{[\s\S]*grid-template-columns: repeat\(auto-fill, minmax\(min\(100%, 560px\), 1fr\)\)/,
+    /\.competitor-category-product-grid \{[\s\S]*grid-template-columns: minmax\(0, 1fr\)[\s\S]*gap: 8px/,
   );
   assert.match(
     stylesSource,
-    /\.competitor-status-card \{[\s\S]*max-width: 720px[\s\S]*container-name: competitor-radar-card/,
+    /\.competitor-status-card \{[\s\S]*max-width: none[\s\S]*gap: 7px[\s\S]*padding: 10px 12px[\s\S]*container-name: competitor-radar-card/,
   );
   assert.match(
     stylesSource,
