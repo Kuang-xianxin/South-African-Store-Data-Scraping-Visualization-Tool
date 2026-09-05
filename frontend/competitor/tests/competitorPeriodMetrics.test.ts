@@ -166,13 +166,13 @@ test("radar and category cards use link totals while seller workbench separates 
   );
   assert.equal(
     pageSource.match(/class="competitor-status-observed-sales"/g)?.length,
-    1,
+    2,
   );
   assert.equal(
     [...pageSource.matchAll(
-      /class="competitor-status-observed-sales"[\s\S]{0,260}?\/>\s*<\/div>\s*<\/article>/g,
+      /<CompetitorObservedSalesMetrics[\s\S]{0,180}?class="competitor-status-observed-sales"/g,
     )].length,
-    1,
+    2,
   );
   assert.equal(pageSource.match(/最新评论数（PLID 共用）/g)?.length, 4);
   assert.equal(pageSource.match(/class="competitor-first-monitored-badge/g)?.length, 4);
@@ -183,10 +183,10 @@ test("radar and category cards use link totals while seller workbench separates 
   );
   assert.equal(
     pageSource.match(/class="competitor-card-category(?: is-compact)?"/g)?.length,
-    3,
+    4,
   );
-  assert.equal(pageSource.match(/aria-label="商品类目层级"/g)?.length, 3);
-  assert.equal(pageSource.match(/类目待采集 · 后续成功采集后补齐/g)?.length, 3);
+  assert.equal(pageSource.match(/aria-label="商品类目层级"/g)?.length, 4);
+  assert.equal(pageSource.match(/类目待采集 · 后续成功采集后补齐/g)?.length, 4);
   assert.match(pageSource, /competitorCategoryLevelLabel\(index: number, total: number\)/);
   assert.match(pageSource, /if \(total <= 1 \|\| index === total - 1\) return "精确类目"/);
   assert.match(pageSource, /if \(index === 0\) return "大类"/);

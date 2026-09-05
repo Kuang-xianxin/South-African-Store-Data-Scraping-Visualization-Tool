@@ -2885,10 +2885,6 @@ function categoryItemOfferSummary(item: CompetitorItem): string {
   ].join(" · ");
 }
 
-function categoryItemPathText(item: CompetitorItem): string {
-  return competitorCategoryPath(item).map((category) => category.name).join(" › ");
-}
-
 async function loadCategoryCatalogOwnStoreItems(): Promise<void> {
   const cacheKey = ownStoreScopeCacheKey("all", "");
   if (categoryCatalogLoadedKey.value === cacheKey) return;
@@ -10272,53 +10268,90 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
               <article
                 v-for="item in pagedCategoryCatalogMatches"
                 :key="`${item.来源}-${item.plid}`"
-                class="competitor-category-product-card"
-                :class="{ 'is-own-store': item.来源 === 'own_store' }"
+                class="competitor-status-card competitor-category-product-card"
+                :class="{
+                  'is-own-store': item.来源 === 'own_store',
+                  'own-store-card': item.来源 === 'own_store',
+                }"
+                tabindex="0"
+                role="button"
+                :aria-haspopup="item.来源 === 'competitor' ? 'dialog' : undefined"
+                :aria-label="item.来源 === 'own_store'
+                  ? `在新标签页查看自有链接 ${item.商品} 的完整详情`
+                  : `查看真正竞品 ${item.商品} 及全部报价的完整详情`"
+                @click="openCategoryProductDetail(item)"
+                @keydown.enter.self="openCategoryProductDetail(item)"
+                @keydown.space.self.prevent="openCategoryProductDetail(item)"
               >
-                <div class="competitor-category-product-source">
-                  <strong
-                    class="competitor-category-source-badge"
-                    :class="{ 'is-own-store': item.来源 === 'own_store' }"
-                  >
-                    {{ item.来源 === "own_store" ? "★ 自有链接" : "真正竞品" }}
-                  </strong>
-                  <span class="competitor-category-product-source-meta">
-                    <span>{{ categoryItemSourceDescription(item) }}</span>
-                    <span class="competitor-first-monitored-badge is-compact">
+                <header class="competitor-status-header">
+                  <div class="competitor-status-identity">
+                    <div class="competitor-product-image competitor-status-image">
+                      <img
+                        v-if="canShowCompetitorImage(item.图片)"
+                        :src="competitorImageUrl(item.图片)"
+                        :alt="`${item.商品} 商品图片`"
+                        width="192"
+                        height="192"
+                        loading="lazy"
+                        decoding="async"
+                        @error="retryCompetitorImage($event, item.图片)"
+                      />
+                      <span v-else>暂无图片</span>
+                    </div>
+                    <div class="competitor-status-title">
+                      <div class="competitor-status-eyebrow">
+                        <strong
+                          class="competitor-category-source-badge"
+                          :class="{ 'is-own-store': item.来源 === 'own_store' }"
+                        >
+                          {{ item.来源 === "own_store" ? "★ 自有链接" : "真正竞品" }}
+                        </strong>
+                        <span>PLID{{ item.plid }}</span>
+                        <span>
+                          {{ categoryItemSourceDescription(item) }} · 更新
+                          {{ formatChinaDateTime(item.采集时间) }}
+                        </span>
+                      </div>
+                      <h3>{{ item.商品 }}</h3>
+                      <p>{{ categoryItemOfferSummary(item) }}</p>
+                      <p v-if="item.来源 === 'own_store'" class="own-store-company-skus">
+                        公司 SKU {{ item.company_skus?.length ? item.company_skus.join("、") : "未关联" }}
+                      </p>
+                      <div v-if="item.来源 === 'own_store'" class="own-offer-latest-statuses">
+                        <span>最新 Offer 状态</span>
+                        <strong
+                          v-for="status in item.最新Offer状态 || []"
+                          :key="status"
+                          class="own-offer-status-pill"
+                          :class="`status-${status}`"
+                          :title="status"
+                        >
+                          {{ ownOfferLatestStatusLabel(status) }}
+                        </strong>
+                        <strong
+                          v-if="!item.最新Offer状态?.length"
+                          class="own-offer-status-pill status-unknown"
+                        >
+                          当前状态缺失
+                        </strong>
+                        <small v-if="item.最新Offer状态更新时间">
+                          状态更新 {{ formatChinaDateTime(item.最新Offer状态更新时间) }}
+                        </small>
+                      </div>
+                    </div>
+                  </div>
+                  <div class="competitor-status-header-actions">
+                    <span class="competitor-first-monitored-badge">
                       <small>首次监控</small>
                       <strong>{{ formatChinaDateTime(item.首次监控时间 ?? null) }}</strong>
                     </span>
-                  </span>
-                </div>
-                <button
-                  type="button"
-                  class="competitor-category-product-main"
-                  :aria-haspopup="item.来源 === 'competitor' ? 'dialog' : undefined"
-                  :aria-label="`查看 ${item.商品} 详情`"
-                  @click="openCategoryProductDetail(item)"
-                >
-                  <span class="competitor-product-image competitor-category-product-image">
-                    <img
-                      v-if="canShowCompetitorImage(item.图片)"
-                      :src="competitorImageUrl(item.图片)"
-                      :alt="`${item.商品} 商品图片`"
-                      width="192"
-                      height="192"
-                      loading="lazy"
-                      decoding="async"
-                      @error="retryCompetitorImage($event, item.图片)"
-                    />
-                    <span v-else>暂无图片</span>
-                  </span>
-                  <span class="competitor-category-product-copy">
-                    <small>PLID{{ item.plid }}</small>
-                    <strong>{{ item.商品 }}</strong>
-                    <span>{{ categoryItemOfferSummary(item) }}</span>
-                    <span>{{ categoryItemPathText(item) || "类目路径待采集" }}</span>
-                    <em>{{ item.来源 === "own_store" ? "打开自有链接完整详情 →" : "弹出商品完整详情 →" }}</em>
-                  </span>
-                </button>
-                <div class="competitor-category-product-metrics">
+                    <span class="competitor-status-open">
+                      {{ item.来源 === "own_store" ? "新标签页查看完整详情 →" : "查看卖家库存 →" }}
+                    </span>
+                  </div>
+                </header>
+
+                <div class="competitor-status-summary">
                   <div>
                     <span>{{ item.来源 === "own_store" ? "跟卖报价 / 自有最新价" : "报价区间 / 主报价" }}</span>
                     <strong>{{ competitorOfferPriceRange(item) }}</strong>
@@ -10336,26 +10369,51 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
                         unavailable: item.库存上限 === '没货',
                       }"
                     >{{ item.库存上限 }}</strong>
-                    <small v-if="item.库存参考过期 && item.上次成功库存">
-                      上次成功 {{ item.上次成功库存 }} · {{ formatChinaDateTime(item.上次成功库存时间) }}
+                    <small v-if="item.来源 === 'own_store'">不执行公开页主报价探测</small>
+                    <small v-else-if="item.库存参考过期 && item.上次成功库存">
+                      上次成功 {{ item.上次成功库存 }} ·
+                      {{ formatChinaDateTime(item.上次成功库存时间) }}
                     </small>
                     <small v-else>{{ item.当前卖家 || "未知卖家" }}</small>
                   </div>
-                  <div>
+                  <div class="competitor-period-revenue">
                     <span>周期内销售额</span>
                     <strong>{{ formatCurrency(item.周期销售额) }}</strong>
                     <small>{{ periodInventoryTurnoverLabel(item) }}</small>
+                  </div>
+                  <div class="competitor-card-category" aria-label="商品类目层级">
+                    <span>商品类目</span>
+                    <ol v-if="competitorCategoryPath(item).length">
+                      <li
+                        v-for="(category, categoryIndex) in competitorCategoryPath(item)"
+                        :key="`${category.id || category.slug || category.name}-${categoryIndex}`"
+                      >
+                        <button
+                          class="competitor-category-node-button"
+                          type="button"
+                          :aria-label="`查看 ${category.name} 类目的全部系统商品`"
+                          @click.stop="openCategoryModal(category, $event)"
+                        >
+                          <small>
+                            {{ competitorCategoryLevelLabel(categoryIndex, competitorCategoryPath(item).length) }}
+                          </small>
+                          <strong>{{ category.name }}</strong>
+                        </button>
+                      </li>
+                    </ol>
+                    <p v-else class="competitor-card-category-empty">
+                      类目待采集 · 后续成功采集后补齐
+                    </p>
                   </div>
                   <div>
                     <span>最新评论数（PLID 共用）</span>
                     <strong>{{ latestReviewCountLabel(item) }}</strong>
                     <small v-if="item.最新评论获取时间">
-                      评论更新 {{ formatChinaDateTime(item.最新评论获取时间) }} · 评分 {{ item.评分 ?? "—" }}
+                      评论更新 {{ formatChinaDateTime(item.最新评论获取时间) }} · 区间末评分
+                      {{ item.评分 ?? "—" }}
                     </small>
-                    <small v-else>公开评论尚未同步 · 评分 {{ item.评分 ?? "—" }}</small>
+                    <small v-else>公开评论尚未同步 · 区间末评分 {{ item.评分 ?? "—" }}</small>
                   </div>
-                </div>
-                <div class="competitor-category-product-sales">
                   <OwnStoreSalesComparisonMetrics
                     v-if="item.来源 === 'own_store'"
                     :own-values="item.自有官方销量"
@@ -10367,12 +10425,14 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
                   />
                   <CompetitorObservedSalesMetrics
                     v-else
+                    class="competitor-status-observed-sales"
                     :values="item.近期观察售出"
                     :through-date="item.近期观察售出截至"
                     context-label="全部卖家 · 全部变体"
                     compact
                   />
                 </div>
+
                 <a
                   class="competitor-category-platform-link"
                   :href="item.链接"

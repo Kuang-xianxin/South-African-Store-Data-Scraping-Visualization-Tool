@@ -68,9 +68,9 @@ test("deduplicates PLIDs, lets own-store evidence win, and lists own links first
   ]);
 });
 
-test("all three radar category hierarchies expose buttons and the catalog uses all-store data", () => {
-  assert.equal(pageSource.match(/class="competitor-category-node-button"/g)?.length, 3);
-  assert.equal(pageSource.match(/@click\.stop="openCategoryModal\(category, \$event\)"/g)?.length, 3);
+test("all four radar category hierarchies expose buttons and the catalog uses all-store data", () => {
+  assert.equal(pageSource.match(/class="competitor-category-node-button"/g)?.length, 4);
+  assert.equal(pageSource.match(/@click\.stop="openCategoryModal\(category, \$event\)"/g)?.length, 4);
   assert.match(pageSource, /class="competitor-modal competitor-category-modal"/);
   assert.match(pageSource, /fetchOwnStoreCompetitors\([\s\S]*?"all"/);
   assert.match(pageSource, /openCategoryProductDetail\(item\)/);
@@ -80,19 +80,58 @@ test("all three radar category hierarchies expose buttons and the catalog uses a
 });
 
 test("category directory cards expose the radar card operating details", () => {
-  const cardStart = pageSource.indexOf('class="competitor-category-product-card"');
+  const cardStart = pageSource.indexOf(
+    'class="competitor-status-card competitor-category-product-card"',
+  );
   const cardEnd = pageSource.indexOf("</article>", cardStart);
   const cardSource = pageSource.slice(cardStart, cardEnd);
 
   assert.ok(cardStart >= 0 && cardEnd > cardStart);
+  assert.match(cardSource, /class="competitor-status-header"/);
+  assert.match(cardSource, /class="competitor-status-summary"/);
   assert.match(cardSource, /categoryItemOfferSummary\(item\)/);
   assert.match(cardSource, /competitor-first-monitored-badge/);
   assert.match(cardSource, /competitorOfferPriceRange\(item\)/);
   assert.match(cardSource, /item\.库存上限/);
   assert.match(cardSource, /item\.周期销售额/);
+  assert.match(cardSource, /class="competitor-card-category"/);
   assert.match(cardSource, /latestReviewCountLabel\(item\)/);
   assert.match(cardSource, /<OwnStoreSalesComparisonMetrics/);
   assert.match(cardSource, /<CompetitorObservedSalesMetrics/);
-  assert.match(stylesSource, /\.competitor-category-product-metrics/);
-  assert.match(stylesSource, /\.competitor-category-product-sales/);
+  assert.match(cardSource, /class="competitor-category-platform-link"/);
+  assert.doesNotMatch(cardSource, /competitor-category-product-(?:main|metrics|sales)/);
+});
+
+test("radar and category directory cards share the compact responsive grid", () => {
+  assert.match(
+    stylesSource,
+    /\.competitor-status-list \{[\s\S]*grid-template-columns: repeat\(auto-fill, minmax\(min\(100%, 560px\), 1fr\)\)/,
+  );
+  assert.match(
+    stylesSource,
+    /\.competitor-category-product-grid \{[\s\S]*grid-template-columns: repeat\(auto-fill, minmax\(min\(100%, 560px\), 1fr\)\)/,
+  );
+  assert.match(
+    stylesSource,
+    /\.competitor-status-card \{[\s\S]*max-width: 720px[\s\S]*container-name: competitor-radar-card/,
+  );
+  assert.match(
+    stylesSource,
+    /@container competitor-radar-card \(max-width: 760px\) \{[\s\S]*grid-template-columns: repeat\(3, minmax\(0, 1fr\)\)/,
+  );
+  assert.match(
+    stylesSource,
+    /@container competitor-radar-card \(max-width: 520px\) \{[\s\S]*grid-template-columns: repeat\(2, minmax\(0, 1fr\)\)/,
+  );
+});
+
+test("product detail stays above the category directory and its nested action modal", () => {
+  assert.match(
+    stylesSource,
+    /\.competitor-product-detail-backdrop \{[\s\S]*z-index: 100/,
+  );
+  assert.match(
+    stylesSource,
+    /\.target-action-modal-backdrop \{[\s\S]*z-index: 110/,
+  );
 });
