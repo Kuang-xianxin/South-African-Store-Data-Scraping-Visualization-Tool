@@ -3397,9 +3397,27 @@ textarea.link-input-error-pulse {
 .competitor-status-summary > .competitor-observed-sales.competitor-status-observed-sales {
   align-self: start;
   justify-self: end;
+  gap: 2px;
   width: calc(100% - 8px);
-  max-width: 164px;
+  max-width: 238px;
   margin: 0;
+  padding: 4px 6px;
+}
+
+.competitor-status-summary > .competitor-observed-sales.competitor-status-observed-sales
+  .competitor-observed-sales-heading small {
+  line-height: 1.2;
+}
+
+.competitor-status-summary > .competitor-observed-sales.competitor-status-observed-sales
+  .competitor-observed-sales-list > div {
+  min-height: 17px;
+}
+
+.competitor-status-summary > .competitor-observed-sales.competitor-status-observed-sales > footer {
+  gap: 0;
+  padding-top: 2px;
+  line-height: 1.2;
 }
 
 .competitor-status-summary > .own-store-sales-comparison {

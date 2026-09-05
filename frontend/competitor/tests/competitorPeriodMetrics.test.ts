@@ -134,7 +134,11 @@ test("radar and category cards use link totals while seller workbench separates 
   );
   assert.match(
     stylesSource,
-    /\.competitor-status-summary > \.competitor-observed-sales\.competitor-status-observed-sales \{[\s\S]*width: calc\(100% - 8px\)[\s\S]*max-width: 164px/,
+    /\.competitor-status-summary > \.competitor-observed-sales\.competitor-status-observed-sales \{[\s\S]*gap: 2px[\s\S]*width: calc\(100% - 8px\)[\s\S]*max-width: 238px[\s\S]*padding: 4px 6px/,
+  );
+  assert.match(
+    stylesSource,
+    /\.competitor-status-summary > \.competitor-observed-sales\.competitor-status-observed-sales[\s\S]*\.competitor-observed-sales-list > div \{[\s\S]*min-height: 17px/,
   );
   assert.doesNotMatch(stylesSource, /competitor-observed-sales-grid/);
   assert.equal(
