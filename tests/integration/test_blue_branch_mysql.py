@@ -43,7 +43,10 @@ def mysql_server(tmp_path_factory):
     initialized = subprocess.run([*common, "--initialize-insecure"], capture_output=True, timeout=90, creationflags=flags)
     assert initialized.returncode == 0, initialized.stderr.decode(errors="replace")[-2000:]
     process = subprocess.Popen([*common, f"--port={port}", "--bind-address=127.0.0.1", "--mysqlx=OFF",
-        "--skip-log-bin", "--server-id=987654", "--max-connections=10", "--event-scheduler=OFF",
+        f"--log-bin={root / 'blue-bin'}", "--gtid-mode=ON", "--enforce-gtid-consistency=ON",
+        "--binlog-format=ROW", "--binlog-row-image=FULL", "--binlog-checksum=CRC32",
+        "--sync-binlog=1", "--innodb-flush-log-at-trx-commit=1",
+        "--server-id=987654", "--max-connections=10", "--event-scheduler=OFF",
         "--local-infile=OFF", "--secure-file-priv=NULL", f"--log-error={root / 'mysql.log'}"],
         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, creationflags=flags)
 
@@ -408,3 +411,108 @@ def test_schema_cycle_is_rejected_before_dml(scenario):
     with apply.open_review(*paths) as review, pytest.raises(apply.MergeRejected, match="cyclic"):
         apply.rehearse(conn, review, **target, commit=True)
     assert rows(conn) == [] and receipts(conn) == 0
+
+
+def journal_inputs(conn, target, baseline):
+    with conn.cursor() as cursor:
+        cursor.execute("SHOW MASTER STATUS")
+        last, position, _, _, executed = cursor.fetchone()
+        cursor.execute("SHOW BINARY LOGS")
+        logs = cursor.fetchall()
+    files = []
+    for row in logs:
+        files.append((target["datadir"].parent / row[0], position if row[0] == last else row[1]))
+        if row[0] == last:
+            break
+
+    def covers(covered):
+        with conn.cursor() as cursor:
+            cursor.execute("SELECT GTID_SUBSET(GTID_SUBTRACT(%s,%s),%s)", (executed, baseline, covered))
+            return cursor.fetchone()[0] == 1
+
+    executable = Path(os.getenv("BLUE_REHEARSAL_MYSQLD", "C:/Program Files/MySQL/MySQL Server 8.0/bin/mysqld.exe"))
+    return files, executable.with_name("mysqlbinlog.exe" if os.name == "nt" else "mysqlbinlog"), covers
+
+
+def test_binlog_journal_preserves_complete_multirow_transaction(scenario, tmp_path):
+    journal = importlib.import_module("blue_branch_journal")
+    conn, target, _, _ = scenario({}, {}, {})
+    assert journal.boundary(conn)["config"]["binlog_format"] == "ROW"
+    with conn.cursor() as cursor:
+        cursor.execute("SELECT @@global.gtid_executed")
+        baseline = cursor.fetchone()[0]
+    conn.autocommit(False)
+    with conn.cursor() as cursor:
+        cursor.execute("INSERT INTO sale_items VALUES (1,'first row'),(2,'second row')")
+        cursor.execute("UPDATE sale_items SET value='changed within same transaction' WHERE id=1")
+    conn.commit()
+    conn.autocommit(True)
+    files, executable, covers = journal_inputs(conn, target, baseline)
+    folder = tmp_path / "complete-journal"
+    result = journal.archive_files(folder, files, executable, {"cluster": merge.CLUSTER}, covers, lambda: None)
+    header, seal = journal.verify_journal(folder)
+    assert result["journal_seal"] == seal and covers(header["gtids"])
+    assert header["transactions"] > 0
+    # The final transaction has several row events but exactly one GTID region.
+    regions = list(journal.transaction_regions(folder / files[-1][0].name))
+    assert regions[-1][2] + regions[-1][3] == files[-1][1]
+    assert result["mysql_writes"] == 0
+
+
+def test_binlog_missing_transaction_file_leaves_unsealed_journal(scenario, tmp_path):
+    journal = importlib.import_module("blue_branch_journal")
+    conn, target, _, _ = scenario({}, {}, {})
+    with conn.cursor() as cursor:
+        cursor.execute("SELECT @@global.gtid_executed")
+        baseline = cursor.fetchone()[0]
+        cursor.execute("INSERT INTO sale_items VALUES (1,'first')")
+        cursor.execute("FLUSH BINARY LOGS")
+        cursor.execute("INSERT INTO sale_items VALUES (2,'second')")
+    files, executable, covers = journal_inputs(conn, target, baseline)
+    folder = tmp_path / "missing-journal"
+    with pytest.raises(journal.JournalRejected, match="missing-required-gtids"):
+        journal.archive_files(folder, files[-1:], executable, {"cluster": merge.CLUSTER}, covers, lambda: None)
+    with pytest.raises(journal.JournalRejected, match="incomplete"):
+        journal.verify_journal(folder)
+
+
+def test_checksum_valid_gtid_only_prefix_is_not_complete_transaction(scenario, tmp_path):
+    import struct
+    journal = importlib.import_module("blue_branch_journal")
+    conn, target, _, _ = scenario({}, {}, {})
+    files, executable, _ = journal_inputs(conn, target, "")
+    source, size = files[-1]
+    full = tmp_path / "full-binlog"
+    journal.prefix_digest(source, size, full)
+    first = next(journal.transaction_regions(full))
+    with full.open("rb") as stream:
+        stream.seek(first[2])
+        event_length = struct.unpack("<IBIIIH", stream.read(19))[3]
+    truncated = tmp_path / "gtid-only"
+    journal.prefix_digest(full, first[2] + event_length, truncated)
+    # Every included event still has its original correct CRC32.
+    journal.verify_binlog(truncated, executable)
+    with pytest.raises(journal.JournalRejected, match="incomplete-transaction"):
+        list(journal.transaction_regions(truncated))
+
+
+def test_binlog_corruption_or_index_edit_is_detected(scenario, tmp_path):
+    import sqlite3
+    journal = importlib.import_module("blue_branch_journal")
+    conn, target, _, _ = scenario({}, {}, {})
+    files, executable, covers = journal_inputs(conn, target, "")
+    folder = tmp_path / "tampered-journal"
+    journal.archive_files(folder, files, executable, {"cluster": merge.CLUSTER}, covers, lambda: None)
+    with sqlite3.connect(folder / "transactions.sqlite3") as db:
+        db.execute("UPDATE transactions SET length=length+1 WHERE gno=(SELECT MIN(gno) FROM transactions)")
+    with pytest.raises(journal.JournalRejected, match="index-mismatch"):
+        journal.verify_journal(folder)
+    damaged = tmp_path / "damaged-binlog"
+    journal.prefix_digest(files[-1][0], files[-1][1], damaged)
+    with damaged.open("r+b") as stream:
+        stream.seek(-5, 2)
+        value = stream.read(1)
+        stream.seek(-1, 1)
+        stream.write(bytes([value[0] ^ 1]))
+    with pytest.raises(journal.JournalRejected, match="validation-failed"):
+        journal.verify_binlog(damaged, executable)
