@@ -191,16 +191,14 @@ test("cat houses and climbing towers match reciprocally by explicit use across m
 test("every radar product-card surface exposes competitor query and the modal reuses the outer card", () => {
   assert.match(radarCardSource, />\s*竞品查询\s*<\/button>/);
   assert.match(pageSource, /openPersonalWatchlistCompetitorMatches\(card, \$event\)/);
-  assert.ok(
-    (pageSource.match(/openCompetitorMatchModal\(item, \$event\)/g)?.length ?? 0) >= 1,
-  );
-  assert.equal(pageSource.match(/<CompetitorRadarProductCard/g)?.length, 3);
+  assert.equal(pageSource.match(/@query-competitors="openCompetitorMatchModal"/g)?.length, 4);
+  assert.equal(pageSource.match(/<CompetitorRadarProductCard/g)?.length, 4);
   assert.match(pageSource, /COMPETITOR MATCHING/);
   assert.match(pageSource, /系统已有商品（含自有链接） · 按相关度排序/);
   assert.match(pageSource, /rankCompetitorMatches\(competitorMatchSource\.value, competitorMatchCandidates\.value\)/);
   assert.doesNotMatch(pageSource, /competitorMatchKindFilter|competitor-match-evidence/);
   assert.match(radarCardSource, /<footer class="competitor-card-query-actions">[\s\S]*竞品查询/);
-  assert.equal(pageSource.match(/<footer class="competitor-card-query-actions">/g)?.length, 2);
+  assert.equal(pageSource.match(/<footer class="competitor-card-query-actions">/g)?.length, 1);
   assert.match(stylesSource, /\.competitor-match-result-list \{[\s\S]*grid-template-columns: minmax\(0, 1fr\)/);
   assert.match(stylesSource, /\.competitor-product-detail-backdrop \{[\s\S]*z-index: 100/);
   assert.match(stylesSource, /\.competitor-match-backdrop \{[\s\S]*z-index: 94/);

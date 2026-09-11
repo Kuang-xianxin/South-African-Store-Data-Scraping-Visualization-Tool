@@ -1,10 +1,13 @@
 <script setup lang="ts">
+import { computed } from "vue";
 import { cachedNumberFormatter } from "../numberFormatters";
 import CompetitorObservedSalesMetrics from "./CompetitorObservedSalesMetrics.vue";
 import OwnStoreSalesComparisonMetrics from "./OwnStoreSalesComparisonMetrics.vue";
 import OwnStoreListingTime from "./OwnStoreListingTime.vue";
 import CompetitorPriceSummary from "./CompetitorPriceSummary.vue";
 import RadarCardProfit from "./RadarCardProfit.vue";
+import RadarProductImage from "./RadarProductImage.vue";
+import { radarCardSellers, radarBrandLabel, type RadarSeller } from "../radarSellerProducts";
 import { radarCardPlatformUrl } from "../radarCardProfit";
 import { ownOfferLatestStatusLabel } from "../ownOfferLatestStatus";
 import {
@@ -43,7 +46,9 @@ const emit = defineEmits<{
   ): void;
   (event: "query-competitors", item: CompetitorItem, mouseEvent: MouseEvent): void;
   (event: "image-error", imageEvent: Event, imageUrl: string | null): void;
+  (event: "open-seller", seller: RadarSeller): void;
 }>();
+const sellers = computed(() => radarCardSellers(props.item));
 
 function formatCurrency(value: number | null): string {
   return value === null
@@ -112,31 +117,17 @@ function categoryLevelLabel(index: number, total: number): string {
   >
     <header class="competitor-status-header">
       <div class="competitor-status-identity">
-        <div class="competitor-product-image competitor-status-image">
-          <img
-            v-if="props.showImage"
-            :src="props.imageSrc"
-            :alt="`${props.item.商品} 商品图片`"
-            width="192"
-            height="192"
-            loading="lazy"
-            decoding="async"
-            @error="emit('image-error', $event, props.item.图片)"
-          />
-          <span v-else>暂无图片</span>
-        </div>
+        <RadarProductImage :src="props.imageSrc" :title="props.item.商品" :show="props.showImage" @image-error="emit('image-error', $event, props.item.图片)" />
         <div class="competitor-status-title">
           <div class="competitor-status-eyebrow">
             <strong v-if="props.item.来源 === 'own_store'" class="competitor-category-source-badge is-own-store">自有链接</strong>
             <span>PLID{{ props.item.plid }}</span>
-            <span v-if="props.item.来源 === 'own_store'">{{ ownStoreNames(props.item) }}</span>
-            <span>{{ formatChinaDateTime(props.item.采集时间) }}</span>
             <strong
               v-if="props.personalWatchlist"
               class="personal-watchlist-badge"
             >我的监控池</strong>
           </div>
-          <h3>
+          <h3 :title="props.item.商品">
             <a v-if="radarCardPlatformUrl(props.item)" class="radar-card-platform-link"
               :href="radarCardPlatformUrl(props.item)!" target="_blank" rel="noopener noreferrer"
               :aria-label="`${props.item.商品}，在新标签页打开平台商品页`">
@@ -145,48 +136,43 @@ function categoryLevelLabel(index: number, total: number): string {
             <span v-else>{{ props.item.商品 }}</span>
           </h3>
           <small v-if="!radarCardPlatformUrl(props.item)" class="radar-card-link-missing">平台链接待补齐</small>
-          <p v-if="props.item.来源 === 'own_store'">
-            {{ props.item.自有报价.length }} 个自有 Offer ·
-            {{ followerSellerCount(props.item) }} 个跟卖卖家 ·
-            {{ ownStoreVariantCount(props.item) }} 个自有变体
-          </p>
-          <p v-else>
-            {{ followerSellerCount(props.item) }} 个卖家 ·
-            {{ props.item.跟卖报价.length }} 个变体 / 报价 ·
-            主卖家 {{ props.item.当前卖家 || "未知" }}
-          </p>
+          <div class="radar-brand-sellers">
+            <span v-if="radarBrandLabel(props.item) !== '待采集'">品牌 {{ radarBrandLabel(props.item) }}</span>
+            <button v-for="seller in sellers.slice(0, 3)" :key="seller.key" type="button" class="radar-seller-link" @click="emit('open-seller', seller)">{{ seller.name }}</button>
+            <span v-if="sellers.length > 3" :title="sellers.map(seller => seller.name).join('、')">等{{ sellers.length }}家</span>
+            <span v-if="!sellers.length">卖家待采集</span>
+          </div>
           <template v-if="props.item.来源 === 'own_store'">
-            <p class="own-store-company-skus">
+            <p class="own-store-company-skus" :title="props.item.company_skus?.join('、')">
               公司 SKU {{ props.item.company_skus?.length ? props.item.company_skus.join("、") : "未关联" }}
             </p>
             <div class="own-offer-latest-statuses">
-              <span>最新 Offer 状态</span>
+              <span>状态</span>
               <strong v-for="status in props.item.最新Offer状态 || []" :key="status"
                 class="own-offer-status-pill" :class="`status-${status}`" :title="status">
-                {{ ownOfferLatestStatusLabel(status) }}
+                {{ ownOfferLatestStatusLabel(status).replace(/\s*[（(].*?[）)]/g, '') }}
               </strong>
               <strong v-if="!props.item.最新Offer状态?.length" class="own-offer-status-pill status-unknown">当前状态缺失</strong>
-              <small v-if="props.item.最新Offer状态更新时间">状态更新 {{ formatChinaDateTime(props.item.最新Offer状态更新时间) }}</small>
             </div>
           </template>
+          <div class="radar-card-times">
+            <OwnStoreListingTime v-if="props.item.来源 === 'own_store'" :item="props.item" />
+            <span class="competitor-first-monitored-badge"><small>首次监控</small><strong>{{ formatChinaDateTime(props.item.首次监控时间 ?? null) }}</strong></span>
+          </div>
         </div>
-      </div>
-      <div class="competitor-status-header-actions">
-        <OwnStoreListingTime v-if="props.item.来源 === 'own_store'" :item="props.item" />
-        <span class="competitor-first-monitored-badge">
-          <small>首次监控</small>
-          <strong>{{ formatChinaDateTime(props.item.首次监控时间 ?? null) }}</strong>
-        </span>
       </div>
     </header>
 
     <div class="competitor-status-summary">
       <div class="radar-card-price-column">
-        <CompetitorPriceSummary :item="props.item" />
-        <RadarCardProfit :item="props.item" :store-scope="props.storeScope" :store-code="props.storeCode" />
+        <CompetitorPriceSummary :item="props.item">
+          <template #own-extra>
+            <RadarCardProfit :item="props.item" :store-scope="props.storeScope" :store-code="props.storeCode" />
+          </template>
+        </CompetitorPriceSummary>
       </div>
-      <div>
-        <span>{{ props.item.来源 === 'own_store' ? 'Seller API 最新库存' : '主报价库存' }}</span>
+      <div class="radar-card-stock">
+        <span>{{ props.item.来源 === 'own_store' ? '官方库存' : '主报价库存' }}</span>
         <strong
           class="stock-pill"
           :class="{
@@ -201,13 +187,14 @@ function categoryLevelLabel(index: number, total: number): string {
         <small v-else-if="props.item.来源 !== 'own_store'">{{ props.item.当前卖家 || "未知卖家" }}</small>
       </div>
       <div class="competitor-period-revenue">
-        <span>周期内销售额</span>
+        <span>观察销售额</span>
         <strong>{{ formatCurrency(props.item.周期销售额) }}</strong>
-        <small>{{ periodInventoryTurnoverLabel(props.item) }}</small>
+        <small :title="periodInventoryTurnoverLabel(props.item)">库存观察 · 非订单</small>
       </div>
       <div class="competitor-card-category" aria-label="商品类目层级">
         <span>商品类目</span>
-        <ol v-if="categoryPath(props.item).length">
+        <template v-if="categoryPath(props.item).length">
+        <ol>
           <li
             v-for="(category, categoryIndex) in categoryPath(props.item)"
             :key="`${category.id || category.slug || category.name}-${categoryIndex}`"
@@ -223,18 +210,15 @@ function categoryLevelLabel(index: number, total: number): string {
             </button>
           </li>
         </ol>
+        </template>
         <p v-else class="competitor-card-category-empty">
           类目待采集 · 后续成功采集后补齐
         </p>
       </div>
-      <div>
-        <span>最新评论数（PLID 共用）</span>
-        <strong>{{ latestReviewCountLabel(props.item) }}</strong>
-        <small v-if="props.item.最新评论获取时间">
-          评论更新 {{ formatChinaDateTime(props.item.最新评论获取时间) }} ·
-          区间末评分 {{ props.item.评分 ?? "—" }}
-        </small>
-        <small v-else>公开评论尚未同步 · 区间末评分 {{ props.item.评分 ?? "—" }}</small>
+      <div class="radar-card-reviews">
+        <span title="最新评论数（PLID 共用）">评论（PLID）</span>
+        <strong :title="`评论更新 ${formatChinaDateTime(props.item.最新评论获取时间 ?? null)}`">{{ latestReviewCountLabel(props.item) }}</strong>
+        <small>评分 {{ props.item.评分 ?? "—" }}</small>
       </div>
       <OwnStoreSalesComparisonMetrics
         v-if="props.item.来源 === 'own_store'"
@@ -267,6 +251,7 @@ function categoryLevelLabel(index: number, total: number): string {
       >
         竞品查询
       </button>
+
     </footer>
   </article>
 </template>

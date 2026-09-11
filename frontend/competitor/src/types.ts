@@ -71,6 +71,9 @@ export type CompetitorObservedSalesWindows = Partial<
 };
 
 export interface CompetitorItem {
+  /** Explicit captured brand only; never inferred from seller or title. */
+  品牌?: string | null;
+  brand?: string | null;
   来源: "competitor" | "own_store";
   快照ID: number;
   plid: string;

@@ -13,6 +13,8 @@ import CompetitorObservedSalesMetrics from "../components/CompetitorObservedSale
 import CompetitorCollectionLogViewer from "../components/CompetitorCollectionLogViewer.vue";
 import BlueDistributedCrawl from "../components/BlueDistributedCrawl.vue";
 import CompetitorRadarProductCard from "../components/CompetitorRadarProductCard.vue";
+import RadarSellerProductsModal from "../components/RadarSellerProductsModal.vue";
+import type { RadarSeller } from "../radarSellerProducts";
 import CompetitorPriceSummary from "../components/CompetitorPriceSummary.vue";
 import LoadingState from "../components/LoadingState.vue";
 import {
@@ -577,6 +579,8 @@ const targetAuditStartDate = ref(localDateInput(30));
 const targetAuditEndDate = ref(localDateInput(0));
 const withStockProbe = ref(true);
 const visibleBrowser = ref(false);
+const sellerProductSelection = shallowRef<{ seller: RadarSeller; scope: OwnStoreScope } | null>(null);
+watch(() => props.currentStoreCode, () => { sellerProductSelection.value = null; });
 const competitors = shallowRef<CompetitorItem[]>([]);
 const storeCompetitors = shallowRef<CompetitorItem[]>([]);
 const competitorPagination = shallowRef<RadarPagination | null>(null);
@@ -7448,6 +7452,7 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
 </script>
 
 <template>
+  <RadarSellerProductsModal v-if="sellerProductSelection" :seller="sellerProductSelection.seller" :store-scope="sellerProductSelection.scope" :store-code="props.currentStoreCode" @close="sellerProductSelection = null" @open-detail="openCategoryProductDetail" />
   <div
     class="competitor-module"
     :class="{ 'admin-priority-layout': props.isAdmin }"
@@ -10398,7 +10403,8 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
               :selected="selectedPlid === item.plid"
               :show-image="canShowCompetitorImage(item.图片)"
               :image-src="competitorImageUrl(item.图片)"
-              @open-detail="openProductDetail"
+              @open-seller="sellerProductSelection = { seller: $event, scope: ownStoreScope }"
+            @open-detail="openProductDetail"
               @open-category="openCategoryModal"
               @query-competitors="openCompetitorMatchModal"
               @image-error="retryCompetitorImage"
@@ -10470,6 +10476,7 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
             :personal-watchlist="personalWatchlistPlids.has(item.plid)"
             :show-image="canShowCompetitorImage(item.图片)"
             :image-src="competitorImageUrl(item.图片)"
+            @open-seller="sellerProductSelection = { seller: $event, scope: ownStoreScope }"
             @open-detail="openProductDetail"
             @open-category="openCategoryModal"
             @query-competitors="openCompetitorMatchModal"
@@ -10647,190 +10654,21 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
               </span>
             </div>
             <div v-else class="competitor-category-product-grid">
-              <article
+              <CompetitorRadarProductCard
                 v-for="item in pagedCategoryCatalogMatches"
                 :key="`${item.来源}-${item.plid}`"
-                class="competitor-status-card competitor-category-product-card"
-                :class="{
-                  'is-own-store': item.来源 === 'own_store',
-                  'own-store-card': item.来源 === 'own_store',
-                }"
-                tabindex="0"
-                role="button"
-                :aria-haspopup="item.来源 === 'competitor' ? 'dialog' : undefined"
-                :aria-label="item.来源 === 'own_store'
-                  ? `在新标签页查看自有链接 ${item.商品} 的完整详情`
-                  : `查看真正竞品 ${item.商品} 及全部报价的完整详情`"
-                @click="openCategoryProductDetail(item)"
-                @keydown.enter.self="openCategoryProductDetail(item)"
-                @keydown.space.self.prevent="openCategoryProductDetail(item)"
-              >
-                <header class="competitor-status-header">
-                  <div class="competitor-status-identity">
-                    <div class="competitor-product-image competitor-status-image">
-                      <img
-                        v-if="canShowCompetitorImage(item.图片)"
-                        :src="competitorImageUrl(item.图片)"
-                        :alt="`${item.商品} 商品图片`"
-                        width="192"
-                        height="192"
-                        loading="lazy"
-                        decoding="async"
-                        @error="retryCompetitorImage($event, item.图片)"
-                      />
-                      <span v-else>暂无图片</span>
-                    </div>
-                    <div class="competitor-status-title">
-                      <div class="competitor-status-eyebrow">
-                        <strong
-                          class="competitor-category-source-badge"
-                          :class="{ 'is-own-store': item.来源 === 'own_store' }"
-                        >
-                          {{ item.来源 === "own_store" ? "★ 自有链接" : "真正竞品" }}
-                        </strong>
-                        <span>PLID{{ item.plid }}</span>
-                        <span>
-                          {{ categoryItemSourceDescription(item) }} · 更新
-                          {{ formatChinaDateTime(item.采集时间) }}
-                        </span>
-                      </div>
-                      <h3>{{ item.商品 }}</h3>
-                      <p>{{ categoryItemOfferSummary(item) }}</p>
-                      <p v-if="item.来源 === 'own_store'" class="own-store-company-skus">
-                        公司 SKU {{ item.company_skus?.length ? item.company_skus.join("、") : "未关联" }}
-                      </p>
-                      <div v-if="item.来源 === 'own_store'" class="own-offer-latest-statuses">
-                        <span>最新 Offer 状态</span>
-                        <strong
-                          v-for="status in item.最新Offer状态 || []"
-                          :key="status"
-                          class="own-offer-status-pill"
-                          :class="`status-${status}`"
-                          :title="status"
-                        >
-                          {{ ownOfferLatestStatusLabel(status) }}
-                        </strong>
-                        <strong
-                          v-if="!item.最新Offer状态?.length"
-                          class="own-offer-status-pill status-unknown"
-                        >
-                          当前状态缺失
-                        </strong>
-                        <small v-if="item.最新Offer状态更新时间">
-                          状态更新 {{ formatChinaDateTime(item.最新Offer状态更新时间) }}
-                        </small>
-                      </div>
-                    </div>
-                  </div>
-                  <div class="competitor-status-header-actions">
-                    <OwnStoreListingTime v-if="item.来源 === 'own_store'" :item="item" />
-                    <span class="competitor-first-monitored-badge">
-                      <small>首次监控</small>
-                      <strong>{{ formatChinaDateTime(item.首次监控时间 ?? null) }}</strong>
-                    </span>
-                    <span class="competitor-status-open">
-                      {{ item.来源 === "own_store" ? "新标签页查看完整详情 →" : "查看卖家库存 →" }}
-                    </span>
-                  </div>
-                </header>
-
-                <div class="competitor-status-summary">
-                  <CompetitorPriceSummary :item="item" />
-                  <div>
-                    <span>{{ item.来源 === "own_store" ? "Seller API 最新库存" : "主报价库存" }}</span>
-                    <strong
-                      class="stock-pill"
-                      :class="{
-                        exact: item.库存精确,
-                        unavailable: item.库存上限 === '没货',
-                      }"
-                    >{{ item.库存上限 }}</strong>
-                    <small v-if="item.来源 !== 'own_store' && item.库存参考过期 && item.上次成功库存">
-                      上次成功 {{ item.上次成功库存 }} ·
-                      {{ formatChinaDateTime(item.上次成功库存时间) }}
-                    </small>
-                    <small v-else-if="item.来源 !== 'own_store'">{{ item.当前卖家 || "未知卖家" }}</small>
-                  </div>
-                  <div class="competitor-period-revenue">
-                    <span>周期内销售额</span>
-                    <strong>{{ formatCurrency(item.周期销售额) }}</strong>
-                    <small>{{ periodInventoryTurnoverLabel(item) }}</small>
-                  </div>
-                  <div class="competitor-card-category" aria-label="商品类目层级">
-                    <span>商品类目</span>
-                    <ol v-if="competitorCategoryPath(item).length">
-                      <li
-                        v-for="(category, categoryIndex) in competitorCategoryPath(item)"
-                        :key="`${category.id || category.slug || category.name}-${categoryIndex}`"
-                      >
-                        <button
-                          class="competitor-category-node-button"
-                          type="button"
-                          :aria-label="`查看 ${category.name} 类目的全部系统商品`"
-                          @click.stop="openCategoryModal(category, $event)"
-                        >
-                          <small>
-                            {{ competitorCategoryLevelLabel(categoryIndex, competitorCategoryPath(item).length) }}
-                          </small>
-                          <strong>{{ category.name }}</strong>
-                        </button>
-                      </li>
-                    </ol>
-                    <p v-else class="competitor-card-category-empty">
-                      类目待采集 · 后续成功采集后补齐
-                    </p>
-                  </div>
-                  <div>
-                    <span>最新评论数（PLID 共用）</span>
-                    <strong>{{ latestReviewCountLabel(item) }}</strong>
-                    <small v-if="item.最新评论获取时间">
-                      评论更新 {{ formatChinaDateTime(item.最新评论获取时间) }} · 区间末评分
-                      {{ item.评分 ?? "—" }}
-                    </small>
-                    <small v-else>公开评论尚未同步 · 区间末评分 {{ item.评分 ?? "—" }}</small>
-                  </div>
-                  <OwnStoreSalesComparisonMetrics
-                    v-if="item.来源 === 'own_store'"
-                    :own-values="item.自有官方销量"
-                    :own-through-date="item.自有官方销量截至"
-                    :follower-values="item.跟卖近期观察售出"
-                    :follower-through-date="item.跟卖近期观察售出截至"
-                    :own-context-label="`${item.自有官方销量店铺数 ?? 0}店 · ${item.自有官方销量Offer数 ?? 0} Offer`"
-                    :follower-context-label="`${followerSellerCount(item)}卖家 · ${item.跟卖报价.length} 报价`"
-                  />
-                  <CompetitorObservedSalesMetrics
-                    v-else
-                    class="competitor-status-observed-sales"
-                    :values="item.近期观察售出"
-                    :through-date="item.近期观察售出截至"
-                    context-label="全部卖家 · 全部变体"
-                    compact
-                  />
-                </div>
-
-                <a
-                  class="competitor-category-platform-link"
-                  :href="item.链接"
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  @click.stop
-                >
-                  <span>{{ item.链接 }}</span>
-                  <strong>打开平台链接 ↗</strong>
-                </a>
-                <footer class="competitor-card-query-actions">
-                  <button
-                    type="button"
-                    class="competitor-query-button"
-                    :aria-label="`查询 ${item.商品} 的竞品`"
-                    @click.stop="openCompetitorMatchModal(item, $event)"
-                    @keydown.enter.stop
-                    @keydown.space.stop
-                  >
-                    竞品查询
-                  </button>
-                </footer>
-              </article>
+                :item="item"
+                store-scope="all"
+                :store-code="props.currentStoreCode"
+                :personal-watchlist="personalWatchlistPlids.has(item.plid)"
+                :show-image="canShowCompetitorImage(item.图片)"
+                :image-src="competitorImageUrl(item.图片)"
+                @open-seller="sellerProductSelection = { seller: $event, scope: 'all' }"
+                @open-detail="openCategoryProductDetail"
+                @open-category="openCategoryModal"
+                @query-competitors="openCompetitorMatchModal"
+                @image-error="retryCompetitorImage"
+              />
             </div>
           </div>
 
@@ -10958,6 +10796,7 @@ function linkHealthLabel(status: CompetitorLinkHealthItem["status"]) {
                 :personal-watchlist="personalWatchlistPlids.has(match.item.plid)"
                 :show-image="canShowCompetitorImage(match.card.图片)"
                 :image-src="competitorImageUrl(match.card.图片)"
+                @open-seller="sellerProductSelection = { seller: $event, scope: 'all' }"
                 @open-detail="openCategoryProductDetail"
                 @open-category="openCategoryFromCompetitorMatch"
                 @query-competitors="openCompetitorMatchModal"

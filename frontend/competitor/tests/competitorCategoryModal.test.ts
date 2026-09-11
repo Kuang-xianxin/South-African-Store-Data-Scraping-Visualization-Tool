@@ -73,30 +73,29 @@ test("deduplicates PLIDs, lets own-store evidence win, and lists own links first
 });
 
 test("radar cards and own detail hierarchies expose buttons and share the all-store catalog", () => {
-  assert.equal(pageSource.match(/class="competitor-category-node-button"/g)?.length, 3);
+  assert.equal(pageSource.match(/class="competitor-category-node-button"/g)?.length, 2);
   assert.equal(radarCardSource.match(/class="competitor-category-node-button"/g)?.length, 1);
-  assert.equal(pageSource.match(/@click\.stop="openCategoryModal\(category, \$event\)"/g)?.length, 3);
+  assert.equal(pageSource.match(/@click\.stop="openCategoryModal\(category, \$event\)"/g)?.length, 2);
   assert.match(radarCardSource, /emit\('open-category', category, \$event\)/);
   assert.match(pageSource, /@open-category="openCategoryModal"/);
   assert.match(pageSource, /class="competitor-modal competitor-category-modal"/);
   assert.match(pageSource, /fetchOwnStoreCompetitors\([\s\S]*?"all"/);
-  assert.match(pageSource, /openCategoryProductDetail\(item\)/);
+  assert.match(pageSource, /@open-detail="openCategoryProductDetail"/);
   assert.match(pageSource, /自有链接/);
   assert.match(stylesSource, /\.competitor-category-product-card\.is-own-store/);
   assert.match(stylesSource, /\.competitor-category-source-badge\.is-own-store/);
 });
 
 test("category directory cards expose the radar card operating details", () => {
-  const cardStart = pageSource.indexOf(
-    'class="competitor-status-card competitor-category-product-card"',
-  );
-  const cardEnd = pageSource.indexOf("</article>", cardStart);
-  const cardSource = pageSource.slice(cardStart, cardEnd);
-
-  assert.ok(cardStart >= 0 && cardEnd > cardStart);
+  const entry = pageSource.match(/<CompetitorRadarProductCard\s+v-for="item in pagedCategoryCatalogMatches"[\s\S]*?\/>/)?.[0] ?? "";
+  assert.match(entry, /:item="item"/);
+  assert.match(entry, /store-scope="all"/);
+  for (const event of ["open-detail", "open-category", "query-competitors", "open-seller", "image-error"]) assert.ok(entry.includes(`@${event}=`), event);
+  assert.doesNotMatch(entry, /role="button"|@click=|@keydown=/);
+  const cardSource = radarCardSource.replaceAll("props.item", "item");
   assert.match(cardSource, /class="competitor-status-header"/);
   assert.match(cardSource, /class="competitor-status-summary"/);
-  assert.match(cardSource, /categoryItemOfferSummary\(item\)/);
+  assert.match(cardSource, /item\.company_skus/);
   assert.match(cardSource, /competitor-first-monitored-badge/);
   assert.match(cardSource, /<CompetitorPriceSummary :item="item"/);
   assert.match(cardSource, /item\.库存上限/);
@@ -105,8 +104,10 @@ test("category directory cards expose the radar card operating details", () => {
   assert.match(cardSource, /latestReviewCountLabel\(item\)/);
   assert.match(cardSource, /<OwnStoreSalesComparisonMetrics/);
   assert.match(cardSource, /<CompetitorObservedSalesMetrics/);
-  assert.match(cardSource, /class="competitor-category-platform-link"/);
+  assert.match(cardSource, /class="radar-card-platform-link"/);
   assert.doesNotMatch(cardSource, /competitor-category-product-(?:main|metrics|sales)/);
+  assert.doesNotMatch(cardSource, /<details|<summary|radar-leaf-category|\s+horizontal\s/);
+  assert.match(cardSource, /<ol>[\s\S]*v-for="\(category, categoryIndex\) in categoryPath\(item\)"/);
 });
 
 test("radar and category directory keep one compact card per row", () => {

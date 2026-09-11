@@ -16,6 +16,7 @@ const prices = computed(() => competitorPriceSummary(props.item));
     <div v-if="prices.isOwn" class="radar-price-own" title="当前授权店铺的自有有效报价；多个价格显示区间">
       <span class="radar-price-own-label">自有报价</span>
       <strong class="radar-price-own-value">{{ prices.own }}</strong>
+      <slot name="own-extra" />
     </div>
     <div v-else class="radar-price-main">
       <span>主报价</span><strong>{{ prices.main }}</strong>
