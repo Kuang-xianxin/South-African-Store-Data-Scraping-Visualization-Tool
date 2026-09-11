@@ -26,10 +26,10 @@ def identifier(name: str) -> str:
     return "`" + name + "`"
 
 
-def archive_path(path: Path, *, create_parent=False) -> Path:
+def archive_path(path: Path, *, create_parent=False, suffix=".sqlite3") -> Path:
     allowed = ROOT / "state/branches"
     target = path.resolve()
-    if not target.is_relative_to(allowed.resolve()) or target.suffix != ".sqlite3":
+    if suffix not in {".sqlite3", ".json"} or not target.is_relative_to(allowed.resolve()) or target.suffix != suffix:
         raise ValueError("archive-must-be-in-protected-blue-branch-directory")
     for item in (path, *path.parents):
         if item == ROOT.parent:

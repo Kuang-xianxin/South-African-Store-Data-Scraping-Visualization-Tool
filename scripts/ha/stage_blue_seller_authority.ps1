@@ -3,9 +3,10 @@ $ErrorActionPreference = 'Stop'
 $blueRoot = [IO.Path]::GetFullPath('D:\TakealotBlue')
 $packageRoot = (Resolve-Path -LiteralPath $PackageDirectory).Path
 $manifest = Get-Content -LiteralPath (Join-Path $packageRoot 'manifest.json') -Raw -Encoding UTF8 | ConvertFrom-Json
-if ($manifest.version -ne 1 -or $manifest.kind -ne 'blue-ha-foundation-disabled') { throw 'Unexpected package' }
+if ($manifest.version -notin @(1,2) -or $manifest.kind -ne 'blue-ha-foundation-disabled') { throw 'Unexpected package' }
 $allowed = @('blue_seller_authority.py','blue_seller_ledger.py','blue_seller_client.py','blue_seller_runtime.py','blue_seller_status.py',
     'blue_branch_merge.py','blue_branch_capture.py','provision_blue_seller_identity.py')
+if ($manifest.version -eq 2) { $allowed += @('blue_branch_apply.py','blue_branch_review.py') }
 $node = Get-Content -LiteralPath (Join-Path $blueRoot 'node.json') -Raw -Encoding UTF8 | ConvertFrom-Json
 if ($node.computer -ne $env:COMPUTERNAME -or $node.node -notin @('main','laptop')) { throw 'Wrong BLUE node' }
 if (Test-Path -LiteralPath (Join-Path $blueRoot 'state\seller-api-enabled.json')) { throw 'Enabled runtime requires a drained upgrade' }
