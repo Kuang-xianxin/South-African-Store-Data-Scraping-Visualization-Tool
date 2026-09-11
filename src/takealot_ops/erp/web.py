@@ -4056,9 +4056,10 @@ def create_app(project_root: Path | None = None) -> FastAPI:
             )
         prepared, refreshing = radar_page_cache.get_or_load(
             cache_key, loader=load_projection, prefer_cached=prefer_cached,
-            version=data_revisions.cache_token(cache_key),
+            version=(data_revisions.cache_token(cache_key)
+                     + data_revisions.radar_access_token(own_store_codes, permissions="")),
             boundary=(data_revisions.radar_access_token(
-                own_store_codes, permissions=json.dumps(request.state.erp_user.as_dict(), sort_keys=True))
+                own_store_codes, permissions=json.dumps(request.state.erp_user.as_dict(), sort_keys=True), own=True)
                       + datetime.now(ZoneInfo("Asia/Shanghai")).date().isoformat()),
         )
         return prepared.response(request, refreshing=refreshing)
@@ -4069,7 +4070,7 @@ def create_app(project_root: Path | None = None) -> FastAPI:
         own_scope: str,
     ) -> Response:
         permissions = json.dumps(request.state.erp_user.as_dict(), sort_keys=True)
-        boundary = data_revisions.radar_access_token(own_store_codes, permissions=permissions)
+        boundary = data_revisions.radar_access_token(own_store_codes, permissions=permissions, own=own)
         # Day rollover refreshes official sales, but keeps the previous complete
         # generation available as a timestamped preview under the SAME permissions.
         sales_day = datetime.now(ZoneInfo("Asia/Shanghai")).date().isoformat() if own else ""
@@ -4083,16 +4084,16 @@ def create_app(project_root: Path | None = None) -> FastAPI:
                              own=own, available={})
         prepared = (radar_own_materialized if own else radar_materialized).page(
             key=cache_key, boundary=boundary,
-            # Access/ownership changes already have their own live boundary.
-            # Do not rebuild unchanged history for other users' configuration
-            # revisions or price-only Offer identity notifications.
+            # Own Offer identity changes refresh the dated authorized preview.
+            # True competitors retain a separate global ownership access boundary.
             version=lambda: data_revisions._topic_token(
                 frozenset(("store", "competitors", "master") if own else ("competitors",)),
                 own_store_codes if own else (),
-            ) + sales_day,
+            ) + sales_day + (data_revisions.radar_access_token(own_store_codes, permissions="") if own else ""),
             fingerprints=lambda: radar_fingerprints(
                 read_engine, own=own, store_codes=own_store_codes,
-                store_version=data_revisions._topic_token(frozenset(("store", "master")), own_store_codes) + sales_day,
+                store_version=(data_revisions._topic_token(frozenset(("store", "master")), own_store_codes)
+                               + sales_day + (data_revisions.radar_access_token(own_store_codes, permissions="") if own else "")),
             ),
             loader=loader, field="store_items" if own else "items", query=query,
             prefer_cached=prefer_cached, watchlist=watchlist,

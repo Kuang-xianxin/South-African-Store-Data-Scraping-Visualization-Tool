@@ -27,9 +27,8 @@ from fastapi.encoders import jsonable_encoder
 from sqlalchemy import Engine, func, select
 from sqlalchemy.orm import Session
 
-from takealot_ops.competitors.own_store import load_connected_store_offers
-from takealot_ops.storage.models import CompetitorSnapshot, CompetitorTarget, CompetitorVariantSnapshot, StoreOfferBaseline, StoreOfferObservation
-from takealot_ops.storage.store_context import store_scope
+from takealot_ops.competitors.own_store import _connected_store_catalog, load_connected_store_offers
+from takealot_ops.storage.models import CompetitorSnapshot, CompetitorTarget, CompetitorVariantSnapshot, OfferCurrent, StoreOfferBaseline, StoreOfferObservation
 from takealot_ops.competitors.service import _competitor_display_date, load_true_competitor_date_range
 from takealot_ops.erp.radar_list_query import RadarListQuery, list_index, matches_index, seller_groups
 
@@ -43,17 +42,25 @@ def radar_date_bounds(engine: Engine, *, own: bool, store_codes: set[str]) -> tu
         return tuple(date.fromisoformat(bounds[k]) if bounds[k] else None for k in ("available_start", "available_end"))  # type: ignore[return-value, arg-type]
     dates: list[date] = []
     with Session(engine) as session:
-        offers = load_connected_store_offers(session)
-        plids = {o.offer.productline_id for o in offers if o.store_code in store_codes and o.offer.productline_id}
-        first, last = session.execute(select(func.min(CompetitorSnapshot.collected_at), func.max(CompetitorSnapshot.collected_at))
-                                      .where(CompetitorSnapshot.plid.in_(plids))).one()
+        codes = tuple(code for code, _ in _connected_store_catalog(session, store_codes=store_codes))
+        # Core reads carry explicit store constraints. Avoid hydrating every
+        # Offer and rescanning the same PLID range once per connected store.
+        offers = OfferCurrent.__table__
+        connection = session.connection()
+        plids = set(connection.execute(select(offers.c.productline_id).distinct().where(
+            offers.c.store_code.in_(codes), offers.c.productline_id.is_not(None),
+            offers.c.productline_id != "",
+        )).scalars())
+        snapshots = CompetitorSnapshot.__table__
+        first, last = connection.execute(select(func.min(snapshots.c.collected_at), func.max(snapshots.c.collected_at))
+                                         .where(snapshots.c.plid.in_(plids))).one()
         dates.extend(_competitor_display_date(v) for v in (first, last) if v is not None)
-        for code in store_codes:
-            with store_scope(code):
-                for model in (StoreOfferBaseline, StoreOfferObservation):
-                    first_day, last_day = session.execute(select(func.min(model.display_date), func.max(model.display_date))
-                                                          .where(model.productline_id.in_(plids))).one()
-                    dates.extend(v for v in (first_day, last_day) if v is not None)
+        for model in (StoreOfferBaseline, StoreOfferObservation):
+            table = model.__table__
+            first_day, last_day = connection.execute(select(func.min(table.c.display_date), func.max(table.c.display_date)).where(
+                table.c.store_code.in_(codes), table.c.productline_id.in_(plids),
+            )).one()
+            dates.extend(v for v in (first_day, last_day) if v is not None)
     return (min(dates), max(dates)) if dates else (None, None)
 
 

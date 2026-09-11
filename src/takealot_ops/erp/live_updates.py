@@ -52,6 +52,7 @@ class DataRevisionReader:
         self._ownership_lock = Lock()
         self._ownership_loaded_at = float("-inf")
         self._ownership_token = ""
+        self._catalog_token = ""
         self._ownership_revision = ""
 
     def rows(self) -> tuple[tuple[str, str, str], ...]:
@@ -74,7 +75,7 @@ class DataRevisionReader:
     def token(self, module: str, store_codes: Iterable[str]) -> str:
         return self._topic_token(MODULE_TOPICS[module], store_codes)
 
-    def radar_access_token(self, store_codes: Iterable[str], *, permissions: str) -> str:
+    def radar_access_token(self, store_codes: Iterable[str], *, permissions: str, own: bool = False) -> str:
         """Stock/price updates refresh data without discarding a safe preview."""
         # The write marker also changes on ordinary Offer price/stock updates.
         # Verify actual global ownership: true competitors exclude every store.
@@ -94,9 +95,15 @@ class DataRevisionReader:
                 self._ownership_token = hashlib.sha256(json.dumps(
                     (identities, catalog), separators=(",", ":"),
                 ).encode()).hexdigest()[:24]
+                self._catalog_token = hashlib.sha256(json.dumps(
+                    catalog, separators=(",", ":"),
+                ).encode()).hexdigest()[:24]
                 self._ownership_loaded_at = time.monotonic()
                 self._ownership_revision = revision
-            ownership = self._ownership_token
+            # An own-store preview is a dated snapshot of already authorized
+            # stores. Offer membership changes refresh its data, not its access.
+            # Public competitors still require current global ownership masking.
+            ownership = self._catalog_token if own else self._ownership_token
         return ownership + hashlib.sha256(permissions.encode()).hexdigest()[:24]
 
     def _topic_token(self, topics: frozenset[str], store_codes: Iterable[str]) -> str:
