@@ -1,5 +1,5 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "source": {
     "file": "NF毛利计算.xlsx",
     "sheet": "利润计算表",
@@ -10,25 +10,5867 @@
       "成本&在库统计"
     ]
   },
-  "mapping_conflicts": [
-    "9902250708549",
-    "9902251365215",
-    "9902242608529",
-    "9902245237368",
-    "9902247096284",
-    "9902247096291",
-    "9902278550212",
-    "9902295554606",
-    "9902299602402",
-    "9902335171954",
-    "9902335214637",
-    "9902335214644",
-    "9902335214651",
-    "9902336838368",
-    "9902335160927",
-    "9902307554501",
-    "9902271464806"
-  ],
+  "mapping_authority": {
+    "sheet": "成本&在库统计",
+    "mappings": {
+      "9902282613330": {
+        "company_sku": "NFT101-KGB-0051",
+        "source_rows": [
+          4
+        ]
+      },
+      "9902310288608": {
+        "company_sku": "NFT101-CQCD-QX-BL-0053",
+        "source_rows": [
+          5
+        ]
+      },
+      "9902306718928": {
+        "company_sku": "NFT101-LLD-0060",
+        "source_rows": [
+          7
+        ]
+      },
+      "9902335653399": {
+        "company_sku": "NFT101-ZWSZD-0063",
+        "source_rows": [
+          8
+        ]
+      },
+      "9902306919233": {
+        "company_sku": "NFT101-WTD-0082",
+        "source_rows": [
+          24
+        ]
+      },
+      "9902310304933": {
+        "company_sku": "NFT101-TGD-0084",
+        "source_rows": [
+          25
+        ]
+      },
+      "9902338664385": {
+        "company_sku": "NFT101-GDWJ-0091",
+        "source_rows": [
+          31
+        ]
+      },
+      "9902324217373": {
+        "company_sku": "NFT101-HSTZ-0094",
+        "source_rows": [
+          32
+        ]
+      },
+      "9902317161096": {
+        "company_sku": "NFT101-YSGJ-0095",
+        "source_rows": [
+          33
+        ]
+      },
+      "9902309361534": {
+        "company_sku": "NFT101-120FDQ-0096",
+        "source_rows": [
+          34
+        ]
+      },
+      "9902338661049": {
+        "company_sku": "NFT101-176FDQ-0097",
+        "source_rows": [
+          35
+        ]
+      },
+      "9902368511857": {
+        "company_sku": "NFT101-176FDQ-0097",
+        "source_rows": [
+          36
+        ]
+      },
+      "9902314139760": {
+        "company_sku": "NFT101-LSTPJ-0099",
+        "source_rows": [
+          37
+        ]
+      },
+      "9902314158037": {
+        "company_sku": "NFT101-HSTPJ-0100",
+        "source_rows": [
+          38
+        ]
+      },
+      "9902311671034": {
+        "company_sku": "NFT101-ZD-DDJ-DG-0101",
+        "source_rows": [
+          39
+        ]
+      },
+      "9902314293639": {
+        "company_sku": "NFT101-DDJ-DL-0102",
+        "source_rows": [
+          40
+        ]
+      },
+      "9902333749742": {
+        "company_sku": "NFT101-WTYWJ-0104",
+        "source_rows": [
+          41
+        ]
+      },
+      "9902327986948": {
+        "company_sku": "NFT101-HGZL-0105",
+        "source_rows": [
+          42
+        ]
+      },
+      "9902365549716": {
+        "company_sku": "NFT101-GRAY-LD-0180",
+        "source_rows": [
+          46
+        ]
+      },
+      "9902348497423": {
+        "company_sku": "NFT101-UFO-LT-0110",
+        "source_rows": [
+          47
+        ]
+      },
+      "9902323516699": {
+        "company_sku": "NFT101-YYTZ-BK-0112",
+        "source_rows": [
+          49
+        ]
+      },
+      "9902333722226": {
+        "company_sku": "NFT101-BLGMJ-0113",
+        "source_rows": [
+          50
+        ]
+      },
+      "9902327352897": {
+        "company_sku": "NFT101-DC-0114",
+        "source_rows": [
+          51
+        ]
+      },
+      "9902418052026": {
+        "company_sku": "NFT101-BZJ-14-0409",
+        "source_rows": [
+          52
+        ]
+      },
+      "9902319621765": {
+        "company_sku": "NFT101-AQCH-0116",
+        "source_rows": [
+          53
+        ]
+      },
+      "9902333722295": {
+        "company_sku": "NFT101-BKGMJ-0117",
+        "source_rows": [
+          54
+        ]
+      },
+      "9902338664545": {
+        "company_sku": "NFT101-FDJ-0118",
+        "source_rows": [
+          55
+        ]
+      },
+      "9902338664392": {
+        "company_sku": "NFT101-LEDBG14-0120",
+        "source_rows": [
+          56
+        ]
+      },
+      "9902338664415": {
+        "company_sku": "NFT101-RGBCS5-0121",
+        "source_rows": [
+          57
+        ]
+      },
+      "9902338664422": {
+        "company_sku": "NFT101-RGBCS14-0122",
+        "source_rows": [
+          58
+        ]
+      },
+      "9902333749674": {
+        "company_sku": "NFT101-35QDTT-0123",
+        "source_rows": [
+          59
+        ]
+      },
+      "9902323827603": {
+        "company_sku": "NFT101-ZLFZGJ-0124",
+        "source_rows": [
+          60
+        ]
+      },
+      "9902327782151": {
+        "company_sku": "NFT101-TJ-0034",
+        "source_rows": [
+          61
+        ]
+      },
+      "9902309870821": {
+        "company_sku": "NFT101-4Q-AMQ-0125",
+        "source_rows": [
+          62
+        ]
+      },
+      "9902355642397": {
+        "company_sku": "NFT101-BZJ-12-0408",
+        "source_rows": [
+          63
+        ]
+      },
+      "9902333742941": {
+        "company_sku": "NFT101-43XFP-0128",
+        "source_rows": [
+          64
+        ]
+      },
+      "9902355658534": {
+        "company_sku": "NFT101-BZJ-14-0409",
+        "source_rows": [
+          65
+        ]
+      },
+      "9902333735257": {
+        "company_sku": "NFT101-TYJ-0130",
+        "source_rows": [
+          66
+        ]
+      },
+      "9902338664576": {
+        "company_sku": "NFT101-DDQJD-0131",
+        "source_rows": [
+          67
+        ]
+      },
+      "9902368483291": {
+        "company_sku": "NFT101-YSLD-0132",
+        "source_rows": [
+          68
+        ]
+      },
+      "9902340130748": {
+        "company_sku": "NFT101-YDEJ",
+        "source_rows": [
+          69
+        ]
+      },
+      "9902396450081": {
+        "company_sku": "NFT101-FR-900-FKJ-0134",
+        "source_rows": [
+          70
+        ]
+      },
+      "9902332975234": {
+        "company_sku": "NFT101-FR400-FKJ-0133",
+        "source_rows": [
+          71
+        ]
+      },
+      "9902317650217": {
+        "company_sku": "NFT101-43XFP-0128",
+        "source_rows": [
+          73
+        ]
+      },
+      "9902348555208": {
+        "company_sku": "NFT101-NLSC6-2-0139",
+        "source_rows": [
+          74
+        ]
+      },
+      "9902348555239": {
+        "company_sku": "NFT101-NLSC7-2-0140",
+        "source_rows": [
+          75
+        ]
+      },
+      "9902395856518": {
+        "company_sku": "NFT101-NLB601-0143",
+        "source_rows": [
+          77
+        ]
+      },
+      "9902333749193": {
+        "company_sku": "NFT101-DZCXQ-0148",
+        "source_rows": [
+          78
+        ]
+      },
+      "9902338661100": {
+        "company_sku": "NFT101-FRJ-638-0179",
+        "source_rows": [
+          79
+        ]
+      },
+      "9902333859137": {
+        "company_sku": "NFT101-PBQB-0158",
+        "source_rows": [
+          80
+        ]
+      },
+      "9902372246110": {
+        "company_sku": "NFT101-JRJ-2",
+        "source_rows": [
+          81
+        ]
+      },
+      "9902333720109": {
+        "company_sku": "NFT101-DDJRJ-0181",
+        "source_rows": [
+          82
+        ]
+      },
+      "9902338661032": {
+        "company_sku": "NFT101-GK261A-0135",
+        "source_rows": [
+          84
+        ]
+      },
+      "9902328259058": {
+        "company_sku": "NFT101-HSAMS-0157",
+        "source_rows": [
+          85
+        ]
+      },
+      "9902328181809": {
+        "company_sku": "NFT101-AMTD-0103",
+        "source_rows": [
+          87
+        ]
+      },
+      "9902327986245": {
+        "company_sku": "NFT101-SGPWJ-0153",
+        "source_rows": [
+          88
+        ]
+      },
+      "9902324491629": {
+        "company_sku": "NFT101-CWMRTZ-0154",
+        "source_rows": [
+          89
+        ]
+      },
+      "9902299602099": {
+        "company_sku": "NFT101-SJZ-WT-0163",
+        "source_rows": [
+          90
+        ]
+      },
+      "9902334239136": {
+        "company_sku": "NFT101-PPJ-0150",
+        "source_rows": [
+          92
+        ]
+      },
+      "9902352524573": {
+        "company_sku": "NFT101-GCQ-0147",
+        "source_rows": [
+          93
+        ]
+      },
+      "9902334266316": {
+        "company_sku": "NFT101-CPB-0149",
+        "source_rows": [
+          94
+        ]
+      },
+      "9902306296693": {
+        "company_sku": "NFT101-SLT-BK-0151",
+        "source_rows": [
+          95
+        ]
+      },
+      "9902308599822": {
+        "company_sku": "NFT101-SLT-YS-0152",
+        "source_rows": [
+          96
+        ]
+      },
+      "9902341167781": {
+        "company_sku": "NFT101-CBFSJ-0142",
+        "source_rows": [
+          97
+        ]
+      },
+      "9902325668877": {
+        "company_sku": "NFT101-BXGCC-0161",
+        "source_rows": [
+          98
+        ]
+      },
+      "9902341166739": {
+        "company_sku": "NFT101-XCSLT-0164",
+        "source_rows": [
+          99
+        ]
+      },
+      "9902386970933": {
+        "company_sku": "NFT101-NBS-0171",
+        "source_rows": [
+          100
+        ]
+      },
+      "9902386969951": {
+        "company_sku": "NFT101-HHTS-0172",
+        "source_rows": [
+          101
+        ]
+      },
+      "9902328236998": {
+        "company_sku": "NFT101-YY-0177",
+        "source_rows": [
+          103
+        ]
+      },
+      "9902341166951": {
+        "company_sku": "NFT101-LSXXT-0178",
+        "source_rows": [
+          104
+        ]
+      },
+      "9902333914591": {
+        "company_sku": "NFT101-JZJ-9V1-0166",
+        "source_rows": [
+          105
+        ]
+      },
+      "9902341168207": {
+        "company_sku": "NFT101-JZJ-3V1-0167",
+        "source_rows": [
+          106
+        ]
+      },
+      "9902390152264": {
+        "company_sku": "NFT101-650FS-0300",
+        "source_rows": [
+          108
+        ]
+      },
+      "9902390238296": {
+        "company_sku": "NFT101-750FS-0301",
+        "source_rows": [
+          109
+        ]
+      },
+      "9902378332329": {
+        "company_sku": "NFT101-XLJ-SW-0187",
+        "source_rows": [
+          110
+        ]
+      },
+      "9902357383618": {
+        "company_sku": "NFT101-TD-BK-0182",
+        "source_rows": [
+          111
+        ]
+      },
+      "9902357383649": {
+        "company_sku": "NFT101-TD-GRAY-0183",
+        "source_rows": [
+          112
+        ]
+      },
+      "9902305142786": {
+        "company_sku": "NFT101-DZC-0184",
+        "source_rows": [
+          113
+        ]
+      },
+      "9902327293572": {
+        "company_sku": "NFT101-XLJ-SW-0187",
+        "source_rows": [
+          114
+        ]
+      },
+      "9902309711582": {
+        "company_sku": "NFT101-KLBJ-0190",
+        "source_rows": [
+          115
+        ]
+      },
+      "9902394210175": {
+        "company_sku": "NFT101-LJZ-BL-0259",
+        "source_rows": [
+          116
+        ]
+      },
+      "9902383814995": {
+        "company_sku": "NFT101-LJZ-BL-0259",
+        "source_rows": [
+          117
+        ]
+      },
+      "9902252565140": {
+        "company_sku": "NFT101-GZQ-Red",
+        "source_rows": [
+          118
+        ]
+      },
+      "9902251365246": {
+        "company_sku": "NFT101-QJD-6",
+        "source_rows": [
+          119
+        ]
+      },
+      "9902247525074": {
+        "company_sku": "NFT101-QJD-6",
+        "source_rows": [
+          120
+        ]
+      },
+      "9902244372657": {
+        "company_sku": "NFT101-CQCD-TX-Blue",
+        "source_rows": [
+          121
+        ]
+      },
+      "9902278782590": {
+        "company_sku": "NFT101-CQCD-TX-Blue",
+        "source_rows": [
+          122
+        ]
+      },
+      "9902252599565": {
+        "company_sku": "NFT101-CQCD-QX-Yellow",
+        "source_rows": [
+          123
+        ]
+      },
+      "9902260232416": {
+        "company_sku": "NFT101-CQCD-QX-Yellow",
+        "source_rows": [
+          124
+        ]
+      },
+      "9902280358035": {
+        "company_sku": "NFT101-CQCD-QX-Yellow",
+        "source_rows": [
+          125
+        ]
+      },
+      "9902262802358": {
+        "company_sku": "NFT101-CYJ-Black",
+        "source_rows": [
+          126
+        ]
+      },
+      "9902251365253": {
+        "company_sku": "NFT101-CYJ-BXG",
+        "source_rows": [
+          127
+        ]
+      },
+      "9902261151358": {
+        "company_sku": "NFT101-CYJ-Black",
+        "source_rows": [
+          128
+        ]
+      },
+      "9902261092897": {
+        "company_sku": "NFT101-CYJ-BXG",
+        "source_rows": [
+          129
+        ]
+      },
+      "9902261102541": {
+        "company_sku": "NFT101-JYSX-SC-75*45",
+        "source_rows": [
+          130
+        ]
+      },
+      "9902267693111": {
+        "company_sku": "NFT101-JYSX-SC-75*45",
+        "source_rows": [
+          131
+        ]
+      },
+      "9902245232165": {
+        "company_sku": "NFT101-PB-SC-75*45",
+        "source_rows": [
+          132
+        ]
+      },
+      "9902268155281": {
+        "company_sku": "NFT101-PB-SC-75*45",
+        "source_rows": [
+          134
+        ]
+      },
+      "9902258999970": {
+        "company_sku": "NFT101-THSC-0106",
+        "source_rows": [
+          135
+        ]
+      },
+      "9902250713314": {
+        "company_sku": "NFT101-AQM-76-83CM",
+        "source_rows": [
+          136
+        ]
+      },
+      "9902267642980": {
+        "company_sku": "NFT101-AQM-76-83CM",
+        "source_rows": [
+          137
+        ]
+      },
+      "9902266037244": {
+        "company_sku": "NFT101-AQM-76-83CM",
+        "source_rows": [
+          138
+        ]
+      },
+      "9902267693739": {
+        "company_sku": "NFT101-AQM-76-83CM",
+        "source_rows": [
+          139
+        ]
+      },
+      "9902259000002": {
+        "company_sku": "NFT101-BDX-LT",
+        "source_rows": [
+          140
+        ]
+      },
+      "9902364867347": {
+        "company_sku": "NFT101-GZQ-Gray100",
+        "source_rows": [
+          141
+        ]
+      },
+      "9902259011268": {
+        "company_sku": "NFT101-MSP",
+        "source_rows": [
+          142
+        ]
+      },
+      "9902265147906": {
+        "company_sku": "NFT101-MSP",
+        "source_rows": [
+          143
+        ]
+      },
+      "9902250709522": {
+        "company_sku": "NFT101-YKC-Green",
+        "source_rows": [
+          145
+        ]
+      },
+      "9902250711624": {
+        "company_sku": "NFT101-YKC-Orange",
+        "source_rows": [
+          146
+        ]
+      },
+      "9902278550816": {
+        "company_sku": "NFT101-YKC-Green",
+        "source_rows": [
+          147
+        ]
+      },
+      "9902280959461": {
+        "company_sku": "NFT101-YKC-Orange",
+        "source_rows": [
+          148
+        ]
+      },
+      "9902277524924": {
+        "company_sku": "NFT101-YKC-Orange",
+        "source_rows": [
+          149
+        ]
+      },
+      "9902250708549": {
+        "company_sku": "NFT101-GXTZ-BL",
+        "source_rows": [
+          150
+        ]
+      },
+      "9902251365222": {
+        "company_sku": "NFT101-JY3-WH",
+        "source_rows": [
+          151
+        ]
+      },
+      "9902241828010": {
+        "company_sku": "NFT101-JY3-BK",
+        "source_rows": [
+          152
+        ]
+      },
+      "9902319176692": {
+        "company_sku": "NFT101-GXTZ-BL",
+        "source_rows": [
+          153
+        ]
+      },
+      "9902251365215": {
+        "company_sku": "NFT101-ZJMB-100",
+        "source_rows": [
+          154
+        ]
+      },
+      "9902261097090": {
+        "company_sku": "NFT101-ZJMB-100",
+        "source_rows": [
+          155
+        ]
+      },
+      "9902242608529": {
+        "company_sku": "NFT101-ZJMB-120",
+        "source_rows": [
+          156
+        ]
+      },
+      "9902261455906": {
+        "company_sku": "NFT101-ZJMB-120",
+        "source_rows": [
+          157
+        ]
+      },
+      "9902251365468": {
+        "company_sku": "NFT101-LJ6-WH",
+        "source_rows": [
+          158
+        ]
+      },
+      "9902258999949": {
+        "company_sku": "NFT101-MBY-BLACK",
+        "source_rows": [
+          159
+        ]
+      },
+      "9902258999925": {
+        "company_sku": "NFT101-MBY-WHITE",
+        "source_rows": [
+          160
+        ]
+      },
+      "9902251365260": {
+        "company_sku": "NFT101-6-BK-FHTZ",
+        "source_rows": [
+          161
+        ]
+      },
+      "9902269640199": {
+        "company_sku": "NFT101-6-BK-FHTZ",
+        "source_rows": [
+          162
+        ]
+      },
+      "9902290255225": {
+        "company_sku": "NFT101-6-BK-FHTZ",
+        "source_rows": [
+          163
+        ]
+      },
+      "9902251365277": {
+        "company_sku": "NFT101-FHTZ-RED",
+        "source_rows": [
+          164
+        ]
+      },
+      "9902282533928": {
+        "company_sku": "NFT101-FHTZ-RED",
+        "source_rows": [
+          165
+        ]
+      },
+      "9902251365475": {
+        "company_sku": "NFT101-FHTZ-BK",
+        "source_rows": [
+          166
+        ]
+      },
+      "9902260455747": {
+        "company_sku": "NFT101-FHTZ-BK",
+        "source_rows": [
+          167
+        ]
+      },
+      "9902294390298": {
+        "company_sku": "NFT101-WGTZ-BK",
+        "source_rows": [
+          168
+        ]
+      },
+      "9902253460734": {
+        "company_sku": "NFT101-WGTZ-BK",
+        "source_rows": [
+          169
+        ]
+      },
+      "9902250722828": {
+        "company_sku": "NFT101-HGJ-JX-6",
+        "source_rows": [
+          170
+        ]
+      },
+      "9902265142758": {
+        "company_sku": "NFT101-JRJ-3",
+        "source_rows": [
+          171
+        ]
+      },
+      "9902253935881": {
+        "company_sku": "NFT101-JRJ-3",
+        "source_rows": [
+          172
+        ]
+      },
+      "9902259011190": {
+        "company_sku": "NFT101-JRJ-3",
+        "source_rows": [
+          173
+        ]
+      },
+      "9902275193245": {
+        "company_sku": "NFT101-JRJ-2",
+        "source_rows": [
+          174
+        ]
+      },
+      "9902250719996": {
+        "company_sku": "NFT101-QGQ-80-L04-Red",
+        "source_rows": [
+          175
+        ]
+      },
+      "9902247097441": {
+        "company_sku": "NFT101-KFST-L-ORANGE-M",
+        "source_rows": [
+          176
+        ]
+      },
+      "9902247097458": {
+        "company_sku": "NFT101-KFST-L-ORANGE-L",
+        "source_rows": [
+          177
+        ]
+      },
+      "9902247097472": {
+        "company_sku": "NFT101-KFST-L-ORANGE-XL",
+        "source_rows": [
+          178
+        ]
+      },
+      "9902277525891": {
+        "company_sku": "NFT101-KFST-L-ORANGE-M",
+        "source_rows": [
+          179
+        ]
+      },
+      "9902277526010": {
+        "company_sku": "NFT101-KFST-L-ORANGE-L",
+        "source_rows": [
+          180
+        ]
+      },
+      "9902277526072": {
+        "company_sku": "NFT101-KFST-L-ORANGE-XL",
+        "source_rows": [
+          181
+        ]
+      },
+      "9902252565454": {
+        "company_sku": "NFT101-KFST-R-BLUE-M",
+        "source_rows": [
+          182
+        ]
+      },
+      "9902252565461": {
+        "company_sku": "NFT101-KFST-R-BLUE-L",
+        "source_rows": [
+          183
+        ]
+      },
+      "9902252565508": {
+        "company_sku": "NFT101-KFST-R-BLUE-XL",
+        "source_rows": [
+          184
+        ]
+      },
+      "9902284116686": {
+        "company_sku": "NFT101-KFST-R-BLUE-M",
+        "source_rows": [
+          185
+        ]
+      },
+      "9902282566049": {
+        "company_sku": "NFT101-KFST-R-BLUE-L",
+        "source_rows": [
+          186
+        ]
+      },
+      "9902282565851": {
+        "company_sku": "NFT101-KFST-R-BLUE-XL",
+        "source_rows": [
+          187
+        ]
+      },
+      "9902260455679": {
+        "company_sku": "NFT101-KFST-L-BL-M-005",
+        "source_rows": [
+          188
+        ]
+      },
+      "9902260455686": {
+        "company_sku": "NFT101-KFST-L-BL-L-006",
+        "source_rows": [
+          189
+        ]
+      },
+      "9902260455693": {
+        "company_sku": "NFT101-KFST-L-BL-XL-007",
+        "source_rows": [
+          190
+        ]
+      },
+      "9902282566360": {
+        "company_sku": "NFT101-KFST-L-BL-M-005",
+        "source_rows": [
+          191
+        ]
+      },
+      "9902282566919": {
+        "company_sku": "NFT101-KFST-L-BL-L-006",
+        "source_rows": [
+          192
+        ]
+      },
+      "9902284106069": {
+        "company_sku": "NFT101-KFST-L-BL-XL-007",
+        "source_rows": [
+          193
+        ]
+      },
+      "9902250712447": {
+        "company_sku": "NFT101-HXZJ-L",
+        "source_rows": [
+          194
+        ]
+      },
+      "9902250712263": {
+        "company_sku": "NFT101-HXZJ-R",
+        "source_rows": [
+          195
+        ]
+      },
+      "9902244167895": {
+        "company_sku": "NFT101-CWXQ-BLACK",
+        "source_rows": [
+          196
+        ]
+      },
+      "9902276750737": {
+        "company_sku": "NFT101-CWXQ-ORANGE",
+        "source_rows": [
+          197
+        ]
+      },
+      "9902242608710": {
+        "company_sku": "NFT101-ZJMB-100",
+        "source_rows": [
+          198
+        ]
+      },
+      "9902245237368": {
+        "company_sku": "NFT101-CWXQ-ORANGE",
+        "source_rows": [
+          199
+        ]
+      },
+      "9902260363035": {
+        "company_sku": "NFT101-CWXQ-BLACK",
+        "source_rows": [
+          200
+        ]
+      },
+      "9902283585469": {
+        "company_sku": "NFT101-CWXQ-BLACK",
+        "source_rows": [
+          201
+        ]
+      },
+      "9902260232409": {
+        "company_sku": "NFT101-CWXQ-ORANGE",
+        "source_rows": [
+          202
+        ]
+      },
+      "9902260783376": {
+        "company_sku": "NFT101-MKF-YELLOW",
+        "source_rows": [
+          203
+        ]
+      },
+      "9902259211743": {
+        "company_sku": "NFT101-MKF-YELLOW",
+        "source_rows": [
+          204
+        ]
+      },
+      "9902259082596": {
+        "company_sku": "NFT101-MKF-BLACK",
+        "source_rows": [
+          205
+        ]
+      },
+      "9902261159255": {
+        "company_sku": "NFT101-MKF-BLACK",
+        "source_rows": [
+          206
+        ]
+      },
+      "9902259228345": {
+        "company_sku": "NFT101-MKF-YELLOW",
+        "source_rows": [
+          207
+        ]
+      },
+      "9902259211484": {
+        "company_sku": "NFT101-MKF-BLACK",
+        "source_rows": [
+          208
+        ]
+      },
+      "9902281977563": {
+        "company_sku": "NFT101-HWLYQ-78",
+        "source_rows": [
+          210
+        ]
+      },
+      "9902245889154": {
+        "company_sku": "NFT101-ZMY-WHITE",
+        "source_rows": [
+          211
+        ]
+      },
+      "9902246019314": {
+        "company_sku": "NFT101-ZMY-GREEN",
+        "source_rows": [
+          212
+        ]
+      },
+      "9902270669912": {
+        "company_sku": "NFT101-ZMY-WHITE",
+        "source_rows": [
+          214
+        ]
+      },
+      "9902270670017": {
+        "company_sku": "NFT101-ZMY-GREEN",
+        "source_rows": [
+          215
+        ]
+      },
+      "9902260442761": {
+        "company_sku": "NFT101-PBJ",
+        "source_rows": [
+          216
+        ]
+      },
+      "9902259203465": {
+        "company_sku": "NFT101-KFJ-BK",
+        "source_rows": [
+          217
+        ]
+      },
+      "9902261091043": {
+        "company_sku": "NFT101-JBJRD-BK",
+        "source_rows": [
+          218
+        ]
+      },
+      "9902253844626": {
+        "company_sku": "NFT101-TBAMQ",
+        "source_rows": [
+          219
+        ]
+      },
+      "9902245216172": {
+        "company_sku": "NFT101-GCTZ",
+        "source_rows": [
+          220
+        ]
+      },
+      "9902269315318": {
+        "company_sku": "NFT101-GCTZ",
+        "source_rows": [
+          221
+        ]
+      },
+      "9902269411874": {
+        "company_sku": "NFT101-GCTZ",
+        "source_rows": [
+          222
+        ]
+      },
+      "9902260442532": {
+        "company_sku": "NFT101-GCTZ",
+        "source_rows": [
+          223
+        ]
+      },
+      "9902244184373": {
+        "company_sku": "NFT101-YDEJ",
+        "source_rows": [
+          224
+        ]
+      },
+      "9902249204281": {
+        "company_sku": "NFT101-YDEJ",
+        "source_rows": [
+          225
+        ]
+      },
+      "9902340130762": {
+        "company_sku": "NFT101-YDEJ",
+        "source_rows": [
+          226
+        ]
+      },
+      "9902268159333": {
+        "company_sku": "NFT101-EBQ",
+        "source_rows": [
+          227
+        ]
+      },
+      "9902266963994": {
+        "company_sku": "NFT101-EBQ",
+        "source_rows": [
+          228
+        ]
+      },
+      "9902267100367": {
+        "company_sku": "NFT101-EBQ",
+        "source_rows": [
+          229
+        ]
+      },
+      "9902270098910": {
+        "company_sku": "NFT101-EBQ",
+        "source_rows": [
+          230
+        ]
+      },
+      "9902261102176": {
+        "company_sku": "NFT101-HWLYQ-78",
+        "source_rows": [
+          231
+        ]
+      },
+      "9902260455365": {
+        "company_sku": "NFT101-HWLYQ-60",
+        "source_rows": [
+          232
+        ]
+      },
+      "9902261444832": {
+        "company_sku": "NFT101-HWLYQ-60",
+        "source_rows": [
+          233
+        ]
+      },
+      "9902260978567": {
+        "company_sku": "NFT101-XTAMQ",
+        "source_rows": [
+          234
+        ]
+      },
+      "9902260786483": {
+        "company_sku": "NFT101-XTAMQ",
+        "source_rows": [
+          235
+        ]
+      },
+      "9902260455280": {
+        "company_sku": "NFT101-8IN1ZZJ",
+        "source_rows": [
+          236
+        ]
+      },
+      "9902261115695": {
+        "company_sku": "NFT101-8IN1ZZJ",
+        "source_rows": [
+          237
+        ]
+      },
+      "9902247970379": {
+        "company_sku": "NFT101-SWEJ",
+        "source_rows": [
+          238
+        ]
+      },
+      "9902368511666": {
+        "company_sku": "NFT101-8IN1ZZJ",
+        "source_rows": [
+          239
+        ]
+      },
+      "9902276750867": {
+        "company_sku": "NFT101-SWEJ",
+        "source_rows": [
+          240
+        ]
+      },
+      "9902268986731": {
+        "company_sku": "NFT101-YDEJ",
+        "source_rows": [
+          241
+        ]
+      },
+      "9902247106518": {
+        "company_sku": "NFT101-GE-EJ",
+        "source_rows": [
+          242
+        ]
+      },
+      "9902240858421": {
+        "company_sku": "NFT101-GE-EJ",
+        "source_rows": [
+          243
+        ]
+      },
+      "9902281287785": {
+        "company_sku": "NFT101-GE-EJ",
+        "source_rows": [
+          244
+        ]
+      },
+      "9902265914386": {
+        "company_sku": "NFT101-FDQ36-WH",
+        "source_rows": [
+          245
+        ]
+      },
+      "9902262483557": {
+        "company_sku": "NFT101-FDQ36-WH",
+        "source_rows": [
+          246
+        ]
+      },
+      "9902261178904": {
+        "company_sku": "NFT101-QXJ",
+        "source_rows": [
+          247
+        ]
+      },
+      "9902267892965": {
+        "company_sku": "NFT101-MTZGD-YX",
+        "source_rows": [
+          248
+        ]
+      },
+      "9902276750768": {
+        "company_sku": "NFT101-MTZGD-DZ",
+        "source_rows": [
+          249
+        ]
+      },
+      "9902268478618": {
+        "company_sku": "NFT101-MTZGD-YX",
+        "source_rows": [
+          250
+        ]
+      },
+      "9902268478915": {
+        "company_sku": "NFT101-MTZGD-DZ",
+        "source_rows": [
+          251
+        ]
+      },
+      "9902268478984": {
+        "company_sku": "NFT101-MTZGD-YX",
+        "source_rows": [
+          252
+        ]
+      },
+      "9902268478779": {
+        "company_sku": "NFT101-MTZGD-DZ",
+        "source_rows": [
+          253
+        ]
+      },
+      "9902260455563": {
+        "company_sku": "NFT101-TPTZ-GD",
+        "source_rows": [
+          254
+        ]
+      },
+      "9902267714397": {
+        "company_sku": "NFT101-TPTZ-BK",
+        "source_rows": [
+          255
+        ]
+      },
+      "9902267900547": {
+        "company_sku": "NFT101-TPTZ-BK",
+        "source_rows": [
+          256
+        ]
+      },
+      "9902261414583": {
+        "company_sku": "NFT101-TPTZ-BK",
+        "source_rows": [
+          257
+        ]
+      },
+      "9902268277075": {
+        "company_sku": "NFT101-TPTZ-BK",
+        "source_rows": [
+          258
+        ]
+      },
+      "9902361039327": {
+        "company_sku": "NFT101-JZJ-012",
+        "source_rows": [
+          259
+        ]
+      },
+      "9902265143182": {
+        "company_sku": "NFT101-JZJ-012",
+        "source_rows": [
+          260
+        ]
+      },
+      "9902263320486": {
+        "company_sku": "NFT101-JJB",
+        "source_rows": [
+          261
+        ]
+      },
+      "9902261146354": {
+        "company_sku": "NFT101-JJB",
+        "source_rows": [
+          262
+        ]
+      },
+      "9902261423134": {
+        "company_sku": "NFT101-YMJ",
+        "source_rows": [
+          263
+        ]
+      },
+      "9902276750683": {
+        "company_sku": "NFT101-YMJ",
+        "source_rows": [
+          264
+        ]
+      },
+      "9902261507384": {
+        "company_sku": "NFT101-YMJ",
+        "source_rows": [
+          265
+        ]
+      },
+      "9902261373026": {
+        "company_sku": "NFT101-YMJ",
+        "source_rows": [
+          266
+        ]
+      },
+      "9902260455532": {
+        "company_sku": "NFT101-KFST-R-OR-XL-004",
+        "source_rows": [
+          267
+        ]
+      },
+      "9902260455525": {
+        "company_sku": "NFT101-KFST-R-OR-L-003",
+        "source_rows": [
+          268
+        ]
+      },
+      "9902260455389": {
+        "company_sku": "NFT101-KFST-R-OR-M-002",
+        "source_rows": [
+          269
+        ]
+      },
+      "9902245815313": {
+        "company_sku": "NFT101-KFST-R-BLUE-XL",
+        "source_rows": [
+          271
+        ]
+      },
+      "9902247096284": {
+        "company_sku": "NFT101-KFST-R-BLUE-L",
+        "source_rows": [
+          272
+        ]
+      },
+      "9902247096291": {
+        "company_sku": "NFT101-KFST-R-BLUE-M",
+        "source_rows": [
+          273
+        ]
+      },
+      "9902267691117": {
+        "company_sku": "NFT101-KDNL-BK",
+        "source_rows": [
+          274
+        ]
+      },
+      "9902267691186": {
+        "company_sku": "NFT101-KDNL-WH",
+        "source_rows": [
+          275
+        ]
+      },
+      "9902267689725": {
+        "company_sku": "NFT101-ZGNL-BK",
+        "source_rows": [
+          276
+        ]
+      },
+      "9902267691018": {
+        "company_sku": "NFT101-ZGNL-BK",
+        "source_rows": [
+          277
+        ]
+      },
+      "9902267692886": {
+        "company_sku": "NFT101-KDNL-WH",
+        "source_rows": [
+          278
+        ]
+      },
+      "9902267692947": {
+        "company_sku": "NFT101-KDNL-BK",
+        "source_rows": [
+          279
+        ]
+      },
+      "9902267692978": {
+        "company_sku": "NFT101-ZGNL-BK",
+        "source_rows": [
+          280
+        ]
+      },
+      "9902261825440": {
+        "company_sku": "NFT101-6-RED-FHTZ",
+        "source_rows": [
+          281
+        ]
+      },
+      "9902265149726": {
+        "company_sku": "NFT101-6-RED-FHTZ",
+        "source_rows": [
+          282
+        ]
+      },
+      "9902274670051": {
+        "company_sku": "NFT101-GZXQ-BL",
+        "source_rows": [
+          283
+        ]
+      },
+      "9902274670075": {
+        "company_sku": "NFT101-GZXQ-YL",
+        "source_rows": [
+          284
+        ]
+      },
+      "9902274670099": {
+        "company_sku": "NFT101-GZXQ-OR",
+        "source_rows": [
+          285
+        ]
+      },
+      "9902274670105": {
+        "company_sku": "NFT101-GZXQ-BK",
+        "source_rows": [
+          286
+        ]
+      },
+      "9902263786503": {
+        "company_sku": "NFT101-GZXQ-OR",
+        "source_rows": [
+          287
+        ]
+      },
+      "9902263786565": {
+        "company_sku": "NFT101-GZXQ-YL",
+        "source_rows": [
+          288
+        ]
+      },
+      "9902263786770": {
+        "company_sku": "NFT101-GZXQ-BK",
+        "source_rows": [
+          289
+        ]
+      },
+      "9902263786930": {
+        "company_sku": "NFT101-GZXQ-BL",
+        "source_rows": [
+          290
+        ]
+      },
+      "9902268985697": {
+        "company_sku": "NFT101-WSTZ-011",
+        "source_rows": [
+          291
+        ]
+      },
+      "9902265143298": {
+        "company_sku": "NFT101-WSTZ-011",
+        "source_rows": [
+          292
+        ]
+      },
+      "9902270111756": {
+        "company_sku": "NFT101-618FRJ-019",
+        "source_rows": [
+          293
+        ]
+      },
+      "9902267529076": {
+        "company_sku": "NFT101-618FRJ-019",
+        "source_rows": [
+          294
+        ]
+      },
+      "9902267692770": {
+        "company_sku": "NFT101-618FRJ-019",
+        "source_rows": [
+          295
+        ]
+      },
+      "9902265143021": {
+        "company_sku": "NFT101-GGQ",
+        "source_rows": [
+          296
+        ]
+      },
+      "9902270064953": {
+        "company_sku": "NFT101-GGQ",
+        "source_rows": [
+          297
+        ]
+      },
+      "9902276751529": {
+        "company_sku": "NFT101-GGQ",
+        "source_rows": [
+          298
+        ]
+      },
+      "9902278551271": {
+        "company_sku": "NFT101-HS-BXG-018",
+        "source_rows": [
+          299
+        ]
+      },
+      "9902277525532": {
+        "company_sku": "NFT101-HS-BK-017",
+        "source_rows": [
+          300
+        ]
+      },
+      "9902277525464": {
+        "company_sku": "NFT101-HS-BXG-018",
+        "source_rows": [
+          301
+        ]
+      },
+      "9902278464304": {
+        "company_sku": "NFT101-FSJ-BL-025",
+        "source_rows": [
+          302
+        ]
+      },
+      "9902278464342": {
+        "company_sku": "NFT101-FSJ-YL-026",
+        "source_rows": [
+          303
+        ]
+      },
+      "9902278782743": {
+        "company_sku": "NFT101-FSJ-BL-025",
+        "source_rows": [
+          304
+        ]
+      },
+      "9902278782736": {
+        "company_sku": "NFT101-FSJ-YL-026",
+        "source_rows": [
+          305
+        ]
+      },
+      "9902255791089": {
+        "company_sku": "NFT101-QGQ-021",
+        "source_rows": [
+          306
+        ]
+      },
+      "9902269313628": {
+        "company_sku": "NFT101-QGQ-021",
+        "source_rows": [
+          307
+        ]
+      },
+      "9902269131734": {
+        "company_sku": "NFT101-QGQ-021",
+        "source_rows": [
+          308
+        ]
+      },
+      "9902255975755": {
+        "company_sku": "NFT101-GJXQ-OR-022",
+        "source_rows": [
+          309
+        ]
+      },
+      "9902275193023": {
+        "company_sku": "NFT101-GJXQ-OR-022",
+        "source_rows": [
+          310
+        ]
+      },
+      "9902275193054": {
+        "company_sku": "NFT101-GJXQ-BK-023",
+        "source_rows": [
+          311
+        ]
+      },
+      "9902265913310": {
+        "company_sku": "NFT101-CBHL-020",
+        "source_rows": [
+          312
+        ]
+      },
+      "9902267999749": {
+        "company_sku": "NFT101-PBJ",
+        "source_rows": [
+          313
+        ]
+      },
+      "9902269410976": {
+        "company_sku": "NFT101-CBHL-020",
+        "source_rows": [
+          314
+        ]
+      },
+      "9902268182065": {
+        "company_sku": "NFT101-CBHL-020",
+        "source_rows": [
+          315
+        ]
+      },
+      "9902267693326": {
+        "company_sku": "NFT101-CBHL-020",
+        "source_rows": [
+          316
+        ]
+      },
+      "9902277263731": {
+        "company_sku": "NFT101-SQH-027",
+        "source_rows": [
+          317
+        ]
+      },
+      "9902278782675": {
+        "company_sku": "NFT101-SQH-027",
+        "source_rows": [
+          318
+        ]
+      },
+      "9902299602181": {
+        "company_sku": "NFT101-SJZ-BK-0028",
+        "source_rows": [
+          319
+        ]
+      },
+      "9902259473486": {
+        "company_sku": "NFT101-BLFS-024",
+        "source_rows": [
+          320
+        ]
+      },
+      "9902267693227": {
+        "company_sku": "NFT101-BLFS-024",
+        "source_rows": [
+          321
+        ]
+      },
+      "9902261222843": {
+        "company_sku": "NFT101-LJ6-BK",
+        "source_rows": [
+          322
+        ]
+      },
+      "9902276850567": {
+        "company_sku": "NFT101-ZXZZ-0030",
+        "source_rows": [
+          323
+        ]
+      },
+      "9902278782781": {
+        "company_sku": "NFT101-ZXZZ-0030",
+        "source_rows": [
+          324
+        ]
+      },
+      "9902348545261": {
+        "company_sku": "NFT101-JQ-0048",
+        "source_rows": [
+          325
+        ]
+      },
+      "9902284499161": {
+        "company_sku": "NFT101-HGZLD-0031",
+        "source_rows": [
+          326
+        ]
+      },
+      "9902279985136": {
+        "company_sku": "NFT101-HGZLD-0031",
+        "source_rows": [
+          327
+        ]
+      },
+      "9902281977495": {
+        "company_sku": "NFT101-HYQ-0032",
+        "source_rows": [
+          328
+        ]
+      },
+      "9902279833222": {
+        "company_sku": "NFT101-HYQ-0032",
+        "source_rows": [
+          329
+        ]
+      },
+      "9902281274907": {
+        "company_sku": "NFT101-HYQ-0032",
+        "source_rows": [
+          330
+        ]
+      },
+      "9902278543238": {
+        "company_sku": "NFT101-XWJ-0029",
+        "source_rows": [
+          331
+        ]
+      },
+      "9902278550212": {
+        "company_sku": "NFT101-XWJ-0029",
+        "source_rows": [
+          332
+        ]
+      },
+      "9902279791690": {
+        "company_sku": "NFT101-FHTZ-BK",
+        "source_rows": [
+          333
+        ]
+      },
+      "9902279791706": {
+        "company_sku": "NFT101-FHTZ-BK",
+        "source_rows": [
+          334
+        ]
+      },
+      "9902294029198": {
+        "company_sku": "NFT101-FHTZ-RED-0035",
+        "source_rows": [
+          335
+        ]
+      },
+      "9902294029204": {
+        "company_sku": "NFT101-FHTZ-BK-0036",
+        "source_rows": [
+          336
+        ]
+      },
+      "9902294030033": {
+        "company_sku": "NFT101-GXTZ-OR-0037",
+        "source_rows": [
+          337
+        ]
+      },
+      "9902294030422": {
+        "company_sku": "NFT101-GXTZ-BL",
+        "source_rows": [
+          338
+        ]
+      },
+      "9902340139550": {
+        "company_sku": "NFT101-HGJ-JX-12-0038",
+        "source_rows": [
+          339
+        ]
+      },
+      "9902340130700": {
+        "company_sku": "NFT101-HGJ-JX-18-0039",
+        "source_rows": [
+          340
+        ]
+      },
+      "9902306719437": {
+        "company_sku": "NFT101-MRD-0041",
+        "source_rows": [
+          341
+        ]
+      },
+      "9902294391721": {
+        "company_sku": "NFT101-LDD-0042",
+        "source_rows": [
+          342
+        ]
+      },
+      "9902293144885": {
+        "company_sku": "NFT101-SD-ZZJ-0043",
+        "source_rows": [
+          343
+        ]
+      },
+      "9902294030880": {
+        "company_sku": "NFT101-NKJ-0044",
+        "source_rows": [
+          344
+        ]
+      },
+      "9902293979647": {
+        "company_sku": "NFT101-LYD-0045",
+        "source_rows": [
+          345
+        ]
+      },
+      "9902300434817": {
+        "company_sku": "NFT101-SJJ-0046",
+        "source_rows": [
+          346
+        ]
+      },
+      "9902293144946": {
+        "company_sku": "NFT101-XLJ-0047",
+        "source_rows": [
+          347
+        ]
+      },
+      "9902294029518": {
+        "company_sku": "NFT101-JQ-0048",
+        "source_rows": [
+          348
+        ]
+      },
+      "9902292746615": {
+        "company_sku": "NFT101-JFB-0049",
+        "source_rows": [
+          349
+        ]
+      },
+      "9902364786310": {
+        "company_sku": "NFT101-NKJ-0044",
+        "source_rows": [
+          350
+        ]
+      },
+      "9902282613354": {
+        "company_sku": "NFT101-KGB-0051",
+        "source_rows": [
+          351
+        ]
+      },
+      "9902295553562": {
+        "company_sku": "NFT101-JXQ-0052",
+        "source_rows": [
+          352
+        ]
+      },
+      "9902300154685": {
+        "company_sku": "NFT101-LBXD-0064",
+        "source_rows": [
+          354
+        ]
+      },
+      "9902304973237": {
+        "company_sku": "NFT101-CSFS-0055",
+        "source_rows": [
+          355
+        ]
+      },
+      "9902304730748": {
+        "company_sku": "NFT101-AMD-0056",
+        "source_rows": [
+          356
+        ]
+      },
+      "9902308195536": {
+        "company_sku": "NFT101-DT0059",
+        "source_rows": [
+          358
+        ]
+      },
+      "9902305330206": {
+        "company_sku": "NFT101-LLD-0060",
+        "source_rows": [
+          359
+        ]
+      },
+      "9902304972872": {
+        "company_sku": "NFT101-DDYS-0061",
+        "source_rows": [
+          360
+        ]
+      },
+      "9902305588591": {
+        "company_sku": "NFT101-DDYS-0062",
+        "source_rows": [
+          361
+        ]
+      },
+      "9902284498997": {
+        "company_sku": "NFT101-XQBC4VS-0065",
+        "source_rows": [
+          363
+        ]
+      },
+      "9902284499086": {
+        "company_sku": "NFT101-XQBR02V-0066",
+        "source_rows": [
+          364
+        ]
+      },
+      "9902339582657": {
+        "company_sku": "NFT101-PTCLG1.5-0067",
+        "source_rows": [
+          365
+        ]
+      },
+      "9902339582664": {
+        "company_sku": "NFT101-PTCLG2-0068",
+        "source_rows": [
+          366
+        ]
+      },
+      "9902339582671": {
+        "company_sku": "NFT101-PTCLG2.5-0069",
+        "source_rows": [
+          367
+        ]
+      },
+      "9902339582688": {
+        "company_sku": "NFT101-PTCLG3-0070",
+        "source_rows": [
+          368
+        ]
+      },
+      "9902339582701": {
+        "company_sku": "NFT101-PTCLG4-0071",
+        "source_rows": [
+          369
+        ]
+      },
+      "9902339582558": {
+        "company_sku": "NFT101-YTCLG1.5-0072",
+        "source_rows": [
+          370
+        ]
+      },
+      "9902339582565": {
+        "company_sku": "NFT101-YTCLG2-0073",
+        "source_rows": [
+          371
+        ]
+      },
+      "9902339582572": {
+        "company_sku": "NFT101-YTCLG2.5-0074",
+        "source_rows": [
+          372
+        ]
+      },
+      "9902339582589": {
+        "company_sku": "NFT101-YTCLG3-0075",
+        "source_rows": [
+          373
+        ]
+      },
+      "9902339582596": {
+        "company_sku": "NFT101-YTCLG4-0076",
+        "source_rows": [
+          374
+        ]
+      },
+      "9902339582718": {
+        "company_sku": "NFT101-CLG1.5-GD-0077",
+        "source_rows": [
+          375
+        ]
+      },
+      "9902339582725": {
+        "company_sku": "NFT101-CLG2-GD-0078",
+        "source_rows": [
+          376
+        ]
+      },
+      "9902339582732": {
+        "company_sku": "NFT101-CLG2.5-GD-0079",
+        "source_rows": [
+          377
+        ]
+      },
+      "9902339582749": {
+        "company_sku": "NFT101-CLG3-GD-0080",
+        "source_rows": [
+          378
+        ]
+      },
+      "9902339582756": {
+        "company_sku": "NFT101-CLG4-GD-0081",
+        "source_rows": [
+          379
+        ]
+      },
+      "9902351896992": {
+        "company_sku": "NFT101-WTD-0082",
+        "source_rows": [
+          380
+        ]
+      },
+      "9902397482890": {
+        "company_sku": "NFT101-FSJ-YL-026",
+        "source_rows": [
+          381
+        ]
+      },
+      "9902333750038": {
+        "company_sku": "NFT101-SPDJJ-0086",
+        "source_rows": [
+          382
+        ]
+      },
+      "9902338664538": {
+        "company_sku": "NFT101-LED5-0087",
+        "source_rows": [
+          383
+        ]
+      },
+      "9902338664439": {
+        "company_sku": "NFT101-LED7-0088",
+        "source_rows": [
+          384
+        ]
+      },
+      "9902342161467": {
+        "company_sku": "NFT101-FZCM-0089",
+        "source_rows": [
+          385
+        ]
+      },
+      "9902342161474": {
+        "company_sku": "NFT101-FZCL-0090",
+        "source_rows": [
+          386
+        ]
+      },
+      "9902333749940": {
+        "company_sku": "NFT101-GDWJ-0091",
+        "source_rows": [
+          387
+        ]
+      },
+      "9902299602310": {
+        "company_sku": "NFT101-YCMX-0092",
+        "source_rows": [
+          388
+        ]
+      },
+      "9902333737275": {
+        "company_sku": "NFT101-120FDQ-0096",
+        "source_rows": [
+          391
+        ]
+      },
+      "9902333748479": {
+        "company_sku": "NFT101-36FDQ-0098",
+        "source_rows": [
+          393
+        ]
+      },
+      "9902394111656": {
+        "company_sku": "NFT101-FDQ36-WH",
+        "source_rows": [
+          398
+        ]
+      },
+      "9902408412953": {
+        "company_sku": "NFT101-DDJRJ-0181",
+        "source_rows": [
+          399
+        ]
+      },
+      "9902398537742": {
+        "company_sku": "NFT101-157-14LT-0108",
+        "source_rows": [
+          402
+        ]
+      },
+      "9902369329703": {
+        "company_sku": "NFT101-NGJ-0483",
+        "source_rows": [
+          403
+        ]
+      },
+      "9902369331140": {
+        "company_sku": "NFT101-NGJ-0483",
+        "source_rows": [
+          404
+        ]
+      },
+      "9902309958253": {
+        "company_sku": "NFT101-QSYWJ-0111",
+        "source_rows": [
+          405
+        ]
+      },
+      "9902365550897": {
+        "company_sku": "NFT101-BDX-LT",
+        "source_rows": [
+          407
+        ]
+      },
+      "9902366564633": {
+        "company_sku": "NFT101-BDX-LT",
+        "source_rows": [
+          408
+        ]
+      },
+      "9902314097084": {
+        "company_sku": "NFT101-FZFS-0115",
+        "source_rows": [
+          409
+        ]
+      },
+      "9902399814804": {
+        "company_sku": "NFT101-NLB601-0143",
+        "source_rows": [
+          410
+        ]
+      },
+      "9902338664606": {
+        "company_sku": "NFT101-FDJ-0118",
+        "source_rows": [
+          412
+        ]
+      },
+      "9902381718707": {
+        "company_sku": "NFT101-RGBCS5-0121",
+        "source_rows": [
+          414
+        ]
+      },
+      "9902340137785": {
+        "company_sku": "NFT101-RGBDT-0119",
+        "source_rows": [
+          416
+        ]
+      },
+      "9902333749704": {
+        "company_sku": "NFT101-35QDTT-0123",
+        "source_rows": [
+          417
+        ]
+      },
+      "9902323830030": {
+        "company_sku": "NFT101-ZLFZGJ-0124",
+        "source_rows": [
+          418
+        ]
+      },
+      "9902357383441": {
+        "company_sku": "NFT101-TJ-0034",
+        "source_rows": [
+          419
+        ]
+      },
+      "9902326024658": {
+        "company_sku": "NFT101-DSGBK-0127",
+        "source_rows": [
+          421
+        ]
+      },
+      "9902358904126": {
+        "company_sku": "NFT101-43XFP-0128",
+        "source_rows": [
+          422
+        ]
+      },
+      "9902406364124": {
+        "company_sku": "NFT101-SKJBK-0129",
+        "source_rows": [
+          423
+        ]
+      },
+      "9902396625816": {
+        "company_sku": "NFT101-TYJ-0130",
+        "source_rows": [
+          424
+        ]
+      },
+      "9902347646594": {
+        "company_sku": "NFT101-DDQJD-0131",
+        "source_rows": [
+          425
+        ]
+      },
+      "9902278476512": {
+        "company_sku": "NFT101-XWJ-0029",
+        "source_rows": [
+          427
+        ]
+      },
+      "9902278550823": {
+        "company_sku": "NFT101-YKC-Green",
+        "source_rows": [
+          428
+        ]
+      },
+      "9902276803082": {
+        "company_sku": "NFT101-YKC-Orange",
+        "source_rows": [
+          429
+        ]
+      },
+      "9902278559253": {
+        "company_sku": "NFT101-ZXZZ-0030",
+        "source_rows": [
+          430
+        ]
+      },
+      "9902267880412": {
+        "company_sku": "NFT101-CBHL-020",
+        "source_rows": [
+          431
+        ]
+      },
+      "9902312124812": {
+        "company_sku": "NFT101-LBXD-0064",
+        "source_rows": [
+          435
+        ]
+      },
+      "9902245237580": {
+        "company_sku": "NFT101-GCTZ",
+        "source_rows": [
+          436
+        ]
+      },
+      "9902278550885": {
+        "company_sku": "NFT101-CQCD-TX-Blue",
+        "source_rows": [
+          438
+        ]
+      },
+      "9902285616512": {
+        "company_sku": "NFT101-HYQ-0032",
+        "source_rows": [
+          439
+        ]
+      },
+      "9902278550243": {
+        "company_sku": "NFT101-CQCD-TX-Blue",
+        "source_rows": [
+          440
+        ]
+      },
+      "9902278550779": {
+        "company_sku": "NFT101-ZXZZ-0030",
+        "source_rows": [
+          441
+        ]
+      },
+      "9902278551462": {
+        "company_sku": "NFT101-SQH-027",
+        "source_rows": [
+          442
+        ]
+      },
+      "9902278551073": {
+        "company_sku": "NFT101-HS-BXG-018",
+        "source_rows": [
+          443
+        ]
+      },
+      "9902292746769": {
+        "company_sku": "NFT101-JFB-0049",
+        "source_rows": [
+          444
+        ]
+      },
+      "9902292828380": {
+        "company_sku": "NFT101-JQ-0048",
+        "source_rows": [
+          445
+        ]
+      },
+      "9902292833278": {
+        "company_sku": "NFT101-JQ-0048",
+        "source_rows": [
+          446
+        ]
+      },
+      "9902295554873": {
+        "company_sku": "NFT101-LDD-0042",
+        "source_rows": [
+          447
+        ]
+      },
+      "9902295555290": {
+        "company_sku": "NFT101-LDD-0042",
+        "source_rows": [
+          448
+        ]
+      },
+      "9902293997337": {
+        "company_sku": "NFT101-SD-ZZJ-0043",
+        "source_rows": [
+          449
+        ]
+      },
+      "9902293997702": {
+        "company_sku": "NFT101-SD-ZZJ-0043",
+        "source_rows": [
+          450
+        ]
+      },
+      "9902295554606": {
+        "company_sku": "NFT101-NKJ-0044",
+        "source_rows": [
+          451
+        ]
+      },
+      "9902295553852": {
+        "company_sku": "NFT101-JXQ-0052",
+        "source_rows": [
+          452
+        ]
+      },
+      "9902295554002": {
+        "company_sku": "NFT101-JXQ-0052",
+        "source_rows": [
+          453
+        ]
+      },
+      "9902293966128": {
+        "company_sku": "NFT101-XQBC4VS-0065",
+        "source_rows": [
+          454
+        ]
+      },
+      "9902295553210": {
+        "company_sku": "NFT101-GXTZ-BL",
+        "source_rows": [
+          455
+        ]
+      },
+      "9902295553227": {
+        "company_sku": "NFT101-GXTZ-OR-0037",
+        "source_rows": [
+          456
+        ]
+      },
+      "9902276879032": {
+        "company_sku": "NFT101-FSJ-BL-025",
+        "source_rows": [
+          457
+        ]
+      },
+      "9902276879049": {
+        "company_sku": "NFT101-FSJ-YL-026",
+        "source_rows": [
+          458
+        ]
+      },
+      "9902274696716": {
+        "company_sku": "NFT101-WGTZ-BK",
+        "source_rows": [
+          459
+        ]
+      },
+      "9902279866060": {
+        "company_sku": "NFT101-QJD-6",
+        "source_rows": [
+          460
+        ]
+      },
+      "9902290255140": {
+        "company_sku": "NFT101-SWEJ",
+        "source_rows": [
+          461
+        ]
+      },
+      "9902278782637": {
+        "company_sku": "NFT101-YKC-Green",
+        "source_rows": [
+          462
+        ]
+      },
+      "9902278225967": {
+        "company_sku": "NFT101-TPTZ-GD",
+        "source_rows": [
+          463
+        ]
+      },
+      "9902323802303": {
+        "company_sku": "NFT101-FR400-FKJ-0133",
+        "source_rows": [
+          465
+        ]
+      },
+      "9902333744846": {
+        "company_sku": "NFT101-FR-900-FKJ-0134",
+        "source_rows": [
+          466
+        ]
+      },
+      "9902333725562": {
+        "company_sku": "NFT101-THJ-0137",
+        "source_rows": [
+          467
+        ]
+      },
+      "9902394111823": {
+        "company_sku": "NFT101-CSJ-5L-WH-0145",
+        "source_rows": [
+          468
+        ]
+      },
+      "9902394111816": {
+        "company_sku": "NFT101-CSJ-5L-BK-0146",
+        "source_rows": [
+          469
+        ]
+      },
+      "9902366939066": {
+        "company_sku": "NFT101-DZCXQ-0148",
+        "source_rows": [
+          472
+        ]
+      },
+      "9902369349442": {
+        "company_sku": "NFT101-PBQB-0158",
+        "source_rows": [
+          474
+        ]
+      },
+      "9902340139314": {
+        "company_sku": "NFT101-YTGZJ-0165",
+        "source_rows": [
+          475
+        ]
+      },
+      "9902341166609": {
+        "company_sku": "NFT101-DDMB100-0159",
+        "source_rows": [
+          477
+        ]
+      },
+      "9902338661131": {
+        "company_sku": "NFT101-GK261A-0135",
+        "source_rows": [
+          478
+        ]
+      },
+      "9902327986344": {
+        "company_sku": "NFT101-HSAMS-0157",
+        "source_rows": [
+          479
+        ]
+      },
+      "9902334269324": {
+        "company_sku": "NFT101-XBHLY-0170",
+        "source_rows": [
+          480
+        ]
+      },
+      "9902327275363": {
+        "company_sku": "NFT101-SGPWJ-0153",
+        "source_rows": [
+          482
+        ]
+      },
+      "9902348555536": {
+        "company_sku": "NFT101-SJZ-WT-0163",
+        "source_rows": [
+          484
+        ]
+      },
+      "9902323830047": {
+        "company_sku": "NFT101-XZY-0138",
+        "source_rows": [
+          485
+        ]
+      },
+      "9902341166586": {
+        "company_sku": "NFT101-GCQ-0147",
+        "source_rows": [
+          487
+        ]
+      },
+      "9902348555161": {
+        "company_sku": "NFT101-CBFSJ-0142",
+        "source_rows": [
+          491
+        ]
+      },
+      "9902348555178": {
+        "company_sku": "NFT101-QHTS-0173",
+        "source_rows": [
+          496
+        ]
+      },
+      "9902413976709": {
+        "company_sku": "NFT101-TLJ-GR-0335",
+        "source_rows": [
+          503
+        ]
+      },
+      "9902394112714": {
+        "company_sku": "NFT101-PLJ-0278",
+        "source_rows": [
+          504
+        ]
+      },
+      "9902300434848": {
+        "company_sku": "NFT101-QXQ-0040",
+        "source_rows": [
+          505
+        ]
+      },
+      "9902300434879": {
+        "company_sku": "NFT101-QXQ-0040",
+        "source_rows": [
+          506
+        ]
+      },
+      "9902298636033": {
+        "company_sku": "NFT101-KFST-R-OR-M-002",
+        "source_rows": [
+          507
+        ]
+      },
+      "9902298636187": {
+        "company_sku": "NFT101-KFST-R-OR-L-003",
+        "source_rows": [
+          508
+        ]
+      },
+      "9902298636347": {
+        "company_sku": "NFT101-KFST-R-OR-XL-004",
+        "source_rows": [
+          509
+        ]
+      },
+      "9902298636477": {
+        "company_sku": "NFT101-XQBC4VS-0065",
+        "source_rows": [
+          510
+        ]
+      },
+      "9902304730779": {
+        "company_sku": "NFT101-AMD-0056",
+        "source_rows": [
+          511
+        ]
+      },
+      "9902305588614": {
+        "company_sku": "NFT101-DDYS-0062",
+        "source_rows": [
+          512
+        ]
+      },
+      "9902304973527": {
+        "company_sku": "NFT101-JT-0050",
+        "source_rows": [
+          513
+        ]
+      },
+      "9902305039154": {
+        "company_sku": "NFT101-MRD-0041",
+        "source_rows": [
+          514
+        ]
+      },
+      "9902267101371": {
+        "company_sku": "NFT101-LJ6-WH",
+        "source_rows": [
+          515
+        ]
+      },
+      "9902298180147": {
+        "company_sku": "NFT101-XLJ-0047",
+        "source_rows": [
+          516
+        ]
+      },
+      "9902298179707": {
+        "company_sku": "NFT101-LYD-0045",
+        "source_rows": [
+          517
+        ]
+      },
+      "9902293455370": {
+        "company_sku": "NFT101-XQBC4VS-0065",
+        "source_rows": [
+          518
+        ]
+      },
+      "9902299602402": {
+        "company_sku": "NFT101-KKQ-0083",
+        "source_rows": [
+          519
+        ]
+      },
+      "9902299602433": {
+        "company_sku": "NFT101-KKQ-0083",
+        "source_rows": [
+          520
+        ]
+      },
+      "9902299602501": {
+        "company_sku": "NFT101-LEDMM-0054",
+        "source_rows": [
+          521
+        ]
+      },
+      "9902265771996": {
+        "company_sku": "NFT101-JRJ-3",
+        "source_rows": [
+          522
+        ]
+      },
+      "9902314125145": {
+        "company_sku": "NFT101-DT0059",
+        "source_rows": [
+          523
+        ]
+      },
+      "9902312080521": {
+        "company_sku": "NFT101-DDYS-0061",
+        "source_rows": [
+          524
+        ]
+      },
+      "9902311653153": {
+        "company_sku": "NFT101-SLT-0057",
+        "source_rows": [
+          525
+        ]
+      },
+      "9902311653214": {
+        "company_sku": "NFT101-SLT-0057",
+        "source_rows": [
+          526
+        ]
+      },
+      "9902365550859": {
+        "company_sku": "NFT101-137C-BIG-0160",
+        "source_rows": [
+          530
+        ]
+      },
+      "9902380176126": {
+        "company_sku": "NFT101-DZTGDA-0235",
+        "source_rows": [
+          531
+        ]
+      },
+      "9902349268602": {
+        "company_sku": "NFT101-DZC-0184",
+        "source_rows": [
+          532
+        ]
+      },
+      "9902401439537": {
+        "company_sku": "NFT101-DP-82RD-0144",
+        "source_rows": [
+          533
+        ]
+      },
+      "9902349268565": {
+        "company_sku": "NFT101-KLBJ-0190",
+        "source_rows": [
+          534
+        ]
+      },
+      "9902340572388": {
+        "company_sku": "NFT101-CCJQR-0208",
+        "source_rows": [
+          535
+        ]
+      },
+      "9902320515657": {
+        "company_sku": "NFT101-6V1-0209",
+        "source_rows": [
+          536
+        ]
+      },
+      "9902364794704": {
+        "company_sku": "NFT101-XWJ-BK-0213",
+        "source_rows": [
+          537
+        ]
+      },
+      "9902327799296": {
+        "company_sku": "NFT101-TJ-BK-0214",
+        "source_rows": [
+          538
+        ]
+      },
+      "9902316615965": {
+        "company_sku": "NFT101-ZRNFS-0219",
+        "source_rows": [
+          539
+        ]
+      },
+      "9902378321316": {
+        "company_sku": "NFT101-YSAMQ-0155",
+        "source_rows": [
+          540
+        ]
+      },
+      "9902378232735": {
+        "company_sku": "NFT101-GJAMQ-0156",
+        "source_rows": [
+          541
+        ]
+      },
+      "9902365789372": {
+        "company_sku": "NFT101-YBAMY-0162",
+        "source_rows": [
+          542
+        ]
+      },
+      "9902390567778": {
+        "company_sku": "NFT101-BM-FDJ-0290",
+        "source_rows": [
+          543
+        ]
+      },
+      "9902365549785": {
+        "company_sku": "NFT101-ZS-UFO-253",
+        "source_rows": [
+          544
+        ]
+      },
+      "9902311660472": {
+        "company_sku": "NFT101-TBAMQ",
+        "source_rows": [
+          545
+        ]
+      },
+      "9902314868141": {
+        "company_sku": "NFT101-TBAMQ",
+        "source_rows": [
+          546
+        ]
+      },
+      "9902364867316": {
+        "company_sku": "NFT101-GZQ-Red",
+        "source_rows": [
+          547
+        ]
+      },
+      "9902307594002": {
+        "company_sku": "NFT101-LEDMM-0054",
+        "source_rows": [
+          548
+        ]
+      },
+      "9902316015383": {
+        "company_sku": "NFT101-HXZJ-L",
+        "source_rows": [
+          549
+        ]
+      },
+      "9902316015376": {
+        "company_sku": "NFT101-HXZJ-R",
+        "source_rows": [
+          550
+        ]
+      },
+      "9902317156474": {
+        "company_sku": "NFT101-ZXZZ-0030",
+        "source_rows": [
+          551
+        ]
+      },
+      "9902317156610": {
+        "company_sku": "NFT101-FHTZ-BK",
+        "source_rows": [
+          552
+        ]
+      },
+      "9902319512551": {
+        "company_sku": "NFT101-QJD-6",
+        "source_rows": [
+          554
+        ]
+      },
+      "9902319578014": {
+        "company_sku": "NFT101-WTD-0082",
+        "source_rows": [
+          555
+        ]
+      },
+      "9902349268268": {
+        "company_sku": "NFT101-DZQ-0174",
+        "source_rows": [
+          556
+        ]
+      },
+      "9902270669813": {
+        "company_sku": "NFT101-KFST-L-BL-XL-007",
+        "source_rows": [
+          557
+        ]
+      },
+      "9902320355062": {
+        "company_sku": "NFT101-GCTZ",
+        "source_rows": [
+          558
+        ]
+      },
+      "9902320355109": {
+        "company_sku": "NFT101-GCTZ",
+        "source_rows": [
+          559
+        ]
+      },
+      "9902251365208": {
+        "company_sku": "NFT101-ZJMB-120",
+        "source_rows": [
+          560
+        ]
+      },
+      "9902332496883": {
+        "company_sku": "NFT101-LJZ-BL-0259",
+        "source_rows": [
+          561
+        ]
+      },
+      "9902331387441": {
+        "company_sku": "NFT101-LJZ-GR-0260",
+        "source_rows": [
+          562
+        ]
+      },
+      "9902390567662": {
+        "company_sku": "NFT101-28JTGJ-0289",
+        "source_rows": [
+          563
+        ]
+      },
+      "9902390567563": {
+        "company_sku": "NFT101-FT-0288",
+        "source_rows": [
+          564
+        ]
+      },
+      "9902390568591": {
+        "company_sku": "NFT101-BM-0273",
+        "source_rows": [
+          565
+        ]
+      },
+      "9902383044156": {
+        "company_sku": "NFT101-BM-0273",
+        "source_rows": [
+          566
+        ]
+      },
+      "9902336913645": {
+        "company_sku": "NFT101-FTZSTZ-0274",
+        "source_rows": [
+          567
+        ]
+      },
+      "9902336926119": {
+        "company_sku": "NFT101-BM-MN-0275",
+        "source_rows": [
+          568
+        ]
+      },
+      "9902337199147": {
+        "company_sku": "NFT101-BMZSTZ-0276",
+        "source_rows": [
+          569
+        ]
+      },
+      "9902380410435": {
+        "company_sku": "NFT101-JGSPY-0277",
+        "source_rows": [
+          570
+        ]
+      },
+      "9902394111137": {
+        "company_sku": "NFT101-PLJ-0278",
+        "source_rows": [
+          571
+        ]
+      },
+      "9902380192423": {
+        "company_sku": "NFT101-FT-0288",
+        "source_rows": [
+          572
+        ]
+      },
+      "9902378870418": {
+        "company_sku": "NFT101-28JTGJ-0289",
+        "source_rows": [
+          573
+        ]
+      },
+      "9902380402645": {
+        "company_sku": "NFT101-BM-FDJ-0290",
+        "source_rows": [
+          574
+        ]
+      },
+      "9902381645416": {
+        "company_sku": "NFT101-650FS-0300",
+        "source_rows": [
+          575
+        ]
+      },
+      "9902394209827": {
+        "company_sku": "NFT101-LED6-BG-0302",
+        "source_rows": [
+          577
+        ]
+      },
+      "9902383079158": {
+        "company_sku": "NFT101-LED14-BG-0303",
+        "source_rows": [
+          578
+        ]
+      },
+      "9902394215972": {
+        "company_sku": "NFT101-LED14-BL-0304",
+        "source_rows": [
+          579
+        ]
+      },
+      "9902394216009": {
+        "company_sku": "NFT101-LED14-GR-0305",
+        "source_rows": [
+          580
+        ]
+      },
+      "9902394215989": {
+        "company_sku": "NFT101-LED14-PK-0306",
+        "source_rows": [
+          581
+        ]
+      },
+      "9902394215996": {
+        "company_sku": "NFT101-LED14-RD-0307",
+        "source_rows": [
+          582
+        ]
+      },
+      "9902380366367": {
+        "company_sku": "NFT101-LED3-BG-0308",
+        "source_rows": [
+          583
+        ]
+      },
+      "9902383671291": {
+        "company_sku": "NFT101-RGB3-0309",
+        "source_rows": [
+          584
+        ]
+      },
+      "9902383619088": {
+        "company_sku": "NFT101-RGB6-0310",
+        "source_rows": [
+          585
+        ]
+      },
+      "9902337233742": {
+        "company_sku": "NFT101-LED11-BG-0311",
+        "source_rows": [
+          586
+        ]
+      },
+      "9902390889436": {
+        "company_sku": "NFT101-PSD-0312",
+        "source_rows": [
+          587
+        ]
+      },
+      "9902392323990": {
+        "company_sku": "NFT101-DP-19LS-0142",
+        "source_rows": [
+          588
+        ]
+      },
+      "9902392324003": {
+        "company_sku": "NFT101-DP-19HS-0143",
+        "source_rows": [
+          589
+        ]
+      },
+      "9902397579354": {
+        "company_sku": "NFT101-DP-82RD-0144",
+        "source_rows": [
+          590
+        ]
+      },
+      "9902385562856": {
+        "company_sku": "NFT101-CSJ-5L-WH-0145",
+        "source_rows": [
+          591
+        ]
+      },
+      "9902385562849": {
+        "company_sku": "NFT101-CSJ-5L-BK-0146",
+        "source_rows": [
+          592
+        ]
+      },
+      "9902394111847": {
+        "company_sku": "NFT101-CSJ-6L-BE-0147",
+        "source_rows": [
+          593
+        ]
+      },
+      "9902338421834": {
+        "company_sku": "NFT101-XFL-GJTZ-0319",
+        "source_rows": [
+          594
+        ]
+      },
+      "9902391233467": {
+        "company_sku": "NFT101-DZ-0320",
+        "source_rows": [
+          595
+        ]
+      },
+      "9902338421957": {
+        "company_sku": "NFT101-23GJTZ-0321",
+        "source_rows": [
+          596
+        ]
+      },
+      "9902391364079": {
+        "company_sku": "NFT101-LNFDJ-0322",
+        "source_rows": [
+          597
+        ]
+      },
+      "9902394209933": {
+        "company_sku": "NFT101-BYT-150-0323",
+        "source_rows": [
+          598
+        ]
+      },
+      "9902394213428": {
+        "company_sku": "NFT101--TYD-200-0324",
+        "source_rows": [
+          599
+        ]
+      },
+      "9902394210069": {
+        "company_sku": "NFT101-TYD-250-0325",
+        "source_rows": [
+          600
+        ]
+      },
+      "9902338692173": {
+        "company_sku": "NFT101-QXZ-0326",
+        "source_rows": [
+          601
+        ]
+      },
+      "9902337586480": {
+        "company_sku": "NFT101-5V1-QXZ-0327",
+        "source_rows": [
+          602
+        ]
+      },
+      "9902333750755": {
+        "company_sku": "NFT101-SPDJJ-0086",
+        "source_rows": [
+          603
+        ]
+      },
+      "9902327301710": {
+        "company_sku": "NFT101-GXTZ-OR-0037",
+        "source_rows": [
+          604
+        ]
+      },
+      "9902327286673": {
+        "company_sku": "NFT101-KDNL-WH",
+        "source_rows": [
+          605
+        ]
+      },
+      "9902312079808": {
+        "company_sku": "NFT101-YSGJ-0095",
+        "source_rows": [
+          606
+        ]
+      },
+      "9902306296716": {
+        "company_sku": "NFT101-SLT-BK-0151",
+        "source_rows": [
+          607
+        ]
+      },
+      "9902308599853": {
+        "company_sku": "NFT101-SLT-YS-0152",
+        "source_rows": [
+          608
+        ]
+      },
+      "9902309886518": {
+        "company_sku": "NFT101-4Q-AMQ-0125",
+        "source_rows": [
+          609
+        ]
+      },
+      "9902338661087": {
+        "company_sku": "NFT101-TYJ-0130",
+        "source_rows": [
+          610
+        ]
+      },
+      "9902338661094": {
+        "company_sku": "NFT101-TYJ-0130",
+        "source_rows": [
+          611
+        ]
+      },
+      "9902319644771": {
+        "company_sku": "NFT101-TGD-0084",
+        "source_rows": [
+          612
+        ]
+      },
+      "9902323727897": {
+        "company_sku": "NFT101-GCQ-0147",
+        "source_rows": [
+          613
+        ]
+      },
+      "9902323790594": {
+        "company_sku": "NFT101-NLB031L-0141",
+        "source_rows": [
+          614
+        ]
+      },
+      "9902323801177": {
+        "company_sku": "NFT101-CBFSJ-0142",
+        "source_rows": [
+          615
+        ]
+      },
+      "9902408572466": {
+        "company_sku": "NFT101-DZTGDA-0235",
+        "source_rows": [
+          616
+        ]
+      },
+      "9902390567396": {
+        "company_sku": "NFT101-BM-MN-0275",
+        "source_rows": [
+          618
+        ]
+      },
+      "9902324205325": {
+        "company_sku": "NFT101-BXGCC-0161",
+        "source_rows": [
+          619
+        ]
+      },
+      "9902325839697": {
+        "company_sku": "NFT101-JZJ-3V1-0167",
+        "source_rows": [
+          621
+        ]
+      },
+      "9902388117909": {
+        "company_sku": "NFT101-24GG-0374",
+        "source_rows": [
+          624
+        ]
+      },
+      "9902348495238": {
+        "company_sku": "NFT101-KKQ-0083",
+        "source_rows": [
+          625
+        ]
+      },
+      "9902326330148": {
+        "company_sku": "NFT101-RGBDT-0119",
+        "source_rows": [
+          626
+        ]
+      },
+      "9902326334245": {
+        "company_sku": "NFT101-JZJ-2D6V1-0168",
+        "source_rows": [
+          627
+        ]
+      },
+      "9902326351297": {
+        "company_sku": "NFT101-QJXLQ-0126",
+        "source_rows": [
+          628
+        ]
+      },
+      "9902326661983": {
+        "company_sku": "NFT101-TJ-0034",
+        "source_rows": [
+          629
+        ]
+      },
+      "9902327263025": {
+        "company_sku": "NFT101-NLSC6-2-0139",
+        "source_rows": [
+          630
+        ]
+      },
+      "9902327568106": {
+        "company_sku": "NFT101-TJ-BK-0214",
+        "source_rows": [
+          631
+        ]
+      },
+      "9902327837837": {
+        "company_sku": "NFT101-JZJ-3V1-0167",
+        "source_rows": [
+          632
+        ]
+      },
+      "9902328197695": {
+        "company_sku": "NFT101-BXGCC-0161",
+        "source_rows": [
+          633
+        ]
+      },
+      "9902328223844": {
+        "company_sku": "NFT101-XQBR02V-0066",
+        "source_rows": [
+          634
+        ]
+      },
+      "9902331391851": {
+        "company_sku": "NFT101-CSFS-0055",
+        "source_rows": [
+          635
+        ]
+      },
+      "9902348556809": {
+        "company_sku": "NFT101-TCQJD-0224",
+        "source_rows": [
+          636
+        ]
+      },
+      "9902331717736": {
+        "company_sku": "NFT101-36FDQ-0098",
+        "source_rows": [
+          637
+        ]
+      },
+      "9902331724710": {
+        "company_sku": "NFT101-QJXLQ-0126",
+        "source_rows": [
+          638
+        ]
+      },
+      "9902331874002": {
+        "company_sku": "NFT101-TCQJD-0224",
+        "source_rows": [
+          639
+        ]
+      },
+      "9902332506032": {
+        "company_sku": "NFT101-FDQ36-WH",
+        "source_rows": [
+          640
+        ]
+      },
+      "9902332938680": {
+        "company_sku": "NFT101-NKJ-0044",
+        "source_rows": [
+          641
+        ]
+      },
+      "9902332941680": {
+        "company_sku": "NFT101-SKJBK-0129",
+        "source_rows": [
+          642
+        ]
+      },
+      "9902332941956": {
+        "company_sku": "NFT101-FXSKJ-0136",
+        "source_rows": [
+          643
+        ]
+      },
+      "9902334539342": {
+        "company_sku": "NFT101-KGB-0051",
+        "source_rows": [
+          644
+        ]
+      },
+      "9902334563040": {
+        "company_sku": "NFT101-HGJ-JX-6",
+        "source_rows": [
+          645
+        ]
+      },
+      "9902335171954": {
+        "company_sku": "NFT101-FR400-FKJ-0133",
+        "source_rows": [
+          646
+        ]
+      },
+      "9902335203204": {
+        "company_sku": "NFT103-BPNL-0255",
+        "source_rows": [
+          647
+        ]
+      },
+      "9902335206786": {
+        "company_sku": "NFT101-FHTZ-RED-0035",
+        "source_rows": [
+          648
+        ]
+      },
+      "9902335206793": {
+        "company_sku": "NFT101-FHTZ-BK-0036",
+        "source_rows": [
+          649
+        ]
+      },
+      "9902335214637": {
+        "company_sku": "NFT101-NBS-0171",
+        "source_rows": [
+          650
+        ]
+      },
+      "9902335214644": {
+        "company_sku": "NFT101-HHTS-0172",
+        "source_rows": [
+          651
+        ]
+      },
+      "9902335214651": {
+        "company_sku": "NFT101-QHTS-0173",
+        "source_rows": [
+          652
+        ]
+      },
+      "9902335245105": {
+        "company_sku": "NFT101-XCSLT-0164",
+        "source_rows": [
+          653
+        ]
+      },
+      "9902335309579": {
+        "company_sku": "NFT101-JZJ-2D9V1-0169",
+        "source_rows": [
+          654
+        ]
+      },
+      "9902335499232": {
+        "company_sku": "NFT101-LYD-0045",
+        "source_rows": [
+          655
+        ]
+      },
+      "9902335501355": {
+        "company_sku": "NFT101-YKPPC-BK-0263",
+        "source_rows": [
+          656
+        ]
+      },
+      "9902335501379": {
+        "company_sku": "NFT101-YKPPC-BL-0262",
+        "source_rows": [
+          657
+        ]
+      },
+      "9902335501386": {
+        "company_sku": "NFT101-YKPPC-GED-0264",
+        "source_rows": [
+          658
+        ]
+      },
+      "9902396629302": {
+        "company_sku": "NFT101-XXT-0225",
+        "source_rows": [
+          659
+        ]
+      },
+      "9902334232533": {
+        "company_sku": "NFT101-GJXQ-BK-023",
+        "source_rows": [
+          660
+        ]
+      },
+      "9902346203675": {
+        "company_sku": "NFT101-FDQ36-WH",
+        "source_rows": [
+          661
+        ]
+      },
+      "9902346208472": {
+        "company_sku": "NFT101-FDQ36-WH",
+        "source_rows": [
+          662
+        ]
+      },
+      "9902346215319": {
+        "company_sku": "NFT101-8IN1ZZJ",
+        "source_rows": [
+          663
+        ]
+      },
+      "9902335512634": {
+        "company_sku": "NFT101-BM-MN-0275",
+        "source_rows": [
+          664
+        ]
+      },
+      "9902335687660": {
+        "company_sku": "NFT101-FRJ-638-0179",
+        "source_rows": [
+          665
+        ]
+      },
+      "9902335687912": {
+        "company_sku": "NFT101-DDJRJ-0181",
+        "source_rows": [
+          666
+        ]
+      },
+      "9902392039518": {
+        "company_sku": "NFT101-LED14-BG-0303",
+        "source_rows": [
+          667
+        ]
+      },
+      "9902392039792": {
+        "company_sku": "NFT101-LED14-BG-0303",
+        "source_rows": [
+          668
+        ]
+      },
+      "9902408412830": {
+        "company_sku": "NFT101-CSJ-6L-BE-0147",
+        "source_rows": [
+          669
+        ]
+      },
+      "9902335798595": {
+        "company_sku": "NFT101-PLJ-0278",
+        "source_rows": [
+          670
+        ]
+      },
+      "9902335807334": {
+        "company_sku": "NFT101-QJXLQ-0126",
+        "source_rows": [
+          671
+        ]
+      },
+      "9902335882775": {
+        "company_sku": "NFT101-JZJ-9V1-0166",
+        "source_rows": [
+          672
+        ]
+      },
+      "9902336838368": {
+        "company_sku": "NFT101-HGJ-JX-12-0038",
+        "source_rows": [
+          673
+        ]
+      },
+      "9902336838627": {
+        "company_sku": "NFT101-KFST-R-OR-M-002",
+        "source_rows": [
+          674
+        ]
+      },
+      "9902336838634": {
+        "company_sku": "NFT101-KFST-R-OR-L-003",
+        "source_rows": [
+          675
+        ]
+      },
+      "9902336838641": {
+        "company_sku": "NFT101-KFST-R-OR-XL-004",
+        "source_rows": [
+          676
+        ]
+      },
+      "9902336869768": {
+        "company_sku": "NFT103-HG-4TD-0265",
+        "source_rows": [
+          677
+        ]
+      },
+      "9902336875547": {
+        "company_sku": "NFT101-JGSPY-0277",
+        "source_rows": [
+          678
+        ]
+      },
+      "9902364733963": {
+        "company_sku": "NFT101-ZS-UFO-253",
+        "source_rows": [
+          679
+        ]
+      },
+      "9902336918183": {
+        "company_sku": "NFT101-WTD-0082",
+        "source_rows": [
+          680
+        ]
+      },
+      "9902337122428": {
+        "company_sku": "NFT101-KGB-0051",
+        "source_rows": [
+          681
+        ]
+      },
+      "9902337190946": {
+        "company_sku": "NFT101-PBQB-0158",
+        "source_rows": [
+          682
+        ]
+      },
+      "9902337192346": {
+        "company_sku": "NFT103-SJNL-0256",
+        "source_rows": [
+          683
+        ]
+      },
+      "9902337205220": {
+        "company_sku": "NFT101-ZYJ-0226",
+        "source_rows": [
+          684
+        ]
+      },
+      "9902337212709": {
+        "company_sku": "NFT101-HGZL-0105",
+        "source_rows": [
+          685
+        ]
+      },
+      "9902337213751": {
+        "company_sku": "NFT101-ZYJ-0226",
+        "source_rows": [
+          686
+        ]
+      },
+      "9902337256987": {
+        "company_sku": "NFT101-TGD-0084",
+        "source_rows": [
+          687
+        ]
+      },
+      "9902337522266": {
+        "company_sku": "NFT101-SLT-0057",
+        "source_rows": [
+          688
+        ]
+      },
+      "9902338565798": {
+        "company_sku": "NFT101-LED5-0087",
+        "source_rows": [
+          689
+        ]
+      },
+      "9902338574615": {
+        "company_sku": "NFT101-RGBCS5-0121",
+        "source_rows": [
+          690
+        ]
+      },
+      "9902338586045": {
+        "company_sku": "NFT101-LEDBG14-0120",
+        "source_rows": [
+          691
+        ]
+      },
+      "9902338591162": {
+        "company_sku": "NFT101-LED7-0088",
+        "source_rows": [
+          692
+        ]
+      },
+      "9902338676920": {
+        "company_sku": "NFT103-QS-5TD-0279",
+        "source_rows": [
+          693
+        ]
+      },
+      "9902338716770": {
+        "company_sku": "NFT101-XWJ-BK-0213",
+        "source_rows": [
+          694
+        ]
+      },
+      "9902338741017": {
+        "company_sku": "NFT101-GJXQ-BK-023",
+        "source_rows": [
+          695
+        ]
+      },
+      "9902339265604": {
+        "company_sku": "NFT101-YCMX-0092",
+        "source_rows": [
+          696
+        ]
+      },
+      "9902339369647": {
+        "company_sku": "NFT101-YCMX-0092",
+        "source_rows": [
+          697
+        ]
+      },
+      "9902339517680": {
+        "company_sku": "NFT101-CWMRTZ-0154",
+        "source_rows": [
+          698
+        ]
+      },
+      "9902340470653": {
+        "company_sku": "NFT101-CQCD-QX-Yellow",
+        "source_rows": [
+          699
+        ]
+      },
+      "9902340470660": {
+        "company_sku": "NFT101-CQCD-QX-BL-0053",
+        "source_rows": [
+          700
+        ]
+      },
+      "9902340483776": {
+        "company_sku": "NFT101-RGBDT-0119",
+        "source_rows": [
+          701
+        ]
+      },
+      "9902340491221": {
+        "company_sku": "NFT101-GXTZ-OR-0037",
+        "source_rows": [
+          702
+        ]
+      },
+      "9902340497490": {
+        "company_sku": "NFT101-HS-BK-017",
+        "source_rows": [
+          703
+        ]
+      },
+      "9902340600852": {
+        "company_sku": "NFT101-DC-0114",
+        "source_rows": [
+          704
+        ]
+      },
+      "9902340988349": {
+        "company_sku": "NFT101-CPB-0149",
+        "source_rows": [
+          705
+        ]
+      },
+      "9902341252425": {
+        "company_sku": "NFT101-CPB-0149",
+        "source_rows": [
+          706
+        ]
+      },
+      "9902341197320": {
+        "company_sku": "NFT101-LJZ-GR-0260",
+        "source_rows": [
+          707
+        ]
+      },
+      "9902341623966": {
+        "company_sku": "NFT101-650FS-0300",
+        "source_rows": [
+          708
+        ]
+      },
+      "9902341676603": {
+        "company_sku": "NFT101-LED14-RD-0307",
+        "source_rows": [
+          709
+        ]
+      },
+      "9902341676610": {
+        "company_sku": "NFT101-LED14-BL-0304",
+        "source_rows": [
+          710
+        ]
+      },
+      "9902341676627": {
+        "company_sku": "NFT101-LED14-PK-0306",
+        "source_rows": [
+          711
+        ]
+      },
+      "9902341676634": {
+        "company_sku": "NFT101-LED14-GR-0305",
+        "source_rows": [
+          712
+        ]
+      },
+      "9902341718204": {
+        "company_sku": "NFT101-PTCLG1.5-0067",
+        "source_rows": [
+          713
+        ]
+      },
+      "9902341718211": {
+        "company_sku": "NFT101-PTCLG2-0068",
+        "source_rows": [
+          714
+        ]
+      },
+      "9902341718228": {
+        "company_sku": "NFT101-PTCLG2.5-0069",
+        "source_rows": [
+          715
+        ]
+      },
+      "9902341718235": {
+        "company_sku": "NFT101-PTCLG3-0070",
+        "source_rows": [
+          716
+        ]
+      },
+      "9902341718242": {
+        "company_sku": "NFT101-PTCLG4-0071",
+        "source_rows": [
+          717
+        ]
+      },
+      "9902341736161": {
+        "company_sku": "NFT101-CCJQR-0208",
+        "source_rows": [
+          718
+        ]
+      },
+      "9902341906946": {
+        "company_sku": "NFT101-GK261A-0135",
+        "source_rows": [
+          719
+        ]
+      },
+      "9902341918246": {
+        "company_sku": "NFT101-ZWSZD-0063",
+        "source_rows": [
+          720
+        ]
+      },
+      "9902342526334": {
+        "company_sku": "NFT101-FDJ-0118",
+        "source_rows": [
+          731
+        ]
+      },
+      "9902342528291": {
+        "company_sku": "NFT101-GZQ-Gray100",
+        "source_rows": [
+          732
+        ]
+      },
+      "9902323461494": {
+        "company_sku": "NFT103-AQM-BL-123CM-0231",
+        "source_rows": [
+          733
+        ]
+      },
+      "9902323461159": {
+        "company_sku": "NFT103-AQM-WH-123CM-0232",
+        "source_rows": [
+          734
+        ]
+      },
+      "9902381372022": {
+        "company_sku": "NFT103-FHCQCD-QX-YL-0236",
+        "source_rows": [
+          735
+        ]
+      },
+      "9902381372046": {
+        "company_sku": "NFT103-FHCQCD-QX-BL-0237",
+        "source_rows": [
+          736
+        ]
+      },
+      "9902354593577": {
+        "company_sku": "NFT103-QXBXG-M-0242",
+        "source_rows": [
+          737
+        ]
+      },
+      "9902352524351": {
+        "company_sku": "NFT103-QXBXG-L-0243",
+        "source_rows": [
+          738
+        ]
+      },
+      "9902352524290": {
+        "company_sku": "NFT103-QXBXG-S-0244",
+        "source_rows": [
+          739
+        ]
+      },
+      "9902354593669": {
+        "company_sku": "NFT103-HGMBD-0245",
+        "source_rows": [
+          740
+        ]
+      },
+      "9902396629326": {
+        "company_sku": "NFT101-XXT-0225",
+        "source_rows": [
+          746
+        ]
+      },
+      "9902358117687": {
+        "company_sku": "NFT103-SQH-0230",
+        "source_rows": [
+          747
+        ]
+      },
+      "9902358116482": {
+        "company_sku": "NFT103-9D5ZNSQH-0229",
+        "source_rows": [
+          748
+        ]
+      },
+      "9902310461315": {
+        "company_sku": "NFT101-LSSLT-0185",
+        "source_rows": [
+          749
+        ]
+      },
+      "9902310256379": {
+        "company_sku": "NFT101-2QGGQ-YL-0188",
+        "source_rows": [
+          750
+        ]
+      },
+      "9902310255389": {
+        "company_sku": "NFT101-3QGGQ-YL-0189",
+        "source_rows": [
+          751
+        ]
+      },
+      "9902322399439": {
+        "company_sku": "NFT101-YWJ-BL-0199",
+        "source_rows": [
+          753
+        ]
+      },
+      "9902322399460": {
+        "company_sku": "NFT101-YWJ-BK-0200",
+        "source_rows": [
+          754
+        ]
+      },
+      "9902314435480": {
+        "company_sku": "NFT101-YJT-HC-0191",
+        "source_rows": [
+          755
+        ]
+      },
+      "9902314435503": {
+        "company_sku": "NFT101-YJT-TM-0192",
+        "source_rows": [
+          756
+        ]
+      },
+      "9902313414684": {
+        "company_sku": "NFT101-QSYWJ-OR-0201",
+        "source_rows": [
+          757
+        ]
+      },
+      "9902313414653": {
+        "company_sku": "NFT101-QSYWJ-BK-0202",
+        "source_rows": [
+          758
+        ]
+      },
+      "9902315129982": {
+        "company_sku": "NFT101-SKTZ-31-0186",
+        "source_rows": [
+          759
+        ]
+      },
+      "9902319565618": {
+        "company_sku": "NFT101-MTFS-0212",
+        "source_rows": [
+          760
+        ]
+      },
+      "9902320714074": {
+        "company_sku": "NFT101-AQM-WT-0206",
+        "source_rows": [
+          761
+        ]
+      },
+      "9902320714081": {
+        "company_sku": "NFT101-AQM-BK-0207",
+        "source_rows": [
+          762
+        ]
+      },
+      "9902384787182": {
+        "company_sku": "NFT101-GJX-S-L-0215",
+        "source_rows": [
+          763
+        ]
+      },
+      "9902365789426": {
+        "company_sku": "NFT101-GJX-S-R-0216",
+        "source_rows": [
+          764
+        ]
+      },
+      "9902384787199": {
+        "company_sku": "NFT101-GJX-L-L-0217",
+        "source_rows": [
+          765
+        ]
+      },
+      "9902365789419": {
+        "company_sku": "NFT101-GJX-L-R-0218",
+        "source_rows": [
+          766
+        ]
+      },
+      "9902320333053": {
+        "company_sku": "NFT101-HT-GY-0203",
+        "source_rows": [
+          767
+        ]
+      },
+      "9902320333077": {
+        "company_sku": "NFT101-HT-BG-0204",
+        "source_rows": [
+          768
+        ]
+      },
+      "9902320333084": {
+        "company_sku": "NFT101-HT-MA-0205",
+        "source_rows": [
+          769
+        ]
+      },
+      "9902407025130": {
+        "company_sku": "NFT101-SKJBK-0129",
+        "source_rows": [
+          772
+        ]
+      },
+      "9902312240642": {
+        "company_sku": "NFT101-XTAMQ",
+        "source_rows": [
+          773
+        ]
+      },
+      "9902380197770": {
+        "company_sku": "NFT101-PPJ-YL-0328",
+        "source_rows": [
+          774
+        ]
+      },
+      "9902380197800": {
+        "company_sku": "NFT101-PPJ-BL-0329",
+        "source_rows": [
+          775
+        ]
+      },
+      "9902397319134": {
+        "company_sku": "NFT101-TLJ-BL-0334",
+        "source_rows": [
+          776
+        ]
+      },
+      "9902385580317": {
+        "company_sku": "NFT101-TLJ-GR-0335",
+        "source_rows": [
+          777
+        ]
+      },
+      "9902397319226": {
+        "company_sku": "NFT101-TLJ-RD-0336",
+        "source_rows": [
+          778
+        ]
+      },
+      "9902347562115": {
+        "company_sku": "NFT101-9J-JZGZ-0400",
+        "source_rows": [
+          779
+        ]
+      },
+      "9902340793721": {
+        "company_sku": "NFT101-RGB-1P-0351",
+        "source_rows": [
+          780
+        ]
+      },
+      "9902388073045": {
+        "company_sku": "NFT101-JBJ-BL-0352",
+        "source_rows": [
+          781
+        ]
+      },
+      "9902388073069": {
+        "company_sku": "NFT101-JBJ-YL-0353",
+        "source_rows": [
+          782
+        ]
+      },
+      "9902341491794": {
+        "company_sku": "NFT101-SMXWJ-0358",
+        "source_rows": [
+          783
+        ]
+      },
+      "9902341503084": {
+        "company_sku": "NFT101-LED-GXK-0370",
+        "source_rows": [
+          785
+        ]
+      },
+      "9902341538215": {
+        "company_sku": "NFT101-LED-MXK-0373",
+        "source_rows": [
+          788
+        ]
+      },
+      "9902341724762": {
+        "company_sku": "NFT101-24GG-0374",
+        "source_rows": [
+          789
+        ]
+      },
+      "9902347538721": {
+        "company_sku": "NFT101-21J-QTLM-0399",
+        "source_rows": [
+          792
+        ]
+      },
+      "9902384149324": {
+        "company_sku": "NFT101-192DGKZQ-0404",
+        "source_rows": [
+          793
+        ]
+      },
+      "9902352869926": {
+        "company_sku": "NFT101-48DGKZQ-0405",
+        "source_rows": [
+          794
+        ]
+      },
+      "9902328450462": {
+        "company_sku": "NFT101-HS-BK-017",
+        "source_rows": [
+          795
+        ]
+      },
+      "9902335728547": {
+        "company_sku": "NFT101-LYD-0045",
+        "source_rows": [
+          796
+        ]
+      },
+      "9902349033583": {
+        "company_sku": "NFT101-YCMX-0092",
+        "source_rows": [
+          797
+        ]
+      },
+      "9902346278826": {
+        "company_sku": "NFT101-ZJMB-100",
+        "source_rows": [
+          798
+        ]
+      },
+      "9902347608011": {
+        "company_sku": "NFT101-618FRJ-019",
+        "source_rows": [
+          799
+        ]
+      },
+      "9902346275917": {
+        "company_sku": "NFT101-CQCD-QX-Yellow",
+        "source_rows": [
+          800
+        ]
+      },
+      "9902346175101": {
+        "company_sku": "NFT101-MTZGD-YX",
+        "source_rows": [
+          801
+        ]
+      },
+      "9902349268817": {
+        "company_sku": "NFT101-ZRNFS-0219",
+        "source_rows": [
+          802
+        ]
+      },
+      "9902346182840": {
+        "company_sku": "NFT101-CBHL-020",
+        "source_rows": [
+          803
+        ]
+      },
+      "9902346183878": {
+        "company_sku": "NFT101-CBHL-020",
+        "source_rows": [
+          804
+        ]
+      },
+      "9902342584181": {
+        "company_sku": "NFT101-SLT-BK-0151",
+        "source_rows": [
+          805
+        ]
+      },
+      "9902342584198": {
+        "company_sku": "NFT101-SLT-YS-0152",
+        "source_rows": [
+          806
+        ]
+      },
+      "9902343466035": {
+        "company_sku": "NFT101-SJJ-0046",
+        "source_rows": [
+          807
+        ]
+      },
+      "9902343545143": {
+        "company_sku": "NFT101-DDQJD-0131",
+        "source_rows": [
+          808
+        ]
+      },
+      "9902343623919": {
+        "company_sku": "NFT101-SPDJJ-0086",
+        "source_rows": [
+          809
+        ]
+      },
+      "9902346499092": {
+        "company_sku": "NFT101-137C-BIG-0160",
+        "source_rows": [
+          810
+        ]
+      },
+      "9902347067351": {
+        "company_sku": "NFT101-ZJ114A-BK-0144",
+        "source_rows": [
+          811
+        ]
+      },
+      "9902347067368": {
+        "company_sku": "NFT101-ZJ114A-RED-0145",
+        "source_rows": [
+          812
+        ]
+      },
+      "9902347067375": {
+        "company_sku": "NFT101-ZJ114A-YL-0146",
+        "source_rows": [
+          813
+        ]
+      },
+      "9902347208006": {
+        "company_sku": "NFT101-ZJMB-120",
+        "source_rows": [
+          814
+        ]
+      },
+      "9902347650751": {
+        "company_sku": "NFT101-PB-SC-75*45",
+        "source_rows": [
+          815
+        ]
+      },
+      "9902347746300": {
+        "company_sku": "NFT101-YYTZ-BK-0112",
+        "source_rows": [
+          816
+        ]
+      },
+      "9902348380657": {
+        "company_sku": "NFT101-KFST-L-ORANGE-M",
+        "source_rows": [
+          817
+        ]
+      },
+      "9902348380664": {
+        "company_sku": "NFT101-KFST-L-ORANGE-L",
+        "source_rows": [
+          818
+        ]
+      },
+      "9902348380671": {
+        "company_sku": "NFT101-KFST-L-ORANGE-XL",
+        "source_rows": [
+          819
+        ]
+      },
+      "9902348442126": {
+        "company_sku": "NFT101-750FS-0301",
+        "source_rows": [
+          820
+        ]
+      },
+      "9902348511983": {
+        "company_sku": "NFT101-YSLD-0132",
+        "source_rows": [
+          821
+        ]
+      },
+      "9902348531530": {
+        "company_sku": "NFT101-6-BK-FHTZ",
+        "source_rows": [
+          822
+        ]
+      },
+      "9902348532728": {
+        "company_sku": "NFT101-CBFSJ-0142",
+        "source_rows": [
+          823
+        ]
+      },
+      "9902348533060": {
+        "company_sku": "NFT101-CBHL-020",
+        "source_rows": [
+          824
+        ]
+      },
+      "9902348533473": {
+        "company_sku": "NFT101-NLSC6-2-0139",
+        "source_rows": [
+          825
+        ]
+      },
+      "9902348534302": {
+        "company_sku": "NFT101-NLSC7-2-0140",
+        "source_rows": [
+          826
+        ]
+      },
+      "9902349008529": {
+        "company_sku": "NFT101-KFST-R-BLUE-M",
+        "source_rows": [
+          827
+        ]
+      },
+      "9902349008543": {
+        "company_sku": "NFT101-KFST-R-BLUE-L",
+        "source_rows": [
+          828
+        ]
+      },
+      "9902349008574": {
+        "company_sku": "NFT101-KFST-R-BLUE-XL",
+        "source_rows": [
+          829
+        ]
+      },
+      "9902351247268": {
+        "company_sku": "NFT101-SF-BK-0193",
+        "source_rows": [
+          830
+        ]
+      },
+      "9902351247275": {
+        "company_sku": "NFT101-SF-OG-0194",
+        "source_rows": [
+          831
+        ]
+      },
+      "9902351247282": {
+        "company_sku": "NFT101-SF-PK-0197",
+        "source_rows": [
+          832
+        ]
+      },
+      "9902351247299": {
+        "company_sku": "NFT101-SF-GY-0196",
+        "source_rows": [
+          833
+        ]
+      },
+      "9902351247305": {
+        "company_sku": "NFT101-SF-BL-0198",
+        "source_rows": [
+          834
+        ]
+      },
+      "9902351247312": {
+        "company_sku": "NFT101-SF-GN-0195",
+        "source_rows": [
+          835
+        ]
+      },
+      "9902351332575": {
+        "company_sku": "NFT103-MW-2-YL-247",
+        "source_rows": [
+          836
+        ]
+      },
+      "9902351307641": {
+        "company_sku": "NFT103-MW-2-BL-248",
+        "source_rows": [
+          837
+        ]
+      },
+      "9902351349382": {
+        "company_sku": "NFT103-MW-2-RED-249",
+        "source_rows": [
+          838
+        ]
+      },
+      "9902351418521": {
+        "company_sku": "NFT101-LJZ-BL-0259",
+        "source_rows": [
+          839
+        ]
+      },
+      "9902351824834": {
+        "company_sku": "NFT101-618FRJ-019",
+        "source_rows": [
+          840
+        ]
+      },
+      "9902352276441": {
+        "company_sku": "NFT103-QXBXG-S-0244",
+        "source_rows": [
+          841
+        ]
+      },
+      "9902367024785": {
+        "company_sku": "NFT101-ZTQ-WH-0475",
+        "source_rows": [
+          842
+        ]
+      },
+      "9902367024792": {
+        "company_sku": "NFT101-ZTQ-BK-0476",
+        "source_rows": [
+          843
+        ]
+      },
+      "9902390568799": {
+        "company_sku": "NFT101-BMZSTZ-0276",
+        "source_rows": [
+          844
+        ]
+      },
+      "9902327843579": {
+        "company_sku": "NFT101-XLHJ-0234",
+        "source_rows": [
+          845
+        ]
+      },
+      "9902317161164": {
+        "company_sku": "NFT101-LEDMM-0054",
+        "source_rows": [
+          846
+        ]
+      },
+      "9902340139970": {
+        "company_sku": "NFT101-HGJ-JX-6",
+        "source_rows": [
+          847
+        ]
+      },
+      "9902356024598": {
+        "company_sku": "NFT101-MT012-0425",
+        "source_rows": [
+          849
+        ]
+      },
+      "9902359534322": {
+        "company_sku": "NFT101-FXCYQ-OR-0434",
+        "source_rows": [
+          855
+        ]
+      },
+      "9902360108383": {
+        "company_sku": "NFT101-YXCYQ-BK-0435",
+        "source_rows": [
+          856
+        ]
+      },
+      "9902359534308": {
+        "company_sku": "NFT101-JXCYQ-GR-0436",
+        "source_rows": [
+          857
+        ]
+      },
+      "9902366606630": {
+        "company_sku": "NFT101-ZBJ-3644AZ-YS-0443",
+        "source_rows": [
+          858
+        ]
+      },
+      "9902366719231": {
+        "company_sku": "NFT101-ZBJ-3644AZ-BK-0444",
+        "source_rows": [
+          859
+        ]
+      },
+      "9902366719286": {
+        "company_sku": "NFT101-ZBJ-5044AZ-YS-0472",
+        "source_rows": [
+          865
+        ]
+      },
+      "9902307595665": {
+        "company_sku": "NFT101-SQH-027",
+        "source_rows": [
+          866
+        ]
+      },
+      "9902361258971": {
+        "company_sku": "NFT101-GCTZ-BL-0226",
+        "source_rows": [
+          867
+        ]
+      },
+      "9902351071092": {
+        "company_sku": "NFT103-AQM-BL-123CM-0231",
+        "source_rows": [
+          868
+        ]
+      },
+      "9902348556977": {
+        "company_sku": "NFT101-6V1-0209",
+        "source_rows": [
+          869
+        ]
+      },
+      "9902351536201": {
+        "company_sku": "NFT101-TCQJD-0224",
+        "source_rows": [
+          870
+        ]
+      },
+      "9902351876260": {
+        "company_sku": "NFT101-DT0059",
+        "source_rows": [
+          871
+        ]
+      },
+      "9902357384554": {
+        "company_sku": "NFT101-HGJ-JX-18-0039",
+        "source_rows": [
+          872
+        ]
+      },
+      "9902319395796": {
+        "company_sku": "NFT101-CWYJY-0210",
+        "source_rows": [
+          873
+        ]
+      },
+      "9902319225772": {
+        "company_sku": "NFT101-YJQ-0211",
+        "source_rows": [
+          874
+        ]
+      },
+      "9902365798541": {
+        "company_sku": "NFT101-CWYSJ-0175",
+        "source_rows": [
+          875
+        ]
+      },
+      "9902365798572": {
+        "company_sku": "NFT101-TX-CWYSJ-0176",
+        "source_rows": [
+          876
+        ]
+      },
+      "9902315978870": {
+        "company_sku": "NFT101-HXZJ-L",
+        "source_rows": [
+          877
+        ]
+      },
+      "9902315978825": {
+        "company_sku": "NFT101-HXZJ-R",
+        "source_rows": [
+          878
+        ]
+      },
+      "9902366701885": {
+        "company_sku": "NFT101-FXSKJ-0136",
+        "source_rows": [
+          879
+        ]
+      },
+      "9902367984447": {
+        "company_sku": "NFT101-GGQ",
+        "source_rows": [
+          880
+        ]
+      },
+      "9902308210406": {
+        "company_sku": "NFT101-CQCD-QX-Yellow",
+        "source_rows": [
+          881
+        ]
+      },
+      "9902357485572": {
+        "company_sku": "NFT101-XLJ-0047",
+        "source_rows": [
+          882
+        ]
+      },
+      "9902357485589": {
+        "company_sku": "NFT101-XLJ-SW-0187",
+        "source_rows": [
+          883
+        ]
+      },
+      "9902309716280": {
+        "company_sku": "NFT101-LDD-0042",
+        "source_rows": [
+          884
+        ]
+      },
+      "9902309716457": {
+        "company_sku": "NFT101-LDD-0042",
+        "source_rows": [
+          885
+        ]
+      },
+      "9902364799266": {
+        "company_sku": "NFT101-ZJ114A-BK-0144",
+        "source_rows": [
+          886
+        ]
+      },
+      "9902364799273": {
+        "company_sku": "NFT101-ZJ114A-RED-0145",
+        "source_rows": [
+          887
+        ]
+      },
+      "9902364799280": {
+        "company_sku": "NFT101-ZJ114A-YL-0146",
+        "source_rows": [
+          888
+        ]
+      },
+      "9902368483666": {
+        "company_sku": "NFT101-137C-BIG-0160",
+        "source_rows": [
+          889
+        ]
+      },
+      "9902352275932": {
+        "company_sku": "NFT101-CDD-0233",
+        "source_rows": [
+          890
+        ]
+      },
+      "9902352560144": {
+        "company_sku": "NFT101-THJ-0137",
+        "source_rows": [
+          891
+        ]
+      },
+      "9902352814148": {
+        "company_sku": "NFT103-QXBXG-M-0242",
+        "source_rows": [
+          892
+        ]
+      },
+      "9902352815329": {
+        "company_sku": "NFT103-QXBXG-L-0243",
+        "source_rows": [
+          893
+        ]
+      },
+      "9902354433668": {
+        "company_sku": "NFT103-HGMBD-0245",
+        "source_rows": [
+          894
+        ]
+      },
+      "9902358354686": {
+        "company_sku": "NFT103-SQH-0230",
+        "source_rows": [
+          895
+        ]
+      },
+      "9902360051801": {
+        "company_sku": "NFT101-MT012-0425",
+        "source_rows": [
+          896
+        ]
+      },
+      "9902361229605": {
+        "company_sku": "NFT101-SPDJJ-0086",
+        "source_rows": [
+          897
+        ]
+      },
+      "9902408413189": {
+        "company_sku": "NFT101-CDD-0233",
+        "source_rows": [
+          898
+        ]
+      },
+      "9902349268701": {
+        "company_sku": "NFT101-DZQ-0174",
+        "source_rows": [
+          899
+        ]
+      },
+      "9902349268480": {
+        "company_sku": "NFT101-ZYJ-0226",
+        "source_rows": [
+          900
+        ]
+      },
+      "9902349268626": {
+        "company_sku": "NFT101-ZYJ-0226",
+        "source_rows": [
+          901
+        ]
+      },
+      "9902363488963": {
+        "company_sku": "NFT101-120FDQ-0096",
+        "source_rows": [
+          902
+        ]
+      },
+      "9902364360107": {
+        "company_sku": "NFT101-JYSX-SC-75*45",
+        "source_rows": [
+          903
+        ]
+      },
+      "9902334995674": {
+        "company_sku": "NFT103-HG-4TD-0265",
+        "source_rows": [
+          906
+        ]
+      },
+      "9902407774229": {
+        "company_sku": "NFT103-TBLL-0280",
+        "source_rows": [
+          908
+        ]
+      },
+      "9902337238419": {
+        "company_sku": "NFT103-MZJSQ-0295",
+        "source_rows": [
+          912
+        ]
+      },
+      "9902406957609": {
+        "company_sku": "NFT103-LXDNZ-HP-0227",
+        "source_rows": [
+          916
+        ]
+      },
+      "9902406957692": {
+        "company_sku": "NFT103-LXDNZ-BL-0228",
+        "source_rows": [
+          917
+        ]
+      },
+      "9902368914146": {
+        "company_sku": "NFT103-MTY-BL-0254",
+        "source_rows": [
+          925
+        ]
+      },
+      "9902334621061": {
+        "company_sku": "NFT103-ZDSNL-0291",
+        "source_rows": [
+          926
+        ]
+      },
+      "9902307568836": {
+        "company_sku": "NFT101-XLJ-0047",
+        "source_rows": [
+          928
+        ]
+      },
+      "9902348922932": {
+        "company_sku": "NFT101-TJ-BK-0214",
+        "source_rows": [
+          929
+        ]
+      },
+      "9902381062190": {
+        "company_sku": "NFT101-PPJ-YL-0328",
+        "source_rows": [
+          930
+        ]
+      },
+      "9902381062213": {
+        "company_sku": "NFT101-PPJ-BL-0329",
+        "source_rows": [
+          931
+        ]
+      },
+      "9902340955938": {
+        "company_sku": "NFT101-CWYSJ-0175",
+        "source_rows": [
+          932
+        ]
+      },
+      "9902394128210": {
+        "company_sku": "NFT103-MFTC-YS-0406",
+        "source_rows": [
+          933
+        ]
+      },
+      "9902394128227": {
+        "company_sku": "NFT103-MFTC-BK-0407",
+        "source_rows": [
+          934
+        ]
+      },
+      "9902385700920": {
+        "company_sku": "NFT103-HGLZ-0440",
+        "source_rows": [
+          935
+        ]
+      },
+      "9902395836800": {
+        "company_sku": "NFT103-SJ-8C-0376",
+        "source_rows": [
+          936
+        ]
+      },
+      "9902335160927": {
+        "company_sku": "NFT101-FR-900-FKJ-0134",
+        "source_rows": [
+          937
+        ]
+      },
+      "9902391198711": {
+        "company_sku": "NFT103-GWL-12-0401",
+        "source_rows": [
+          938
+        ]
+      },
+      "9902392064428": {
+        "company_sku": "NFT103-GWL-10-0402",
+        "source_rows": [
+          939
+        ]
+      },
+      "9902405137262": {
+        "company_sku": "NFT103-GWL-8-0403",
+        "source_rows": [
+          940
+        ]
+      },
+      "9902384790144": {
+        "company_sku": "NFT101-DMGFRJ-0530",
+        "source_rows": [
+          986
+        ]
+      },
+      "9902392047216": {
+        "company_sku": "NFT101-CLG1.5-GD-0077",
+        "source_rows": [
+          999
+        ]
+      },
+      "9902331724932": {
+        "company_sku": "NFT101-XBHLY-0170",
+        "source_rows": [
+          1000
+        ]
+      },
+      "9902337588736": {
+        "company_sku": "NFT101-HGZL-0105",
+        "source_rows": [
+          1001
+        ]
+      },
+      "9902370556594": {
+        "company_sku": "NFT101-4/3FRJ-0482",
+        "source_rows": [
+          1004
+        ]
+      },
+      "9902373535855": {
+        "company_sku": "NFT101-NGJ-0483",
+        "source_rows": [
+          1005
+        ]
+      },
+      "9902331807895": {
+        "company_sku": "NFT101-KDNL-BK",
+        "source_rows": [
+          1010
+        ]
+      },
+      "9902331808045": {
+        "company_sku": "NFT101-ZGNL-BK",
+        "source_rows": [
+          1011
+        ]
+      },
+      "9902331808090": {
+        "company_sku": "NFT101-ZGNL-BK",
+        "source_rows": [
+          1012
+        ]
+      },
+      "9902335362055": {
+        "company_sku": "NFT103-BPNL-0255",
+        "source_rows": [
+          1013
+        ]
+      },
+      "9902394216146": {
+        "company_sku": "NFT101-JBJ-BL-0352",
+        "source_rows": [
+          1014
+        ]
+      },
+      "9902394216160": {
+        "company_sku": "NFT101-JBJ-YL-0353",
+        "source_rows": [
+          1015
+        ]
+      },
+      "9902375832136": {
+        "company_sku": "NFT103-HWXYJD-BK-0296",
+        "source_rows": [
+          1016
+        ]
+      },
+      "9902375832150": {
+        "company_sku": "NFT103-HWXYJD-BL-0299",
+        "source_rows": [
+          1017
+        ]
+      },
+      "9902375832167": {
+        "company_sku": "NFT103-HWXYJD-GR-0298",
+        "source_rows": [
+          1018
+        ]
+      },
+      "9902375832174": {
+        "company_sku": "NFT103-HWXYJD-GE-0297",
+        "source_rows": [
+          1019
+        ]
+      },
+      "9902364799129": {
+        "company_sku": "NFT101-GZQ-Red",
+        "source_rows": [
+          1020
+        ]
+      },
+      "9902366811867": {
+        "company_sku": "NFT101-16-TYT-0433",
+        "source_rows": [
+          1021
+        ]
+      },
+      "9902366812604": {
+        "company_sku": "NFT101-12-TYT-0432",
+        "source_rows": [
+          1022
+        ]
+      },
+      "9902366930414": {
+        "company_sku": "NFT101-8-TYT-0431",
+        "source_rows": [
+          1023
+        ]
+      },
+      "9902369920870": {
+        "company_sku": "NFT101-ZSGJ-BL-0474",
+        "source_rows": [
+          1024
+        ]
+      },
+      "9902369920887": {
+        "company_sku": "NFT101-ZSGJ-RED-0473",
+        "source_rows": [
+          1025
+        ]
+      },
+      "9902372281012": {
+        "company_sku": "NFT101-RGB6-0310",
+        "source_rows": [
+          1026
+        ]
+      },
+      "9902372284747": {
+        "company_sku": "NFT101-RGB3-0309",
+        "source_rows": [
+          1027
+        ]
+      },
+      "9902373747005": {
+        "company_sku": "NFT103-YKMRD-0341",
+        "source_rows": [
+          1028
+        ]
+      },
+      "9902374806091": {
+        "company_sku": "NFT101-6-TYT-0430",
+        "source_rows": [
+          1029
+        ]
+      },
+      "9902378275145": {
+        "company_sku": "NFT101-4/3FRJ-0482",
+        "source_rows": [
+          1030
+        ]
+      },
+      "9902380024410": {
+        "company_sku": "NFT103-SBAMY-0337",
+        "source_rows": [
+          1031
+        ]
+      },
+      "9902380410671": {
+        "company_sku": "NFT101-176FDQ-0097",
+        "source_rows": [
+          1032
+        ]
+      },
+      "9902382307863": {
+        "company_sku": "NFT101-GRAY-LD-0180",
+        "source_rows": [
+          1033
+        ]
+      },
+      "9902382334234": {
+        "company_sku": "NFT103-SJZJ-0246",
+        "source_rows": [
+          1034
+        ]
+      },
+      "9902382560343": {
+        "company_sku": "NFT102-FRJ738-0515",
+        "source_rows": [
+          1035
+        ]
+      },
+      "9902385927990": {
+        "company_sku": "NFT101-LED6-BG-0302",
+        "source_rows": [
+          1036
+        ]
+      },
+      "9902387056988": {
+        "company_sku": "NFT101-LED3-BG-0308",
+        "source_rows": [
+          1037
+        ]
+      },
+      "9902392039075": {
+        "company_sku": "NFT101-157-14LT-0108",
+        "source_rows": [
+          1038
+        ]
+      },
+      "9902392309703": {
+        "company_sku": "NFT101-CSGMJ-0445",
+        "source_rows": [
+          1039
+        ]
+      },
+      "9902393334568": {
+        "company_sku": "NFT103-MW-3-RED-252",
+        "source_rows": [
+          1040
+        ]
+      },
+      "9902393336357": {
+        "company_sku": "NFT103-MW-3-YL-250",
+        "source_rows": [
+          1041
+        ]
+      },
+      "9902395848384": {
+        "company_sku": "NFT101-AMTD-0103",
+        "source_rows": [
+          1042
+        ]
+      },
+      "9902395848490": {
+        "company_sku": "NFT101-JTC-BR-0221",
+        "source_rows": [
+          1043
+        ]
+      },
+      "9902395848513": {
+        "company_sku": "NFT101-JTC-BK-0223",
+        "source_rows": [
+          1044
+        ]
+      },
+      "9902395848537": {
+        "company_sku": "NFT101-JTC-RE-0222",
+        "source_rows": [
+          1045
+        ]
+      },
+      "9902396433169": {
+        "company_sku": "NFT101-THSC-0106",
+        "source_rows": [
+          1046
+        ]
+      },
+      "9902399240665": {
+        "company_sku": "NFT101-LED11-BG-0311",
+        "source_rows": [
+          1047
+        ]
+      },
+      "9902392047223": {
+        "company_sku": "NFT101-CLG2-GD-0078",
+        "source_rows": [
+          1048
+        ]
+      },
+      "9902392047247": {
+        "company_sku": "NFT101-CLG2.5-GD-0079",
+        "source_rows": [
+          1049
+        ]
+      },
+      "9902392047254": {
+        "company_sku": "NFT101-CLG3-GD-0080",
+        "source_rows": [
+          1050
+        ]
+      },
+      "9902392047261": {
+        "company_sku": "NFT101-CLG4-GD-0081",
+        "source_rows": [
+          1051
+        ]
+      },
+      "9902392268895": {
+        "company_sku": "NFT101-YTCLG1.5-0072",
+        "source_rows": [
+          1052
+        ]
+      },
+      "9902392268925": {
+        "company_sku": "NFT101-YTCLG2-0073",
+        "source_rows": [
+          1053
+        ]
+      },
+      "9902392268956": {
+        "company_sku": "NFT101-YTCLG2.5-0074",
+        "source_rows": [
+          1054
+        ]
+      },
+      "9902392269007": {
+        "company_sku": "NFT101-YTCLG3-0075",
+        "source_rows": [
+          1055
+        ]
+      },
+      "9902392269038": {
+        "company_sku": "NFT101-YTCLG4-0076",
+        "source_rows": [
+          1056
+        ]
+      },
+      "9902392283829": {
+        "company_sku": "NFT101-XXT-0225",
+        "source_rows": [
+          1057
+        ]
+      },
+      "9902395521201": {
+        "company_sku": "NFT103-LXDNZ-BL-0228",
+        "source_rows": [
+          1058
+        ]
+      },
+      "9902395521232": {
+        "company_sku": "NFT103-LXDNZ-HP-0227",
+        "source_rows": [
+          1059
+        ]
+      },
+      "9902395764585": {
+        "company_sku": "NFT103-SJ-8C-0376",
+        "source_rows": [
+          1060
+        ]
+      },
+      "9902419253330": {
+        "company_sku": "NFT103-QS-5TD-0279",
+        "source_rows": [
+          1063
+        ]
+      },
+      "9902417686246": {
+        "company_sku": "NFT103-MTFS-WT-0283",
+        "source_rows": [
+          1070
+        ]
+      },
+      "9902417686420": {
+        "company_sku": "NFT103-MTFS-YL-0284",
+        "source_rows": [
+          1071
+        ]
+      },
+      "9902407838075": {
+        "company_sku": "NFT103-ZDBD-WT-0285",
+        "source_rows": [
+          1072
+        ]
+      },
+      "9902407838051": {
+        "company_sku": "NFT103-ZDBD-YL-0286",
+        "source_rows": [
+          1073
+        ]
+      },
+      "9902405816631": {
+        "company_sku": "NFT103-LXDNZ-HP-0227",
+        "source_rows": [
+          1078
+        ]
+      },
+      "9902405816662": {
+        "company_sku": "NFT103-LXDNZ-BL-0228",
+        "source_rows": [
+          1079
+        ]
+      },
+      "9902407777152": {
+        "company_sku": "NFT103-CFZWJ-BK-0339",
+        "source_rows": [
+          1086
+        ]
+      },
+      "9902401658464": {
+        "company_sku": "NFT103-SCQSJ-0395",
+        "source_rows": [
+          1093
+        ]
+      },
+      "9902420422336": {
+        "company_sku": "NFT103-YFM-0414",
+        "source_rows": [
+          1110
+        ]
+      },
+      "9902409508570": {
+        "company_sku": "NFT101-YJQ-0211",
+        "source_rows": [
+          1113
+        ]
+      },
+      "9902417683894": {
+        "company_sku": "NFT103-BXGFS-0287",
+        "source_rows": [
+          1181
+        ]
+      },
+      "9902407686386": {
+        "company_sku": "NFT103-CFZWJ-BK-0339",
+        "source_rows": [
+          1191
+        ]
+      },
+      "9902403491502": {
+        "company_sku": "NFT103-GZ-BK-0356",
+        "source_rows": [
+          1213
+        ]
+      },
+      "9902403491533": {
+        "company_sku": "NFT103-GZ-WH-0355",
+        "source_rows": [
+          1214
+        ]
+      },
+      "9902403491540": {
+        "company_sku": "NFT103-GZ-BR-0357",
+        "source_rows": [
+          1215
+        ]
+      },
+      "9902404514842": {
+        "company_sku": "NFT103-ZJDSG-0354",
+        "source_rows": [
+          1216
+        ]
+      },
+      "9902408996293": {
+        "company_sku": "NFT103-MFTC-BK-0407",
+        "source_rows": [
+          1217
+        ]
+      },
+      "9902408996361": {
+        "company_sku": "NFT103-MFTC-YS-0406",
+        "source_rows": [
+          1218
+        ]
+      },
+      "9902415947011": {
+        "company_sku": "NFT103-LXSNX-0388",
+        "source_rows": [
+          1219
+        ]
+      },
+      "9902417930103": {
+        "company_sku": "NFT103-YFM-0414",
+        "source_rows": [
+          1220
+        ]
+      },
+      "9902420886930": {
+        "company_sku": "NFT101-HGJ-JX-12-0038",
+        "source_rows": [
+          1221
+        ]
+      },
+      "9902420887197": {
+        "company_sku": "NFT101-HGJ-JX-12-0038",
+        "source_rows": [
+          1222
+        ]
+      },
+      "9902408660149": {
+        "company_sku": "NFT101-FT-0288",
+        "source_rows": [
+          1223
+        ]
+      },
+      "9902408660156": {
+        "company_sku": "NFT101-FT-0288",
+        "source_rows": [
+          1224
+        ]
+      },
+      "9902421125960": {
+        "company_sku": "NFT101-ZTQ-WH-0475",
+        "source_rows": [
+          1225
+        ]
+      },
+      "9902420923062": {
+        "company_sku": "NFT101-ZTQ-BK-0476",
+        "source_rows": [
+          1226
+        ]
+      },
+      "9902420708959": {
+        "company_sku": "NFT101-XFL-GJTZ-0319",
+        "source_rows": [
+          1227
+        ]
+      },
+      "9902421016275": {
+        "company_sku": "NFT101-XFL-GJTZ-0319",
+        "source_rows": [
+          1228
+        ]
+      },
+      "9902421022054": {
+        "company_sku": "NFT101-XFL-GJTZ-0319",
+        "source_rows": [
+          1229
+        ]
+      },
+      "9902389783745": {
+        "company_sku": "NFT103-GPY-BK-0410",
+        "source_rows": [
+          1278
+        ]
+      },
+      "9902389783752": {
+        "company_sku": "NFT103-GPY-Gray-0411",
+        "source_rows": [
+          1279
+        ]
+      },
+      "9902389783776": {
+        "company_sku": "NFT103-GPY-GE-0412",
+        "source_rows": [
+          1280
+        ]
+      },
+      "9902389783769": {
+        "company_sku": "NFT103-GPY-BL-0413",
+        "source_rows": [
+          1281
+        ]
+      },
+      "9902389743954": {
+        "company_sku": "NFT103-HGYD-BK-0437",
+        "source_rows": [
+          1282
+        ]
+      },
+      "9902389743961": {
+        "company_sku": "NFT103-HGYD-GRE-0438",
+        "source_rows": [
+          1283
+        ]
+      },
+      "9902389743978": {
+        "company_sku": "NFT103-HGYD-BL-0439",
+        "source_rows": [
+          1284
+        ]
+      },
+      "9902389425942": {
+        "company_sku": "NFT103-LLSNT-PK-0349",
+        "source_rows": [
+          1285
+        ]
+      },
+      "9902389425829": {
+        "company_sku": "NFT103-LLSNT-BK-0346",
+        "source_rows": [
+          1286
+        ]
+      },
+      "9902389425720": {
+        "company_sku": "NFT103-LLSNT-PP-0348",
+        "source_rows": [
+          1287
+        ]
+      },
+      "9902389425645": {
+        "company_sku": "NFT103-LLSNT-GR-0347",
+        "source_rows": [
+          1288
+        ]
+      },
+      "9902389420923": {
+        "company_sku": "NFT103-SNT-PP-0345",
+        "source_rows": [
+          1289
+        ]
+      },
+      "9902389420794": {
+        "company_sku": "NFT103-SNT-PK-0343",
+        "source_rows": [
+          1290
+        ]
+      },
+      "9902389420671": {
+        "company_sku": "NFT103-SNT-GR-0342",
+        "source_rows": [
+          1291
+        ]
+      },
+      "9902389420572": {
+        "company_sku": "NFT103-SNT-BK-0344",
+        "source_rows": [
+          1292
+        ]
+      },
+      "9902386988952": {
+        "company_sku": "NFT101-CQCD-TX-Blue",
+        "source_rows": [
+          1293
+        ]
+      },
+      "9902384650554": {
+        "company_sku": "NFT103-SNX-BR-0380",
+        "source_rows": [
+          1294
+        ]
+      },
+      "9902384650547": {
+        "company_sku": "NFT103-SNX-PL-0384",
+        "source_rows": [
+          1295
+        ]
+      },
+      "9902384650516": {
+        "company_sku": "NFT103-SNX-GRE-0385",
+        "source_rows": [
+          1296
+        ]
+      },
+      "9902384650509": {
+        "company_sku": "NFT103-SNX-BL-0378",
+        "source_rows": [
+          1297
+        ]
+      },
+      "9902384650493": {
+        "company_sku": "NFT103-SNX-YL-0379",
+        "source_rows": [
+          1298
+        ]
+      },
+      "9902384650486": {
+        "company_sku": "NFT103-SNX-PK-0383",
+        "source_rows": [
+          1299
+        ]
+      },
+      "9902384284285": {
+        "company_sku": "NFT103-SBAMY-0337",
+        "source_rows": [
+          1300
+        ]
+      },
+      "9902389682048": {
+        "company_sku": "NFT103-BTJ-0350",
+        "source_rows": [
+          1301
+        ]
+      },
+      "9902389456199": {
+        "company_sku": "NFT103-SCCBZ-WH-0365",
+        "source_rows": [
+          1333
+        ]
+      },
+      "9902389456281": {
+        "company_sku": "NFT103-SCCBZ-MPL-0366",
+        "source_rows": [
+          1334
+        ]
+      },
+      "9902389456144": {
+        "company_sku": "NFT103-SCCBZ-BK-0367",
+        "source_rows": [
+          1335
+        ]
+      },
+      "9902286538592": {
+        "company_sku": "NFT101-NKJ-0044",
+        "source_rows": [
+          1336
+        ]
+      },
+      "9902368773552": {
+        "company_sku": "NFT101-35QDTT-0123",
+        "source_rows": [
+          1337
+        ]
+      },
+      "9902374695404": {
+        "company_sku": "NFT101-XWJ-0029",
+        "source_rows": [
+          1338
+        ]
+      },
+      "9902307568874": {
+        "company_sku": "NFT101-XLJ-0047",
+        "source_rows": [
+          1339
+        ]
+      },
+      "9902368530919": {
+        "company_sku": "NFT101-BDX-LT",
+        "source_rows": [
+          1340
+        ]
+      },
+      "9902372246035": {
+        "company_sku": "NFT101-XWJ-BK-0213",
+        "source_rows": [
+          1341
+        ]
+      },
+      "9902278551042": {
+        "company_sku": "NFT101-HS-BXG-018",
+        "source_rows": [
+          1342
+        ]
+      },
+      "9902387295455": {
+        "company_sku": "NFT103-HGLZ-0440",
+        "source_rows": [
+          1343
+        ]
+      },
+      "9902387318154": {
+        "company_sku": "NFT101-CWXQ-ORANGE",
+        "source_rows": [
+          1344
+        ]
+      },
+      "9902388098468": {
+        "company_sku": "NFT103-LLSNT-BK-0346",
+        "source_rows": [
+          1345
+        ]
+      },
+      "9902388098444": {
+        "company_sku": "NFT103-LLSNT-GR-0347",
+        "source_rows": [
+          1346
+        ]
+      },
+      "9902388098451": {
+        "company_sku": "NFT103-LLSNT-PP-0348",
+        "source_rows": [
+          1347
+        ]
+      },
+      "9902388098475": {
+        "company_sku": "NFT103-LLSNT-PK-0349",
+        "source_rows": [
+          1348
+        ]
+      },
+      "9902388098710": {
+        "company_sku": "NFT103-SNT-GR-0342",
+        "source_rows": [
+          1349
+        ]
+      },
+      "9902388098734": {
+        "company_sku": "NFT103-SNT-PK-0343",
+        "source_rows": [
+          1350
+        ]
+      },
+      "9902388098703": {
+        "company_sku": "NFT103-SNT-BK-0344",
+        "source_rows": [
+          1351
+        ]
+      },
+      "9902388098758": {
+        "company_sku": "NFT103-SNT-PP-0345",
+        "source_rows": [
+          1352
+        ]
+      },
+      "9902388214912": {
+        "company_sku": "NFT103-SCCBZ-WH-0365",
+        "source_rows": [
+          1353
+        ]
+      },
+      "9902388214929": {
+        "company_sku": "NFT103-SCCBZ-MPL-0366",
+        "source_rows": [
+          1354
+        ]
+      },
+      "9902388214882": {
+        "company_sku": "NFT103-SCCBZ-BK-0367",
+        "source_rows": [
+          1355
+        ]
+      },
+      "9902388217685": {
+        "company_sku": "NFT103-SNX-BKBL-0377",
+        "source_rows": [
+          1356
+        ]
+      },
+      "9902388217517": {
+        "company_sku": "NFT103-SNX-BL-0378",
+        "source_rows": [
+          1357
+        ]
+      },
+      "9902388217500": {
+        "company_sku": "NFT103-SNX-YL-0379",
+        "source_rows": [
+          1358
+        ]
+      },
+      "9902388217630": {
+        "company_sku": "NFT103-SNX-BR-0380",
+        "source_rows": [
+          1359
+        ]
+      },
+      "9902388217562": {
+        "company_sku": "NFT103-SNX-SL-0381",
+        "source_rows": [
+          1360
+        ]
+      },
+      "9902388217654": {
+        "company_sku": "NFT103-SNX-BP-0382",
+        "source_rows": [
+          1361
+        ]
+      },
+      "9902388217487": {
+        "company_sku": "NFT103-SNX-PK-0383",
+        "source_rows": [
+          1362
+        ]
+      },
+      "9902388217609": {
+        "company_sku": "NFT103-SNX-PL-0384",
+        "source_rows": [
+          1363
+        ]
+      },
+      "9902388217548": {
+        "company_sku": "NFT103-SNX-GRE-0385",
+        "source_rows": [
+          1364
+        ]
+      },
+      "9902388217470": {
+        "company_sku": "NFT103-SNX-BK-0386",
+        "source_rows": [
+          1365
+        ]
+      },
+      "9902389638472": {
+        "company_sku": "NFT103-BTJ-0350",
+        "source_rows": [
+          1366
+        ]
+      },
+      "9902389667533": {
+        "company_sku": "NFT103-HGYD-BK-0437",
+        "source_rows": [
+          1367
+        ]
+      },
+      "9902389667540": {
+        "company_sku": "NFT103-HGYD-GRE-0438",
+        "source_rows": [
+          1368
+        ]
+      },
+      "9902389667557": {
+        "company_sku": "NFT103-HGYD-BL-0439",
+        "source_rows": [
+          1369
+        ]
+      },
+      "9902389703101": {
+        "company_sku": "NFT103-GPY-BK-0410",
+        "source_rows": [
+          1370
+        ]
+      },
+      "9902389703118": {
+        "company_sku": "NFT103-GPY-Gray-0411",
+        "source_rows": [
+          1371
+        ]
+      },
+      "9902389703149": {
+        "company_sku": "NFT103-GPY-GE-0412",
+        "source_rows": [
+          1372
+        ]
+      },
+      "9902389703125": {
+        "company_sku": "NFT103-GPY-BL-0413",
+        "source_rows": [
+          1373
+        ]
+      },
+      "9902267089891": {
+        "company_sku": "NFT101-HS-BXG-018",
+        "source_rows": [
+          1374
+        ]
+      },
+      "9902387281847": {
+        "company_sku": "NFT103-STMRD-0340",
+        "source_rows": [
+          1375
+        ]
+      },
+      "9902387284398": {
+        "company_sku": "NFT103-YKMRD-0341",
+        "source_rows": [
+          1376
+        ]
+      },
+      "9902387291389": {
+        "company_sku": "NFT103-HGD-BK-0292",
+        "source_rows": [
+          1377
+        ]
+      },
+      "9902387291396": {
+        "company_sku": "NFT103-HGD-BL-0293",
+        "source_rows": [
+          1378
+        ]
+      },
+      "9902387291402": {
+        "company_sku": "NFT103-HGD-OR-0294",
+        "source_rows": [
+          1379
+        ]
+      },
+      "9902387291679": {
+        "company_sku": "NFT103-HWXYJD-BK-0296",
+        "source_rows": [
+          1380
+        ]
+      },
+      "9902387291686": {
+        "company_sku": "NFT103-HWXYJD-BL-0299",
+        "source_rows": [
+          1381
+        ]
+      },
+      "9902387291693": {
+        "company_sku": "NFT103-HWXYJD-GR-0298",
+        "source_rows": [
+          1382
+        ]
+      },
+      "9902387291709": {
+        "company_sku": "NFT103-HWXYJD-GE-0297",
+        "source_rows": [
+          1383
+        ]
+      },
+      "9902387293321": {
+        "company_sku": "NFTC2-3H1LWJ-PK-0526",
+        "source_rows": [
+          1384
+        ]
+      },
+      "9902387293338": {
+        "company_sku": "NFTC2-3H1LWJ-BK-0528",
+        "source_rows": [
+          1385
+        ]
+      },
+      "9902387293352": {
+        "company_sku": "NFTC2-3H1LWJ-BL-0527",
+        "source_rows": [
+          1386
+        ]
+      },
+      "9902387293635": {
+        "company_sku": "NFT103-SJDNZ-BK-0281",
+        "source_rows": [
+          1387
+        ]
+      },
+      "9902387293642": {
+        "company_sku": "NFT103-SJDNZ-HP-0282",
+        "source_rows": [
+          1388
+        ]
+      },
+      "9902387293819": {
+        "company_sku": "NFTC2-2H1LWJ-BK-0529",
+        "source_rows": [
+          1389
+        ]
+      },
+      "9902387293963": {
+        "company_sku": "NFT103-7QCD-DR-WH-0266",
+        "source_rows": [
+          1390
+        ]
+      },
+      "9902387293987": {
+        "company_sku": "NFT103-7QCD-SR-WH-0267",
+        "source_rows": [
+          1391
+        ]
+      },
+      "9902387294007": {
+        "company_sku": "NFT103-7QCD-DSR-WH-0268",
+        "source_rows": [
+          1392
+        ]
+      },
+      "9902387294014": {
+        "company_sku": "NFT103-7QCD-NW-WH-0269",
+        "source_rows": [
+          1393
+        ]
+      },
+      "9902387294045": {
+        "company_sku": "NFT103-7QCD-DNW-WH-0270",
+        "source_rows": [
+          1394
+        ]
+      },
+      "9902387294120": {
+        "company_sku": "NFT103-7QCD-GW-WH-0271",
+        "source_rows": [
+          1395
+        ]
+      },
+      "9902387294182": {
+        "company_sku": "NFT103-7QCD-DGW-WH-0272",
+        "source_rows": [
+          1396
+        ]
+      },
+      "9902418166549": {
+        "company_sku": "NFT101-192DGKZQ-0404",
+        "source_rows": [
+          1400
+        ]
+      },
+      "9902420511283": {
+        "company_sku": "NFT101-192DGKZQ-0404",
+        "source_rows": [
+          1401
+        ]
+      },
+      "9902420512075": {
+        "company_sku": "NFT101-192DGKZQ-0404",
+        "source_rows": [
+          1402
+        ]
+      },
+      "9902420512631": {
+        "company_sku": "NFT101-192DGKZQ-0404",
+        "source_rows": [
+          1403
+        ]
+      }
+    }
+  },
   "profiles": [
     {
       "row": 2,

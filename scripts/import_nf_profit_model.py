@@ -15,16 +15,12 @@ from xml.etree import ElementTree
 from openpyxl import load_workbook
 from openpyxl.formula.translate import Translator
 
-from takealot_ops.nf_profit import calculate_cells
+from takealot_ops.nf_profit import calculate_cells, compile_mapping_authority
 
 
 ROOT = Path(__file__).resolve().parents[1]
 STORE_CODES = {"101": "store-02", "102": "current", "103": "store-03",
                "c1": "store-04", "c2": "store-05", "c3": "store-06"}
-CONFLICTS = """9902250708549 9902251365215 9902242608529 9902245237368
-9902247096284 9902247096291 9902278550212 9902295554606 9902299602402
-9902335171954 9902335214637 9902335214644 9902335214651 9902336838368
-9902335160927 9902307554501 9902271464806""".split()
 
 
 def numeric(value: Any) -> bool:
@@ -66,8 +62,9 @@ def compile_workbook(source: Path) -> dict[str, Any]:
         if rowvalues[0]:
             dimensions.setdefault(str(rowvalues[0]).casefold(), (rownum, rowvalues))
     costs: dict[str, tuple[int, tuple[Any, ...]]] = {}
-    for rownum, rowvalues in enumerate(cached["成本&在库统计"].iter_rows(
-            max_col=8, values_only=True), 1):
+    cost_rows = list(cached["成本&在库统计"].iter_rows(max_col=8, values_only=True))
+    authority = compile_mapping_authority(cost_rows)
+    for rownum, rowvalues in enumerate(cost_rows, 1):
         if rowvalues[1]:
             costs.setdefault(str(rowvalues[1]).casefold(), (rownum, rowvalues))
     profiles = []
@@ -148,11 +145,11 @@ def compile_workbook(source: Path) -> dict[str, Any]:
         profiles.append(profile)
     cached.close()
     formulas.close()
-    return {"schema_version": 1,
+    return {"schema_version": 2,
             "source": {"file": source.name, "sheet": "利润计算表",
                        "sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
                        "reference_sheets": ["基数", "单件CBM 单重", "成本&在库统计"]},
-            "mapping_conflicts": CONFLICTS, "profiles": profiles}
+            "mapping_authority": authority, "profiles": profiles}
 
 
 if __name__ == "__main__":

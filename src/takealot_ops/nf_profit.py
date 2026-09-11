@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import re
+from collections.abc import Iterable, Sequence
 from decimal import Decimal
 from functools import lru_cache
 from pathlib import Path
@@ -16,8 +18,9 @@ MODEL_PATH = Path(__file__).resolve().parents[2] / "config" / "nf_profit_model.j
 def _read_catalog(path: str, mtime: int) -> dict[str, Any]:
     del mtime
     payload = json.loads(Path(path).read_text(encoding="utf-8"))
-    if (not isinstance(payload, dict) or payload.get("schema_version") != 1
-            or not isinstance(payload.get("profiles"), list)):
+    if (not isinstance(payload, dict) or payload.get("schema_version") != 2
+            or not isinstance(payload.get("profiles"), list)
+            or not isinstance(payload.get("mapping_authority"), dict)):
         raise ValueError("Unsupported NF model snapshot")
     return payload
 
@@ -28,6 +31,36 @@ def load_nf_catalog() -> dict[str, Any]:
         return _read_catalog(str(MODEL_PATH), MODEL_PATH.stat().st_mtime_ns)
     except (OSError, ValueError):
         return {"source": {}, "profiles": [], "error": "利润计算表配置缺失或损坏。"}
+
+
+def compile_mapping_authority(rows: Iterable[Sequence[Any]]) -> dict[str, Any]:
+    """Use only the user's authoritative sheet, preserving every evidence row."""
+    mappings: dict[str, dict[str, Any]] = {}
+    iterator = iter(rows)
+    header = next(iterator, ())
+    if len(header) < 4 or str(header[1]).strip() != "SKU" or str(header[3]).strip() != "平台SKU":
+        raise ValueError("成本&在库统计 的SKU/平台SKU列与预期不符")
+    for row_number, row in enumerate(iterator, 2):
+        if len(row) < 4 or row[3] is None or str(row[3]).strip() == "":
+            continue
+        company = str(row[1] or "").strip()
+        raw = row[3]
+        if isinstance(raw, (int, float)) and not isinstance(raw, bool):
+            if raw != int(raw):
+                raise ValueError(f"成本&在库统计 D{row_number} 不是整数SKU")
+            raw = str(int(raw))
+        for token in re.split(r"[,;，；、\s]+", str(raw).strip()):
+            if not token:
+                continue
+            if not company or not re.fullmatch(r"990\d{10}", token):
+                raise ValueError(f"成本&在库统计 第{row_number}行缺少明确的公司SKU/990")
+            if token in mappings and mappings[token]["company_sku"].casefold() != company.casefold():
+                raise ValueError(f"成本&在库统计 内部同一990对应多个公司SKU：{token}")
+            mapping = mappings.setdefault(token, {"company_sku": company, "source_rows": []})
+            mapping["source_rows"].append(row_number)
+    if not mappings:
+        raise ValueError("成本&在库统计 未提供有效990映射")
+    return {"sheet": "成本&在库统计", "mappings": mappings}
 
 
 def calculate_cells(profile: dict[str, Any], price: Decimal) -> dict[str, Decimal]:
@@ -94,8 +127,17 @@ def workbook_profit(
     if catalog.get("error"):
         result["message"] = catalog["error"]
         return result
-    if platform_sku in catalog.get("mapping_conflicts", []):
-        result["message"] = "该 990 与公司 SKU 存在待核对的对应冲突。"
+    authority = catalog.get("mapping_authority") or {}
+    if authority.get("sheet") != "成本&在库统计" or not isinstance(authority.get("mappings"), dict):
+        result["message"] = "缺少「成本&在库统计」的公司 SKU / 990 对应依据。"
+        return result
+    mapping = authority["mappings"].get(str(platform_sku or "").strip())
+    if not mapping:
+        result["message"] = "「成本&在库统计」未收录该 990，暂无主表对应依据。"
+        return result
+    result["mapping_source"] = {"sheet": authority["sheet"], **mapping}
+    if str(mapping["company_sku"]).casefold() != str(company_sku or "").strip().casefold():
+        result["message"] = f"系统公司 SKU 与主表不一致，应按主表对应 {mapping['company_sku']}。"
         return result
     candidates = [p for p in catalog["profiles"]
                   if p["company_sku"].casefold() == str(company_sku or "").strip().casefold()]

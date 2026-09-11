@@ -7,13 +7,24 @@ from decimal import Decimal
 
 import pytest
 
-from takealot_ops.nf_profit import calculate_cells, load_nf_catalog, workbook_profit
+from takealot_ops.nf_profit import (
+    calculate_cells, compile_mapping_authority, load_nf_catalog, workbook_profit,
+)
 from takealot_ops.container_selection import _own_profile_payload
 from takealot_ops.profitability import ProfitabilityOffer, build_own_store_profitability_payload
 
 
 CATALOG = load_nf_catalog()
 VERIFIED = [p for p in CATALOG["profiles"] if not p["issues"]]
+
+
+def _catalog(profile):
+    result = deepcopy(CATALOG)
+    result["profiles"] = [profile]
+    result["mapping_authority"]["mappings"]["safe"] = {
+        "company_sku": profile["company_sku"], "source_rows": [2],
+    }
+    return result
 
 
 @pytest.mark.parametrize("profile", VERIFIED, ids=lambda p: f"sheet-row-{p['row']}")
@@ -56,7 +67,7 @@ def test_current_price_recomputes_commission_ads_and_workbook_margin():
 
 def test_conflicting_identity_bad_source_and_ambiguous_profiles_do_not_fallback():
     p = deepcopy(VERIFIED[0])
-    catalog = {**CATALOG, "profiles": [p]}
+    catalog = _catalog(p)
     args = dict(company_sku=p["company_sku"], platform_sku="safe", store_code="store-02",
                 price=Decimal(1399))
     assert workbook_profit(catalog, **args)["status"] == "available"
@@ -74,7 +85,8 @@ def test_exact_store_uses_its_profile_and_unknown_store_does_not_guess():
     other = deepcopy(first)
     other["stores"] = ["store-05"]
     other["inputs"]["U"] = 999
-    catalog = {**CATALOG, "profiles": [first, other]}
+    catalog = _catalog(first)
+    catalog["profiles"].append(other)
     args = dict(company_sku=first["company_sku"], platform_sku="safe", price=Decimal(1399))
     exact = workbook_profit(catalog, store_code="store-02", **args)
     assert exact["calculation"]["cost_rmb"] == first["inputs"]["U"]
@@ -105,7 +117,7 @@ def test_fixed_workbook_model_never_calls_market_rate_or_uses_legacy_cost():
     )
     args = dict(rate_service=NoNetwork(), store_codes={"store-02"},
                 fee_window_start=date(2026, 8, 1), fee_window_end=date(2026, 8, 30),
-                fee_window_days=30, nf_catalog={**CATALOG, "profiles": [p]})
+                fee_window_days=30, nf_catalog=_catalog(p))
     item = build_own_store_profitability_payload([offer], **args)["items"][0]
     assert item["workbook_profit"]["calculation"]["profit_rmb"] == pytest.approx(238.83161043956)
     assert item["cost_rmb"] == p["inputs"]["U"]
@@ -117,7 +129,7 @@ def test_fixed_workbook_model_never_calls_market_rate_or_uses_legacy_cost():
 
 
 def test_container_uses_workbook_margin_without_double_charging_first_leg():
-    model = workbook_profit({**CATALOG, "profiles": [VERIFIED[0]]},
+    model = workbook_profit(_catalog(VERIFIED[0]),
         company_sku=VERIFIED[0]["company_sku"], platform_sku="safe",
         store_code="store-02", price=Decimal(1399))
     offer = {"store_code": "store-02", "offer_id": "one", "workbook_profit": model}
@@ -133,3 +145,56 @@ def test_container_uses_workbook_margin_without_double_charging_first_leg():
     assert result["items"][0]["profit_margin_percentage"] == 43.05
     args["profit_items"] = [offer, {"workbook_profit": {"status": "unavailable"}}]
     assert _own_profile_payload(profile, **args)["profit"]["status"] != "available"
+
+
+def test_cost_sheet_resolves_the_reported_cross_sheet_conflict():
+    catalog = deepcopy(CATALOG)
+    # An obsolete cross-sheet list must not override the user-selected main sheet.
+    catalog["mapping_conflicts"] = ["9902245237368"]
+    result = workbook_profit(catalog, company_sku="NFT101-CWXQ-ORANGE",
+        platform_sku="9902245237368", store_code="current", price=Decimal(352))
+    assert result["status"] == "available"
+    assert result["mapping_source"] == {
+        "sheet": "成本&在库统计", "company_sku": "NFT101-CWXQ-ORANGE", "source_rows": [199],
+    }
+    mismatch = workbook_profit(catalog, company_sku="NFT101-KKQ-0083",
+        platform_sku="9902245237368", store_code="current", price=Decimal(352))
+    assert mismatch["calculation"] is None
+    assert "NFT101-CWXQ-ORANGE" in mismatch["message"]
+
+
+@pytest.mark.parametrize("sku", ["9902307554501", "9902271464806"])
+def test_absent_main_sheet_mapping_remains_explicit(sku):
+    result = workbook_profit(CATALOG, company_sku="NFT101-GZQ-Red",
+        platform_sku=sku, store_code="current", price=Decimal(1399))
+    assert result["calculation"] is None
+    assert "主表对应依据" in result["message"]
+
+
+def test_authority_compiler_keeps_repeated_evidence_and_splits_sku_cells():
+    result = compile_mapping_authority([
+        ("店铺", "SKU", "品名", "平台SKU"),
+        ("A", "COMP-A", "one", "9902245237368\n9902247096284"),
+        ("B", "COMP-A", "one", 9902245237368),
+    ])
+    assert result["mappings"]["9902245237368"] == {
+        "company_sku": "COMP-A", "source_rows": [2, 3],
+    }
+    assert result["mappings"]["9902247096284"]["source_rows"] == [2]
+
+
+def test_authority_compiler_rejects_internal_conflict_and_prose():
+    header = ("店铺", "SKU", "品名", "平台SKU")
+    with pytest.raises(ValueError, match="多个公司SKU"):
+        compile_mapping_authority([header, (None, "A", "a", "9902245237368"),
+                                  (None, "B", "b", "9902245237368")])
+    with pytest.raises(ValueError, match="缺少明确"):
+        compile_mapping_authority([header, (None, "A", "a", "已换9902245237368")])
+    with pytest.raises(ValueError, match="列与预期不符"):
+        compile_mapping_authority([("店铺", "品名", "SKU", "平台SKU")])
+
+
+def test_compiled_main_sheet_has_only_unique_authoritative_mappings():
+    assert CATALOG["schema_version"] == 2
+    assert "mapping_conflicts" not in CATALOG
+    assert len(CATALOG["mapping_authority"]["mappings"]) == 976
