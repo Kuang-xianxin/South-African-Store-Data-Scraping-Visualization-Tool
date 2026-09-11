@@ -34,6 +34,6 @@
 
 - 证据目录：`logs/radar-card-polish-20260911/`，包括原始失败测试、最终测试、隔离构建、业务核对、平台地址、资源清单、进程和采集连续性。
 - 当前入口：`assets/index-B5wq9rGp.js`；雷达页面：`assets/CompetitorsPage-CCZCu14D.js`。
-- `green.zip`：28文件，SHA256 `2582d86de031decb0171c9fdc750bfb6ef59a82065c81ded58867002c8792b9f`。
+- `green.zip`：28文件，最终SHA256 `a7570e74273d94e996dc01d77a571f0e3ca05b83b3d28f5e30c090869f9d0ba5`。Git检查发现生成入口混合换行，已仅将HTML入口统一LF并原子替换；脚本和样式未变化，三入口资源/健康复核通过。首版包保存在`green-first.zip`，最终入口替换前备份为`green-lf-backup/`。
 - 原入口与发布清单：`green-backup/index.html`、`green-backup/manifest.json`。所有旧哈希资源保留；如需回退，先核对现用入口仍是本次版本，再原子恢复备份入口，避免覆盖后续发布。
 - 持久发布技能已同步渐进卡片、明确详情按钮、平台原址、利润依据与按需读取、先基线push及静态发布保留旧资源的规则：`C:/Users/Mayn/.codex/skills/takealot-erp-verified-release/SKILL.md`。
