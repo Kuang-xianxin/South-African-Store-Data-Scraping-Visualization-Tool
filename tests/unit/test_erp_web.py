@@ -138,6 +138,8 @@ def test_web_only_skips_scheduled_runner_and_blocks_loopback_trigger(
     app = create_app(tmp_path)
 
     with TestClient(app, client=("127.0.0.1", 50000)) as client:
+        assert app.state.radar_materialized.max_scopes == 8
+        assert app.state.radar_own_materialized.max_scopes == 8
         health = client.get("/api/health")
         trigger = client.post("/api/internal/competitors/scheduled-trigger", json={})
 
@@ -1444,6 +1446,11 @@ def test_competitor_radar_returns_automatic_store_targets_and_separate_items(
         for item in operating_store_overview.json()["store_items"]
     } == {"12345678"}
     assert own_store_overview.status_code == 200
+    for payload in (own_store_overview.json(), all_store_own_store_overview.json(),
+                    operating_own_store_overview.json(), one_plid_own_store_overview.json()):
+        for card in payload["store_items"]:
+            assert card["own_profit_summary"]["total"] == len(card["自有报价"])
+            assert card["own_profit_summary"]["profit"] is None  # fixture has no model mapping
     assert {item["plid"] for item in own_store_overview.json()["store_items"]} == {
         "12345678"
     }

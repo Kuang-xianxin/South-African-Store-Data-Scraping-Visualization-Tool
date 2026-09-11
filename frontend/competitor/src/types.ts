@@ -71,6 +71,13 @@ export type CompetitorObservedSalesWindows = Partial<
 };
 
 export interface CompetitorItem {
+  own_profit_summary?: {
+    profit: [number, number] | null;
+    margin: [number, number] | null;
+    available: number;
+    total: number;
+    reasons: string[];
+  };
   /** Explicit captured brand only; never inferred from seller or title. */
   品牌?: string | null;
   brand?: string | null;

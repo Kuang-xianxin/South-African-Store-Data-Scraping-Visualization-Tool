@@ -44,6 +44,8 @@ from takealot_ops.erp.radar_list_query import RadarListQuery
 from takealot_ops.erp.competitor_match_catalog import load_match_catalog, read_precomputed_match_cards
 from takealot_ops.erp.radar_materialized import MaterializedRadar, radar_date_bounds, radar_fingerprints
 from takealot_ops.erp.radar_code_version import materialized_code_fingerprint
+from takealot_ops.erp.radar_profit import radar_profit_summary
+from takealot_ops.nf_profit import load_nf_catalog
 from takealot_ops.erp.radar_warmup import (
     RadarWarmRequest, RadarWarmup, initial_warm_requests, resolve_warm_request,
 )
@@ -1320,10 +1322,14 @@ def create_app(project_root: Path | None = None) -> FastAPI:
     radar_materialized = MaterializedRadar(
         root / "data" / "runtime-cache" / "radar-true-materialized-v2.sqlite3",
         namespace=materialized_code_fingerprint(root), batch_size=32, max_pages=32768,
+        max_scopes=8,
     )
     radar_own_materialized = MaterializedRadar(
         root / "data" / "runtime-cache" / "radar-own-materialized-v2.sqlite3",
         namespace=materialized_code_fingerprint(root), batch_size=32, max_pages=32768,
+        # Four scheduled warm scopes plus foreground single/operating-store views
+        # must coexist; otherwise each warm cycle evicts a recently viewed list.
+        max_scopes=8,
     )
     radar_warmup = RadarWarmup(root / "data" / "runtime-cache" / "radar-warmup.sqlite3")
     match_catalog_cache = RadarPageCache(
@@ -7924,6 +7930,7 @@ def _product_master_competitor_store_records(
 ) -> list[dict[str, Any]]:
     """Enrich only the own-store identities nested in private-link cards."""
     copied = [dict(record) for record in records]
+    profit_catalog = load_nf_catalog()
     nested_locations: list[tuple[int, str, int]] = []
     nested_records: list[dict[str, Any]] = []
     for item_index, item in enumerate(copied):
@@ -7963,6 +7970,7 @@ def _product_master_competitor_store_records(
         )
         item["company_skus"] = company_skus
         item["company_sku"] = company_skus[0] if len(company_skus) == 1 else None
+        item["own_profit_summary"] = radar_profit_summary(item, profit_catalog)
     return copied
 
 

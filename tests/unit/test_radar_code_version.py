@@ -25,6 +25,10 @@ def test_unrelated_handler_does_not_invalidate_but_projection_dependency_does(tm
     assert second != first
     web.write_text(web.read_text().replace("local(): return load()", "local(): return load() + 1"))
     assert materialized_code_fingerprint(tmp_path) != second
+    third = materialized_code_fingerprint(tmp_path)
+    (tmp_path / "config").mkdir()
+    (tmp_path / "config/nf_profit_model.json").write_text('{"schema_version": 2}')
+    assert materialized_code_fingerprint(tmp_path) != third
 
 
 def test_real_projection_fingerprint_can_resolve_transitive_imports():

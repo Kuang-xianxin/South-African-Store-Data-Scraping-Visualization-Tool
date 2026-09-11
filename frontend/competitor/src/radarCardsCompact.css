@@ -378,6 +378,11 @@
   box-shadow: none; transform: none;
 }
 .competitor-status-card.radar-card-refined:is(.own-store-card,.is-own-store) { background: #fff; border: 1px solid #cbdde2; border-left: 3px solid #6091b6; }
+:is(#own-store-follower-panel,#true-competitor-panel) .competitor-status-card.radar-card-refined.own-store-card { background: #fff; border: 1px solid #d5e1d8; box-shadow: none; }
+:is(#own-store-follower-panel,#true-competitor-panel) .own-store-card::before { content: none; }
+:is(#own-store-follower-panel,#true-competitor-panel) .own-store-card .competitor-category-source-badge.is-own-store { background: #f1f5f2; border-color: #d6e0d9; color: #496151; box-shadow: none; }
+:is(#own-store-follower-panel,#true-competitor-panel) .own-store-card .competitor-status-summary,
+:is(#own-store-follower-panel,#true-competitor-panel) .own-store-card .competitor-status-summary > div { border-color: #e7ede9; }
 .competitor-status-card.radar-card-refined:hover,.competitor-status-card.radar-card-refined.selected { background: #fff; transform: none; box-shadow: none; border-color: #a4bcab; }
 .radar-card-refined > .competitor-status-header { grid-column: 1; grid-row: 1; display: block; }
 .radar-card-refined .competitor-status-identity { gap: 10px; align-items: start; }
@@ -397,9 +402,13 @@
 .radar-card-refined .radar-brand-sellers { order: 2; display: inline-flex; flex-wrap: wrap; align-items: baseline; gap: 3px 8px; font-size: 11px; line-height: 1.4; }
 .radar-seller-link { padding: 0; border: 0; background: transparent; color: #176143; font: inherit; text-align: left; cursor: pointer; }
 .radar-seller-link:hover { text-decoration: underline; }
-.radar-card-refined .radar-card-times { order: 2; display: inline-flex; flex-wrap: wrap; gap: 3px 8px; }
-.radar-card-refined .radar-card-times .competitor-first-monitored-badge { padding: 0; gap: 3px; border: 0; border-radius: 0; background: transparent; color: #627568; }
-.radar-card-refined .radar-card-times :is(small,strong) { color: #627568; font-size: 10px; line-height: 1.4; font-weight: 400; }
+.radar-card-refined .radar-card-times { order: 2; display: inline-flex; flex-wrap: wrap; gap: 4px 8px; }
+.radar-card-refined .radar-card-times .competitor-first-monitored-badge { padding: 2px 7px; gap: 5px; border: 1px solid #bad7c5; border-radius: 4px; background: #edf7f0; white-space: nowrap; }
+.radar-card-refined .radar-card-times small { color: #486953; font-size: 11px; line-height: 1.4; font-weight: 600; }
+.radar-card-refined .radar-card-times strong { color: #205d38; font-size: 12px; line-height: 1.4; font-weight: 750; font-variant-numeric: tabular-nums; }
+.radar-card-refined .radar-card-times .own-store-listing-time { border-color: #d9c4eb; background: #f5eefb; }
+.radar-card-refined .radar-card-times .own-store-listing-time small { color: #71528b; }
+.radar-card-refined .radar-card-times .own-store-listing-time strong { color: #693491; }
 .radar-card-refined > .competitor-card-query-actions { grid-column: 2; grid-row: 1; align-self: end; justify-self: end; gap: 6px; margin: 0; padding: 0 0 1px; border: 0; flex-wrap: wrap; }
 .radar-card-refined .competitor-query-button,.radar-card-detail-button { display: inline-flex; align-items: center; justify-content: center; min-height: 29px; padding: 5px 10px; border: 1px solid #b7ccbf; border-radius: 4px; font: inherit; font-size: 12px; font-weight: 600; line-height: 1.3; cursor: pointer; box-shadow: none; transform: none; }
 .radar-card-detail-button { background: #fff; color: #205c3c; }

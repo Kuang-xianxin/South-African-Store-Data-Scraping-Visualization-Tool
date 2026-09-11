@@ -83,6 +83,28 @@ def test_incremental_changes_removal_and_disk_restart_do_not_reload_unchanged_hi
         restored.close()
 
 
+def test_warm_users_and_foreground_scope_coexist_across_restart(tmp_path):
+    cache, _, _, _, calls, options = setup_cache(tmp_path, 1)
+    cache.max_scopes = 8
+    boundaries = [f"warm-user-{i}" for i in range(4)] + ["foreground-current"]
+    try:
+        for boundary in boundaries:
+            cache.page(**(options | {"boundary": boundary}), query=query(), prefer_cached=False)
+        assert len(calls) == 5
+        for boundary in reversed(boundaries):
+            cache.page(**(options | {"boundary": boundary}), query=query(), prefer_cached=False)
+        assert len(calls) == 5
+    finally:
+        cache.close()
+    restored = MaterializedRadar(cache.path, namespace="test", max_scopes=8)
+    try:
+        for boundary in boundaries:
+            restored.page(**(options | {"boundary": boundary}), query=query(), prefer_cached=False)
+        assert len(calls) == 5
+    finally:
+        restored.close()
+
+
 def test_old_complete_preview_is_available_after_long_idle_and_day_loader_is_replaced(tmp_path):
     cache, records, markers, version, calls, options = setup_cache(tmp_path, 2)
     original, _, _ = cache.page(**options, query=query(), prefer_cached=False)

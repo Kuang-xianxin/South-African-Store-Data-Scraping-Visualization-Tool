@@ -86,4 +86,8 @@ def materialized_code_fingerprint(root: Path) -> str:
                         child = imported_module + "." + alias.name
                         if source.joinpath(*child.split(".")).with_suffix(".py").is_file():
                             modules.add(child)
+    # Profit is part of persisted own-card projections. A deployed model change
+    # must invalidate those cards as well as a Python formula change.
+    model = root / "config" / "nf_profit_model.json"
+    digest.update(model.read_bytes() if model.is_file() else b"nf-model-missing")
     return digest.hexdigest()

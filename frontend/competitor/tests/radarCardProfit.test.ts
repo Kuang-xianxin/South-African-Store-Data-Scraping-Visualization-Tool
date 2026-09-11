@@ -75,38 +75,24 @@ test("card body and title do not open detail; explicit sibling actions dispatch 
   detail.props.onClick();query.props.onClick({stopPropagation(){}});assert.deepEqual(actions,["detail","query"]);app.unmount();
 });
 
-test("profit does not load on mount, deduplicates clicks, then renders the model result",async()=>{
-  let requests=0;let resolve!:(data:any)=>void;
-  const Profit=component("RadarCardProfit",{"../api":{AUTH_SESSION_ENDING_EVENT:"end",fetchCompetitorDetail:()=>{requests++;return new Promise((r)=>{resolve=r})}}});
-  const root=node("root");const app=renderer.createApp(Profit,{item,storeScope:"all"});app.mount(root);
-  assert.equal(requests,0);const button=walk(root).find((n)=>n.tag==="button")!;
-  button.props.onClick({stopPropagation(){}});button.props.onClick({stopPropagation(){}});assert.equal(requests,1);
-  resolve({own_store_profitability:{items:[row(62,12)]}});await new Promise(setImmediate);await vue.nextTick();
-  assert.match(text(root),/62[,.]00/);assert.match(text(root),/12%/);
-  assert.match(walk(root).find(n=>n.tag==="section")!.props.title,/1 \/ 1/);
-  assert.equal(walk(root).some(n=>n.tag==="details"),false);app.unmount();
-});
-test("scope changes and unmount cancel pending profit reads and reject late results",async()=>{
-  let signal:AbortSignal|undefined;let resolve!:(data:any)=>void;
-  const Profit=component("RadarCardProfit",{"../api":{AUTH_SESSION_ENDING_EVENT:"end",fetchCompetitorDetail:(_p:any,_s:any,_e:any,_scope:any,s:AbortSignal)=>{signal=s;return new Promise((r)=>{resolve=r})}}});
-  const scope=vue.ref("all");const root=node("root");const app=renderer.createApp({setup:()=>()=>vue.h(Profit,{item,storeScope:scope.value})});app.mount(root);
-  walk(root).find((n)=>n.tag==="button")!.props.onClick({stopPropagation(){}});scope.value="current";await vue.nextTick();assert.equal(signal!.aborted,true);
-  resolve({own_store_profitability:{items:[row(888,99)]}});await new Promise(setImmediate);await vue.nextTick();assert.doesNotMatch(text(root),/888/);
-  walk(root).find((n)=>n.tag==="button")!.props.onClick({stopPropagation(){}});app.unmount();assert.equal(signal!.aborted,true);
+test("profit displays immediately from list data without requests or expansion",()=>{
+  const Profit=component("RadarCardProfit",{});
+  const summary={profit:[-15,62],margin:[-3,12],available:2,total:3,reasons:["成本缺失"]};
+  const root=node("root");const app=renderer.createApp(Profit,{item:{...item,own_profit_summary:summary},storeScope:"all"});app.mount(root);
+  assert.match(text(root),/62[,.]00/);assert.match(text(root),/12%/);assert.match(text(root),/2\/3 报价可算/);
+  assert.match(walk(root).find(n=>n.tag==="section")!.props.title,/成本缺失/);
+  assert.equal(walk(root).some(n=>["details","button"].includes(n.tag)),false);app.unmount();
 });
 
-test("a failed profit refresh explains retained results and allows a later retry",async()=>{
-  let requests=0;
-  const Profit=component("RadarCardProfit",{"../api":{AUTH_SESSION_ENDING_EVENT:"end",fetchCompetitorDetail:async()=>{
-    requests++;
-    if(requests===2)throw new Error("服务暂不可用");
-    return {own_store_profitability:{items:[row(requests===1?62:70,12)]}};
-  }}});
-  const root=node("root");const app=renderer.createApp(Profit,{item,storeScope:"all"});app.mount(root);
-  const click=async()=>{walk(root).find((n)=>n.tag==="button")!.props.onClick({stopPropagation(){}});await new Promise(setImmediate);await vue.nextTick()};
-  await click();await click();
-  assert.match(text(root),/62[,.]00/);assert.match(text(root),/更新失败，以上保留上次结果：服务暂不可用/);
-  await click();assert.match(text(root),/70[,.]00/);assert.doesNotMatch(text(root),/更新失败/);app.unmount();
+test("profit follows replacement card data and clears unavailable results",async()=>{
+  const Profit=component("RadarCardProfit",{});
+  const selected=vue.ref({...item,own_profit_summary:{profit:[62,62],margin:[12,12],available:1,total:1,reasons:[]}});
+  const root=node("root");const app=renderer.createApp({setup:()=>()=>vue.h(Profit,{item:selected.value,storeScope:"all"})});app.mount(root);
+  assert.match(text(root),/62[,.]00/);
+  selected.value={...item,own_profit_summary:undefined};await vue.nextTick();
+  assert.doesNotMatch(text(root),/62[,.]00/);assert.match(text(root),/待核算/);
+  selected.value={...item,own_profit_summary:{profit:[0,0],margin:[0,0],available:1,total:1,reasons:[]}};await vue.nextTick();
+  assert.match(text(root),/0[,.]00/);assert.match(text(root),/利润率 0%/);app.unmount();
 });
 
 test("seller matching keeps exact IDs and private store identities, and brands are not guessed",()=>{
