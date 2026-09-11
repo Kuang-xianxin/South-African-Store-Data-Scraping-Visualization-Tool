@@ -1,22 +1,22 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { keywordRankingContext, keywordRankingRows, primaryTitle, titleDiagnosis, titleWordChanges } from "../src/titleOptimization.ts";
-import type { SearchRankingAnalysis, SearchRankingKeywordResult, SearchRankingTitleStrategy } from "../src/types.ts";
+import { keywordRankingContext, keywordRankingRows, primaryTitle, referenceCategory, referencePosition, searchPosition, titleDiagnosis, titleWordChanges } from "../src/titleOptimization.ts";
+import type { SearchRankingAnalysis, SearchRankingKeywordResult, SearchRankingTitleStrategy, TitleBenchmark } from "../src/types.ts";
 
 const keyword = (overrides: Partial<SearchRankingKeywordResult> = {}) => ({
   id: 1, keyword: "cat house", candidate_order: 0, relevance_status: "accepted", validation_evidence: {},
-  pages_scanned: 1, found: true, organic_rank: 6, page_number: 1, observed_at: "2026-09-09T06:23:50",
+  pages_scanned: 1, found: true, organic_rank: 6, page_number: 1, page_rank: 6, observed_at: "2026-09-09T06:23:50",
   ...overrides,
 }) as SearchRankingKeywordResult;
 
 test("unadopted queries retain observed ranks and all queries remain available", () => {
-  const input = [keyword({ id: 1, relevance_status: "rejected_irrelevant", organic_rank: 1 }),
+  const input = [keyword({ id: 1, relevance_status: "rejected_irrelevant", organic_rank: 1, page_rank: 1 }),
     keyword({ id: 2, candidate_order: 1, organic_rank: 6 }),
     keyword({ id: 3, candidate_order: 2, found: false, organic_rank: null, pages_scanned: 3 })];
   const original = structuredClone(input);
   const rows = keywordRankingRows(input);
   assert.deepEqual(rows.map((row) => row.item.id), [2, 3, 1]);
-  assert.equal(rows[2].rank, "#1");
+  assert.equal(rows[2].rank, "第 1 页 · 第 1 个");
   assert.equal(rows[2].relation, "未纳入推荐");
   assert.equal(rows[1].rank, "扫描范围内未找到");
   assert.equal(rows[1].scope, "已扫描 3 页");
@@ -102,4 +102,33 @@ test("title comparison distinguishes added facts from reordering existing words"
   assert.deepEqual(titleWordChanges("Brand Blue Cat Box", "Brand Cat Box Blue"), { added: [], removed: [], reordered: true });
   assert.deepEqual(titleWordChanges("Brand Cat Box", "Brand Cat Storage Box"), { added: ["Storage"], removed: [], reordered: false });
   assert.deepEqual(titleWordChanges("Brand Cat BOX", "Brand Cat Box"), { added: [], removed: [], reordered: false });
+});
+
+test("page positions use recorded slots even when preceding organic pages were short", () => {
+  const [row] = keywordRankingRows([keyword({ organic_rank: 38, page_number: 3, page_rank: 4, pages_scanned: 3 })]);
+  assert.equal(row.rank, "第 3 页 · 第 4 个");
+  assert.match(row.scope, /#38/);
+  assert.equal(searchPosition(2, null, 40), "第 2 页 · 页内位置未记录");
+  assert.equal(searchPosition(null, null, 40), "自然位 #40 · 页内位置未记录");
+  for (const slot of [0, -2, 1.5, NaN, true]) assert.equal(searchPosition(2, slot, 40), "第 2 页 · 页内位置未记录");
+});
+
+test("reference positions distinguish the competitor, target and unsearched records", () => {
+  const row = { organic_position: 27, page_number: 1, page_rank: 27, target_organic_position: 38, target_page_number: 3, target_page_rank: 4, target_found: true, target_pages_scanned: 3 } as TitleBenchmark["search_evidence"][number];
+  assert.equal(referencePosition(row), "第 1 页 · 第 27 个");
+  assert.equal(referencePosition(row, true), "第 3 页 · 第 4 个");
+  assert.equal(referencePosition({ ...row, target_found: false }, true), "本次扫描未定位");
+  assert.equal(referencePosition({ ...row, target_pages_scanned: 0 }, true), "未采集");
+  assert.equal(referencePosition({ ...row, target_organic_position: null }, true), "排名数据待核实");
+});
+
+test("full supplemental breadcrumbs retain provenance without changing original category input", () => {
+  const item = { category_path: [], category_observation: { status: "available", source: "public_product", captured_at: "2026-09-11T09:00:00Z", path: [{ name: "Pets" }, { name: "Equipment & Accessories" }, { name: "Beds & Blankets" }] } } as unknown as TitleBenchmark;
+  const original = structuredClone(item);
+  assert.equal(referenceCategory(item).label, "Pets → Equipment & Accessories → Beds & Blankets");
+  assert.equal(referenceCategory(item).supplemental, true);
+  assert.equal(referenceCategory(item).source, "平台商品类目");
+  assert.deepEqual(item, original);
+  item.category_observation = { ...item.category_observation!, status: "request_failed", path: [] };
+  assert.equal(referenceCategory(item).missing, "平台类目读取失败，可重试");
 });

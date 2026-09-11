@@ -665,9 +665,34 @@ async function selectProduct(
   }
 }
 
+const refreshingCategories = ref(false);
+const categoryMessage = ref("");
+watch([selectedOfferId, selectedStoreCode], () => { categoryMessage.value = ""; });
+
+async function runCategoryRefresh() {
+  const product = selectedProduct.value;
+  if (!product || analyzing.value || refreshingCategories.value || !props.canOperate) return;
+  const offerId = product.offer_id;
+  const storeCode = String(product.store_code ?? selectedStoreCode.value);
+  refreshingCategories.value = true;
+  categoryMessage.value = "";
+  try {
+    const updated = await reviewSearchRankingTitles(offerId, storeCode, "reference-categories");
+    if (selectedOfferId.value !== offerId || selectedStoreCode.value !== storeCode) return;
+    detail.value = updated;
+    const refs = updated.analysis?.title_benchmarks?.items ?? [];
+    const available = refs.filter((item) => item.category_observation?.path.length || item.category_path.length).length;
+    categoryMessage.value = `已显示 ${available}/${refs.length} 个竞品的类目${available < refs.length ? '，其余可查看具体原因后重试' : ''}`;
+  } catch (caught) {
+    if (selectedOfferId.value === offerId && selectedStoreCode.value === storeCode) {
+      categoryMessage.value = errorMessage(caught, "竞品类目补充失败，请重试");
+    }
+  } finally { refreshingCategories.value = false; }
+}
+
 async function runReferenceAnalysis() {
   const product = selectedProduct.value;
-  if (!product || analyzing.value || !props.canOperate) return;
+  if (!product || analyzing.value || refreshingCategories.value || !props.canOperate) return;
   const offerId = product.offer_id;
   const storeCode = String(product.store_code ?? selectedStoreCode.value);
   analyzing.value = true;
@@ -1774,7 +1799,7 @@ function errorMessage(caught: unknown, fallback: string) {
             <template v-if="detail.latest_attempt.error">原因：{{ detail.latest_attempt.error }}</template>
           </p>
 
-          <TitleOptimizationReview v-if="analysis" :key="selectedProduct.offer_id" :analysis="analysis" :current-title="selectedProduct.title || ''" :current-offer-id="selectedProduct.offer_id" :current-plid="selectedProduct.productline_id" :strategies="titleStrategies" :can-review="props.canOperate" :reviewing="analyzing" @review="runReferenceAnalysis" />
+          <TitleOptimizationReview v-if="analysis" :key="selectedProduct.offer_id" :analysis="analysis" :current-title="selectedProduct.title || ''" :current-offer-id="selectedProduct.offer_id" :current-plid="selectedProduct.productline_id" :strategies="titleStrategies" :can-review="props.canOperate" :reviewing="analyzing" :refreshing-categories="refreshingCategories" :category-message="categoryMessage" @categories="runCategoryRefresh" @review="runReferenceAnalysis" />
           <details v-if="analysis" class="optimization-auxiliary analysis-evidence">
             <summary>查看分析依据与历史方案</summary>
           <details v-if="analysis" class="optimization-auxiliary evidence-group"><summary>历史标题方案与排名复盘</summary>

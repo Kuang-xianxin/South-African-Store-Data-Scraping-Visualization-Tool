@@ -16,6 +16,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.engine import Engine
 
 from takealot_ops.competitors.service import load_competitor_dataset
+from takealot_ops.search_ranking.reference_categories import category_path
 from takealot_ops.search_ranking.codex_cli import (
     CODEX_TITLE_MODEL, CODEX_TITLE_EFFORT, CodexAppServerClient, CodexWeeklyQuotaGuard,
 )
@@ -168,6 +169,7 @@ def _specifications(title: str) -> list[str]:
 def build_title_benchmarks(
     analysis: Mapping[str, Any], *, target_plid: str, current_title: str,
     reviews: Mapping[str, Any] | None = None,
+    supplemental_categories: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Deduplicate PLIDs; keep query positions separate from textual observations."""
     profile = analysis.get("profile") or {}
@@ -179,6 +181,7 @@ def build_title_benchmarks(
     evaluated = 0
     blocked: set[str] = set()
     categories: dict[str, list[dict[str, Any]]] = {}
+    category_times: dict[str, Any] = {}
     product_urls: dict[str, str] = {}
     # Reconcile all known PLID evidence before applying query-local relevance.
     for query in analysis.get("keywords") or []:
@@ -191,9 +194,10 @@ def build_title_benchmarks(
                 product_urls[plid] = saved_url
             if row.get("category_conflicts_target") or row.get("matched_exclusion_terms") or row.get("is_target"):
                 blocked.add(plid)
-            category = row.get("category_path")
-            if isinstance(category, list) and len(category) > len(categories.get(plid, [])):
+            category = category_path(row.get("category_path"))
+            if len(category) > len(categories.get(plid, [])):
                 categories[plid] = category
+                category_times[plid] = query.get("observed_at")
     for query in analysis.get("keywords") or []:
         evidence = query.get("validation_evidence") or {}
         rows = evidence.get("first_page_result_classifications") or []
@@ -264,7 +268,13 @@ def build_title_benchmarks(
             observation = {
                 "keyword": _text(query.get("keyword")),
                 "organic_position": position,
+                "page_number": 1,
+                "page_rank": position,
                 "target_organic_position": query.get("organic_rank"),
+                "target_page_number": query.get("page_number"),
+                "target_page_rank": query.get("page_rank"),
+                "target_found": query.get("found"),
+                "target_pages_scanned": query.get("pages_scanned"),
                 "captured_at": query.get("observed_at"),
                 "title": title,
             }
@@ -305,6 +315,18 @@ def build_title_benchmarks(
                     comparison_reason=reading["comparison_reason"],
                     title_analysis_status="complete",
                 )
+    # Supplementary categories never alter the historical review fingerprint/input.
+    for item in items:
+        original = item["category_path"]
+        saved = (supplemental_categories or {}).get(item["plid"])
+        item["category_observation"] = {
+            "status": "available" if original else "not_recorded", "path": original,
+            "source": "search_record", "captured_at": category_times.get(item["plid"]),
+        }
+        if not original and isinstance(saved, Mapping):
+            item["category_observation"] = {
+                **saved, "path": category_path(saved.get("path")),
+            }
     return {
         "items": items, "candidate_count": len(ranked),
         "evaluated_count": evaluated, "limit": 10,

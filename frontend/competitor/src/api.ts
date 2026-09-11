@@ -1232,9 +1232,10 @@ export function analyzeSearchRanking(
 export function reviewSearchRankingTitles(
   offerId: string,
   storeCode?: string | null,
+  operation: "title-review" | "reference-categories" = "title-review",
 ): Promise<SearchRankingDetailPayload> {
   return request<SearchRankingDetailPayload>(
-    `/api/erp/search-ranking/${encodeURIComponent(offerId)}/title-review`,
+    `/api/erp/search-ranking/${encodeURIComponent(offerId)}/${operation}`,
     { method: "POST", headers: storeHeaders(storeCode) },
   );
 }

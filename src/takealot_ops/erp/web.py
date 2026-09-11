@@ -2792,6 +2792,11 @@ def create_app(project_root: Path | None = None) -> FastAPI:
         if benchmarks:
             if request.state.erp_user.can(COMPETITORS_VIEW):
                 try:
+                    from takealot_ops.search_ranking.reference_categories import enrich_reference_categories
+                    enrich_reference_categories(read_engine, benchmarks)
+                except (SQLAlchemyError, ValueError):
+                    pass  # Category lookup must not suppress otherwise available observations.
+                try:
                     enrich_monitored_benchmarks(read_engine, benchmarks)
                 except (SQLAlchemyError, ValueError):
                     for item in benchmarks["items"]:
@@ -2830,6 +2835,20 @@ def create_app(project_root: Path | None = None) -> FastAPI:
             raise HTTPException(status_code=503, detail=str(exc)) from exc
         except (SearchRankingProviderError, CompetitorNetworkError) as exc:
             raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    @app.post("/api/erp/search-ranking/{offer_id}/reference-categories")
+    async def supplement_search_ranking_categories(offer_id: str, request: Request) -> dict[str, Any]:
+        if search_ranking_lock.locked():
+            raise HTTPException(status_code=409, detail="另一个标题任务正在运行，请稍后补充类目")
+        service: SearchRankingService = request.app.state.search_ranking_service
+        try:
+            async with search_ranking_lock:
+                await service.supplement_reference_categories(
+                    offer_id, include_monitored=request.state.erp_user.can(COMPETITORS_VIEW),
+                )
+                return search_ranking_product_detail(offer_id, request)
+        except SearchRankingInputError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     @app.post("/api/erp/search-ranking/{offer_id}/title-review")
     async def review_search_ranking_titles(offer_id: str, request: Request) -> dict[str, Any]:

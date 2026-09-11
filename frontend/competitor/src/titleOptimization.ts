@@ -1,4 +1,32 @@
-import type { SearchRankingAnalysis, SearchRankingKeywordResult, SearchRankingTitleStrategy } from "./types.ts";
+import type { SearchRankingAnalysis, SearchRankingKeywordResult, SearchRankingTitleStrategy, TitleBenchmark } from "./types.ts";
+
+const positiveInteger = (value: unknown): value is number => typeof value === "number" && Number.isInteger(value) && value > 0;
+
+export function searchPosition(page: unknown, slot: unknown, overall: unknown) {
+  if (positiveInteger(page) && positiveInteger(slot)) return `第 ${page} 页 · 第 ${slot} 个`;
+  if (positiveInteger(page)) return `第 ${page} 页 · 页内位置未记录`;
+  return positiveInteger(overall) ? `自然位 #${overall} · 页内位置未记录` : "排名数据待核实";
+}
+
+export function referencePosition(row: TitleBenchmark["search_evidence"][number], target = false) {
+  if (!target) return searchPosition(row.page_number, row.page_rank, row.organic_position);
+  if (row.target_pages_scanned === 0) return "未采集";
+  if (row.target_found === false) return "本次扫描未定位";
+  if (!positiveInteger(row.target_organic_position)) return row.target_found ? "排名数据待核实" : "本次扫描未定位";
+  return searchPosition(row.target_page_number, row.target_page_rank, row.target_organic_position);
+}
+
+export function referenceCategory(item: TitleBenchmark) {
+  const evidence = item.category_observation;
+  const path = evidence?.path?.length ? evidence.path : item.category_path;
+  return {
+    label: path.map((part) => part.name).join(" → "),
+    source: ({ search_record: "原搜索记录", monitored_snapshot: "已采集竞品档案", public_product: "平台商品类目" })[evidence?.source ?? "search_record"],
+    capturedAt: evidence?.captured_at ?? null,
+    supplemental: Boolean(path.length && evidence && evidence.source !== "search_record"),
+    missing: ({ missing_url: "缺少完整商品链接，暂无法补充", request_failed: "平台类目读取失败，可重试", missing: "平台本次未返回类目" } as Record<string, string>)[evidence?.status ?? ""] ?? "类目尚未记录",
+  };
+}
 
 export function keywordRankingRows(keywords: SearchRankingKeywordResult[]) {
   return keywords.map((item, index) => {
@@ -7,14 +35,14 @@ export function keywordRankingRows(keywords: SearchRankingKeywordResult[]) {
     const adopted = ["accepted", "opportunity", "comparison_resample"].includes(item.relevance_status);
     const scope = !scanned
       ? item.relevance_status === "model_low_confidence" ? "商品识别待核实，未发起搜索" : "尚未完成搜索采集"
-      : located && item.page_number ? `第 ${item.page_number} 页`
+      : located ? `自然位 #${item.organic_rank} · 不含广告`
       : item.found ? "已找到商品，排名数据不完整"
       : item.pages_scanned === 1 && item.relevance_status === "rejected_irrelevant"
         ? "仅检查首页，未继续翻页"
         : `已扫描 ${item.pages_scanned} 页`;
     return {
       item, located, scope,
-      rank: located ? `#${item.organic_rank}` : !scanned ? "未采集" : item.found ? "待核实" : "扫描范围内未找到",
+      rank: located ? searchPosition(item.page_number, item.page_rank, item.organic_rank) : !scanned ? "未采集" : item.found ? "待核实" : "扫描范围内未找到",
       observedAt: scanned ? item.observed_at : null,
       relation: ({ accepted: "已采纳词", opportunity: "拓展词", comparison_resample: "复采词", rejected_irrelevant: "未纳入推荐", model_low_confidence: "待核实词" })[item.relevance_status],
       priority: adopted && scanned ? 0 : located ? 1 : scanned ? 2 : 3,

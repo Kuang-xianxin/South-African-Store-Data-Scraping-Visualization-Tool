@@ -2787,6 +2787,70 @@ class SearchRankingService:
             engine.dispose()
         return payload
 
+    async def supplement_reference_categories(
+        self, offer_id: str, *, include_monitored: bool = False,
+    ) -> dict[str, Any]:
+        """Explicit, at most ten public category reads; no model, ranking or enrollment."""
+        from takealot_ops.search_ranking.reference_categories import enrich_reference_categories
+
+        detail = self.detail_payload(offer_id)
+        if detail is None or not detail.get("analysis"):
+            raise SearchRankingInputError("请先完成商品分析，再补充竞品类目")
+        analysis = detail["analysis"]
+        benchmarks = analysis["title_benchmarks"]
+        if include_monitored:
+            engine = create_read_only_engine(self.database_url)
+            try:
+                enrich_reference_categories(engine, benchmarks)
+            finally:
+                engine.dispose()
+        items = benchmarks["items"][:10]
+        missing = [item for item in items if not item["category_observation"].get("path")]
+        if missing:
+            async with self._search_client_factory() as client:
+                paced = _PacedSearchClient(
+                    client, minimum_interval_seconds=self.runtime.page_delay_seconds,
+                    throttle=self._public_request_throttle,
+                )
+                for item in missing:
+                    result = (await paced.fetch_product_category_path(item["url"]) if item["url"]
+                              else {"status": "missing_url", "category_path": []})
+                    item["category_observation"] = {
+                        "status": result["status"], "path": result["category_path"],
+                        "source": "public_product", "captured_at": _utcnow().isoformat(),
+                    }
+        if not items:
+            return detail
+        current = self.detail_payload(offer_id)
+        if (current is None or not current.get("analysis")
+                or current["analysis"]["id"] != analysis["id"]
+                or current["analysis"]["title_benchmarks"]["review_fingerprint"]
+                != benchmarks["review_fingerprint"]):
+            raise SearchRankingInputError("商品或搜索证据已更新，本次类目未应用，请重试")
+        engine = create_engine_for_database_url(self.database_url)
+        try:
+            with Session(engine) as session, session.begin():
+                record = session.scalar(select(SearchRankingAnalysis).where(
+                    SearchRankingAnalysis.id == analysis["id"],
+                    SearchRankingAnalysis.status == "completed",
+                ).with_for_update())
+                if record is None:
+                    raise SearchRankingInputError("原分析记录已不可用")
+                vision = dict(record.vision_payload or {})
+                saved = dict(vision.get("competitor_category_observations") or {})
+                for item in items:
+                    observation = item["category_observation"]
+                    if observation.get("source") == "search_record":
+                        continue
+                    # A failed attempt on another node cannot erase a successful read.
+                    if observation.get("path") or not (saved.get(item["plid"]) or {}).get("path"):
+                        saved[item["plid"]] = observation
+                vision["competitor_category_observations"] = saved
+                record.vision_payload = vision
+        finally:
+            engine.dispose()
+        return self.detail_payload(offer_id) or detail
+
     async def review_title_benchmarks(self, offer_id: str) -> dict[str, Any]:
         """Explicit model operation over saved search evidence; never recollect ranks."""
         detail = self.detail_payload(offer_id)
@@ -12712,6 +12776,7 @@ def _analysis_payload(
     payload["title_benchmarks"] = build_title_benchmarks(
         payload, target_plid=str(analysis.productline_id), current_title=effective_title,
         reviews=vision.get("competitor_title_reviews") if isinstance(vision, Mapping) else None,
+        supplemental_categories=vision.get("competitor_category_observations") if isinstance(vision, Mapping) else None,
     )
     return payload
 

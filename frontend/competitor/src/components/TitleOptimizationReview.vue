@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, ref, watch } from "vue";
 import type { SearchRankingAnalysis, SearchRankingTitleStrategy, TitleBenchmark } from "../types";
-import { keywordRankingContext, keywordRankingRows, primaryTitle, titleDiagnosis, titleWordChanges } from "../titleOptimization";
+import { keywordRankingContext, keywordRankingRows, primaryTitle, referenceCategory, referencePosition, titleDiagnosis, titleWordChanges } from "../titleOptimization";
 import { productThumbnailUrl } from "../productImages";
 
 const props = defineProps<{
@@ -12,13 +12,16 @@ const props = defineProps<{
   strategies: SearchRankingTitleStrategy[];
   canReview?: boolean;
   reviewing?: boolean;
+  refreshingCategories?: boolean;
+  categoryMessage?: string;
 }>();
-const emit = defineEmits<{ review: [] }>();
+const emit = defineEmits<{ review: []; categories: [] }>();
 const diagnosis = computed(() => titleDiagnosis(props.analysis, props.currentTitle));
 const primary = computed(() => primaryTitle(props.strategies));
 const proposedTitle = computed(() => diagnosis.value.keep ? props.currentTitle : primary.value?.title ?? "");
 const changes = computed(() => titleWordChanges(props.currentTitle, proposedTitle.value));
 const references = computed(() => props.analysis.title_benchmarks?.items ?? []);
+const missingCategories = computed(() => references.value.filter((item) => !referenceCategory(item).label).length);
 const rankings = computed(() => keywordRankingRows(props.analysis.keywords));
 const rankingContext = computed(() => keywordRankingContext(props.analysis, props.currentTitle, props.currentOfferId, props.currentPlid));
 const showAllRankings = ref(false);
@@ -29,7 +32,15 @@ const failedImages = ref(new Set<string>());
 const copyMessage = ref("");
 let returnFocus: HTMLElement | null = null;
 
-watch(() => props.analysis, () => {
+watch(() => props.analysis, (current, previous) => {
+  if (current.id === previous.id) {
+    if (selected.value) {
+      const updated = references.value.find((item) => item.plid === selected.value?.plid);
+      if (updated) selected.value = updated;
+      else closeReference();
+    }
+    return;
+  }
   closeReference();
   showAll.value = false;
   showAllRankings.value = false;
@@ -142,9 +153,14 @@ function monitoringLabel(item: TitleBenchmark) {
 
     <section class="reference-panel" aria-labelledby="title-references-label">
       <div class="review-heading"><h3 id="title-references-label">竞品标题参考</h3><span>{{ references.length }} 个独立商品</span></div>
+      <div v-if="missingCategories" class="category-actions">
+        <span>{{ missingCategories }} 个竞品待补类目</span>
+        <button v-if="canReview" type="button" :disabled="reviewing || refreshingCategories" @click="emit('categories')">{{ refreshingCategories ? '正在补充类目…' : '补充缺失类目' }}</button>
+      </div>
+      <p v-if="categoryMessage" class="evidence-note" role="status">{{ categoryMessage }}</p>
       <div v-if="references.length && analysis.title_benchmarks?.review_status !== 'complete'" class="review-empty" role="status">
         <p>{{ analysis.title_benchmarks?.review_status === 'failed' ? '竞品标题分析未完成，可重试。' : '已有完整竞品标题，尚未分析其品名、卖点和表达方式。' }}</p>
-        <button v-if="canReview" type="button" :disabled="reviewing" @click="emit('review')">{{ reviewing ? '正在分析竞品标题…' : '分析竞品标题' }}</button>
+        <button v-if="canReview" type="button" :disabled="reviewing || refreshingCategories" @click="emit('review')">{{ reviewing ? '正在分析竞品标题…' : '分析竞品标题' }}</button>
         <details v-if="analysis.title_benchmarks?.review_error"><summary>查看原因</summary>{{ analysis.title_benchmarks.review_error }}</details>
       </div>
       <p v-if="!references.length" class="review-empty">{{ analysis.title_benchmarks?.review_status === 'complete' ? '本轮候选与我们商品的可比性不足，未作为标题参考。' : '当前记录没有可比竞品的完整标题证据。重新分析后补充；不会用不相关商品凑数。' }}</p>
@@ -156,6 +172,7 @@ function monitoringLabel(item: TitleBenchmark) {
             <span class="reference-relation">{{ item.relation === 'direct_same_product' ? '同类商品' : '同需求商品' }}</span>
             <a v-if="item.url" :href="item.url" target="_blank" rel="noopener noreferrer" class="full-title">{{ item.title }}</a>
             <p v-else class="full-title">{{ item.title }}</p>
+            <p class="reference-category"><span>平台类目</span>{{ referenceCategory(item).label || referenceCategory(item).missing }}</p>
             <p v-if="item.title_analysis_status === 'complete'">{{ item.title_assessment }}</p>
             <button type="button" @click="openReference(item, $event)">查看对比依据</button>
           </div>
@@ -171,11 +188,17 @@ function monitoringLabel(item: TitleBenchmark) {
       <p v-if="!selected.url" class="evidence-note">现有记录缺少完整商品链接，可按标题在平台搜索。</p>
       <p>{{ selected.relation === 'direct_same_product' ? '同类商品' : '同需求替代商品' }} · PLID{{ selected.plid }}</p>
       <p v-if="selected.comparison_reason" class="evidence-note">{{ selected.comparison_reason }}</p>
+      <section class="category-section"><h4>平台类目</h4>
+        <p class="category-path">{{ referenceCategory(selected).label || referenceCategory(selected).missing }}</p>
+        <p v-if="referenceCategory(selected).label" class="evidence-note">{{ referenceCategory(selected).source }} · {{ observedTime(referenceCategory(selected).capturedAt) }} · 北京时间</p>
+        <p v-if="referenceCategory(selected).supplemental" class="evidence-note">补充的类目供对照参考，原标题分析未因此重新计算。</p>
+        <button v-if="!referenceCategory(selected).label && canReview" type="button" :disabled="reviewing || refreshingCategories" @click="emit('categories')">{{ refreshingCategories ? '正在补充类目…' : '补充缺失类目' }}</button>
+        <p v-if="categoryMessage" class="evidence-note" role="status">{{ categoryMessage }}</p>
+      </section>
       <section><h4>标题表达与可借鉴部分</h4>
         <p v-if="selected.title_analysis_status !== 'complete'" class="review-empty">尚未完成竞品标题分析。</p>
         <p v-else>{{ selected.title_assessment }}</p>
         <dl class="reference-facts">
-          <dt>平台类目</dt><dd>{{ selected.category_path.map((item) => item.name).join(' / ') || '现有搜索记录未包含平台类目' }}</dd>
           <template v-if="selected.title_analysis_status === 'complete'">
             <dt>商品品名</dt><dd>{{ selected.core_phrases.join(" / ") }}</dd>
             <dt>标题中的卖点</dt><dd>{{ selected.detail_phrases.join(" / ") || "标题未明确写出独立卖点" }}</dd>
@@ -189,7 +212,9 @@ function monitoringLabel(item: TitleBenchmark) {
       <section><h4>搜索表现</h4>
         <article v-for="row in selected.search_evidence" :key="`${row.keyword}-${row.captured_at}`" class="query-observation">
           <b>{{ row.keyword }}</b>
-          <p>竞品自然位 #{{ row.organic_position }} · 我们 {{ row.target_organic_position ? `#${row.target_organic_position}` : '本次扫描未定位' }}</p>
+          <p>竞品：<strong>{{ referencePosition(row) }}</strong></p>
+          <p>{{ rankingContext.sameLink ? '我们' : '同组参考商品' }}：{{ referencePosition(row, true) }}</p>
+          <small>自然位 #{{ row.organic_position }} · 不含广告</small><br />
           <small>{{ observedTime(row.captured_at) }} · 北京时间</small>
           <p v-if="row.title !== selected.title">当时标题：{{ row.title }}</p>
         </article>
@@ -210,6 +235,7 @@ function monitoringLabel(item: TitleBenchmark) {
 </template>
 
 <style scoped>
+.category-actions{display:flex;flex-wrap:wrap;align-items:center;gap:12px;margin:10px 0 18px;font-size:13px;color:#677a73}.reference-category{overflow-wrap:anywhere;color:#345749}.reference-category span{color:#677a73;margin-right:10px}.category-path{font-size:15px;font-weight:600;line-height:1.8;overflow-wrap:anywhere}.title-workbench button:disabled{opacity:.55;cursor:wait}.ranking-table .rank-located{font-size:14px!important;line-height:1.6}
 .keyword-rankings{margin-top:22px;padding-top:18px;border-top:1px solid #dfe8e4}.keyword-rankings .review-heading{margin-bottom:6px}.keyword-rankings h4{margin:0;font-size:15px}.keyword-rankings .review-heading small{color:#6b7e77}.ranking-context{padding:10px 12px;border-radius:8px;background:#fff7e7;font-size:13px;line-height:1.6}.ranking-table{width:100%;table-layout:fixed;border-collapse:collapse;font-size:13px;text-align:left}.ranking-caption{position:absolute;width:1px;height:1px;padding:0;overflow:hidden;clip-path:inset(50%);white-space:nowrap}.ranking-table th{font-weight:500;color:#6b7e77;padding:10px 8px;border-bottom:1px solid #dfe8e4}.ranking-table td{padding:12px 8px;border-bottom:1px solid #edf1f0;vertical-align:top;overflow-wrap:anywhere;line-height:1.5}.ranking-table th:first-child,.ranking-table td:first-child{width:43%;padding-left:0}.ranking-table th:nth-child(2){width:29%}.ranking-table th:last-child,.ranking-table td:last-child{padding-right:0}.ranking-table a{color:#28584b;font-weight:600}.ranking-table small,.ranking-table th span{display:block;font-size:11px;color:#6b7e77;margin-top:4px;font-weight:400}.ranking-table strong{font-size:13px;font-weight:500}.ranking-table .rank-located{font-size:20px;font-weight:700;color:#216550}.ranking-table time{font-size:12px;color:#596e65}.more-rankings{margin-top:14px}.keyword-rankings .evidence-note{margin-bottom:0}@media(max-width:640px){.ranking-table th:first-child,.ranking-table td:first-child{width:38%}.ranking-table th:nth-child(2){width:31%}.ranking-table td,.ranking-table th{padding-left:6px;padding-right:6px}.ranking-table .rank-located{font-size:18px}.ranking-table a,.ranking-table strong{font-size:12px}.ranking-table time{font-size:11px}}
 .title-workbench{display:grid;gap:18px;color:#243b43}.title-workbench section{min-width:0}.diagnosis-panel,.recommendation-panel,.reference-panel{padding:22px;border:1px solid #dbe5e5;border-radius:16px;background:#fff}.recommendation-panel{background:#f3faf7;border-color:#b9d8c9}.review-heading{display:flex;align-items:center;justify-content:space-between;gap:14px;margin-bottom:14px}.review-heading h3{margin:0;font-size:17px}.diagnosis-badge{border-radius:18px;padding:6px 12px;background:#edf3f2;font-size:13px}.full-title{display:block;white-space:normal;overflow-wrap:anywhere;line-height:1.65;font-size:16px;color:inherit}.recommended-title{font-size:20px;font-weight:650}.title-workbench button{border:1px solid #b4cac3;border-radius:8px;background:#fff;color:#28584b;padding:8px 13px;cursor:pointer}.title-workbench button:focus-visible,.title-workbench summary:focus-visible{outline:3px solid #207d68;outline-offset:3px}.title-workbench li,.short-reason,.reference-copy p{font-size:13px;line-height:1.6}.title-workbench ul{padding-left:20px;margin-bottom:0}.review-disclosure{margin-top:16px;border-top:1px solid #d9e6e0;padding-top:12px}.review-disclosure summary{cursor:pointer;font-size:13px}.alternative-title{border-top:1px solid #dbe5e5;margin-top:16px;padding-top:14px}.reference-list{display:grid;gap:0}.reference-card{display:grid;grid-template-columns:72px minmax(0,1fr);gap:16px;padding:18px 0;border-top:1px solid #edf1f0}.reference-card:first-child{border-top:0;padding-top:0}.reference-card img{object-fit:contain;border-radius:9px}.reference-image-empty{display:grid;place-items:center;width:72px;height:72px;background:#f1f4f3;color:#71857d;font-size:11px}.reference-relation{font-size:11px;color:#657d73}.reference-copy p{margin:6px 0 9px}.more-references{margin-top:10px}.review-empty,.evidence-note{font-size:13px;color:#677a73;line-height:1.65}.reference-dialog{border:0;border-radius:18px;padding:26px;width:min(740px,calc(100vw - 40px));max-height:85vh;overflow:auto;box-sizing:border-box;color:#243b43}.reference-dialog::backdrop{background:#102c35aa}.reference-dialog section{border-top:1px solid #dfe8e4;margin-top:20px;padding-top:6px}.reference-dialog button{border:1px solid #c2d3cc;border-radius:8px;padding:8px 14px;background:white;cursor:pointer}.reference-dialog .full-title{font-weight:600}.reference-facts{display:grid;grid-template-columns:140px minmax(0,1fr);gap:12px;font-size:14px;line-height:1.5}.reference-facts dt{color:#6b7e77}.reference-facts dd{margin:0;overflow-wrap:anywhere}.query-observation{padding:12px;background:#f4f7f5;border-radius:10px;margin:8px 0}.query-observation p{margin:7px 0;font-size:14px}.query-observation small{color:#6b7e77}mark{background:#d9f1df}del{color:#9b5347}@media(max-width:640px){.diagnosis-panel,.recommendation-panel,.reference-panel{padding:16px}.review-heading{align-items:flex-start;flex-wrap:wrap}.recommended-title{font-size:17px}.reference-card{grid-template-columns:56px minmax(0,1fr);gap:12px}.reference-card img,.reference-image-empty{width:56px;height:56px}.reference-dialog{padding:18px;width:calc(100vw - 24px)}.reference-facts{grid-template-columns:1fr;gap:5px}.reference-facts dd{margin-bottom:10px}}
 </style>

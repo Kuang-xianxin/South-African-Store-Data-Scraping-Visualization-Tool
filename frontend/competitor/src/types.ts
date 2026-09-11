@@ -2981,6 +2981,12 @@ export interface SearchRankingBatchStatusPayload {
 }
 
 export interface TitleBenchmark {
+  category_observation?: {
+    status: string;
+    path: CompetitorCategoryBreadcrumb[];
+    source: "search_record" | "monitored_snapshot" | "public_product";
+    captured_at: string | null;
+  };
   comparison_reason?: string;
   title_analysis_status?: "pending" | "complete";
   plid: string;
@@ -2999,7 +3005,13 @@ export interface TitleBenchmark {
   search_evidence: Array<{
     keyword: string;
     organic_position: number;
+    page_number?: number | null;
+    page_rank?: number | null;
     target_organic_position: number | null;
+    target_page_number?: number | null;
+    target_page_rank?: number | null;
+    target_found?: boolean | null;
+    target_pages_scanned?: number | null;
     captured_at: string | null;
     title: string;
   }>;
