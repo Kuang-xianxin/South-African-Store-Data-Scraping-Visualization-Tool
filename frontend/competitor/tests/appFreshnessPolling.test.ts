@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 
-const appSource = readFileSync(new URL("../src/App.vue", import.meta.url), "utf8");
+const appSource = readFileSync(new URL("../src/App.vue", import.meta.url), "utf8").replace(/\r\n/g, "\n");
 
 test("sidebar freshness polls while the page is visible and cleans up its lifecycle", () => {
   assert.match(appSource, /const freshnessPollIntervalMs = 15_000/);

@@ -161,7 +161,7 @@ test("radar and category cards use link totals while seller workbench separates 
     productCardSources.match(/:values="(?:item|props\.item)\.近期观察售出"/g)?.length,
     2,
   );
-  assert.equal(pageSource.match(/<OwnStoreSalesComparisonMetrics/g)?.length, 3);
+  assert.equal(pageSource.match(/<OwnStoreSalesComparisonMetrics/g)?.length, 2);
   assert.match(pageSource, /:own-values="item\.自有官方销量"/);
   assert.match(pageSource, /:follower-values="item\.跟卖近期观察售出"/);
   assert.match(pageSource, /:own-values="card\.competitor\.自有官方销量"/);
@@ -188,19 +188,19 @@ test("radar and category cards use link totals while seller workbench separates 
     )].length,
     2,
   );
-  assert.equal(productCardSources.match(/最新评论数（PLID 共用）/g)?.length, 4);
-  assert.equal(productCardSources.match(/class="competitor-first-monitored-badge/g)?.length, 4);
-  assert.equal(productCardSources.match(/<small>首次监控<\/small>/g)?.length, 4);
+  assert.equal(productCardSources.match(/最新评论数（PLID 共用）/g)?.length, 3);
+  assert.equal(productCardSources.match(/class="competitor-first-monitored-badge/g)?.length, 3);
+  assert.equal(productCardSources.match(/<small>首次监控<\/small>/g)?.length, 3);
   assert.doesNotMatch(
     productCardSources,
     /最新评论数（PLID 共用）[\s\S]{0,180}?首次监控/,
   );
   assert.equal(
     productCardSources.match(/class="competitor-card-category(?: is-compact)?"/g)?.length,
-    4,
+    3,
   );
-  assert.equal(productCardSources.match(/aria-label="商品类目层级"/g)?.length, 4);
-  assert.equal(productCardSources.match(/类目待采集 · 后续成功采集后补齐/g)?.length, 4);
+  assert.equal(productCardSources.match(/aria-label="商品类目层级"/g)?.length, 3);
+  assert.equal(productCardSources.match(/类目待采集 · 后续成功采集后补齐/g)?.length, 3);
   assert.match(pageSource, /competitorCategoryLevelLabel\(index: number, total: number\)/);
   assert.match(pageSource, /if \(total <= 1 \|\| index === total - 1\) return "精确类目"/);
   assert.match(pageSource, /if \(index === 0\) return "大类"/);
@@ -217,7 +217,7 @@ test("radar and category cards use link totals while seller workbench separates 
   assert.match(stylesSource, /\.competitor-card-category li > strong,[\s\S]*grid-column: 3/);
   assert.match(stylesSource, /\.competitor-card-category li:not\(:last-child\)::after/);
   assert.match(pageSource, /latestReviewCountLabel\(card\.competitor\)/);
-  assert.equal(pageSource.match(/latestReviewCountLabel\(item\)/g)?.length, 2);
+  assert.equal(pageSource.match(/latestReviewCountLabel\(item\)/g)?.length, 1);
   assert.match(radarCardSource, /latestReviewCountLabel\(props\.item\)/);
   assert.match(typesSource, /首次监控时间\?: string \| null/);
   assert.match(typesSource, /最新评论数\?: number \| null/);

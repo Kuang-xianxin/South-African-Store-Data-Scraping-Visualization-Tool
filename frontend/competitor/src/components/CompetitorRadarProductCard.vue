@@ -4,13 +4,15 @@ import CompetitorObservedSalesMetrics from "./CompetitorObservedSalesMetrics.vue
 import OwnStoreSalesComparisonMetrics from "./OwnStoreSalesComparisonMetrics.vue";
 import OwnStoreListingTime from "./OwnStoreListingTime.vue";
 import CompetitorPriceSummary from "./CompetitorPriceSummary.vue";
+import RadarCardProfit from "./RadarCardProfit.vue";
+import { radarCardPlatformUrl } from "../radarCardProfit";
 import { ownOfferLatestStatusLabel } from "../ownOfferLatestStatus";
 import {
   comparisonOffers,
   followerOffers,
   groupCompetitorOffersBySeller,
 } from "../competitorOfferHistory";
-import type { CompetitorCategoryBreadcrumb, CompetitorItem } from "../types";
+import type { CompetitorCategoryBreadcrumb, CompetitorItem, OwnStoreScope } from "../types";
 import { formatChinaDateTime } from "../time";
 
 const props = withDefaults(defineProps<{
@@ -20,12 +22,16 @@ const props = withDefaults(defineProps<{
   personalWatchlist?: boolean;
   imageSrc?: string;
   showImage?: boolean;
+  storeScope?: OwnStoreScope;
+  storeCode?: string;
 }>(), {
   cardId: undefined,
   selected: false,
   personalWatchlist: false,
   imageSrc: "",
   showImage: false,
+  storeScope: "current",
+  storeCode: "",
 });
 
 const emit = defineEmits<{
@@ -98,20 +104,11 @@ function categoryLevelLabel(index: number, total: number): string {
 <template>
   <article
     :id="props.cardId"
-    class="competitor-status-card"
+    class="competitor-status-card radar-card-refined"
     :class="{
       selected: props.selected,
       'own-store-card competitor-category-product-card is-own-store': props.item.来源 === 'own_store',
     }"
-    tabindex="0"
-    role="button"
-    :aria-haspopup="props.item.来源 === 'own_store' ? undefined : 'dialog'"
-    :aria-label="props.item.来源 === 'own_store'
-      ? `在新标签页查看 ${props.item.商品} 自有链接详情`
-      : `查看 ${props.item.商品} 及全部 ${props.item.跟卖报价.length} 个报价的详情`"
-    @click="emit('open-detail', props.item)"
-    @keydown.enter.self="emit('open-detail', props.item)"
-    @keydown.space.self.prevent="emit('open-detail', props.item)"
   >
     <header class="competitor-status-header">
       <div class="competitor-status-identity">
@@ -139,7 +136,15 @@ function categoryLevelLabel(index: number, total: number): string {
               class="personal-watchlist-badge"
             >我的监控池</strong>
           </div>
-          <h3>{{ props.item.商品 }}</h3>
+          <h3>
+            <a v-if="radarCardPlatformUrl(props.item)" class="radar-card-platform-link"
+              :href="radarCardPlatformUrl(props.item)!" target="_blank" rel="noopener noreferrer"
+              :aria-label="`${props.item.商品}，在新标签页打开平台商品页`">
+              {{ props.item.商品 }}<span aria-hidden="true" class="radar-card-external-mark">↗</span>
+            </a>
+            <span v-else>{{ props.item.商品 }}</span>
+          </h3>
+          <small v-if="!radarCardPlatformUrl(props.item)" class="radar-card-link-missing">平台链接待补齐</small>
           <p v-if="props.item.来源 === 'own_store'">
             {{ props.item.自有报价.length }} 个自有 Offer ·
             {{ followerSellerCount(props.item) }} 个跟卖卖家 ·
@@ -172,12 +177,14 @@ function categoryLevelLabel(index: number, total: number): string {
           <small>首次监控</small>
           <strong>{{ formatChinaDateTime(props.item.首次监控时间 ?? null) }}</strong>
         </span>
-        <span class="competitor-status-open">{{ props.item.来源 === 'own_store' ? '新标签页查看完整详情 →' : '查看卖家库存 →' }}</span>
       </div>
     </header>
 
     <div class="competitor-status-summary">
-      <CompetitorPriceSummary :item="props.item" />
+      <div class="radar-card-price-column">
+        <CompetitorPriceSummary :item="props.item" />
+        <RadarCardProfit :item="props.item" :store-scope="props.storeScope" :store-code="props.storeCode" />
+      </div>
       <div>
         <span>{{ props.item.来源 === 'own_store' ? 'Seller API 最新库存' : '主报价库存' }}</span>
         <strong
@@ -248,6 +255,10 @@ function categoryLevelLabel(index: number, total: number): string {
       />
     </div>
     <footer class="competitor-card-query-actions">
+      <button type="button" class="radar-card-detail-button"
+        :aria-label="props.item.来源 === 'own_store' ? `在新标签页查看 ${props.item.商品} 自有链接详情` : `查看 ${props.item.商品} 完整详情`"
+        :aria-haspopup="props.item.来源 === 'own_store' ? undefined : 'dialog'"
+        @click="emit('open-detail', props.item)">查看详情</button>
       <button
         type="button"
         class="competitor-query-button"

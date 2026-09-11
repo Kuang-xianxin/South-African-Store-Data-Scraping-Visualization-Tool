@@ -368,3 +368,97 @@
     min-height: 36px;
   }
 }
+
+/* Refined list cards: explicit actions and readable evidence without whole-card clicks. */
+.competitor-status-card.radar-card-refined {
+  gap: 14px;
+  padding: 16px;
+  grid-template-rows: auto auto auto;
+  cursor: default;
+  contain-intrinsic-size: auto 310px;
+  box-shadow: 0 3px 12px rgb(25 60 42 / 4%);
+  transition: border-color 140ms ease;
+}
+.competitor-status-card.radar-card-refined:hover,
+.competitor-status-card.radar-card-refined.selected {
+  transform: none;
+  box-shadow: 0 3px 12px rgb(25 60 42 / 4%);
+}
+.radar-card-refined .competitor-status-header { align-items: start; }
+.radar-card-refined .competitor-status-identity { gap: 12px; }
+.radar-card-refined .competitor-status-image { flex-basis: 54px; width: 54px; height: 54px; }
+.radar-card-refined .competitor-status-title h3 { font-size: 16px; line-height: 1.5; font-weight: 700; margin-block: 4px; }
+.radar-card-refined .competitor-status-title p { font-size: 12px; line-height: 1.5; color: #586b60; margin-top: 3px; }
+.radar-card-refined .competitor-status-eyebrow { font-size: 11px; line-height: 1.5; font-weight: 600; }
+.radar-card-platform-link { color: #183f2c; text-decoration: none; text-underline-offset: 4px; overflow-wrap: anywhere; }
+.radar-card-platform-link:hover { color: #147448; text-decoration: underline; }
+.radar-card-external-mark { display: inline-block; margin-left: 6px; color: #607d69; font-size: 13px; }
+.radar-card-link-missing { font-size: 11px; color: #87652f; }
+.radar-card-refined .competitor-status-header-actions { gap: 7px; flex-wrap: wrap; }
+.radar-card-refined .own-offer-latest-statuses { margin-top: 6px; gap: 5px; }
+.radar-card-refined .own-offer-latest-statuses :is(span, small, strong) { font-size: 11px; line-height: 1.4; }
+.radar-card-refined > .competitor-status-summary {
+  grid-column: 1; grid-row: 2;
+  grid-template-columns: minmax(170px, 1.1fr) minmax(230px, 1.4fr) minmax(85px, .6fr) minmax(150px, 1.15fr) minmax(125px, .95fr) minmax(105px, .75fr);
+  grid-template-rows: auto;
+  padding-top: 14px;
+  gap: 0;
+}
+.radar-card-refined.competitor-status-card > .competitor-status-summary > * { grid-column: auto; grid-row: auto; }
+.radar-card-refined > .competitor-status-summary > div { padding-inline: 12px; row-gap: 5px; }
+.radar-card-refined > .competitor-status-summary > div:first-child { padding-left: 0; padding-bottom: 0; }
+.radar-card-refined .competitor-status-summary > div > span { font-size: 12px; line-height: 1.5; font-weight: 600; }
+.radar-card-refined .competitor-status-summary > div > strong { font-size: 16px; line-height: 1.45; }
+.radar-card-refined .competitor-status-summary small { font-size: 11px; line-height: 1.5; font-weight: 400; }
+.radar-card-refined .competitor-status-summary .radar-card-price-column { gap: 12px; }
+.radar-card-refined :is(.own-store-sales-comparison, .competitor-observed-sales) { padding: 7px 9px; }
+.radar-card-refined :is(.own-store-sales-comparison, .competitor-observed-sales-table) :is(th, td) { font-size: 12px; line-height: 1.5; padding-block: 2px; }
+.radar-card-refined :is(.own-store-sales-comparison, .competitor-observed-sales-table) thead th { font-size: 11px; }
+.radar-card-refined :is(.own-store-sales-comparison, .competitor-observed-sales-table) td.unavailable { font-size: 11px; }
+.radar-card-refined .competitor-card-category li { min-height: 24px; }
+.radar-card-refined .competitor-category-node-button { padding-block: 3px; }
+.radar-card-refined .competitor-category-node-button strong { font-size: 12px; line-height: 1.4; }
+.radar-card-refined .competitor-card-category > span { font-size: 12px; }
+.radar-card-refined > .competitor-card-query-actions {
+  grid-column: 1; grid-row: 3;
+  justify-self: stretch; align-self: auto;
+  gap: 8px; padding: 12px 0 0; margin: 0;
+  border-top: 1px solid #e6ece7;
+  flex-wrap: wrap;
+}
+.radar-card-refined .competitor-query-button,
+.radar-card-detail-button {
+  display: inline-flex; align-items: center; justify-content: center;
+  min-height: 36px; padding: 8px 15px;
+  border: 1px solid #b7ccbf; border-radius: 7px;
+  font: inherit; font-size: 12px; font-weight: 600; line-height: 1.4;
+  cursor: pointer; box-shadow: none; transform: none;
+}
+.radar-card-detail-button { background: #f4f8f5; color: #205c3c; }
+.radar-card-detail-button:hover { background: #e7f0e9; }
+.radar-card-detail-button:focus-visible,.radar-card-platform-link:focus-visible,.radar-card-profit-load:focus-visible { outline: 3px solid #a9cbb5; outline-offset: 3px; }
+.radar-card-profit { display: grid; gap: 4px; border-top: 1px solid #dfe8e2; padding-top: 12px; min-width: 0; }
+.radar-card-profit-label { color: #52675b; font-size: 12px; font-weight: 600; }
+.radar-card-profit > strong { color: #1b6841; font-size: 17px; line-height: 1.4; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.radar-card-profit > strong.is-loss { color: #a13e36; }
+.radar-card-profit-margin { font-size: 12px; color: #285c3c; }
+.radar-card-profit-load { justify-self: start; padding: 3px 0; border: 0; background: transparent; color: #206d45; font-size: 13px; font-weight: 650; cursor: pointer; }
+.radar-card-profit-load:disabled { color: #687b6e; cursor: wait; }
+.radar-card-profit-evidence { font-size: 11px; color: #596c60; overflow-wrap: anywhere; }
+.radar-card-profit-evidence summary { cursor: pointer; padding-block: 3px; }
+.radar-card-profit-evidence small { display: block; margin-top: 5px; }
+@container competitor-radar-card (max-width: 1100px) {
+  .radar-card-refined > .competitor-status-summary { grid-template-columns: minmax(150px, 1fr) minmax(220px, 1.3fr) minmax(125px, 1fr); row-gap: 18px; }
+  .radar-card-refined.competitor-status-card > .competitor-status-summary > * { grid-column: auto; grid-row: auto; }
+  .radar-card-refined > .competitor-status-summary > .competitor-card-category { border-left: 0; padding-left: 0; }
+}
+@container competitor-radar-card (max-width: 620px) {
+  .radar-card-refined > .competitor-status-summary { grid-template-columns: repeat(2,minmax(0,1fr)); }
+  .radar-card-refined > .competitor-status-summary > .radar-card-price-column { grid-column: 1 / -1; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 14px; }
+  .radar-card-refined .radar-card-profit { border-top: 0; padding-top: 0; }
+  .radar-card-refined > .competitor-status-summary > :is(.own-store-sales-comparison,.competitor-observed-sales) { grid-column: 1 / -1; }
+  .radar-card-refined > .competitor-status-summary > div:nth-child(2),.radar-card-refined > .competitor-status-summary > .competitor-period-revenue { border-left: 0; padding-left: 0; }
+  .radar-card-refined > .competitor-status-summary > .competitor-card-category { border-left: 1px solid #e4e9e5; padding-left: 12px; }
+}
+@media (pointer: coarse) { .radar-card-refined :is(.competitor-query-button,.radar-card-detail-button,.radar-card-profit-load) { min-height: 44px; } }
+@media (prefers-reduced-motion: reduce) { .radar-card-refined,.radar-card-refined button { transition: none; } }

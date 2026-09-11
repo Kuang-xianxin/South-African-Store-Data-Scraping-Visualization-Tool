@@ -73,9 +73,9 @@ test("deduplicates PLIDs, lets own-store evidence win, and lists own links first
 });
 
 test("radar cards and own detail hierarchies expose buttons and share the all-store catalog", () => {
-  assert.equal(pageSource.match(/class="competitor-category-node-button"/g)?.length, 4);
+  assert.equal(pageSource.match(/class="competitor-category-node-button"/g)?.length, 3);
   assert.equal(radarCardSource.match(/class="competitor-category-node-button"/g)?.length, 1);
-  assert.equal(pageSource.match(/@click\.stop="openCategoryModal\(category, \$event\)"/g)?.length, 4);
+  assert.equal(pageSource.match(/@click\.stop="openCategoryModal\(category, \$event\)"/g)?.length, 3);
   assert.match(radarCardSource, /emit\('open-category', category, \$event\)/);
   assert.match(pageSource, /@open-category="openCategoryModal"/);
   assert.match(pageSource, /class="competitor-modal competitor-category-modal"/);

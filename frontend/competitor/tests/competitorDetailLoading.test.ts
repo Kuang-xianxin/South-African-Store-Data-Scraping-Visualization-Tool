@@ -83,8 +83,8 @@ test("only own-store cards leave the current page", () => {
     /if \(item\.来源 !== "own_store"\) \{\s+openProductModal\(item, context\);\s+return;/,
   );
   assert.match(dispatcher, /openOwnStoreDetailTab\(\{/);
-  assert.match(pageSource, /class="competitor-status-card own-store-card"[\s\S]*新标签页/);
-  assert.match(radarCardSource, /class="competitor-status-card"[\s\S]*:aria-haspopup="props\.item\.来源 === 'own_store' \? undefined : 'dialog'"/);
+  assert.match(pageSource, /<CompetitorRadarProductCard[\s\S]*v-for="item in pagedStoreCompetitors"[\s\S]*@open-detail="openProductDetail"/);
+  assert.match(radarCardSource, /class="competitor-status-card radar-card-refined"[\s\S]*:aria-haspopup="props\.item\.来源 === 'own_store' \? undefined : 'dialog'"/);
 });
 
 test("standalone own-link detail loads its full local evidence concurrently", () => {
