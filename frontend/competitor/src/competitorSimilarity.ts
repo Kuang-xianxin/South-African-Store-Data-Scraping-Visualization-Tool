@@ -1,4 +1,5 @@
 import { competitorCategoryIdentity } from "./competitorCategoryMatches.ts";
+import { productIdentity, sharedProductType, dependentProductReference, conflictingProductHeads } from "./competitorProductIdentity.ts";
 import type { CompetitorCategoryBreadcrumb, CompetitorItem } from "./types";
 
 export type CompetitorMatchKind = "near_identical" | "same_need";
@@ -74,6 +75,7 @@ const TOKEN_ALIASES = new Map<string, string>([
 const GENERIC_PRODUCT_TERMS = new Set([
   "adult", "child", "infant", "portable", "device", "kit", "set", "pack",
   "rescue", "emergency", "aid", "professional", "home", "use", "new",
+  "maker", "machine", "equipment", "black", "white", "stainless", "steel",
 ]);
 
 const STRONG_ACCESSORY_PATTERN = /\b(?:accessor(?:y|ies)|attachment|bracket|case|cover|holder|parts?|protector|refill|replacement|sleeve|spare)\b/i;
@@ -175,17 +177,19 @@ function categoryRelation(
   const candidateIdentities = new Set(candidatePath.map(competitorCategoryIdentity));
   const sourceLeaf = sourcePath.at(-1) ?? null;
   const sourceParent = sourcePath.at(-2) ?? null;
+  const candidateLeaf = candidatePath.at(-1) ?? null;
+  const candidateParent = candidatePath.at(-2) ?? null;
   const sharedCategory = [...sourcePath]
     .reverse()
     .find((entry) => candidateIdentities.has(competitorCategoryIdentity(entry))) ?? null;
   return {
     exactLeaf: Boolean(
       sourceLeaf
-      && candidateIdentities.has(competitorCategoryIdentity(sourceLeaf)),
+      && candidateLeaf && competitorCategoryIdentity(sourceLeaf) === competitorCategoryIdentity(candidateLeaf),
     ),
     sameParent: Boolean(
       sourceParent
-      && candidateIdentities.has(competitorCategoryIdentity(sourceParent)),
+      && candidateParent && competitorCategoryIdentity(sourceParent) === competitorCategoryIdentity(candidateParent),
     ),
     sharedCategory,
   };
@@ -236,13 +240,14 @@ interface MatchIndex {
   terms: Map<string, Set<CompetitorMatchCandidate>>;
   titles: Map<string, Set<CompetitorMatchCandidate>>;
   needs: Map<string, Set<CompetitorMatchCandidate>>;
+  identities: Map<string, Set<CompetitorMatchCandidate>>;
 }
 // Catalog arrays are immutable generations. Inventory/card refreshes are separate.
 const indexCache = new WeakMap<readonly CompetitorMatchCandidate[], MatchIndex>();
 function indexedCandidates<T extends CompetitorMatchCandidate>(source: CompetitorMatchSource, candidates: readonly T[]): T[] {
   let index = indexCache.get(candidates);
   if (!index) {
-    index = { terms: new Map(), titles: new Map(), needs: new Map() };
+    index = { terms: new Map(), titles: new Map(), needs: new Map(), identities: new Map() };
     const add = (map: Map<string, Set<CompetitorMatchCandidate>>, key: string, item: T) => {
       if (!map.has(key)) map.set(key, new Set());
       map.get(key)!.add(item);
@@ -252,6 +257,7 @@ function indexedCandidates<T extends CompetitorMatchCandidate>(source: Competito
       for (const token of features.tokens) add(index.terms, token, item);
       add(index.titles, features.title, item);
       for (const need of features.needs) add(index.needs, need, item);
+      for (const key of productIdentity(item).forms.keys()) add(index.identities, key, item);
     }
     indexCache.set(candidates, index);
   }
@@ -259,6 +265,7 @@ function indexedCandidates<T extends CompetitorMatchCandidate>(source: Competito
   const selected = new Set<CompetitorMatchCandidate>(index.titles.get(features.title));
   for (const term of features.tokens) for (const item of index.terms.get(term) ?? []) selected.add(item);
   for (const need of features.needs) for (const item of index.needs.get(need) ?? []) selected.add(item);
+  for (const key of productIdentity(source).forms.keys()) for (const item of index.identities.get(key) ?? []) selected.add(item);
   return [...selected] as T[];
 }
 
@@ -271,6 +278,16 @@ function scoreCandidate<T extends CompetitorMatchCandidate>(
   const sourceTitle = left.title;
   const candidateTitle = right.title;
   if (!sourceTitle || !candidateTitle) return null;
+  const sourceIdentity = productIdentity(source);
+  const candidateIdentity = productIdentity(candidate);
+  const accessoryMismatch = sourceIdentity.accessory !== candidateIdentity.accessory;
+  if (accessoryMismatch || dependentProductReference(sourceIdentity, candidateIdentity)
+    || dependentProductReference(candidateIdentity, sourceIdentity)) return null;
+  const sharedNeeds = sharedValues(left.needs, right.needs);
+  const knownUseConflict = (left.needs.length > 0 || right.needs.length > 0) && !sharedNeeds.length;
+  const sharedType = knownUseConflict ? null : sharedProductType(sourceIdentity, candidateIdentity);
+  if (knownUseConflict || (!sharedType && !sharedNeeds.length
+    && conflictingProductHeads(sourceIdentity, candidateIdentity))) return null;
   const differentCatUse = (furniture: MatchFeatures, other: MatchFeatures) => furniture.needs.length > 0
     && other.needs.length === 0 && /\b(?:litter|toilet|scoop|carri(?:er|ers)|transport|food|feeding|bowl|fountain)\b/.test(other.title);
   if (differentCatUse(left, right) || differentCatUse(right, left)) return null;
@@ -303,8 +320,6 @@ function scoreCandidate<T extends CompetitorMatchCandidate>(
     ? (2 * sharedSpecs.length) / (sourceSpecs.length + candidateSpecs.length)
     : 0;
   const categories = categoryRelation(source, candidate);
-  const accessoryMismatch = STRONG_ACCESSORY_PATTERN.test(sourceTitle)
-    !== STRONG_ACCESSORY_PATTERN.test(candidateTitle);
 
   let score = tokenSimilarity * 52 + bigramSimilarity * 14;
   if (categories.exactLeaf) score += 22;
@@ -319,6 +334,7 @@ function scoreCandidate<T extends CompetitorMatchCandidate>(
   const exactTitle = sourceTitle === candidateTitle;
   const nearIdentical = exactTitle || (
     !accessoryMismatch
+    && sharedCoreTerms.length > 0
     && (categories.exactLeaf || sharedModels.length > 0)
     && (
       (score >= 66 && tokenSimilarity >= 0.5)
@@ -334,8 +350,7 @@ function scoreCandidate<T extends CompetitorMatchCandidate>(
     && (tokenSimilarity >= 0.78 || (
       coreContainment >= 0.85 && tokenSimilarity >= 0.35 && sharedBigrams.length > 0
     ));
-  const sharedNeeds = sharedValues(left.needs, right.needs);
-  const sameNeed = sharedNeeds.length > 0 || sharedCoreTerms.length > 0 && ((
+  const sameNeed = Boolean(sharedType) || sharedNeeds.length > 0 || sharedCoreTerms.length > 0 && ((
     categories.exactLeaf
     && score >= 30
     && (sharedTerms.length > 0 || tokenSimilarity >= 0.14)
@@ -350,8 +365,9 @@ function scoreCandidate<T extends CompetitorMatchCandidate>(
   if (!nearIdentical && !sameNeed) return null;
   if (accessoryMismatch && score < 74) return null;
 
-  if (!nearIdentical && sharedNeeds.length) score = Math.max(score, 42);
+  if (!nearIdentical && (sharedNeeds.length || sharedType)) score = Math.max(score, 42);
   const reasons: string[] = [];
+  if (sharedType && !nearIdentical) reasons.push(`共同品名：${sharedType}`);
   if (sharedNeeds.length && !nearIdentical) reasons.push(`同一用途：${sharedNeeds[0]}`);
   if (exactTitle) reasons.push("商品标题完全一致");
   if (categories.exactLeaf) {
