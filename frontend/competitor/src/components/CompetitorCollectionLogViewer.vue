@@ -169,8 +169,7 @@ onBeforeUnmount(() => {
         <header class="competitor-modal-header collection-log-modal-header">
           <div>
             <p class="section-kicker">COLLECTION ROUNDS</p>
-            <h2 id="collection-log-modal-title">竞品雷达轮次详情</h2>
-            <span>一个批次编号代表一轮；这里只显示轮次汇总，不展示逐商品爬取行</span>
+            <h2 id="collection-log-modal-title">选品雷达轮次详情</h2>
           </div>
           <button
             class="competitor-modal-close"
@@ -315,7 +314,6 @@ onBeforeUnmount(() => {
         </div>
 
         <div class="competitor-modal-actions collection-log-actions">
-          <span>轮次详情仅供查看，不会改变采集任务或断点。</span>
           <button type="button" @click="emit('close')">关闭</button>
         </div>
       </section>

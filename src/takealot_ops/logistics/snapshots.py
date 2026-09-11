@@ -63,5 +63,6 @@ def load_provider_snapshot(engine: Engine, provider: str) -> dict[str, Any] | No
         return {
             "provider": snapshot.provider,
             "fetched_at": fetched_at.isoformat(),
-            "payload": deepcopy(snapshot.payload),
+            # This Session owns a fresh JSON decode, with no shared object cache.
+            "payload": snapshot.payload,
         }

@@ -97,8 +97,9 @@ test("trend metadata, y-axis labels, and plot use dedicated horizontal columns",
   assert.match(pageSource, /class="offer-trend-panel-text-divider"/);
   assert.match(
     pageSource,
-    /COMPETITOR_OFFER_TREND_HORIZONTAL_LAYOUT\.axisLabelX/,
+    /offerTrendHorizontalLayout\.axisLabelX/,
   );
+  assert.match(pageSource, /: COMPETITOR_OFFER_TREND_HORIZONTAL_LAYOUT/);
   assert.match(styleSource, /\.offer-trend-panel-text-divider\s*\{/);
 });
 

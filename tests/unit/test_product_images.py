@@ -180,12 +180,31 @@ def test_media_takealot_image_is_trusted_and_normalized() -> None:
     assert trusted_product_image_url(source) == source.replace("http://", "https://")
 
 
-def test_media_takealot_tsin_image_is_trusted_and_normalized() -> None:
-    source = "http://media.takealot.com/covers_tsins/61498554/61498554-1-zoom.jpeg"
+@pytest.mark.parametrize("path", [
+    "/covers_tsins/61498554/61498554-1-zoom.jpeg",
+    "/covers/47858680/554082577841a-zoom.jpg",
+])
+def test_media_takealot_legacy_image_is_trusted_and_cached(
+    path: str, tmp_path: Path,
+) -> None:
+    source = f"http://media.takealot.com{path}"
 
     assert trusted_product_thumbnail_url(source) == source.replace("http://", "https://")
     with pytest.raises(ProductImageInputError):
         trusted_product_image_url(source)
+    downloads: list[str] = []
+
+    def fetcher(url: str) -> bytes:
+        downloads.append(url)
+        return _large_jpeg()
+
+    cache = ProductThumbnailCache(tmp_path, fetcher=fetcher)
+    thumbnail = cache.thumbnail_path(source)
+    assert cache.thumbnail_path(source) == thumbnail
+    assert downloads == [source.replace("http://", "https://")]
+    with Image.open(thumbnail) as rendered:
+        assert rendered.format == "JPEG"
+        assert max(rendered.size) == 192
 
 
 @pytest.mark.parametrize("size", [0, 191, 193, 512, 641, 10_000])
@@ -203,8 +222,13 @@ def test_thumbnail_cache_rejects_unsupported_sizes(size: int) -> None:
         "https://takealot.s3.amazonaws.com/other/example/s.file",
         "https://takealot.s3.amazonaws.com/covers_images/example/s.file?redirect=1",
         "https://user:pass@takealot.s3.amazonaws.com/covers_images/example/s.file",
+        "https://media.takealot.com.evil.example/covers/47858680/image.jpg",
+        "https://media.takealot.com/covers/47858680/image.jpg?redirect=1",
+        "https://media.takealot.com/covers_other/47858680/image.jpg",
     ],
 )
 def test_thumbnail_cache_rejects_untrusted_sources(url: str) -> None:
     with pytest.raises(ProductImageInputError):
         trusted_product_image_url(url)
+    with pytest.raises(ProductImageInputError):
+        trusted_product_thumbnail_url(url)

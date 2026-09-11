@@ -29,6 +29,27 @@ class Base(DeclarativeBase):
     """Base class for all persistent entities."""
 
 
+class SellerHomeSnapshot(StoreScopedMixin, Base):
+    """Latest successful official finance/warehouse evidence, isolated by seller."""
+
+    __tablename__ = "seller_home_snapshots"
+
+    store_code: Mapped[str] = mapped_column(String(80), primary_key=True)
+    kind: Mapped[str] = mapped_column(String(24), primary_key=True)
+    captured_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+
+
+class ErpDataRevision(Base):
+    """Small committed change markers; never contains business payloads."""
+
+    __tablename__ = "erp_data_revisions"
+
+    scope: Mapped[str] = mapped_column(String(64), primary_key=True)
+    topic: Mapped[str] = mapped_column(String(32), primary_key=True)
+    revision: Mapped[str] = mapped_column(String(32), nullable=False)
+
+
 class CollectionRun(StoreScopedMixin, Base):
     """One collection attempt and its outcome."""
 
@@ -791,6 +812,77 @@ class CompetitorSnapshot(Base):
     offers: Mapped[list[dict[str, Any]] | None] = mapped_column(JSON)
 
 
+class CompetitorCollectionJob(Base):
+    """One durable competitor crawl item leased by exactly one worker at a time."""
+
+    __tablename__ = "competitor_collection_jobs"
+    __table_args__ = (
+        UniqueConstraint(
+            "batch_id",
+            "plid",
+            name="uq_competitor_collection_jobs_batch_plid",
+        ),
+        Index(
+            "ix_competitor_collection_jobs_claim",
+            "status",
+            "available_at",
+            "lease_expires_at",
+            "priority",
+            "item_index",
+        ),
+        Index(
+            "ix_competitor_collection_jobs_batch_status",
+            "batch_id",
+            "status",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    batch_id: Mapped[str] = mapped_column(String(100), nullable=False)
+    item_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    plid: Mapped[str] = mapped_column(String(30), nullable=False)
+    url: Mapped[str] = mapped_column(Text, nullable=False)
+    followers_only: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    with_stock_probe: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    status: Mapped[str] = mapped_column(String(30), nullable=False, default="pending")
+    priority: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    max_attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=3)
+    available_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    lease_owner: Mapped[str | None] = mapped_column(String(100))
+    lease_token: Mapped[str | None] = mapped_column(String(64))
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    title: Mapped[str | None] = mapped_column(Text)
+    message: Mapped[str | None] = mapped_column(Text)
+    failure_kind: Mapped[str | None] = mapped_column(String(50))
+    retryable: Mapped[bool | None] = mapped_column(Boolean)
+    discovered_targets: Mapped[list[dict[str, Any]] | None] = mapped_column(JSON)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class CompetitorWorkerHeartbeat(Base):
+    """Latest liveness and assignment reported by one distributed crawler worker."""
+
+    __tablename__ = "competitor_worker_heartbeats"
+
+    worker_id: Mapped[str] = mapped_column(String(100), primary_key=True)
+    node_name: Mapped[str] = mapped_column(String(100), nullable=False)
+    egress_label: Mapped[str] = mapped_column(String(100), nullable=False)
+    state: Mapped[str] = mapped_column(String(30), nullable=False)
+    current_job_id: Mapped[int | None] = mapped_column(Integer)
+    current_plid: Mapped[str | None] = mapped_column(String(30))
+    last_error: Mapped[str | None] = mapped_column(Text)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    last_seen_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        index=True,
+    )
+
+
 class CompetitorReview(Base):
     """Latest known public review body for a watched competitor product."""
 
@@ -1318,6 +1410,7 @@ class DailyReportObservation(StoreScopedMixin, Base):
             "offer_id",
             name="uq_daily_report_observation_store_run_offer",
         ),
+        Index("ix_daily_report_observations_store_run_views", "store_code", "run_id", "page_views_30_days"),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)

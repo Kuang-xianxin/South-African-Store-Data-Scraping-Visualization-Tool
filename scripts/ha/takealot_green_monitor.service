@@ -1,0 +1,19 @@
+[Unit]
+Description=Read-only production green HTTPS and radar latency monitor
+After=network-online.target nginx.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=takealot-monitor
+SupplementaryGroups=adm
+ExecStart=/usr/bin/python3 /opt/takealot-green-monitor/green_public_monitor.py
+StateDirectory=takealot-green-monitor
+StateDirectoryMode=0755
+TimeoutStartSec=55
+UMask=0022
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX

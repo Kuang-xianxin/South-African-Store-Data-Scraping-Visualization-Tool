@@ -46,7 +46,6 @@ test("keeps identifier matching as substring-only", () => {
 test("all product-name search pages use the shared fuzzy matcher", () => {
   const directMatcherPages = [
     "KeywordTrafficPage.vue",
-    "SearchRankingPage.vue",
     "QuadrantsPage.vue",
     "AnomalyProductsPage.vue",
   ];
@@ -55,6 +54,13 @@ test("all product-name search pages use the shared fuzzy matcher", () => {
     assert.match(source, /matchesProductSearch/);
     assert.match(source, /模糊搜索/);
   }
+
+  const titlePicker = readFileSync(new URL("../src/titleProductPicker.ts", import.meta.url), "utf8");
+  assert.match(titlePicker, /matchesProductSearch/);
+  const titlePage = readFileSync(new URL("../src/pages/SearchRankingPage.vue", import.meta.url), "utf8");
+  assert.match(titlePage, /TitleProductPicker/);
+  const titleSelector = readFileSync(new URL("../src/components/TitleProductPicker.vue", import.meta.url), "utf8");
+  assert.match(titleSelector, /filterPickerFamilies/);
 
   const competitorPage = readFileSync(
     new URL("../src/pages/CompetitorsPage.vue", import.meta.url),

@@ -171,19 +171,13 @@ def load_connected_store_offer_points(
             baseline.c.productline_id.in_(normalized_plids)
         )
 
-    combined = union_all(observation_statement, baseline_statement).subquery()
+    # Read one consistent UNION statement without a wide derived-table sort.
+    # MySQL otherwise materializes titles/images too, potentially spilling to disk.
+    # The caller already needs these points in memory; sort their references here.
     rows = session.connection().execute(
-        select(
-            *(combined.c[name] for name in common_columns),
-            combined.c.source_rank,
-        ).order_by(
-            combined.c.store_code.asc(),
-            combined.c.source_rank.asc(),
-            combined.c.captured_at.desc(),
-            combined.c.offer_id.asc(),
-        )
+        union_all(observation_statement, baseline_statement)
     ).mappings()
-    return [
+    points = [
         ConnectedStoreOfferPoint(
             id=row["id"],
             store_code=row["store_code"],
@@ -205,6 +199,11 @@ def load_connected_store_offer_points(
         )
         for row in rows
     ]
+    # Stable passes preserve the original store/source/time/Offer ordering.
+    points.sort(key=lambda point: point.offer_id)
+    points.sort(key=lambda point: point.captured_at, reverse=True)
+    points.sort(key=lambda point: (point.store_code, point.source_kind != "observation"))
+    return points
 
 
 def connected_store_plids(session: Session) -> set[str]:

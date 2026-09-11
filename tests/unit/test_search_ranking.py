@@ -15,6 +15,7 @@ from sqlalchemy.orm import Session
 from takealot_ops.competitors.api import CompetitorPublicClient
 from takealot_ops.search_ranking.service import (
     AdjacentDemandCandidate,
+    CodexCliProductVisionClient,
     DecisionParameterChoice,
     DecisionParameterConfirmation,
     FusionVisionProfile,
@@ -51,6 +52,8 @@ from takealot_ops.search_ranking.service import (
     _cross_check_image_profile,
     _discover_keyword_candidates,
     _enrich_profile_with_confirmed_facts,
+    _formal_category_relation,
+    _formal_category_title_identity_resolution,
     _inject_comparison_resample_candidates,
     _opportunity_gate_from_result,
     _opportunity_phrase_safety,
@@ -824,6 +827,56 @@ async def test_public_search_pacer_spaces_autocomplete_and_both_page_requests() 
 
 
 @pytest.mark.asyncio
+async def test_public_search_pacer_caches_and_bounds_formal_category_by_plid(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class UnderlyingClient:
+        def __init__(self) -> None:
+            self.category_calls = 0
+
+        async def fetch_product_category_path(
+            self,
+            url: str,
+        ) -> tuple[dict[str, str | None], ...]:
+            del url
+            self.category_calls += 1
+            return (
+                {
+                    "name": "LED Lights",
+                    "id": "27254",
+                    "type": "category",
+                    "slug": "led-lights",
+                },
+            )
+
+    monkeypatch.setattr(search_ranking_service, "FORMAL_CATEGORY_LOOKUP_REQUEST_LIMIT", 1)
+    underlying = UnderlyingClient()
+    client = _PacedSearchClient(
+        underlying,  # type: ignore[arg-type]
+        minimum_interval_seconds=0,
+    )
+
+    first = await client.fetch_product_category_path(
+        "https://www.takealot.com/first-slug/PLID102862001"
+    )
+    cached = await client.fetch_product_category_path(
+        "https://www.takealot.com/different-slug/PLID102862001"
+    )
+    budget_exhausted = await client.fetch_product_category_path(
+        "https://www.takealot.com/another-product/PLID102862002"
+    )
+
+    assert first == cached
+    assert first["status"] == "available"
+    assert first["category_path"][0]["name"] == "LED Lights"
+    assert budget_exhausted["status"] == "budget_exhausted"
+    assert underlying.category_calls == 1
+    assert client.category_request_count == 1
+    assert client.category_cache_hit_count == 1
+    assert client.request_count == 1
+
+
+@pytest.mark.asyncio
 async def test_public_request_throttle_adds_bounded_random_jitter() -> None:
     clock_values = iter([0.0, 0.2, 1.4])
     sleeps: list[float] = []
@@ -861,7 +914,10 @@ async def test_ranking_public_client_disables_search_endpoint_retries() -> None:
     client._get_json = fake_get_json  # type: ignore[method-assign]
 
     assert await client.fetch_search_suggestions("rgb") == []
-    assert retries_seen == [0]
+    assert await client.fetch_product_category_path(
+        "https://www.takealot.com/example/PLID123"
+    ) == ()
+    assert retries_seen == [0, 0]
 
 
 @pytest.mark.asyncio
@@ -2122,31 +2178,33 @@ async def test_changed_adjacent_title_resamples_only_its_primary_evidence_end_to
     assert FakeVisionClient.calls == 2
 
 
-def test_provider_signature_uses_doubao_then_qwen_and_disables_codex_cli(
+def test_active_route_uses_sol_cli_even_when_legacy_keys_are_present(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("DASHSCOPE_API_KEY", "qwen-secret")
     monkeypatch.setenv("ARK_API_KEY", "doubao-secret")
-    monkeypatch.setenv("TAKEALOT_SEARCH_CODEX_CLI_PATH", str(tmp_path / "codex.exe"))
+    cli = tmp_path / "codex.exe"
+    cli.touch()
+    monkeypatch.setenv("TAKEALOT_SEARCH_CODEX_CLI_PATH", str(cli))
     runtime = SearchRankingRuntimeSettings.from_env(tmp_path)
 
-    assert runtime.provider_signature == (
-        "doubao:doubao-seed-2-0-lite-260215|qwen:qwen3.7-plus"
-    )
-    assert runtime.primary_provider.name == "doubao"
-    assert runtime.primary_provider.model == "doubao-seed-2-0-lite-260215"
-    assert runtime.fallback_provider is not None
-    assert runtime.fallback_provider.name == "qwen"
-    assert runtime.fallback_provider.model == "qwen3.7-plus"
-    assert runtime.codex_cli_path is None
-    assert all(provider.name != "codex_cli" for provider in runtime.providers)
+    assert runtime.provider_signature == "codex_cli:gpt-5.6-sol"
+    assert runtime.primary_provider.name == "codex_cli"
+    assert runtime.primary_provider.model == "gpt-5.6-sol"
+    assert runtime.fallback_provider is None
+    assert runtime.codex_cli_path == cli
+    assert len(runtime.providers) == 1
     assert "secret" not in runtime.provider_signature
-
     service = SearchRankingService(tmp_path)
-    assert service._vision_client_factory is OpenAICompatibleProductVisionClient
-    assert not hasattr(service, "prepare_model_quota")
-    assert not hasattr(service, "model_quota_status")
+    assert service._vision_client_factory is CodexCliProductVisionClient
+    status = service.status_payload()
+    assert status["configured"] is True
+    assert status["pricing_mode"] == "codex_subscription_quota"
+    assert status["model_policy"]["codex_cli_execution_enabled"] is True
+    assert status["model_policy"]["model_fallback_allowed"] is False
+    cli.unlink()
+    assert service.status_payload()["configured"] is False
 
 
 @pytest.mark.asyncio
@@ -4684,6 +4742,525 @@ def test_semantic_relation_does_not_grant_s_without_query_product_identity() -> 
     assert evidence["semantic_relation_same_product_result_count"] == 24
 
 
+def test_formal_category_relation_does_not_treat_a_broad_parent_as_same_product() -> None:
+    target = [
+        {"name": "Home & Kitchen", "id": "12", "type": "department"},
+        {"name": "Homeware", "id": "26000", "type": "category"},
+        {"name": "LED Wall Lights", "id": "27254", "type": "category"},
+    ]
+    shelf = [
+        {"name": "Home & Kitchen", "id": "12", "type": "department"},
+        {"name": "Homeware", "id": "26000", "type": "category"},
+        {"name": "Wall Shelving & Storage", "id": "28359", "type": "category"},
+    ]
+
+    assert _formal_category_relation(target, shelf) == "disjoint_category_branch"
+    assert _formal_category_relation(target, shelf[:1]) == "unavailable"
+
+
+def test_formal_category_and_visual_modifiers_replace_conflicting_search_identity() -> None:
+    visual_profile = VisionProfile(
+        product_name="White Hexagonal Wall Shelf Unit",
+        category="Home & Decor > Storage & Organisation > Wall Shelves",
+        product_type_terms=["hexagon shelf", "honeycomb wall shelf"],
+        same_product_aliases=["hexagon display rack", "honeycomb organizer"],
+        same_demand_product_terms=["floating shelves"],
+        distinctive_terms=["interlocking hexagons", "modular honeycomb pattern"],
+        keywords=[
+            KeywordCandidate(phrase="hexagon wall shelf", rationale="Visual identity"),
+            KeywordCandidate(phrase="honeycomb shelf unit", rationale="Visual identity"),
+        ],
+        autocomplete_seeds=[
+            KeywordCandidate(phrase="hexagon shelf white", rationale="Visual root"),
+            KeywordCandidate(phrase="honeycomb wall storage", rationale="Visual root"),
+        ],
+        opportunity_seeds=[
+            KeywordCandidate(phrase="modular hexagon shelf", rationale="Adjacent need")
+        ],
+        exclusions=["LED wall light"],
+        confidence=0.95,
+        title_suggestion="Hexagon Wall Shelf",
+        title_reason="Visual classification",
+    )
+    model_profile = visual_profile.model_copy(
+        update={
+            "product_name": "White Hexagonal Honeycomb Wall Shelf Unit",
+            "product_type_terms": ["hexagon wall shelf", "geometric wall shelf"],
+            "same_product_aliases": [
+                "white hexagon shelf",
+                "hexagon display rack",
+                "honeycomb organizer",
+                "geometric wall cubby",
+            ],
+            "keywords": [
+                KeywordCandidate(phrase="honeycomb shelf unit", rationale="Fusion identity"),
+                KeywordCandidate(phrase="honeycomb wall storage", rationale="Fusion identity"),
+            ],
+        }
+    )
+    target_category = {
+        "status": "available",
+        "plid": "102862001",
+        "category_path": [
+            {"name": "Computers & Tablets", "id": "13", "type": "department"},
+            {
+                "name": "Smart Home & Connected Living",
+                "id": "27220",
+                "type": "category",
+            },
+            {"name": "Smart Lighting", "id": "27251", "type": "category"},
+            {"name": "LED Lights", "id": "27254", "type": "category"},
+        ],
+    }
+
+    resolved, evidence = _formal_category_title_identity_resolution(
+        model_profile,
+        visual_profile=visual_profile,
+        source_title="11 Hexagon White Honeycomb LED Wall Light",
+        target_category_evidence=target_category,
+    )
+
+    expected_terms = [
+        "hexagon led wall light",
+        "honeycomb led wall light",
+        "hexagon wall light",
+        "honeycomb wall light",
+    ]
+    assert evidence["applied"] is True
+    assert evidence["status"] == "applied"
+    assert evidence["category_identity_tokens"] == ["led", "light"]
+    assert evidence["title_identity_base"] == "led wall light"
+    assert evidence["visual_supported_modifiers"] == ["hexagon", "honeycomb"]
+    assert evidence["title_identity_terms"] == expected_terms
+    assert "hexagon wall shelf" in evidence["suppressed_model_terms"]
+    assert resolved.product_type_terms == expected_terms[:2]
+    assert resolved.same_product_aliases == expected_terms[2:]
+    assert resolved.same_demand_product_terms == ["led wall light"]
+    assert resolved.opportunity_seeds == []
+    assert resolved.category.endswith("Smart Lighting > LED Lights")
+
+    lexicon = search_ranking_service._same_product_lexicon(
+        resolved,
+        model_profile=model_profile,
+        source_title="11 Hexagon White Honeycomb LED Wall Light",
+        formal_category_identity_resolution=evidence,
+    )
+    assert [entry["term"] for entry in lexicon["entries"]] == expected_terms
+    assert all(
+        entry["sources"] == ["formal_category_title_identity_phrase"]
+        for entry in lexicon["entries"]
+    )
+    excluded = {(entry["term"], entry["reason"]) for entry in lexicon["excluded"]}
+    assert ("led wall light", "formal_category_requires_visual_modifier") in excluded
+    assert (
+        "hexagon wall shelf",
+        "formal_category_title_identity_conflict",
+    ) in excluded
+    assert [
+        candidate.phrase
+        for candidate in _precise_candidates(
+            resolved,
+            same_product_lexicon=lexicon,
+        )[:4]
+    ] == expected_terms
+
+
+def test_formal_category_resolution_preserves_aligned_or_human_confirmed_identity() -> None:
+    profile = VisionProfile(
+        product_name="Hexagon LED Wall Light",
+        category="LED Lights",
+        product_type_terms=["hexagon led wall light", "led wall lamp"],
+        same_product_aliases=["honeycomb wall light"],
+        distinctive_terms=["hexagon", "honeycomb"],
+        keywords=[
+            KeywordCandidate(phrase="hexagon led wall light", rationale="Aligned identity"),
+            KeywordCandidate(phrase="honeycomb wall light", rationale="Aligned alias"),
+        ],
+        autocomplete_seeds=[
+            KeywordCandidate(phrase="hexagon wall light", rationale="Aligned root"),
+            KeywordCandidate(phrase="honeycomb led light", rationale="Aligned root"),
+        ],
+        opportunity_seeds=[KeywordCandidate(phrase="wall lighting", rationale="Adjacent need")],
+        exclusions=[],
+        confidence=0.95,
+        title_suggestion="Hexagon LED Wall Light",
+        title_reason="Aligned identity",
+    )
+    target_category = [
+        {"name": "Computers & Tablets", "id": "13", "type": "department"},
+        {"name": "LED Lights", "id": "27254", "type": "category"},
+    ]
+
+    aligned, aligned_evidence = _formal_category_title_identity_resolution(
+        profile,
+        visual_profile=profile,
+        source_title="11 Hexagon White Honeycomb LED Wall Light",
+        target_category_evidence=target_category,
+    )
+    assert aligned == profile
+    assert aligned_evidence["applied"] is False
+    assert aligned_evidence["status"] == "model_identity_aligned"
+
+    conflicting = profile.model_copy(
+        update={
+            "product_name": "Hexagon Wall Shelf",
+            "category": "Wall Shelves",
+            "product_type_terms": ["hexagon wall shelf"],
+            "same_product_aliases": ["honeycomb shelf"],
+        }
+    )
+    preserved, human_evidence = _formal_category_title_identity_resolution(
+        conflicting,
+        visual_profile=conflicting,
+        source_title="11 Hexagon White Honeycomb LED Wall Light",
+        target_category_evidence=target_category,
+        confirmed_fact_records=[
+            {"fact_type": "product_type", "fact_term": "hexagon display shelf"}
+        ],
+    )
+    assert preserved == conflicting
+    assert human_evidence["applied"] is False
+    assert human_evidence["status"] == "human_identity_preserved"
+
+
+@pytest.mark.asyncio
+async def test_formal_category_resolution_searches_only_narrow_resolved_roots() -> None:
+    visual_profile = VisionProfile(
+        product_name="White Hexagonal Wall Shelf Unit",
+        category="Wall Shelves",
+        product_type_terms=["hexagon shelf", "honeycomb wall shelf"],
+        same_product_aliases=["honeycomb organizer"],
+        distinctive_terms=["interlocking hexagons", "honeycomb pattern"],
+        keywords=[
+            KeywordCandidate(phrase="hexagon wall shelf", rationale="Visual identity"),
+            KeywordCandidate(phrase="honeycomb shelf unit", rationale="Visual identity"),
+        ],
+        autocomplete_seeds=[
+            KeywordCandidate(phrase="hexagon shelf white", rationale="Visual root"),
+            KeywordCandidate(phrase="honeycomb storage", rationale="Visual root"),
+        ],
+        opportunity_seeds=[KeywordCandidate(phrase="wall storage", rationale="Adjacent need")],
+        exclusions=[],
+        confidence=0.95,
+        title_suggestion="Hexagon Wall Shelf",
+        title_reason="Visual identity",
+    )
+    target_category = [
+        {"name": "Computers & Tablets", "id": "13", "type": "department"},
+        {"name": "LED Lights", "id": "27254", "type": "category"},
+    ]
+    resolved, evidence = _formal_category_title_identity_resolution(
+        visual_profile,
+        visual_profile=visual_profile,
+        source_title="11 Hexagon White Honeycomb LED Wall Light",
+        target_category_evidence=target_category,
+    )
+    lexicon = search_ranking_service._same_product_lexicon(
+        resolved,
+        model_profile=visual_profile,
+        source_title="11 Hexagon White Honeycomb LED Wall Light",
+        formal_category_identity_resolution=evidence,
+    )
+
+    class BroadSuggestionClient:
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+
+        async def fetch_search_suggestions(self, keyword: str) -> list[str]:
+            self.calls.append(keyword)
+            return ["led wall light"]
+
+    client = BroadSuggestionClient()
+    candidates, checks = await _discover_keyword_candidates(
+        client,  # type: ignore[arg-type]
+        profile=resolved,
+        source_title="11 Hexagon White Honeycomb LED Wall Light",
+        official_title="11 Hexagon White Honeycomb LED Wall Light",
+        title_reference_terms=evidence["title_identity_terms"],
+        same_product_lexicon=lexicon,
+        model_autocomplete_seeds=resolved.autocomplete_seeds,
+        model_opportunity_seeds=resolved.opportunity_seeds,
+        title_root_overrides=evidence["title_identity_terms"],
+        blocked_exact_terms=evidence["excluded_broad_title_terms"],
+        max_keywords=14,
+    )
+
+    assert client.calls == evidence["title_identity_terms"]
+    assert all("shelf" not in candidate.phrase.casefold() for candidate in candidates)
+    assert all(candidate.phrase.casefold() != "led wall light" for candidate in candidates)
+    assert all(
+        check["expansions"][0]["reason"] == "formal_category_requires_visual_modifier"
+        for check in checks
+    )
+
+
+@pytest.mark.asyncio
+async def test_formal_category_cluster_vetoes_model_only_false_s_for_wall_shelves() -> None:
+    shelf_category = [
+        {"name": "Home & Kitchen", "id": "12", "type": "department", "slug": None},
+        {"name": "Homeware", "id": "26000", "type": "category", "slug": None},
+        {"name": "Office", "id": "28352", "type": "category", "slug": None},
+        {
+            "name": "Study & Home Office Furniture",
+            "id": "28353",
+            "type": "category",
+            "slug": None,
+        },
+        {"name": "Shelving & Storage", "id": "28359", "type": "category", "slug": None},
+    ]
+    target_category = {
+        "status": "available",
+        "plid": "102862001",
+        "category_path": [
+            {
+                "name": "Computers & Tablets",
+                "id": "13",
+                "type": "department",
+                "slug": None,
+            },
+            {
+                "name": "Smart Home & Connected Living",
+                "id": "27220",
+                "type": "category",
+                "slug": None,
+            },
+            {
+                "name": "Smart Lighting",
+                "id": "27251",
+                "type": "category",
+                "slug": None,
+            },
+            {"name": "LED Lights", "id": "27254", "type": "category", "slug": None},
+        ],
+    }
+
+    class CategoryAwareSearchClient:
+        def __init__(self) -> None:
+            self.category_calls: list[str] = []
+            self.next_calls = 0
+
+        async def fetch_search_first_page(
+            self,
+            keyword: str,
+        ) -> tuple[str, dict[str, Any]]:
+            products = [
+                (str(91_695_015 + index), f"Hexagon Wall Shelf Model {index}")
+                for index in range(3)
+            ]
+            products.extend(
+                (str(92_000_000 + index), f"Floating Shelves Model {index}")
+                for index in range(11)
+            )
+            products.extend(
+                (str(93_000_000 + index), f"Unrelated Product {index}")
+                for index in range(22)
+            )
+            return _search_url(keyword), _payload(products, after="", total=1611)
+
+        async def fetch_search_next_page(
+            self,
+            request_url: str,
+            after: str,
+        ) -> dict[str, Any]:
+            del request_url, after
+            self.next_calls += 1
+            return _payload([], after="", total=1611)
+
+        async def fetch_product_category_path(
+            self,
+            url: str,
+        ) -> list[dict[str, str | None]]:
+            self.category_calls.append(url)
+            return shelf_category
+
+    profile = VisionProfile(
+        product_name="White Hexagonal Honeycomb Wall Shelf Unit",
+        category="Home & Decor > Storage & Organisation > Wall Shelves",
+        product_type_terms=["hexagon wall shelf", "geometric wall shelf"],
+        same_product_aliases=["hexagon display rack"],
+        same_demand_product_terms=["floating shelves"],
+        distinctive_terms=["interlocking hexagons"],
+        keywords=[
+            KeywordCandidate(phrase="hexagon wall shelf", rationale="Model identity"),
+            KeywordCandidate(phrase="geometric wall shelf", rationale="Model identity"),
+        ],
+        autocomplete_seeds=[
+            KeywordCandidate(phrase="hexagon shelf", rationale="Model root"),
+            KeywordCandidate(phrase="wall shelf", rationale="Model root"),
+        ],
+        opportunity_seeds=[
+            KeywordCandidate(phrase="wall decor", rationale="Adjacent need")
+        ],
+        exclusions=["LED wall light", "honeycomb lamp"],
+        confidence=0.95,
+        title_suggestion="Hexagon Wall Shelf",
+        title_reason="Model identity",
+    )
+    candidate = SearchKeywordCandidate(
+        phrase="hexagon wall shelf",
+        rationale="Model same-product lexicon",
+        candidate_source="same_product_lexicon",
+        intended_strategy="core",
+        candidate_provenance=(
+            {
+                "candidate_source": "same_product_lexicon",
+                "intended_strategy": "core",
+                "same_product_lexicon_sources": ["fusion_product_type_terms"],
+            },
+        ),
+    )
+    client = CategoryAwareSearchClient()
+
+    observation = await _collect_keyword_observation(
+        client,  # type: ignore[arg-type]
+        candidate=candidate,
+        candidate_order=1,
+        target_plid="102862001",
+        profile=profile,
+        max_pages=5,
+        relevance_threshold=0.60,
+        page_delay_seconds=0,
+        source_title="11 Hexagon White Honeycomb LED Wall Light",
+        target_category_evidence=target_category,
+    )
+
+    evidence = observation.validation_evidence
+    assert observation.relevance_status == "rejected_irrelevant"
+    assert observation.pages_scanned == 1
+    assert evidence["semantic_relation_grade"] == "C/I"
+    assert evidence["semantic_relation_decision"] == (
+        "formal_category_cluster_conflicts_with_target"
+    )
+    assert evidence["semantic_relation_category_vetoed_s"] is True
+    assert evidence["semantic_relation_category_available_count"] == 3
+    assert evidence["semantic_relation_category_conflict_count"] == 3
+    assert evidence["semantic_relation_category_conflict_cluster"]["terminal_category_key"] == (
+        "id:28359"
+    )
+    assert evidence["semantic_relation_same_product_result_count"] == 0
+    assert evidence["semantic_relation_same_demand_result_count"] == 0
+    assert evidence["semantic_relation_rejected_result_count"] == 36
+    assert all(
+        item["reason"] == "formal_category_conflicts_with_target"
+        for item in evidence["first_page_result_classifications"][:3]
+    )
+    assert all(
+        item["reason"] == "query_category_cluster_invalidates_model_identity"
+        for item in evidence["first_page_result_classifications"][3:14]
+    )
+    assert len(client.category_calls) == 3
+    assert client.next_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_formal_category_labels_support_model_only_s_across_departments() -> None:
+    result_category = [
+        {"name": "Home & Kitchen", "id": "12", "type": "department", "slug": None},
+        {"name": "Decorative LED Lights", "id": "999", "type": "category", "slug": None},
+    ]
+
+    class CategoryAwareSearchClient:
+        async def fetch_search_first_page(
+            self,
+            keyword: str,
+        ) -> tuple[str, dict[str, Any]]:
+            products = [
+                (str(94_000_000 + index), f"Hexagon LED Wall Light Model {index}")
+                for index in range(12)
+            ]
+            products.extend(
+                (str(95_000_000 + index), f"Unrelated Product {index}")
+                for index in range(24)
+            )
+            return _search_url(keyword), _payload(products, after="", total=800)
+
+        async def fetch_search_next_page(
+            self,
+            request_url: str,
+            after: str,
+        ) -> dict[str, Any]:
+            del request_url, after
+            return _payload([], after="", total=800)
+
+        async def fetch_product_category_path(
+            self,
+            url: str,
+        ) -> list[dict[str, str | None]]:
+            del url
+            return result_category
+
+    profile = VisionProfile(
+        product_name="Hexagon LED Wall Light",
+        category="Smart Lighting",
+        product_type_terms=["hexagon led wall light"],
+        same_product_aliases=["honeycomb wall light"],
+        same_demand_product_terms=["decorative wall lighting"],
+        distinctive_terms=["hexagon"],
+        keywords=[
+            KeywordCandidate(phrase="hexagon wall light", rationale="Model identity"),
+            KeywordCandidate(phrase="honeycomb wall light", rationale="Model identity"),
+        ],
+        autocomplete_seeds=[
+            KeywordCandidate(phrase="hexagon light", rationale="Model root"),
+            KeywordCandidate(phrase="wall light", rationale="Model root"),
+        ],
+        opportunity_seeds=[
+            KeywordCandidate(phrase="gaming lights", rationale="Adjacent need")
+        ],
+        exclusions=["wall shelf"],
+        confidence=0.95,
+        title_suggestion="Hexagon LED Wall Light",
+        title_reason="Model identity",
+    )
+    candidate = SearchKeywordCandidate(
+        phrase="hexagon led wall light",
+        rationale="Model same-product lexicon",
+        candidate_source="same_product_lexicon",
+        intended_strategy="core",
+        candidate_provenance=(
+            {
+                "candidate_source": "same_product_lexicon",
+                "intended_strategy": "core",
+                "same_product_lexicon_sources": ["fusion_product_type_terms"],
+            },
+        ),
+    )
+
+    observation = await _collect_keyword_observation(
+        CategoryAwareSearchClient(),  # type: ignore[arg-type]
+        candidate=candidate,
+        candidate_order=1,
+        target_plid="102862001",
+        profile=profile,
+        max_pages=5,
+        relevance_threshold=0.60,
+        page_delay_seconds=0,
+        source_title="11 Hexagon White Honeycomb LED Wall Light",
+        target_category_evidence={
+            "status": "available",
+            "category_path": [
+                {
+                    "name": "Computers & Tablets",
+                    "id": "13",
+                    "type": "department",
+                    "slug": None,
+                },
+                {"name": "LED Lights", "id": "27254", "type": "category", "slug": None},
+            ],
+        },
+    )
+
+    evidence = observation.validation_evidence
+    assert observation.relevance_status == "accepted"
+    assert evidence["semantic_relation_grade"] == "S"
+    assert evidence["semantic_relation_category_vetoed_s"] is False
+    assert evidence["semantic_relation_category_support_count"] == 3
+    assert {
+        item["category_relation_to_target"]
+        for item in evidence["first_page_result_classifications"][:3]
+    } == {"related_category_labels"}
+
+
 def test_cat_storage_page_audit_separates_exact_and_same_demand_competitors() -> None:
     profile = VisionProfile(
         product_name="Foldable cat villa storage unit",
@@ -6420,6 +6997,54 @@ def test_comparison_injection_prioritizes_targets_and_preserves_fresh_classifica
     assert candidates[1].comparison_role == "secondary"
 
 
+def test_formal_category_identity_filters_stale_comparison_queries_and_refills_slots() -> None:
+    current_title = "Hexagon LED Wall Light"
+    fresh = [
+        SearchKeywordCandidate(
+            phrase=phrase,
+            rationale="Resolved formal-category identity",
+            candidate_source="same_product_lexicon",
+            intended_strategy="core",
+        )
+        for phrase in (
+            "hexagon led wall light",
+            "honeycomb led wall light",
+            "hexagon wall light",
+        )
+    ]
+    candidates = _inject_comparison_resample_candidates(
+        fresh,
+        previous={
+            "source_title": "Old Shelf Title",
+            "title_suggestions": [current_title],
+            "issued_strategies": [
+                {
+                    "strategy": "contiguous_core",
+                    "title": current_title,
+                    "evidence_keywords": ["led wall light", "hexagon wall light"],
+                }
+            ],
+            "ranks": {"led wall light": 10, "hexagon wall light": 20},
+        },
+        current_title=current_title,
+        max_keywords=4,
+        allowed_comparison_keywords={
+            "hexagon led wall light",
+            "honeycomb led wall light",
+            "hexagon wall light",
+            "honeycomb wall light",
+        },
+    )
+
+    assert [candidate.phrase for candidate in candidates] == [
+        "hexagon wall light",
+        "hexagon led wall light",
+        "honeycomb led wall light",
+    ]
+    assert all(candidate.phrase != "led wall light" for candidate in candidates)
+    assert candidates[0].comparison_role == "primary"
+
+
 def test_comparison_injection_skips_historical_queries_over_four_words() -> None:
     current_title = "Enclosed Cat Litter Box"
     candidates = _inject_comparison_resample_candidates(
@@ -6619,7 +7244,7 @@ def test_result_page_learning_never_adopts_an_unsupported_competitor_brand() -> 
     )
 
 
-def test_web_reads_local_status_and_missing_key_never_starts_external_search(
+def test_web_reads_local_status_and_missing_cli_never_starts_external_search(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -6772,13 +7397,13 @@ def test_web_reads_local_status_and_missing_key_never_starts_external_search(
         "pause_after_provider_or_network_error": True,
         "reverse_image_search": False,
         "requires_snapshot_confirmation": True,
-        "primary_provider": "doubao",
-        "primary_model": "doubao-seed-2-0-lite-260215",
+        "primary_provider": "codex_cli",
+        "primary_model": "gpt-5.6-sol",
         "fallback_provider": None,
         "fallback_model": None,
         "model_fallback_allowed": False,
         "codex_cli_integration_retained": True,
-        "codex_cli_execution_enabled": False,
+        "codex_cli_execution_enabled": True,
         "public_request_min_interval_seconds": 3.0,
         "public_request_max_interval_seconds": 5.0,
     }
@@ -6786,8 +7411,8 @@ def test_web_reads_local_status_and_missing_key_never_starts_external_search(
     assert batch_without_acknowledgements.status_code == 422
     assert batch_without_provider.status_code == 409
     assert run.status_code == 503
-    assert "DASHSCOPE_API_KEY" in run.json()["detail"]
-    assert "ARK_API_KEY" in run.json()["detail"]
+    assert "Codex CLI" in run.json()["detail"]
+    assert batch_preview.json()["preview"]["estimated_cost"]["cost_estimate_applicable"] is False
     assert reverse_without_acknowledgements.status_code == 404
     assert reverse_with_false_confirmation.status_code == 404
     assert manual_fact_without_acknowledgements.status_code == 422

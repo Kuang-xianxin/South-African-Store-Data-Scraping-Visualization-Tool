@@ -20,6 +20,7 @@ from takealot_ops.exchange_rates import (
     ExchangeRateUnavailable,
 )
 from takealot_ops.product_master import load_product_master_links, normalize_product_sku
+from takealot_ops.nf_profit import load_nf_catalog, workbook_profit
 from takealot_ops.storage.models import DailySalesMetricState, ErpStore, OfferCurrent, SaleItem
 from takealot_ops.storage.store_context import normalize_store_code, store_scope
 
@@ -135,6 +136,7 @@ def load_own_store_profitability(
                 )
     return build_own_store_profitability_payload(
         offers,
+        nf_catalog=load_nf_catalog(),
         rate_service=rate_service,
         store_codes=set(normalized_codes),
         fee_window_start=fee_window_start,
@@ -207,6 +209,7 @@ def load_own_store_profitability_bulk(
     return {
         plid: build_own_store_profitability_payload(
             offers_by_plid.get(plid, []),
+            nf_catalog=load_nf_catalog(),
             rate_service=rate_service,
             store_codes=set(normalized_codes),
             fee_window_start=fee_window_start,
@@ -322,12 +325,13 @@ def build_own_store_profitability_payload(
     fee_window_start: date,
     fee_window_end: date,
     fee_window_days: int,
+    nf_catalog: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build JSON-safe unit-profit scenarios from explicit local evidence."""
     quote: ExchangeRateQuote | None = None
     has_cost = any(_positive_decimal(offer.cost_rmb) is not None for offer in offers)
     rate_status = "not_required"
-    if has_cost:
+    if has_cost and nf_catalog is None:
         try:
             quote = rate_service.latest()
         except ExchangeRateUnavailable:
@@ -343,6 +347,18 @@ def build_own_store_profitability_payload(
         )
         for offer in offers
     ]
+    if nf_catalog is not None:
+        for item, offer in zip(items, offers, strict=True):
+            model = workbook_profit(
+                nf_catalog, company_sku=offer.company_sku, platform_sku=offer.sku,
+                store_code=offer.store_code, price=offer.selling_price_zar,
+            )
+            item["workbook_profit"] = model
+            item["message"] = model["message"]
+            calculation = model["calculation"]
+            item["cost_rmb"] = calculation["cost_rmb"] if calculation else None
+            item["cost_zar"] = None
+            item["cost_effective_date"] = None
     if not items:
         message = "当前 PLID 没有可见的 Seller API 自有 Offer。"
     elif not has_cost:
@@ -351,6 +367,8 @@ def build_own_store_profitability_payload(
         message = "人民币成本已保留，但参考汇率暂不可用，未生成利润换算。"
     else:
         message = "利润按当前单件售价、当前有效人民币成本和披露汇率逐 Offer 计算。"
+    if nf_catalog is not None:
+        message = "按 NF毛利计算.xlsx 利润计算表的箱规、成本、固定汇率和费用逐 Offer 计算。"
     return {
         "items": items,
         "store_codes": sorted(store_codes),

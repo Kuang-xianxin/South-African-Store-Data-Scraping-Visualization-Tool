@@ -1,8 +1,13 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, onUnmounted, ref, watch } from "vue";
+import { cachedNumberFormatter } from "../numberFormatters";
+import TitleOptimizationReview from "../components/TitleOptimizationReview.vue";
+import TitleProductPicker from "../components/TitleProductPicker.vue";
+import { useLiveUpdates } from "../liveUpdates";
+import { computed, nextTick, onMounted, onUnmounted, ref, shallowRef, watch } from "vue";
 
 import {
   analyzeSearchRanking,
+  reviewSearchRankingTitles,
   ApiRequestError,
   confirmSearchRankingDecisionParameters,
   confirmSearchRankingProductFacts,
@@ -18,7 +23,6 @@ import {
   startSearchRankingBatch,
 } from "../api";
 import { PRODUCT_IMAGE_SIZE, productThumbnailUrl } from "../productImages";
-import { matchesProductSearch } from "../productSearch";
 import { groupSearchRankingProducts } from "../searchRankingFamilies";
 import {
   rootExpansionCheckIsPhrase,
@@ -26,6 +30,7 @@ import {
 } from "../searchRankingRootExpansion";
 import { formatChinaDateTime } from "../time";
 import type {
+  CompetitorCategoryBreadcrumb,
   OwnStoreScope,
   SearchRankingAnalysis,
   SearchRankingDetailPayload,
@@ -49,16 +54,28 @@ const props = defineProps<{
   canOperate: boolean;
   storeScope?: OwnStoreScope;
   multiStoreLabel?: string;
+  active?: boolean;
+  requestedOfferId?: string;
+  requestedStoreCode?: string;
   onPermissionDenied?: (message: string) => void;
 }>();
+const emit = defineEmits<{ selectProduct: [selection: { offerId: string; storeCode: string }] }>();
 
-const listPayload = ref<SearchRankingListPayload | null>(null);
-const detail = ref<SearchRankingDetailPayload | null>(null);
+const liveUpdateState = useLiveUpdates("search-ranking", async () => {
+  await loadProducts(selectedOfferId.value, true);
+  if (rootExpansionLibrary.value) await loadRootExpansionLibrary(true);
+  await loadBatchPreview();
+  return !error.value;
+}, {
+  busy: () => loadingList.value || loadingDetail.value || analyzing.value || factSaving.value || decisionParameterSaving.value || Boolean(batchAction.value),
+  editing: () => searchHasPendingEdits(),
+  enabled: () => props.active !== false,
+});
+
+const listPayload = shallowRef<SearchRankingListPayload | null>(null);
+const detail = shallowRef<SearchRankingDetailPayload | null>(null);
 const selectedOfferId = ref("");
 const selectedStoreCode = ref("");
-const search = ref("");
-const identityDifferenceFilter = ref<"all" | "high" | "moderate" | "aligned" | "manual" | "unanalysed">("all");
-const titleScoreFilter = ref<"all" | "85_plus" | "70_84" | "55_69" | "below_55" | "insufficient" | "unscored">("all");
 const loadingList = ref(false);
 const loadingDetail = ref(false);
 const analyzing = ref(false);
@@ -69,7 +86,9 @@ const decisionParameterSaving = ref(false);
 const decisionParameterChoices = ref<Record<string, boolean | null>>({});
 const factRevocationTarget = ref<SearchRankingProductFactRecord | null>(null);
 const factRevocationReason = ref("");
-const rootExpansionLibrary = ref<SearchRootExpansionLibraryPayload | null>(null);
+const rootExpansionLibrary = shallowRef<SearchRootExpansionLibraryPayload | null>(null);
+const rootLibraryElement = ref<HTMLElement | null>(null);
+let rootLibraryObserver: IntersectionObserver | null = null;
 const rootExpansionLibrarySearch = ref("");
 const rootExpansionLibraryLoading = ref(false);
 const batchPreviewPayload = ref<SearchRankingBatchPreviewPayload | null>(null);
@@ -83,6 +102,7 @@ const factDrafts = ref<Array<{
   statement: string;
 }>>([]);
 const error = ref("");
+const requestedProductUnavailable = ref(false);
 const failedImages = ref(new Set<string>());
 const rankingDetailElement = ref<HTMLElement | null>(null);
 const rankingDetailMinimumHeight = ref(0);
@@ -93,40 +113,6 @@ let productListRequestSequence = 0;
 const products = computed(() => listPayload.value?.items ?? []);
 const productFamilies = computed(() => groupSearchRankingProducts(products.value));
 const eligibility = computed(() => listPayload.value?.eligibility ?? null);
-const filteredProductFamilies = computed(() => {
-  return productFamilies.value.filter((family) => {
-    const textMatches = family.variants.some((item) => matchesProductSearch(
-      {
-        productNames: [item.title, item.company_product_name],
-        otherValues: [
-          item.sku,
-          item.company_sku,
-          item.offer_id,
-          item.productline_id,
-          item.store_name,
-          item.store_code,
-        ],
-      },
-      search.value,
-    ));
-    if (!textMatches) return false;
-    const latest = family.latest_analysis;
-    const differenceMatches = identityDifferenceFilter.value === "all"
-      || (identityDifferenceFilter.value === "manual" && latest?.manual_fact_required)
-      || (identityDifferenceFilter.value === "unanalysed" && !latest)
-      || latest?.identity_difference_level === identityDifferenceFilter.value;
-    if (!differenceMatches) return false;
-    const score = latest?.title_score_value;
-    const scoreMatches = titleScoreFilter.value === "all"
-      || (titleScoreFilter.value === "unscored" && (score === null || score === undefined))
-      || (titleScoreFilter.value === "insufficient" && latest?.title_score_band === "insufficient_evidence")
-      || (titleScoreFilter.value === "85_plus" && score !== null && score !== undefined && score >= 85)
-      || (titleScoreFilter.value === "70_84" && score !== null && score !== undefined && score >= 70 && score < 85)
-      || (titleScoreFilter.value === "55_69" && score !== null && score !== undefined && score >= 55 && score < 70)
-      || (titleScoreFilter.value === "below_55" && score !== null && score !== undefined && score < 55);
-    return scoreMatches;
-  });
-});
 const selectedProduct = computed(() => detail.value?.product ?? null);
 const selectedFamily = computed(() => productFamilies.value.find((family) =>
   family.variants.some(
@@ -381,24 +367,42 @@ const titleStrategies = computed<SearchRankingTitleStrategy[]>(() => {
 onMounted(() => {
   window.scrollTo({ top: 0, left: 0, behavior: "auto" });
   void loadProducts();
-  void loadRootExpansionLibrary();
+  if (typeof IntersectionObserver !== "undefined" && rootLibraryElement.value) {
+    rootLibraryObserver = new IntersectionObserver((entries) => {
+      if (entries.some((entry) => entry.isIntersecting) && liveUpdateState.isActive()) {
+        rootLibraryObserver?.disconnect();
+        void loadRootExpansionLibrary();
+      }
+    }, { rootMargin: "300px" });
+    rootLibraryObserver.observe(rootLibraryElement.value);
+  }
   void loadBatchPreview();
 });
 
 watch(() => props.storeScope, () => {
   void loadProducts();
 });
+watch([() => props.requestedOfferId, () => props.requestedStoreCode], () => {
+  if (!props.requestedOfferId || loadingList.value) return;
+  const requested = products.value.find((item) => item.offer_id === props.requestedOfferId
+    && String(item.store_code ?? "") === String(props.requestedStoreCode ?? ""));
+  requestedProductUnavailable.value = !requested;
+  if (requested && (requested.offer_id !== selectedOfferId.value || String(requested.store_code ?? "") !== selectedStoreCode.value)) {
+    void selectProduct(requested);
+  }
+});
 
 onUnmounted(() => {
+  rootLibraryObserver?.disconnect();
   if (batchPollTimer) clearTimeout(batchPollTimer);
 });
 
-async function loadProducts(preferredOfferId = "") {
+async function loadProducts(preferredOfferId = "", preserve = false) {
   const requestSequence = ++productListRequestSequence;
   const requestedStoreScope = props.storeScope ?? "current";
   detailRequestSequence += 1;
   loadingDetail.value = false;
-  loadingList.value = true;
+  loadingList.value = !preserve;
   error.value = "";
   try {
     const payload = await fetchSearchRankingProducts(requestedStoreScope);
@@ -407,6 +411,15 @@ async function loadProducts(preferredOfferId = "") {
       || requestedStoreScope !== (props.storeScope ?? "current")
     ) return;
     listPayload.value = payload;
+    loadingList.value = false;
+    const requested = products.value.find((item) => item.offer_id === props.requestedOfferId
+      && String(item.store_code ?? "") === String(props.requestedStoreCode ?? ""));
+    requestedProductUnavailable.value = Boolean(props.requestedOfferId && !requested);
+    if (requested) {
+      await selectProduct(requested, String(requested.store_code ?? ""), preserve);
+      return;
+    }
+    if (requestedProductUnavailable.value) return;
     const preferredFamily = productFamilies.value.find((family) =>
       family.variants.some(
         (item) =>
@@ -421,8 +434,10 @@ async function loadProducts(preferredOfferId = "") {
       ?? productFamilies.value.find((family) => family.latest_analysis?.status === "completed")
       ?? productFamilies.value.find((family) => family.representative.analyzable)
       ?? productFamilies.value[0];
-    const next = nextFamily?.representative;
-    if (next) await selectProduct(next);
+    const next = (preserve
+      ? preferredFamily?.variants.find((item) => item.offer_id === preferredOfferId)
+      : null) ?? nextFamily?.representative;
+    if (next) await selectProduct(next, String(next.store_code ?? ""), preserve);
     else {
       selectedOfferId.value = "";
       selectedStoreCode.value = "";
@@ -452,7 +467,11 @@ function scheduleBatchPoll() {
   if (batchPollTimer) clearTimeout(batchPollTimer);
   batchPollTimer = null;
   if (!batchIsActive.value) return;
-  batchPollTimer = setTimeout(() => void refreshBatchStatus(), 2_500);
+  batchPollTimer = setTimeout(() => {
+    if (liveUpdateState.isActive() && document.visibilityState === "visible") {
+      void refreshBatchStatus();
+    } else scheduleBatchPoll();
+  }, 2_500);
 }
 
 async function refreshBatchStatus() {
@@ -461,7 +480,7 @@ async function refreshBatchStatus() {
     const payload = await fetchSearchRankingBatchStatus();
     if (batchPreviewPayload.value) batchPreviewPayload.value.batch = payload.batch;
     if (wasActive && !batchIsActive.value) {
-      await loadProducts(selectedOfferId.value);
+      if (!searchHasPendingEdits()) await loadProducts(selectedOfferId.value, true);
       await loadBatchPreview();
       return;
     }
@@ -484,7 +503,7 @@ async function startFullBatch() {
   const accepted = window.confirm([
     `确认串行分析 ${preview.store_count} 个授权店铺的 ${preview.eligible_count} 个商品族（由 ${preview.eligible_offer_count} 条有效 Offer 按同店同 PLID 合并）？`,
     `预计 ${preview.fresh_vision_count} 个商品族需新双阶段模型分析（隔离识图 + 图文融合），约 ${formatWholeNumber(preview.estimated_usage.total_tokens)} Token。`,
-    `常见费用约 ¥${cost.typical_low_cny.toFixed(2)}–¥${cost.typical_high_cny.toFixed(2)}，保守上界约 ¥${cost.conservative_upper_cny.toFixed(2)}。`,
+    cost.pricing_mode === "codex_subscription_quota" ? "使用 Codex 登录额度；本系统每周窗口最多新增消耗10个百分点，不按 API 单价估算。" : `常见费用约 ¥${cost.typical_low_cny.toFixed(2)}–¥${cost.typical_high_cny.toFixed(2)}，保守上界约 ¥${cost.conservative_upper_cny.toFixed(2)}。`,
     `预计用时约 ${duration.likely_min_hours}–${duration.likely_max_hours} 小时。公开请求全程单并发、每次间隔 ${policy?.public_request_min_interval_seconds ?? 3}–${policy?.public_request_max_interval_seconds ?? 5} 秒；不倒搜、不自动重试，错误后暂停。`,
   ].join("\n\n"));
   if (!accepted) return;
@@ -566,7 +585,8 @@ async function restartFullBatch() {
   }
   const accepted = window.confirm([
     `确认丢弃旧批次的剩余进度，并从第 1 个商品族重新开始 ${preview.store_count} 店 ${preview.eligible_count} 个商品族？`,
-    `预计约 ${formatWholeNumber(preview.estimated_usage.total_tokens)} Token，常见费用 ¥${preview.estimated_cost.typical_low_cny.toFixed(2)}–¥${preview.estimated_cost.typical_high_cny.toFixed(2)}。`,
+    `预计约 ${formatWholeNumber(preview.estimated_usage.total_tokens)} Token。`,
+    preview.estimated_cost.pricing_mode === "codex_subscription_quota" ? "计入 Codex 登录额度，每周窗口最多新增消耗10个百分点。" : `常见费用 ¥${preview.estimated_cost.typical_low_cny.toFixed(2)}–¥${preview.estimated_cost.typical_high_cny.toFixed(2)}。`,
     "已完成商品族也会重新分析；系统会再次核对快照，仍保持单并发且不自动重试。",
   ].join("\n\n"));
   if (!accepted) return;
@@ -584,6 +604,13 @@ async function restartFullBatch() {
   }
 }
 
+function searchHasPendingEdits(): boolean {
+  return factConfirmationOpen.value || Boolean(factRevocationTarget.value)
+    || (decisionParameterProfile.value?.candidates ?? []).some((item) =>
+      (decisionParameterChoices.value[item.parameter_key] ?? null) !== (item.manual_decision ?? null),
+    );
+}
+
 function syncDecisionParameterChoices(profile: SearchRankingDecisionParameterProfile | null) {
   decisionParameterChoices.value = Object.fromEntries(
     (profile?.candidates ?? []).map((item) => [item.parameter_key, item.manual_decision]),
@@ -593,6 +620,7 @@ function syncDecisionParameterChoices(profile: SearchRankingDecisionParameterPro
 async function selectProduct(
   productOrOfferId: SearchRankingProduct | string,
   requestedStoreCode = selectedStoreCode.value,
+  preserve = false,
 ) {
   const offerId = typeof productOrOfferId === "string"
     ? productOrOfferId
@@ -609,14 +637,18 @@ async function selectProduct(
   factRevocationTarget.value = null;
   selectedOfferId.value = offerId;
   selectedStoreCode.value = storeCode;
-  loadingDetail.value = true;
+  requestedProductUnavailable.value = false;
+  emit("selectProduct", { offerId, storeCode });
+  loadingDetail.value = !preserve;
   error.value = "";
   try {
     const payload = await fetchSearchRankingDetail(offerId, storeCode);
     if (
-      selectedOfferId.value === offerId
+      requestSequence === detailRequestSequence
+      && selectedOfferId.value === offerId
       && selectedStoreCode.value === storeCode
     ) {
+      if (preserve && searchHasPendingEdits()) return;
       detail.value = payload;
       syncDecisionParameterChoices(payload.decision_parameter_profile);
     }
@@ -630,6 +662,25 @@ async function selectProduct(
       await nextTick();
       rankingDetailMinimumHeight.value = 0;
     }
+  }
+}
+
+async function runReferenceAnalysis() {
+  const product = selectedProduct.value;
+  if (!product || analyzing.value || !props.canOperate) return;
+  const offerId = product.offer_id;
+  const storeCode = String(product.store_code ?? selectedStoreCode.value);
+  analyzing.value = true;
+  error.value = "";
+  try {
+    const updated = await reviewSearchRankingTitles(offerId, storeCode);
+    if (selectedOfferId.value === offerId && selectedStoreCode.value === storeCode) {
+      detail.value = updated;
+    }
+  } catch (caught) {
+    error.value = errorMessage(caught, "竞品标题分析未完成，请重试");
+  } finally {
+    analyzing.value = false;
   }
 }
 
@@ -650,13 +701,11 @@ async function runAnalysis() {
   analyzing.value = true;
   error.value = "";
   try {
-    const analyzedDetail = await analyzeSearchRanking(
+    await analyzeSearchRanking(
       familyRepresentative.offer_id,
       familyRepresentative.store_code,
     );
-    detail.value = selectedBeforeAnalysis === familyRepresentative.offer_id
-      ? analyzedDetail
-      : await fetchSearchRankingDetail(selectedBeforeAnalysis, selectedBeforeStoreCode);
+    detail.value = await fetchSearchRankingDetail(selectedBeforeAnalysis, selectedBeforeStoreCode);
     syncDecisionParameterChoices(detail.value.decision_parameter_profile);
     await refreshListSummary(selectedBeforeAnalysis, selectedBeforeStoreCode);
     await loadRootExpansionLibrary();
@@ -710,8 +759,8 @@ async function saveDecisionParameterConfirmation() {
   }
 }
 
-async function loadRootExpansionLibrary() {
-  rootExpansionLibraryLoading.value = true;
+async function loadRootExpansionLibrary(background: unknown = false) {
+  rootExpansionLibraryLoading.value = background !== true;
   try {
     rootExpansionLibrary.value = await fetchSearchRankingRootExpansionLibrary(
       rootExpansionLibrarySearch.value,
@@ -1024,8 +1073,37 @@ function firstPageAuditReasonLabel(item: SearchRankingFirstPageResultClassificat
     ordered_same_product_name_or_alias: "标题包含完整有序同品名或直接别名",
     identity_tokens_scattered_not_direct_proof: "只有分散词元重合，不足以证明同品",
     conflicting_product_family_in_subtitle: "平台副标题显示为另一商品族",
+    formal_category_conflicts_with_target: "商品链接正式类目与目标商品冲突",
+    query_category_cluster_invalidates_model_identity: "类目抽样已否决本搜索词的模型商品身份",
     no_complete_same_product_identity: "没有完整同品身份短语",
   }[item.reason];
+}
+
+function categoryPathLabel(path: CompetitorCategoryBreadcrumb[] | undefined) {
+  return path?.map((item) => item.name).filter(Boolean).join(" › ") ?? "";
+}
+
+function formalCategoryValidationLabel(item: SearchRankingKeywordResult) {
+  const evidence = item.validation_evidence;
+  const available = evidence.semantic_relation_category_available_count ?? 0;
+  const sampled = evidence.semantic_relation_category_sample_count ?? 0;
+  const conflicts = evidence.semantic_relation_category_conflict_count ?? 0;
+  if (evidence.semantic_relation_category_vetoed_s) {
+    return `未通过：${conflicts}/${available} 个可用抽样商品集中在与目标不同的正式类目，已否决 S 级`;
+  }
+  if (evidence.semantic_relation_category_validation_status === "target_category_unavailable") {
+    return "目标商品正式类目不可用；本轮未据此降级";
+  }
+  if (evidence.semantic_relation_category_validation_status === "no_core_results") {
+    return "没有可供类目交叉核验的核心竞品";
+  }
+  if (evidence.semantic_relation_category_validation_status === "unavailable") {
+    return `已计划抽样 ${sampled} 个商品链接，但正式类目均不可用；本轮未据此降级`;
+  }
+  if (evidence.semantic_relation_category_validation_status === "partial") {
+    return `已取得 ${available}/${sampled} 个商品链接正式类目，未形成一致冲突`;
+  }
+  return `已核验 ${available}/${sampled} 个商品链接正式类目，未形成一致冲突`;
 }
 
 function firstPageAuditImageUrl(item: SearchRankingFirstPageResultClassification) {
@@ -1094,11 +1172,21 @@ function rootSourceLabel(source: SearchRankingRootSource | string | null | undef
 function sameProductLexiconSourceLabel(source: string) {
   return {
     human_confirmed_product_fact: "人工确认事实",
+    formal_category_title_identity_phrase: "正式类目 + 当前标题身份词",
     seller_title_identity_phrase: "图题支持的当前标题身份词",
     fusion_product_type_terms: "图文融合商品类型",
     fusion_same_product_aliases: "图文融合同品别名",
     historical_profile_term: "历史识别词",
   }[source] ?? "来源待复核";
+}
+
+function sameProductLexiconExclusionReason(reason: string) {
+  return {
+    formal_category_requires_visual_modifier: "正式类目要求保留图片支持的区分词",
+    formal_category_title_identity_conflict: "与商品链接正式类目冲突，搜索前已屏蔽",
+    outside_2_to_4_words: "不符合 2–4 词直搜长度",
+    broad_identity_head_without_title_or_primary_shape: "商品主体过宽且缺少标题或主形态支持",
+  }[reason] ?? "未进入精准词库";
 }
 
 function sameProductLexiconEntryWasSearched(term: string) {
@@ -1282,25 +1370,27 @@ function providerLabel(provider: string) {
   const labels: Record<string, string> = {
     qwen: "千问",
     doubao: "豆包",
-    codex_cli: "Codex CLI / Terra",
+    codex_cli: "Codex CLI",
     openai: "OpenAI（历史）",
   };
   return labels[provider] ?? provider;
 }
 
-function costLabel(value: number | null | undefined) {
+function costLabel(value: number | null | undefined, provider?: string) {
+  if (provider === "codex_cli") return "计入 Codex 额度";
   if (value === null || value === undefined) return "—";
   if (value === 0) return "¥0（缓存复用）";
   return `约 ¥${value.toFixed(4)}`;
 }
 
-function incurredCostLabel(value: number | null | undefined) {
+function incurredCostLabel(value: number | null | undefined, provider?: string) {
+  if (provider === "codex_cli") return "计入 Codex 额度";
   if (value === null || value === undefined) return "费用暂无法估算";
   return `估算 ¥${value.toFixed(4)}`;
 }
 
 function formatWholeNumber(value: number | null | undefined) {
-  return new Intl.NumberFormat("zh-CN", { maximumFractionDigits: 0 }).format(value ?? 0);
+  return cachedNumberFormatter("zh-CN", { maximumFractionDigits: 0 }).format(value ?? 0);
 }
 
 function batchStatusLabel(status: SearchRankingBatchStatusValue | null | undefined) {
@@ -1312,7 +1402,7 @@ function batchStatusLabel(status: SearchRankingBatchStatusValue | null | undefin
     paused_after_error: "遇错暂停，未自动重试",
     stopping: "当前商品族结束后保存进度",
     stopped: "已停止，可继续断点",
-    stopped_quota_limit: "历史 Codex 批次曾因额度停止",
+    stopped_quota_limit: "Codex 额度已达上限",
     interrupted: "ERP 重启中断，待人工确认",
     completed: "全部完成",
   };
@@ -1326,6 +1416,8 @@ function errorMessage(caught: unknown, fallback: string) {
 
 <template>
   <div class="ranking-page">
+    <details class="optimization-auxiliary">
+      <summary>分析设置与批量任务</summary>
     <section class="method-banner">
       <div class="method-banner-copy">
         <p class="method-eyebrow">IMAGE → TITLE → PLATFORM</p>
@@ -1422,7 +1514,12 @@ function errorMessage(caught: unknown, fallback: string) {
               样本 {{ batchPreview.estimated_usage.historical_sample_count }} 次
             </small>
           </article>
-          <article>
+          <article v-if="batchPreview.estimated_cost.pricing_mode === 'codex_subscription_quota'">
+            <span>模型用量</span>
+            <strong>计入 Codex 额度</strong>
+            <small>每周窗口最多新增10个百分点；人民币费用不适用</small>
+          </article>
+          <article v-else>
             <span>人民币预估</span>
             <strong>
               ¥{{ batchPreview.estimated_cost.typical_low_cny.toFixed(2) }}–¥{{ batchPreview.estimated_cost.typical_high_cny.toFixed(2) }}
@@ -1460,8 +1557,8 @@ function errorMessage(caught: unknown, fallback: string) {
             </strong>
             <span>
               完成 {{ batchState.completed_count ?? 0 }} · 跳过 {{ batchState.skipped_count ?? 0 }} ·
-              失败 {{ batchState.failed_count ?? 0 }} · 实际费用约
-              ¥{{ (batchState.usage?.estimated_cost_cny ?? 0).toFixed(4) }}
+              失败 {{ batchState.failed_count ?? 0 }} · 已记录 API 费用约
+              ¥{{ (batchState.usage?.estimated_cost_cny ?? 0).toFixed(4) }}；Codex 调用计入额度
             </span>
           </div>
           <div class="batch-progress-track" aria-label="批次进度">
@@ -1475,11 +1572,11 @@ function errorMessage(caught: unknown, fallback: string) {
             变体参数 {{ batchVariantParameterSummary(batchState.current_target) }}
           </small>
           <small v-if="(batchState.deduplicated_pending_variant_count ?? 0) > 0" class="batch-resume-note">
-            旧检查点已合并 {{ batchState.deduplicated_pending_variant_count }} 条尚未处理的重复变体；已处理记录保留，继续时不会重跑这些变体。
+            已合并 {{ batchState.deduplicated_pending_variant_count }} 条待处理重复变体
           </small>
           <small v-if="batchState.last_error" class="batch-error">{{ batchState.last_error }}</small>
           <small v-if="batchState.usage && !batchState.usage.cost_accounting_complete" class="batch-error">
-            批次曾在响应完成前中断，当前实际费用累计可能不完整，请以供应商账单为准。
+            费用统计可能不完整，以供应商账单为准。
           </small>
         </div>
         <p v-else-if="batchState?.message" class="batch-owner-note">{{ batchState.message }}</p>
@@ -1548,95 +1645,27 @@ function errorMessage(caught: unknown, fallback: string) {
       </template>
     </section>
 
+    </details>
+    <p v-if="batchIsActive" class="running-note" role="status">批量分析进行中，可展开“分析设置与批量任务”查看进度和停止。</p>
     <p v-if="error" class="error-banner" role="alert">{{ error }}</p>
 
+    <TitleProductPicker
+      :families="productFamilies"
+      :selected-offer-id="selectedOfferId"
+      :selected-store-code="selectedStoreCode"
+      :loading="loadingList"
+      :disabled="analyzing || factSaving || decisionParameterSaving"
+      :active="props.active"
+      @select="selectProduct"
+    />
     <div class="ranking-layout">
-      <aside class="product-rail">
-        <div class="rail-title">
-          <div><p>OWN BUYABLE PRODUCT FAMILIES</p><h3>自有在售商品族</h3></div>
-          <span>{{ filteredProductFamilies.length }} 族 / {{ products.length }} Offer</span>
-        </div>
-        <input v-model="search" type="search" placeholder="商品名称支持模糊搜索，也可输入平台 SKU、公司 SKU 或 PLID" />
-        <div class="rail-filters">
-          <label>
-            <span>交叉验证</span>
-            <select v-model="identityDifferenceFilter">
-              <option value="all">全部差异</option>
-              <option value="high">差异大</option>
-              <option value="moderate">中等差异</option>
-              <option value="aligned">一致</option>
-              <option value="manual">待人工事实</option>
-              <option value="unanalysed">未分析</option>
-            </select>
-          </label>
-          <label>
-            <span>标题评分</span>
-            <select v-model="titleScoreFilter">
-              <option value="all">全部评分</option>
-              <option value="85_plus">85–100</option>
-              <option value="70_84">70–84</option>
-              <option value="55_69">55–69</option>
-              <option value="below_55">低于 55</option>
-              <option value="insufficient">证据不足</option>
-              <option value="unscored">未评分</option>
-            </select>
-          </label>
-        </div>
-        <div v-if="loadingList" class="empty-state">正在读取本地商品…</div>
-        <div v-else-if="!filteredProductFamilies.length" class="empty-state">
-          没有符合“自有、buyable、正数可售库存、快照新鲜”的商品
-        </div>
-        <template v-else>
-          <button
-            v-for="family in filteredProductFamilies"
-            :key="family.key"
-            class="product-row"
-            :class="{ active: selectedFamily?.key === family.key }"
-            @click="selectProduct(family.representative)"
-          >
-            <img
-              v-if="imageUrl(family.representative)"
-              :src="imageUrl(family.representative)"
-              :alt="family.representative.title ?? family.representative.sku ?? '商品图片'"
-              @error="markImageFailed(family.representative.image_url)"
-            />
-            <span v-else class="image-fallback">NO IMG</span>
-            <span class="product-copy">
-              <strong>{{ family.shared_title || family.representative.title || "未命名商品" }}</strong>
-              <small>PLID{{ family.productline_id || "—" }} · {{ family.variant_count }} 个变体合并</small>
-              <small v-if="family.variant_parameter_values.length" class="family-parameter-summary">
-                变体参数 {{ variantParameterSummary(family.variant_parameter_values) }}
-              </small>
-              <small>合计可售 {{ family.total_available_stock }} · 代表平台 SKU {{ family.representative.sku || family.representative.offer_id }}</small>
-              <small v-if="props.storeScope !== 'current'">店铺 {{ family.representative.store_name || family.representative.store_code || "—" }}</small>
-              <small>公司 SKU {{ familyCompanySkuLabel(family.variants) }}</small>
-              <em :class="family.latest_analysis?.status ?? 'untracked'">
-                {{
-                  family.latest_analysis?.status === "completed"
-                    ? "已有定位"
-                    : family.latest_analysis?.status === "failed"
-                      ? "上次失败"
-                      : family.latest_analysis?.status === "running"
-                        ? "采集中"
-                        : "未定位"
-                }}
-              </em>
-              <small v-if="family.latest_analysis?.manual_fact_required" class="rail-warning">待人工事实 · 批次已跳过</small>
-              <small v-else-if="family.latest_analysis?.identity_large_difference" class="rail-warning">图与标题差异大</small>
-              <small v-if="family.latest_analysis?.title_score_value !== null && family.latest_analysis?.title_score_value !== undefined">
-                代表标题 {{ family.latest_analysis.title_score_value }} 分 · 证据覆盖 {{ family.latest_analysis.title_score_evidence_coverage ?? 0 }}%
-              </small>
-            </span>
-          </button>
-        </template>
-      </aside>
-
       <main
         ref="rankingDetailElement"
         class="ranking-detail"
         :style="rankingDetailMinimumHeight ? { minHeight: `${rankingDetailMinimumHeight}px` } : undefined"
       >
         <div v-if="loadingDetail" class="detail-loading">正在读取定位记录…</div>
+        <div v-else-if="requestedProductUnavailable" class="detail-loading">修改记录中的商品暂不符合当前在售分析条件，请从上方选择可分析商品。</div>
         <template v-else-if="selectedProduct">
           <section class="product-hero">
             <img
@@ -1652,9 +1681,10 @@ function errorMessage(caught: unknown, fallback: string) {
                 {{ selectedFamily?.variant_count ?? 1 }} 个变体 · 链路代表
                 {{ selectedFamily?.representative.sku || selectedFamily?.representative.offer_id || selectedProduct.offer_id }}
               </p>
-              <h2>{{ selectedProduct.title || "未命名商品" }}</h2>
+              <h2>{{ selectedProduct.company_product_name || "商品标题诊断" }}</h2>
               <p v-if="props.storeScope !== 'current'">店铺 {{ selectedProduct.store_name || selectedProduct.store_code || "—" }}</p>
               <p>公司 SKU {{ selectedProduct.company_sku || "未关联" }}</p>
+              <details class="optimization-auxiliary"><summary>商品资料</summary>
               <span class="selected-variant-parameter">
                 当前 Offer 变体参数：
                 <b>{{ variantParameterSummary(variantParametersFor(selectedProduct.offer_id).map((item) => item.value)) }}</b>
@@ -1665,6 +1695,7 @@ function errorMessage(caught: unknown, fallback: string) {
                 {{ selectedFamily?.total_available_stock ?? selectedProduct.available_stock }} ·
                 {{ formatChinaDateTime(selectedProduct.captured_at) }}
               </span>
+              </details>
               <details v-if="(selectedFamily?.variant_count ?? 1) > 1" class="family-variants">
                 <summary>切换 {{ selectedFamily?.variant_count }} 个变体（共享一次完整链路）</summary>
                 <button
@@ -1682,7 +1713,7 @@ function errorMessage(caught: unknown, fallback: string) {
                 </button>
               </details>
               <span v-if="!selectedProduct.analyzable" class="blocked-note">
-                当前链接已不满足自有在售闸门，模型不会被调用。
+                商品已不符合在售条件，无法分析。
               </span>
             </div>
             <button
@@ -1698,8 +1729,8 @@ function errorMessage(caught: unknown, fallback: string) {
                     : factSaving
                       ? "商品事实处理中…"
                     : analysis
-                      ? "重新分析商品族"
-                      : "分析商品族"
+                      ? "重新分析"
+                      : "分析标题"
               }}
             </button>
           </section>
@@ -1734,16 +1765,20 @@ function errorMessage(caught: unknown, fallback: string) {
             {{ analysis ? "页面继续保留最后一次成功的三种标题与排名结果。" : "目前还没有可显示的成功结果。" }}
             <template v-if="detail.latest_attempt.vision_stage_completed">
               模型阶段已成功并记账：{{ detail.latest_attempt.usage?.total_tokens ?? "—" }} tokens ·
-              {{ costLabel(detail.latest_attempt.estimated_cost_cny ?? null) }}；后续重试可复用这次图片识别。
+              {{ costLabel(detail.latest_attempt.estimated_cost_cny ?? null, detail.latest_attempt.provider) }}；后续重试可复用这次图片识别。
             </template>
             <template v-else-if="latestAttemptHasUnusableSpend">
               模型请求已产生 {{ detail.latest_attempt.usage?.total_tokens ?? "—" }} tokens ·
-              {{ incurredCostLabel(detail.latest_attempt.estimated_cost_cny) }}，但识别结构不可用，重试不能复用本次结果。
+              {{ incurredCostLabel(detail.latest_attempt.estimated_cost_cny, detail.latest_attempt.provider) }}，但识别结构不可用，重试不能复用本次结果。
             </template>
             <template v-if="detail.latest_attempt.error">原因：{{ detail.latest_attempt.error }}</template>
           </p>
 
-          <section v-if="analysis" class="title-review title-review-priority">
+          <TitleOptimizationReview v-if="analysis" :key="selectedProduct.offer_id" :analysis="analysis" :current-title="selectedProduct.title || ''" :current-offer-id="selectedProduct.offer_id" :current-plid="selectedProduct.productline_id" :strategies="titleStrategies" :can-review="props.canOperate" :reviewing="analyzing" @review="runReferenceAnalysis" />
+          <details v-if="analysis" class="optimization-auxiliary analysis-evidence">
+            <summary>查看分析依据与历史方案</summary>
+          <details v-if="analysis" class="optimization-auxiliary evidence-group"><summary>历史标题方案与排名复盘</summary>
+<section v-if="analysis" class="title-review title-review-priority">
             <div class="section-heading">
               <div><p>THREE TITLE PLAYBOOKS · RESULT FIRST</p><h3>建议主标题（三种打法）</h3></div>
               <span>{{ validationStatusLabel(analysis.title_validation?.status) }}</span>
@@ -1774,14 +1809,13 @@ function errorMessage(caught: unknown, fallback: string) {
                 </strong>
                 <p class="strategy-explanation">{{ strategy.explanation }}</p>
                 <small v-if="strategy.strategy === 'contiguous_core'" class="strategy-boundary">
-                  完整短语优先是低风险写法，不代表平台公开了连续词组加权规则。
+                  优先保留完整商品短语
                 </small>
                 <small v-else-if="strategy.strategy === 'hot_term_coverage'" class="strategy-boundary">
-                  优先覆盖不同完整根词入口；每个词都必须来自当时平台扩展并通过类目页验证。扩展顺序不是公开搜索量。
+                  覆盖已验证扩展词；排序非搜索量
                 </small>
                 <small v-else class="strategy-boundary">
-                  入选前必须实际搜到本商品，并通过按窄形态标题词核算的首页低竞争门槛；
-                  未获当前标题或运营人工确认事实支持的材质、尺寸、受众、兼容性或功效声明会被拦截。
+                  已定位且低竞争；仅采用已确认属性
                 </small>
                 <div class="strategy-evidence">
                   <span>证据词</span>
@@ -1793,7 +1827,7 @@ function errorMessage(caught: unknown, fallback: string) {
               </article>
             </div>
             <p class="title-format-note">
-              商品类型优先，规格参数默认后置；原主标题已有的自有品牌保留在最前，不从模型或竞品标题猜品牌。
+              原有品牌在前，商品类型优先，规格默认后置
             </p>
             <article
               v-if="analysis.title_validation?.matched_strategy || analysis.title_validation?.matched_suggestion"
@@ -1806,7 +1840,7 @@ function errorMessage(caught: unknown, fallback: string) {
               <span v-if="analysis.title_validation.matched_suggestion">
                 {{ analysis.title_validation.matched_suggestion }}
               </span>
-              <small>下方位次变化只验证这个历史标题，不代表本轮三张候选卡已经采用。</small>
+              <small>位次仅对应历史标题</small>
             </article>
             <div
               v-if="analysis.title_validation?.comparisons?.length"
@@ -1833,8 +1867,10 @@ function errorMessage(caught: unknown, fallback: string) {
               标题建议需复采验证；排名变化不等同因果。
             </p>
           </section>
+</details>
 
-          <section v-if="decisionParameterProfile" class="decision-parameter-section">
+          <details v-if="decisionParameterProfile" class="optimization-auxiliary evidence-group"><summary>商品参数确认</summary>
+<section v-if="decisionParameterProfile" class="decision-parameter-section">
             <div class="section-heading decision-parameter-heading">
               <div>
                 <p>HUMAN DECISION PARAMETER CLASSIFICATION</p>
@@ -1890,7 +1926,7 @@ function errorMessage(caught: unknown, fallback: string) {
               </article>
             </div>
             <p v-else class="decision-parameter-empty">
-              当前标题没有识别到功率、容量、尺寸、数量、防护等级等明确规格。仍可人工确认“当前标题无可识别规格参数”，形成该标题的审计记录。
+              未识别到明确规格，可确认“无可识别规格”。
             </p>
             <div class="decision-parameter-actions">
               <button
@@ -1917,12 +1953,14 @@ function errorMessage(caught: unknown, fallback: string) {
               <template v-if="decisionParameterProfile.applied_decision_values.length">
                 {{ decisionParameterProfile.applied_decision_values.join(" / ") }} 为决策参数；需点击“重新验证定位”取得搜索页证据后才会前置。
               </template>
-              <template v-else>当前标题没有参数被确认为决策参数，全部规格继续后置。</template>
+              <template v-else>未确认决策参数，规格保持后置。</template>
             </p>
           </section>
+</details>
 
           <template v-if="analysis">
-            <section class="identity-grid">
+            <details class="optimization-auxiliary evidence-group"><summary>图片与标题核对</summary>
+<section class="identity-grid">
               <article>
                 <p>1 · 隔离图片观察</p>
                 <h3>{{ analysis.visual_profile?.product_name || "未识别" }}</h3>
@@ -1933,14 +1971,16 @@ function errorMessage(caught: unknown, fallback: string) {
                 <h3>{{ analysis.recognition?.identity_difference_level === "high" ? "差异大" : analysis.recognition?.identity_difference_level === "moderate" ? "中等差异" : "一致" }}</h3>
                 <span>{{ analysis.recognition?.title_identity_supported_terms?.join(" / ") || "未命中明确商品主体短语" }}</span>
                 <small v-if="analysis.recognition?.identity_difference_warning">{{ analysis.recognition.identity_difference_warning }}</small>
-                <small v-else>交叉验证结果单独保存，不会覆盖图片观察或主标题原文。</small>
               </article>
               <article>
-                <p>3 · 图文融合生成</p>
+                <p>{{ analysis.recognition?.formal_category_identity_resolution?.applied ? "3 · 正式类目裁决" : "3 · 图文融合生成" }}</p>
                 <h3>{{ analysis.product_name || "未识别" }}</h3>
                 <span>{{ analysis.category || "类别未知" }} · {{ confidenceLabel(analysis.confidence) }}</span>
+                <small v-if="analysis.recognition?.formal_category_identity_resolution?.applied">
+                  类目、标题与图片已核对；冲突词已排除。
+                </small>
                 <small v-if="providerFallbackSucceeded">
-                  主服务未返回完整双阶段结构，已切换备用服务完成分析。
+                  已由备用服务完成分析。
                 </small>
                 <small v-else>{{ providerLabel(analysis.provider) }} · {{ analysis.model }} · {{ analysis.vision_reused ? "复用同图同标题缓存" : "本次调用" }}</small>
               </article>
@@ -1949,11 +1989,24 @@ function errorMessage(caught: unknown, fallback: string) {
                 <h3>{{ analysis.usage.total_tokens ?? "—" }}</h3>
                 <span>
                   输入 {{ analysis.usage.input_tokens ?? "—" }} · 输出 {{ analysis.usage.output_tokens ?? "—" }} tokens ·
-                  {{ costLabel(analysis.estimated_cost_cny) }}
+                  {{ costLabel(analysis.estimated_cost_cny, analysis.provider) }}
                   （按 {{ detail?.status.pricing_snapshot_date }} 配置单价）
                 </span>
               </article>
             </section>
+</details>
+
+            <p
+              v-if="analysis.recognition?.formal_category_identity_resolution?.applied"
+              class="comparison-warning"
+            >
+              商品链接正式类目已在搜索前参与裁决：
+              {{ analysis.recognition.formal_category_identity_resolution.target_category_label }}。
+              本轮同品直搜与扩展词根仅采用
+              {{ analysis.recognition.formal_category_identity_resolution.title_identity_terms.join(" / ") }}；
+              已屏蔽模型误识别词
+              {{ analysis.recognition.formal_category_identity_resolution.suppressed_model_terms.join(" / ") }}。
+            </p>
 
             <p v-if="analysis.recognition?.manual_fact_required" class="comparison-warning">
               该商品缺少关键事实，批次已跳过且不会自动重试：{{ analysis.recognition.manual_fact_reason }}
@@ -1961,7 +2014,8 @@ function errorMessage(caught: unknown, fallback: string) {
               可使用下方“人工确认商品事实”，但不强制补录。
             </p>
 
-            <section v-if="productFactProfile" class="product-fact-section">
+            <details v-if="productFactProfile" class="optimization-auxiliary evidence-group"><summary>商品事实档案</summary>
+<section v-if="productFactProfile" class="product-fact-section">
               <div class="section-heading product-fact-heading">
                 <div>
                   <p>AUDITABLE PRODUCT FACT PROFILE</p>
@@ -2011,11 +2065,13 @@ function errorMessage(caught: unknown, fallback: string) {
                 </article>
               </div>
               <p v-else class="product-fact-empty">
-                尚无人工确认事实。每个已分析商品都可在下方按需补充，不强制录入。
+                暂无确认事实，可按需补充。
               </p>
             </section>
+</details>
 
-            <section v-if="factRecommendation" class="fact-recommendation-section">
+            <details v-if="factRecommendation" class="optimization-auxiliary evidence-group"><summary>待确认的商品事实</summary>
+<section v-if="factRecommendation" class="fact-recommendation-section">
               <div class="section-heading fact-recommendation-heading">
                 <div>
                   <p>HUMAN PRODUCT FACT CONFIRMATION</p>
@@ -2041,6 +2097,7 @@ function errorMessage(caught: unknown, fallback: string) {
                 <span v-else>当前模型服务未配置，暂不能在确认后重新验证搜索页。</span>
               </div>
             </section>
+</details>
 
             <section
               v-if="sameProductLexicon?.entries.length"
@@ -2078,7 +2135,7 @@ function errorMessage(caught: unknown, fallback: string) {
               <details v-if="sameProductLexicon.excluded.length" class="same-product-lexicon-excluded">
                 <summary>{{ sameProductLexicon.excluded.length }} 个身份表达未进入精准词库</summary>
                 <span>
-                  {{ sameProductLexicon.excluded.map((entry) => `${entry.term}（${entry.word_count}词）`).join(" / ") }}
+                  {{ sameProductLexicon.excluded.map((entry) => `${entry.term}（${sameProductLexiconExclusionReason(entry.reason)}）`).join(" / ") }}
                 </span>
               </details>
             </section>
@@ -2095,7 +2152,7 @@ function errorMessage(caught: unknown, fallback: string) {
                 <span>{{ analysis.profile.same_demand_product_terms.length }} 个替代商品族</span>
               </div>
               <p>
-                用于逐条判断搜索页里满足同一核心需求的竞品；它们与完全同款分开统计，且不会因为进入该词库就自动成为推荐搜索词。
+                同需求词库，推荐词需另行验证。
               </p>
               <div class="same-demand-lexicon-terms">
                 <span
@@ -2105,7 +2162,8 @@ function errorMessage(caught: unknown, fallback: string) {
               </div>
             </section>
 
-            <section class="keyword-section">
+            <details class="optimization-auxiliary evidence-group"><summary>搜索词与自然位置</summary>
+<section class="keyword-section">
               <div class="section-heading">
                 <div><p>PLATFORM-EVIDENCED QUERY STRATEGY</p><h3>搜索词策略与自然位置</h3></div>
                 <span>
@@ -2133,9 +2191,7 @@ function errorMessage(caught: unknown, fallback: string) {
                   {{ contextualRootExpansionSummary.rejected }} 项未入选
                 </summary>
                 <p>
-                  Takealot 对每个词根返回的原始第1–5项都会留作审计，但不会盲选。
-                  只有不超过4词，并且保留本商品身份或命中结构化相邻需求所列替代商品族的扩展，才可进入搜索；
-                  超过4词的相关扩展只保留为平台原始证据，不占搜索位。
+                  仅搜索不超过4词的相关扩展；其余保留为原始证据。
                   其中 {{ contextualRootExpansionSummary.followupRoots }} 个相关扩展已作为完整词组词根继续观察下一层平台扩展。
                 </p>
                 <div class="root-expansion-selection-grid">
@@ -2170,13 +2226,13 @@ function errorMessage(caught: unknown, fallback: string) {
                     <p
                       v-else-if="check.status === 'observed' && !(check.expansions?.length)"
                     >
-                      Takealot 本次未返回补全词；该词根已留存，不把空结果伪装成热词。
+                      本次未返回补全词。
                       <mark v-if="check.direct_query_fallback_selected">已改为主标题完整词组直验。</mark>
                     </p>
                     <p
                       v-else-if="check.status === 'observed' && check.direct_query_fallback_selected"
                     >
-                      平台没有返回可采用的精简同品词（候选不相关或超过4词）；该完整词组已改为直接搜索页验证。
+                      无可用扩展词，已直接验证原词组。
                     </p>
                   </article>
                 </div>
@@ -2225,6 +2281,19 @@ function errorMessage(caught: unknown, fallback: string) {
                     <div><dt>核心词供给门槛</dt><dd>{{ coreSupplyGateLabel(item) }}</dd></div>
                     <div><dt>采集时间</dt><dd>{{ formatChinaDateTime(item.observed_at) }}</dd></div>
                   </dl>
+                  <div
+                    v-if="item.validation_evidence.semantic_relation_category_validation_required"
+                    class="formal-category-audit-summary"
+                  >
+                    <strong>商品链接正式类目核验</strong>
+                    <span>{{ formalCategoryValidationLabel(item) }}</span>
+                    <small v-if="categoryPathLabel(item.validation_evidence.semantic_relation_target_category_path)">
+                      目标类目：{{ categoryPathLabel(item.validation_evidence.semantic_relation_target_category_path) }}
+                    </small>
+                    <small v-if="categoryPathLabel(item.validation_evidence.semantic_relation_category_conflict_cluster?.category_path)">
+                      冲突类目：{{ categoryPathLabel(item.validation_evidence.semantic_relation_category_conflict_cluster?.category_path) }}
+                    </small>
+                  </div>
                   <details
                     v-if="item.validation_evidence.first_page_result_classifications?.length"
                     class="first-page-result-audit"
@@ -2236,8 +2305,7 @@ function errorMessage(caught: unknown, fallback: string) {
                       · 扣除目标后核心竞品 {{ item.validation_evidence.core_competitor_count_excluding_target_first_page ?? item.validation_evidence.direct_competitor_count_excluding_target_first_page ?? 0 }} 个
                     </summary>
                     <p>
-                      覆盖率只使用下列已逐条检查的自然商品；平台返回总数作为“组合是否过窄”的供给门槛，不能当作搜索量。
-                      该总数是采集时的平台快照，可能随平台实验、时段或索引更新变化。
+                      覆盖率按已核对商品计算；平台结果数非搜索量。
                     </p>
                     <div class="first-page-result-list">
                       <article
@@ -2270,6 +2338,9 @@ function errorMessage(caught: unknown, fallback: string) {
                           >{{ result.title }}</a>
                           <strong v-else>{{ result.title }}</strong>
                           <small v-if="result.subtitle">{{ result.subtitle }}</small>
+                          <small v-if="categoryPathLabel(result.category_path)">
+                            正式类目：{{ categoryPathLabel(result.category_path) }}
+                          </small>
                           <small v-if="result.matched_exclusion_terms.length">
                             冲突词：{{ result.matched_exclusion_terms.join("、") }}
                           </small>
@@ -2286,8 +2357,10 @@ function errorMessage(caught: unknown, fallback: string) {
                 </article>
               </div>
             </section>
+</details>
 
-            <section v-if="analysis.title_score" class="title-score-section">
+            <details v-if="analysis.title_score" class="optimization-auxiliary evidence-group"><summary>标题评分明细</summary>
+<section v-if="analysis.title_score" class="title-score-section">
               <div class="section-heading">
                 <div><p>EVIDENCE-BASED TITLE QUALITY</p><h3>现有主标题质量评分</h3></div>
                 <strong>{{ analysis.title_score.score }} / 100 · {{ analysis.title_score.label }}</strong>
@@ -2310,15 +2383,17 @@ function errorMessage(caught: unknown, fallback: string) {
                 </article>
               </div>
               <small v-if="analysis.title_score.compatibility_projection" class="score-limitations">
-                这是旧版记录按新版标题质量规则进行的本地换算；未改写历史记录，也没有重新调用模型或平台。
+                旧记录按新版规则换算，未重新验证。
               </small>
               <small class="score-limitations">
                 不计分：{{ analysis.title_score.non_scoring_signals.map((item) => item.label).join("、") }}。
               </small>
               <small class="score-limitations">{{ analysis.title_score.limitations.join(" ") }}</small>
             </section>
+</details>
 
-            <section class="history-section" v-if="detail?.history.length">
+            <details v-if="detail?.history.length" class="optimization-auxiliary evidence-group"><summary>分析运行历史</summary>
+<section class="history-section" v-if="detail?.history.length">
               <div class="section-heading"><div><p>AUDIT TRAIL</p><h3>定位历史</h3></div></div>
               <div class="history-list">
                 <span v-for="run in detail.history" :key="run.id">
@@ -2328,18 +2403,21 @@ function errorMessage(caught: unknown, fallback: string) {
                 </span>
               </div>
             </section>
+</details>
           </template>
-          <section v-else class="first-run">
+          </details>
+          <section v-if="!analysis" class="first-run">
             <p>NO RANKING EVIDENCE YET</p>
-            <h3>这个商品还没有搜索定位记录</h3>
-            <span>首次运行会保存隔离图片观察、标题交叉验证、图文融合搜索词、平台位置和证据化标题评分。</span>
+            <h3>这个商品还没有标题分析</h3>
+            <span>点击“分析标题”，查看修改建议和竞品参考。</span>
           </section>
         </template>
         <div v-else class="detail-loading">请选择一个商品</div>
       </main>
     </div>
 
-    <section class="autocomplete-library-section">
+    <details class="optimization-auxiliary"><summary>查看平台词库</summary>
+    <section ref="rootLibraryElement" class="autocomplete-library-section">
       <div class="section-heading autocomplete-library-heading">
         <div>
           <p>SHARED TAKEALOT ROOT EXPANSION EVIDENCE</p>
@@ -2355,10 +2433,7 @@ function errorMessage(caught: unknown, fallback: string) {
       <p v-if="rootExpansionLibrary" class="autocomplete-library-policy">
         全店分析共享 {{ rootExpansionLibrary.summary.root_count }} 个已观察完整词根或词组；
         已隐藏 {{ rootExpansionLibrary.summary.legacy_partial_input_state_count }} 个历史逐字补全状态。
-        缓存采集满 {{ rootExpansionLibrary.policy.ttl_hours }} 小时后不会定时刷新，只有分析再次实际输入该根词时才刷新一次；
-        打开或筛选本区只读本地数据库，不访问 Takealot。
-        本区展示平台原始返回，不代表为当前商品入选；逐商品相关性选择以上方分析中的筛选审计为准。
-        {{ rootExpansionLibrary.policy.note }}
+        平台原始扩展，非当前商品推荐词。
       </p>
       <div v-if="rootExpansionLibrary?.roots.length" class="autocomplete-phrase-table">
         <div class="autocomplete-table-head">
@@ -2380,10 +2455,11 @@ function errorMessage(caught: unknown, fallback: string) {
         </article>
       </div>
       <p v-else class="product-fact-empty">
-        {{ rootExpansionLibraryLoading ? "正在读取本地词根/词组扩展库…" : "暂无匹配的扩展证据；首次被一键分析实际输入完整词根或词组后才会入库。" }}
+        {{ rootExpansionLibraryLoading ? "正在读取本地词根/词组扩展库…" : !rootExpansionLibrary ? "点击筛选本地库查看扩展证据。" : "暂无匹配的扩展证据；首次被一键分析实际输入完整词根或词组后才会入库。" }}
       </p>
     </section>
 
+    </details>
     <div
       v-if="factConfirmationOpen && factRecommendation"
       class="fact-modal-backdrop"
@@ -2457,6 +2533,10 @@ function errorMessage(caught: unknown, fallback: string) {
 </template>
 
 <style scoped>
+.optimization-auxiliary { border: 1px solid #dce6e2; border-radius: 10px; padding: 12px 16px; background: #fff; }
+.optimization-auxiliary > summary { cursor: pointer; font-size: 13px; color: #47675a; }
+.optimization-auxiliary[open] > summary { margin-bottom: 16px; }
+.analysis-evidence { margin-top: 18px; }
 .ranking-page { display: grid; gap: 18px; color: #18221c; overflow-anchor: none; }
 .method-banner { display: grid; grid-template-columns: minmax(0, .88fr) minmax(440px, 1.12fr); align-items: start; gap: 28px; padding: 24px 28px; border: 1px solid #c8d4cb; border-radius: 18px; background: linear-gradient(135deg, #f5f7ed, #e4eee8); }
 .method-eyebrow, .section-heading p, .rail-title p, .first-run p { margin: 0 0 5px; color: #64746a; font-size: 11px; font-weight: 800; letter-spacing: .14em; }
@@ -2517,7 +2597,7 @@ dt { color: #738078; font-size: 12px; } dd { margin: 0; font-weight: 750; }
 .batch-actions .batch-start-button { border-color: #2f7254; color: #fff; background: #2f7254; }
 .batch-actions .batch-stop-button { border-color: #be8a72; color: #874a2c; background: #fff8f3; }
 .batch-policy-note { margin: 0; padding-top: 11px; border-top: 1px solid #d5dfd8; }
-.ranking-layout { display: grid; grid-template-columns: minmax(260px, 325px) minmax(0, 1fr); gap: 18px; align-items: start; }
+.ranking-layout { display: grid; grid-template-columns: minmax(0, 1fr); gap: 18px; align-items: start; }
 .product-rail, .ranking-detail > section, .detail-loading { border: 1px solid #d9dfdb; border-radius: 16px; background: #fff; }
 .product-rail { position: sticky; top: 18px; max-height: calc(100vh - 36px); overflow: auto; padding: 16px; }
 .rail-title, .section-heading { display: flex; justify-content: space-between; align-items: end; gap: 16px; }
@@ -2690,6 +2770,7 @@ dt { color: #738078; font-size: 12px; } dd { margin: 0; font-weight: 750; }
 .query-source { color: #5f7166; font-weight: 700; }
 .query-path { color: #7a6a4b; font-weight: 650; }
 .keyword-main > strong { color: #235c45; white-space: nowrap; }.keyword-position { display: grid; gap: 4px; text-align: right; }.keyword-position > span { color: #194f3a; font-size: 15px; font-weight: 850; }.keyword-position > small { color: #65746b; font-size: 12px; font-weight: 700; }.keyword-card dl { display: flex; gap: 28px; margin: 14px 0 8px; }.keyword-card dl div { display: grid; gap: 3px; }
+.formal-category-audit-summary { display: grid; gap: 3px; margin: 10px 0; padding: 9px 11px; border-left: 3px solid #b6762e; border-radius: 7px; background: #fff6e8; color: #694817; font-size: 12px; }.formal-category-audit-summary strong { color: #704512; }.formal-category-audit-summary small { color: #765f3f; }
 .keyword-card p { margin: 7px 0; color: #4e5c53; }.keyword-card small, .position-notice, .causality-note { color: #6e7a72; line-height: 1.6; }
 .first-page-result-audit { margin-top: 13px; padding: 11px 12px; border: 1px solid #d4dfd8; border-radius: 9px; background: rgba(255, 255, 255, .76); }
 .first-page-result-audit > summary { color: #315d49; font-size: 12px; font-weight: 850; cursor: pointer; }
@@ -2748,4 +2829,24 @@ dt { color: #738078; font-size: 12px; } dd { margin: 0; font-weight: 750; }
 @media (max-width: 1050px) { .ranking-layout { grid-template-columns: 1fr; }.product-rail { position: static; max-height: 420px; }.method-banner { grid-template-columns: 1fr; }.batch-metrics, .title-score-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }.product-hero { grid-template-columns: 90px minmax(0, 1fr); }.analyze-button { grid-column: 1 / -1; }.identity-grid, .same-product-lexicon-grid { grid-template-columns: 1fr; }.autocomplete-table-head, .autocomplete-phrase-table article { grid-template-columns: minmax(190px, 1fr) 110px 110px 150px; } }
 @media (max-width: 780px) { .method-guardrail-grid { grid-template-columns: 1fr; }.title-strategy-grid, .product-fact-grid, .decision-parameter-grid { grid-template-columns: 1fr; }.decision-parameter-choice { grid-template-columns: 1fr; }.suggested-title { min-height: 0; }.fact-draft-row { grid-template-columns: 1fr; }.autocomplete-library-heading { align-items: stretch; flex-direction: column; }.autocomplete-table-head { display: none; }.autocomplete-phrase-table article { grid-template-columns: 1fr 1fr; }.autocomplete-phrase-table article strong { grid-column: 1 / -1; } }
 @media (max-width: 650px) { .method-banner { padding: 18px; }.method-model-route { grid-template-columns: 1fr; }.method-model-arrow { display: none; }.batch-heading, .batch-progress-copy { flex-direction: column; }.batch-metrics, .batch-store-detail > div { grid-template-columns: 1fr; }.product-hero { grid-template-columns: 1fr; }.keyword-main { flex-direction: column; }.keyword-position { text-align: left; }.keyword-card dl { flex-wrap: wrap; }.first-page-result-list > article { grid-template-columns: 48px minmax(0, 1fr); }.first-page-result-list img, .first-page-result-image-placeholder { width: 48px; height: 48px; }.fact-modal-actions { flex-direction: column-reverse; }.fact-modal-actions button { width: 100%; } }
+
+/* Mobile layout: retain every field and existing action. */
+
+@media (max-width: 760px) {
+  .ranking-page, .ranking-layout, .ranking-detail, .product-rail { min-width: 0; }
+  .product-rail { max-height: min(430px, 55svh); overscroll-behavior: contain; }
+  .product-hero { grid-template-columns: 64px minmax(0, 1fr); gap: 12px; }
+  .product-hero > img, .hero-fallback { width: 64px; height: 64px; }
+  .product-hero h2, .product-hero h3 { overflow-wrap: anywhere; line-height: 1.4; }
+  .analyze-button { width: 100%; }
+  .batch-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .batch-metrics strong { overflow-wrap: anywhere; }
+  .root-expansion-decision { grid-template-columns: minmax(0, 1fr); gap: 6px; }
+  .root-expansion-decision small, .root-expansion-decision mark { grid-column: 1; }
+  .root-expansion-decision :is(span, strong, em, mark) { overflow-wrap: anywhere; }
+  .rail-filters { grid-template-columns: minmax(0, 1fr); }
+  .fact-modal-dialog { padding: 18px 14px; }
+  .title-score-grid, .autocomplete-phrase-table article { grid-template-columns: minmax(0, 1fr); }
+  .title-strategy-card { padding: 14px; }
+}
 </style>

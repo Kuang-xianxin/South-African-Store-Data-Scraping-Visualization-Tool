@@ -1,5 +1,7 @@
 <script setup lang="ts">
-import { computed, ref } from "vue";
+import { computed, onBeforeUnmount, onDeactivated, ref } from "vue";
+import { useLiveUpdates } from "../liveUpdates";
+import { copyUserLogin, ERP_PUBLIC_LOGIN_URL, formatUserLogin } from "../userLoginCopy";
 
 import {
   createStore,
@@ -23,6 +25,13 @@ import type {
   UserRole,
 } from "../types";
 
+useLiveUpdates("users", async () => {
+  await load(true); return !error.value;
+}, {
+  busy: () => loading.value || saving.value || savingStore.value || busyUserId.value !== null || busyStoreId.value !== null || copyingUserId.value !== null,
+  editing: () => Boolean(username.value || displayName.value || password.value || storeCode.value || storeDisplayName.value || copyTarget.value),
+});
+
 const users = ref<ManagedUser[]>([]);
 const stores = ref<ManagedStore[]>([]);
 const loading = ref(true);
@@ -40,18 +49,39 @@ const createAllStores = ref(false);
 const createStoreIds = ref<number[]>([]);
 const storeCode = ref("");
 const storeDisplayName = ref("");
+const loginPasswords = new Map<number, { password: string; updatedAt: string }>();
+const copyingUserId = ref<number | null>(null);
+const copiedUserId = ref<number | null>(null);
+const copyDialog = ref<HTMLDialogElement | null>(null);
+const copyTarget = ref<ManagedUser | null>(null);
+const copyPassword = ref("");
+const copyMode = ref<"current" | "reset">("current");
+const copyError = ref("");
+const manualCopyText = ref("");
+let copiedTimer: ReturnType<typeof setTimeout> | undefined;
+let copyGeneration = 0;
+
+function clearLoginPasswords() {
+  copyGeneration += 1;
+  loginPasswords.clear();
+  clearTimeout(copiedTimer);
+  copiedUserId.value = null;
+  copyDialog.value?.close();
+  closeCopyDialog();
+}
+onBeforeUnmount(clearLoginPasswords);
+onDeactivated(clearLoginPasswords);
 
 const roleDescriptions: Record<UserRole, string> = {
-  viewer: "查看店铺、竞品和已有报表，不执行采集、刷新或人工处理。",
-  operator: "承担日常运营工作，可采集并使用已开放的经营模块；全部店铺刷新仅限 kxx。",
-  selection: "可查看和采集竞品雷达，不执行店铺数据刷新。",
-  admin: "拥有系统管理能力；全部店铺刷新仍仅限 kxx 账号。",
+  viewer: "仅查看数据与报表。",
+  operator: "日常运营与采集；全店刷新仅限 kxx。",
+  selection: "查看与采集竞品。",
+  admin: "管理系统；全店刷新仅限 kxx。",
 };
 
 const templateCards = (Object.keys(templateLabels) as UserRole[]).map((key) => ({
   role: key,
   title: templateLabels[key],
-  description: roleDescriptions[key],
   permissions: templatePermissions[key].map((permission) => permissionLabels[permission]),
 }));
 
@@ -60,8 +90,9 @@ const activeStores = computed(() => stores.value.filter((store) => store.active)
 
 void load();
 
-async function load() {
-  loading.value = true;
+async function load(background: unknown = false) {
+  const preserve = background === true;
+  loading.value = !preserve;
   error.value = "";
   try {
     const [loadedUsers, loadedStores] = await Promise.all([
@@ -69,8 +100,12 @@ async function load() {
       fetchStores(),
     ]);
     users.value = loadedUsers;
+    for (const [id, saved] of loginPasswords) {
+      const user = loadedUsers.find((item) => item.id === id);
+      if (!user?.active || user.updated_at !== saved.updatedAt) loginPasswords.delete(id);
+    }
     stores.value = loadedStores;
-    if (!createStoreIds.value.length) {
+    if (!preserve && !createStoreIds.value.length) {
       const current = loadedStores.find(
         (store) => store.active && store.data_connected,
       );
@@ -88,16 +123,21 @@ async function submit() {
   saving.value = true;
   notice.value = "";
   error.value = "";
+  const submittedPassword = password.value;
+  const generation = copyGeneration;
   try {
     const created = await createUser({
       username: username.value,
       display_name: displayName.value,
-      password: password.value,
+      password: submittedPassword,
       role: role.value,
       all_stores: createAllStores.value,
       store_ids: createStoreIds.value,
     });
     users.value = [...users.value, created];
+    if (generation === copyGeneration) {
+      loginPasswords.set(created.id, { password: submittedPassword, updatedAt: created.updated_at });
+    }
     username.value = "";
     displayName.value = "";
     password.value = "";
@@ -107,7 +147,7 @@ async function submit() {
       (store) => store.active && store.data_connected,
     );
     createStoreIds.value = current ? [current.id] : [];
-    notice.value = "账号已创建，权限模板和店铺范围已保存。";
+    notice.value = "账号已创建，可在该账号旁一键复制登录信息。";
   } catch (reason) {
     error.value = reason instanceof Error ? reason.message : "账号创建失败";
   } finally {
@@ -275,6 +315,7 @@ async function saveUser(
   successMessage: string,
 ) {
   if (busyUserId.value !== null) return;
+  const generation = copyGeneration;
   busyUserId.value = user.id;
   notice.value = "";
   error.value = "";
@@ -283,12 +324,91 @@ async function saveUser(
     users.value = users.value.map((item) =>
       item.id === updated.id ? updated : item,
     );
+    const savedPassword = change.password ?? loginPasswords.get(user.id)?.password;
+    if (savedPassword && updated.active && generation === copyGeneration) {
+      loginPasswords.set(updated.id, { password: savedPassword, updatedAt: updated.updated_at });
+    } else {
+      loginPasswords.delete(user.id);
+    }
     notice.value = successMessage;
+    return updated;
   } catch (reason) {
+    // An uncertain update must never leave an older password ready to forward.
+    loginPasswords.delete(user.id);
     error.value = reason instanceof Error ? reason.message : "账号更新失败";
   } finally {
     busyUserId.value = null;
   }
+}
+
+function openCopyDialog(user: ManagedUser, knownPassword = "") {
+  copyTarget.value = user;
+  copyPassword.value = knownPassword;
+  copyMode.value = "current";
+  copyError.value = "";
+  manualCopyText.value = "";
+  copyDialog.value?.showModal();
+}
+
+function closeCopyDialog() {
+  copyTarget.value = null;
+  copyPassword.value = "";
+  copyError.value = "";
+  manualCopyText.value = "";
+}
+
+async function copyLogin(user: ManagedUser, suppliedPassword?: string) {
+  if (!user.active || copyingUserId.value !== null || busyUserId.value !== null) return;
+  const saved = loginPasswords.get(user.id);
+  const knownPassword = suppliedPassword ?? (saved?.updatedAt === user.updated_at ? saved.password : "");
+  if (!knownPassword) {
+    openCopyDialog(user);
+    return;
+  }
+  copyingUserId.value = user.id;
+  const generation = copyGeneration;
+  copiedUserId.value = null;
+  copyError.value = "";
+  const text = formatUserLogin(user.username, knownPassword);
+  try {
+    await copyUserLogin(text);
+    if (generation !== copyGeneration) return;
+    loginPasswords.set(user.id, { password: knownPassword, updatedAt: user.updated_at });
+    copyDialog.value?.close();
+    closeCopyDialog();
+    copiedUserId.value = user.id;
+    notice.value = `${user.display_name} 的账号、密码和公网地址已复制。`;
+    clearTimeout(copiedTimer);
+    copiedTimer = setTimeout(() => { copiedUserId.value = null; }, 3000);
+  } catch {
+    if (generation !== copyGeneration) return;
+    if (!copyDialog.value?.open) openCopyDialog(user, knownPassword);
+    manualCopyText.value = text;
+    copyError.value = "复制失败，请重试或手动复制下方内容。";
+  } finally {
+    copyingUserId.value = null;
+  }
+}
+
+async function submitLoginCopy() {
+  let user = copyTarget.value;
+  const value = copyPassword.value;
+  const generation = copyGeneration;
+  if (!user || !value || copyingUserId.value !== null || busyUserId.value !== null) return;
+  copyError.value = "";
+  if (copyMode.value === "reset") {
+    const updated = await saveUser(user, { password: value }, `${user.display_name} 的密码已重置，原会话已失效。`);
+    if (generation !== copyGeneration) return;
+    if (!updated) {
+      copyError.value = error.value || "密码重置未完成";
+      return;
+    }
+    user = updated;
+    copyTarget.value = updated;
+    // Retrying a denied clipboard write must never submit another password reset.
+    copyMode.value = "current";
+  }
+  await copyLogin(user, value);
 }
 
 function formatDate(value: string | null) {
@@ -320,7 +440,6 @@ function formatDate(value: string | null) {
             <strong>{{ card.title }}</strong>
             <small>{{ card.role }}</small>
           </header>
-          <p>{{ card.description }}</p>
           <ul>
             <li v-for="item in card.permissions" :key="item">{{ item }}</li>
           </ul>
@@ -488,8 +607,8 @@ function formatDate(value: string | null) {
       </form>
     </section>
 
-    <p v-if="notice" class="user-notice success">{{ notice }}</p>
-    <p v-if="error" class="user-notice error">{{ error }}</p>
+    <p v-if="notice" class="user-notice success" role="status">{{ notice }}</p>
+    <p v-if="error" class="user-notice error" role="alert">{{ error }}</p>
 
     <section class="erp-panel accounts-panel">
       <div class="section-title">
@@ -552,6 +671,15 @@ function formatDate(value: string | null) {
               <span>套用会覆盖自定义权限</span>
             </div>
             <div class="account-actions">
+              <button
+                type="button"
+                class="copy-login-button"
+                :disabled="busyUserId !== null || copyingUserId !== null || !user.active"
+                :aria-label="`一键复制 ${user.display_name} 的登录信息`"
+                @click="copyLogin(user)"
+              >
+                {{ copyingUserId === user.id ? "正在复制…" : copiedUserId === user.id ? "已复制" : "一键复制" }}
+              </button>
               <button
                 type="button"
                 :disabled="busyUserId !== null"
@@ -650,14 +778,13 @@ function formatDate(value: string | null) {
             <div class="permission-heading">
               <div>
                 <strong>账号独立权限</strong>
-                <span>勾选后立即保存；所需的查看权限会自动一并开启</span>
+                <span>勾选即保存，并开启所需查看权限</span>
               </div>
               <small>{{ user.permissions.length }} 项已开启</small>
             </div>
             <div class="permission-group-grid">
               <fieldset v-for="group in permissionGroups" :key="group.title">
                 <legend>{{ group.title }}</legend>
-                <p>{{ group.description }}</p>
                 <label
                   v-for="permission in group.permissions"
                   :key="permission"
@@ -683,6 +810,34 @@ function formatDate(value: string | null) {
         </article>
       </div>
     </section>
+    <dialog ref="copyDialog" class="login-copy-dialog" aria-labelledby="login-copy-title" @close="closeCopyDialog" @cancel="copyingUserId !== null || busyUserId !== null ? $event.preventDefault() : undefined">
+      <form @submit.prevent="submitLoginCopy">
+        <h2 id="login-copy-title">复制登录信息</h2>
+        <p>{{ copyTarget?.display_name }} · {{ copyTarget?.username }}</p>
+        <p class="login-copy-url">系统地址：{{ ERP_PUBLIC_LOGIN_URL }}</p>
+        <label>
+          密码来源
+          <select v-model="copyMode" :disabled="busyUserId !== null || copyingUserId !== null" @change="copyPassword = ''; copyError = ''; manualCopyText = ''">
+            <option value="current">填写当前密码</option>
+            <option value="reset">设置新密码</option>
+          </select>
+        </label>
+        <p v-if="copyMode === 'current'" class="login-copy-hint">原密码无法读取，请填写当前密码；新建或重置后可直接复制。</p>
+        <p v-else class="login-copy-warning">确认后旧密码失效，该账号需重新登录。</p>
+        <label>
+          {{ copyMode === 'reset' ? "新密码" : "当前密码" }}
+          <input v-model="copyPassword" type="password" autocomplete="new-password" required :minlength="copyMode === 'reset' ? 8 : undefined" maxlength="128" :disabled="busyUserId !== null || copyingUserId !== null" @input="manualCopyText = ''; copyError = ''" />
+        </label>
+        <p v-if="copyError" class="login-copy-warning" role="alert">{{ copyError }}</p>
+        <textarea v-if="manualCopyText" :value="manualCopyText" readonly rows="5" aria-label="待复制的登录信息" @focus="($event.target as HTMLTextAreaElement).select()" />
+        <div class="login-copy-actions">
+          <button type="button" :disabled="busyUserId !== null || copyingUserId !== null" @click="copyDialog?.close()">取消</button>
+          <button type="submit" class="primary-button" :disabled="!copyPassword || busyUserId !== null || copyingUserId !== null">
+            {{ busyUserId !== null ? "正在重置…" : copyingUserId !== null ? "正在复制…" : copyMode === "reset" ? "重置并复制" : "复制登录信息" }}
+          </button>
+        </div>
+      </form>
+    </dialog>
   </div>
 </template>
 
@@ -1079,6 +1234,31 @@ button:disabled {
   color: #a8483f;
   border-color: #e6bbb6;
 }
+.account-actions .copy-login-button {
+  color: white;
+  border-color: #24704e;
+  background: #24704e;
+}
+.login-copy-dialog {
+  width: min(460px, calc(100vw - 32px));
+  max-height: calc(100dvh - 32px);
+  padding: 24px;
+  border: 1px solid #dce5e0;
+  border-radius: 14px;
+  color: #234b3a;
+  overflow: auto;
+}
+.login-copy-dialog::backdrop { background: rgb(15 35 26 / 45%); }
+.login-copy-dialog form, .login-copy-dialog label { display: grid; gap: 10px; }
+.login-copy-dialog h2, .login-copy-dialog p { margin: 0; }
+.login-copy-dialog h2 { font-size: 20px; }
+.login-copy-dialog p { font-size: 13px; line-height: 1.6; overflow-wrap: anywhere; }
+.login-copy-dialog label { margin-top: 8px; font-size: 13px; }
+.login-copy-url, .login-copy-hint { color: #687b70; }
+.login-copy-warning { color: #a43f35; }
+.login-copy-dialog textarea { width: 100%; padding: 10px; resize: vertical; box-sizing: border-box; }
+.login-copy-actions { display: flex; justify-content: flex-end; flex-wrap: wrap; gap: 10px; margin-top: 10px; }
+.login-copy-actions button { min-height: 44px; padding: 9px 16px; border: 1px solid #ced9d3; border-radius: 8px; }
 .account-permissions {
   padding: 18px 20px 20px;
 }
@@ -1215,4 +1395,16 @@ fieldset > p {
     padding-left: 16px;
   }
 }
+
+/* Mobile layout: retain every field and existing action. */
+
+@media (max-width: 760px) {
+  .store-option-grid, .permission-group-grid { grid-template-columns: minmax(0, 1fr); }
+  .account-actions, .permission-actions { flex-wrap: wrap; }
+  .account-actions > button { flex: 1 1 100px; }
+  .permission-item, .store-access-option { min-height: 48px; align-items: start; }
+  .account-toolbar input, .store-create-form input { width: 100%; }
+  .account-card, .account-header > div, .store-card { min-width: 0; }
+}
+
 </style>

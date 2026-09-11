@@ -17,7 +17,7 @@ const typeSource = readFileSync(
 
 test("seller and category confirmations expose admin-only collapsible operation records", () => {
   assert.match(pageSource, /v-if="props\.isAdmin" class="competitor-listing-operations"/);
-  assert.match(pageSource, /确认加入才留痕；展开具体记录后分页读取本次全部商品链接/);
+  assert.doesNotMatch(pageSource, /确认加入才留痕；展开具体记录后分页读取本次全部商品链接/);
   assert.match(pageSource, /@toggle="handleListingOperationToggle\(\$event, operation\.id\)"/);
   assert.match(pageSource, /\{\{ item\.url \}\}/);
   assert.match(pageSource, /listingOperationResultLabel\(item\.result\)/);

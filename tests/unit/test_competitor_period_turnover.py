@@ -131,4 +131,20 @@ def test_recent_observed_sales_windows_include_both_dates_and_share_latest_ancho
     windows, through_date = _recent_observed_sales_units(observations)
 
     assert through_date == date(2026, 8, 29)
-    assert windows == {"7": 10, "15": 30, "30": 40, "60": 90, "90": 90}
+    assert windows == {"7": 10, "15": 30, "30": 40, "60": 90, "90": 90, "total": 110}
+
+
+def test_observed_total_keeps_offer_scopes_separate_and_missing_distinct_from_zero() -> None:
+    def point(stock: int | None, scope: str, day: int, *, exact: bool = True):
+        return _observation(stock, None, scope=scope, display_date=date(2026, 8, day), exact=exact)
+
+    values, _ = _recent_observed_sales_units([
+        point(10, "red", 1), point(1, "blue", 1),
+        point(100, "red", 2, exact=False),
+        point(6, "red", 3), point(5, "blue", 3),
+        point(20, "single", 3),
+    ])
+    assert values["total"] == 4
+    assert _recent_observed_sales_units([point(8, "red", 1)])[0]["total"] is None
+    assert _recent_observed_sales_units([point(8, "red", 1), point(8, "red", 2)])[0]["total"] == 0
+    assert _recent_observed_sales_units([])[0]["total"] is None

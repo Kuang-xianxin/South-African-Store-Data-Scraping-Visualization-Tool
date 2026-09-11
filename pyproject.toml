@@ -28,6 +28,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+fast-reads = ["mysqlclient>=2.2.8,<2.3", "Brotli>=1.2,<2"]
 dev = [
     "build>=1.2",
     "mypy>=1.11",

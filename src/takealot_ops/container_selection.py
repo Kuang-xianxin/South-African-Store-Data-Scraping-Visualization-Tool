@@ -14,12 +14,12 @@ from urllib.parse import urlparse
 
 from sqlalchemy import or_, select
 from sqlalchemy.engine import Engine
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, load_only
 
 from takealot_ops.competitors.own_store_sales import (
     build_own_store_sales_series_bulk,
 )
-from takealot_ops.competitors.service import _snapshot_recent_observed_sales_units
+from takealot_ops.competitors.service import SnapshotRead, _snapshot_recent_observed_sales_units
 from takealot_ops.exchange_rates import ExchangeRateQuote
 from takealot_ops.product_master import normalize_product_sku
 from takealot_ops.profitability import load_own_store_profitability_bulk
@@ -813,7 +813,21 @@ def _own_profile_payload(
     )
     sea_freight = _number(profile.get("sea_freight_rmb")) or 0
     profit_rows: list[dict[str, Any]] = []
+    uses_workbook = any("workbook_profit" in item for item in profit_items)
     for item in profit_items:
+        if uses_workbook:
+            model = item.get("workbook_profit") or {}
+            calculation = model.get("calculation")
+            if model.get("status") == "available" and isinstance(calculation, dict):
+                profit_rows.append({
+                    "store_code": item.get("store_code"),
+                    "offer_id": item.get("offer_id"),
+                    "profit_rmb_after_direct_fees_and_sea": round(calculation["profit_rmb"], 2),
+                    "profit_margin_percentage": round(calculation["margin_percentage"], 2),
+                    "fee_basis": item.get("fee_basis"),
+                    "workbook_source_rows": model.get("source_rows"),
+                })
+            continue
         scenario = (item.get("scenarios") or {}).get("current_fee_adjusted")
         if not isinstance(scenario, dict):
             continue
@@ -845,6 +859,9 @@ def _own_profile_payload(
         else "fee_unverified"
     )
     profit_positive = bool(profit_values and min(profit_values) > 0)
+    if uses_workbook and len(profit_rows) != len(profit_items):
+        profit_status = "fee_unverified"
+        profit_positive = False
 
     target_units = math.ceil(forecast_monthly * target_cover_days / 30)
     clearance_units = math.ceil(forecast_monthly * clearance_days / 30)
@@ -892,6 +909,8 @@ def _own_profile_payload(
         recommendation_status = "profit_unverified"
         label = "先核利润"
         reason = "缺少完整费用样本，或至少一个可计算 Offer 扣直接费用与海运后非正利润。"
+        if uses_workbook:
+            reason = "部分 Offer 缺少可核实的表内参数，或按利润计算表计算后利润非正。"
         recommended_units = 0
     elif recommended_units <= 0:
         recommendation_status = "hold"
@@ -992,7 +1011,12 @@ def _own_profile_payload(
             "maximum_profit_rmb": round(max(profit_values), 2) if profit_values else None,
             "minimum_margin_percentage": round(min(margin_values), 2) if margin_values else None,
             "items": profit_rows,
-            "note": "扣平台直接费用与工作表9单件海运头程；未扣广告、仓储、税费、退货损失和月租。",
+            "note": (
+                "按 NF 利润计算表扣采购及头程、送仓、佣金及VAT、平台运费及VAT、"
+                "换标、调拨、广告及汇损；头程已包含，不再重复扣减。"
+                if uses_workbook else
+                "扣平台直接费用与工作表9单件海运头程；未扣广告、仓储、税费、退货损失和月租。"
+            ),
         },
         "recommendation": {
             "status": recommendation_status,
@@ -1275,9 +1299,16 @@ def _load_radar_link_evidence(
             .order_by(CompetitorTargetAudit.changed_at)
         ):
             audits_by_plid[audit.plid].append(audit)
-        snapshots_by_plid: dict[str, list[CompetitorSnapshot]] = defaultdict(list)
+        snapshots_by_plid: dict[str, list[SnapshotRead]] = defaultdict(list)
         for snapshot in session.scalars(
             select(CompetitorSnapshot)
+            .options(load_only(*(
+                getattr(CompetitorSnapshot, column) for column in (
+                    "id", "plid", "collected_at", "sku", "seller_id", "title", "image_url",
+                    "price", "stock_status", "stock_quantity", "stock_exact",
+                    "observed_stock_outflow", "review_count", "rating",
+                )
+            ), raiseload=True))
             .where(CompetitorSnapshot.plid.in_(sorted(plids)))
             .order_by(CompetitorSnapshot.plid, CompetitorSnapshot.collected_at)
         ):
@@ -1290,8 +1321,11 @@ def _load_radar_link_evidence(
         }
         variant_signatures: dict[int, frozenset[tuple[str, str, str]]] = {}
         if snapshot_ids:
-            for variant in session.scalars(
-                select(CompetitorVariantSnapshot).where(
+            for variant in session.execute(
+                select(
+                    CompetitorVariantSnapshot.snapshot_id, CompetitorVariantSnapshot.variant_key,
+                    CompetitorVariantSnapshot.sku, CompetitorVariantSnapshot.seller_id,
+                ).where(
                     CompetitorVariantSnapshot.snapshot_id.in_(sorted(snapshot_ids))
                 )
             ):
@@ -1304,8 +1338,9 @@ def _load_radar_link_evidence(
                     )
                 }
         review_dates_by_plid: dict[str, list[date]] = defaultdict(list)
-        for review in session.scalars(
-            select(CompetitorReview).where(CompetitorReview.plid.in_(sorted(plids)))
+        for review in session.execute(
+            select(CompetitorReview.plid, CompetitorReview.review_date)
+            .where(CompetitorReview.plid.in_(sorted(plids)))
         ):
             parsed = _competitor_review_date(review.review_date)
             if parsed is not None and parsed <= as_of:

@@ -70,6 +70,10 @@ class TakealotClient:
                 return
             page_params["continuation_token"] = continuation_token
 
+    def get_balances(self) -> Mapping[str, Any]:
+        """Read official seller balances with the existing seller API credential."""
+        return self._json_object(self._request("GET", "/balances", {}))
+
     def list_offers(self) -> Iterator[OfferRecord]:
         """Yield typed current-offer records."""
         captured_at = datetime.now(UTC)

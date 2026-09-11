@@ -330,10 +330,14 @@ async def test_stock_probe_cancellation_closes_browser_without_cart_cleanup(
         await probe_product_stocks(
             product,
             profile_dir=tmp_path / "stock-profile",
+            proxy_server="socks5://127.0.0.1:17890",
         )
 
     assert context.close.await_count >= 1
     clear_cart.assert_not_awaited()
+    assert playwright.chromium.launch_persistent_context.await_args.kwargs[
+        "proxy"
+    ] == {"server": "socks5://127.0.0.1:17890"}
 
 @pytest.mark.asyncio
 async def test_initial_quantity_menu_waits_for_animated_numeric_options(

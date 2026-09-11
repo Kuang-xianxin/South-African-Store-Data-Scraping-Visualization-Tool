@@ -359,6 +359,7 @@ def test_radar_link_exposes_fixed_observed_stock_outflow_windows() -> None:
             "30": 20,
             "60": 20,
             "90": 20,
+            "total": 20,
         }
         assert payload["monitoring"]["recent_observed_sales_through"] == "2026-08-29"
     finally:

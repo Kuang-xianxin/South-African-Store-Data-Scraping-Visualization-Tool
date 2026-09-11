@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import { cachedNumberFormatter } from "../numberFormatters";
+import { useLiveUpdates } from "../liveUpdates";
 import {
   computed,
   defineAsyncComponent,
@@ -37,6 +39,13 @@ const props = defineProps<{
   operatingConnectedStoreCount?: number;
   onPermissionDenied?: () => void;
 }>();
+
+useLiveUpdates("container-selection", async () => {
+  await load(true); return !error.value;
+}, {
+  busy: () => loading.value,
+  editing: () => false,
+});
 
 const payload = ref<ContainerSelectionPayload | null>(null);
 const loading = ref(true);
@@ -187,29 +196,37 @@ function radarCategoryCoverImage(category: ContainerSelectionRadarCategory): str
   return radarCategoryCovers.value.get(category.category_id)?.current.image_url?.trim() ?? "";
 }
 
-async function load(): Promise<void> {
+async function load(background: unknown = false): Promise<void> {
+  const preserve = background === true;
   controller?.abort();
-  controller = new AbortController();
-  loading.value = true;
+  const requestController = new AbortController();
+  controller = requestController;
+  const requestedAsOf = props.asOf;
+  loading.value = !preserve;
   error.value = "";
   try {
-    payload.value = await fetchContainerSelection(props.asOf, controller.signal);
+    const result = await fetchContainerSelection(requestedAsOf, requestController.signal);
+    if (requestController.signal.aborted || controller !== requestController || requestedAsOf !== props.asOf) return;
+    payload.value = result;
     if (
       selectedRadarCategoryId.value !== "all"
       && !payload.value.radar_categories.some(
         (category) => category.category_id === selectedRadarCategoryId.value,
       )
     ) selectedRadarCategoryId.value = "all";
-    expandedRadarCategoryIds.value = new Set();
-    failedImageKeys.value = new Set();
+    if (!preserve) {
+      expandedRadarCategoryIds.value = new Set();
+      failedImageKeys.value = new Set();
+    }
     void nextTick(scheduleRadarDetailWarmup);
   } catch (caught) {
+    if (requestController.signal.aborted || controller !== requestController) return;
     if (caught instanceof DOMException && caught.name === "AbortError") return;
     error.value = caught instanceof ApiRequestError
       ? caught.message
       : "配柜选品数据暂时无法读取";
   } finally {
-    loading.value = false;
+    if (controller === requestController) loading.value = false;
   }
 }
 
@@ -250,7 +267,7 @@ function monitoringTone(status: string): string {
 
 function number(value: number | null | undefined, digits = 0): string {
   if (value === null || value === undefined || !Number.isFinite(value)) return "—";
-  return new Intl.NumberFormat("zh-CN", {
+  return cachedNumberFormatter("zh-CN", {
     maximumFractionDigits: digits,
     minimumFractionDigits: digits,
   }).format(value);
@@ -387,9 +404,6 @@ onBeforeUnmount(() => {
       <div>
         <p class="eyebrow">CHRISTMAS CONTAINER FILL</p>
         <h1>配柜选品</h1>
-        <p>
-          用大体积、快动销、非带电商品释放国内仓并填充普货舱位；新品先监控，补货先看真实链路。
-        </p>
       </div>
       <button type="button" :disabled="loading" @click="load">
         {{ loading ? "正在计算…" : "重新计算" }}
@@ -413,7 +427,7 @@ onBeforeUnmount(() => {
       <article>
         <span>新品类目 / 代表链接</span>
         <strong>{{ payload.summary.radar_category_count }}/{{ payload.summary.radar_link_count }}</strong>
-        <small>{{ payload.summary.radar_active_link_count }} 条已进入竞品雷达</small>
+        <small>{{ payload.summary.radar_active_link_count }} 条已进入选品雷达</small>
       </article>
       <article>
         <span>近期亮眼 / 可进复核</span>
@@ -427,12 +441,12 @@ onBeforeUnmount(() => {
       </article>
     </section>
 
-    <p v-if="error" class="state-card error" role="alert">
+    <p v-if="error && !payload" class="state-card error" role="alert">
       {{ error }}
       <button type="button" @click="load">重试</button>
     </p>
     <p v-else-if="loading && !payload" class="state-card" role="status">
-      正在按店铺、PLID、Offer 重建近30天销售、前30天趋势与库存链路…
+      正在计算选品建议…
     </p>
 
     <template v-if="payload">
@@ -491,30 +505,30 @@ onBeforeUnmount(() => {
           </select>
         </label>
         <small v-if="activeView === 'replenishment'">
-          月动销先逐链路按有效覆盖计算，再跨店汇总；缺失日期不补 0。
+          按有效销量覆盖折算月动销
         </small>
         <small v-else>
-          评论必须看日期；累计评论只用于价格带，近30天评论和库存流出才参与新品判断。
+          新品判断采用近30天评论与库存观察
         </small>
       </section>
 
       <section v-if="activeView === 'replenishment'" class="table-shell">
-        <table>
+        <table class="mobile-record-table">
           <thead>
             <tr>
-              <th>商品</th>
-              <th>配柜体积</th>
-              <th>动销证据</th>
-              <th>分阶段库存</th>
-              <th>利润下限</th>
-              <th>建议</th>
-              <th></th>
+              <th scope="col">商品</th>
+              <th scope="col">配柜体积</th>
+              <th scope="col">动销证据</th>
+              <th scope="col">分阶段库存</th>
+              <th scope="col">利润下限</th>
+              <th scope="col">建议</th>
+              <th scope="col"></th>
             </tr>
           </thead>
           <tbody>
             <template v-for="item in replenishmentItems" :key="item.company_sku">
               <tr>
-                <td class="product-cell">
+                <td data-label="商品" data-mobile-wide class="product-cell">
                   <span class="rank">{{ item.rank }}</span>
                   <div class="selection-product-image">
                     <img
@@ -539,30 +553,30 @@ onBeforeUnmount(() => {
                     </div>
                   </div>
                 </td>
-                <td>
+                <td data-label="配柜体积">
                   <strong>{{ number(item.logistics.unit_cbm, 4) }} m³/件</strong>
                   <small>{{ number(item.logistics.cbm_per_100_units, 2) }} m³/百件</small>
                   <small>{{ item.source.measured ? "实测箱规" : "工作簿箱规，待实测" }}</small>
                 </td>
-                <td>
+                <td data-label="动销证据">
                   <strong>{{ number(item.sales.recent_monthly_velocity, 1) }} 件/月近期月化</strong>
                   <small>近30天 {{ item.sales.recent_30_units }} 件 · {{ item.sales.recent_known_link_count }}/{{ item.sales.link_count }} 条链路达标</small>
                   <small>前30天月化 {{ number(item.sales.previous_monthly_velocity, 1) }} 件 · 环比 {{ trend(item.sales.recent_vs_previous_change_percentage) }}</small>
                   <small>90天 {{ item.sales.ordered_units }} 件，仅作背景</small>
                 </td>
-                <td>
+                <td data-label="分阶段库存">
                   <strong>可售 {{ item.inventory.sellable_stock }}</strong>
                   <small>收货中 {{ item.inventory.stock_in_receiving }} · 在途 {{ item.inventory.stock_on_way }}</small>
                   <small>按近期月化，可售覆盖 {{ number(item.inventory.stock_cover_days, 1) }} 天</small>
                 </td>
-                <td>
+                <td data-label="利润下限">
                   <strong :class="{ negative: (item.profit.minimum_profit_rmb ?? 0) <= 0 }">
                     {{ money(item.profit.minimum_profit_rmb) }}/件
                   </strong>
                   <small>最低利润率 {{ percent(item.profit.minimum_margin_percentage) }}</small>
                   <small>{{ item.profit.calculated_offer_count }} 个 Offer 可复算</small>
                 </td>
-                <td>
+                <td data-label="建议" data-mobile-wide>
                   <span class="status-pill" :class="recommendationTone(item.recommendation.status)">
                     {{ item.recommendation.label }}
                   </span>
@@ -574,7 +588,7 @@ onBeforeUnmount(() => {
                   </small>
                   <small>{{ item.recommendation.reason }}</small>
                 </td>
-                <td class="action-cell">
+                <td data-label="操作" class="action-cell">
                   <button type="button" @click="toggleDetail(item)">
                     {{ expandedSku === item.company_sku ? "收起详情" : "详情" }}
                   </button>
@@ -711,7 +725,7 @@ onBeforeUnmount(() => {
             >
               <span>
                 <strong>代表链接（{{ category.representatives.length }}）</strong>
-                <small>点击查看最高价、最低价、评论最多及中位等差异链接</small>
+                <small>查看代表链接</small>
               </span>
               <b>{{ isRadarCategoryLinksExpanded(category.category_id) ? "收起" : "展开" }}</b>
             </button>
@@ -721,16 +735,16 @@ onBeforeUnmount(() => {
               :id="radarCategoryLinksPanelId(category.category_id)"
               class="representative-table-shell"
             >
-              <table class="representative-table">
+              <table class="representative-table mobile-record-table">
                 <thead>
                   <tr>
-                    <th>差异角色</th>
-                    <th>代表链接</th>
-                    <th>当前价格 / 市场结构</th>
-                    <th>近30天评论日期</th>
-                    <th>库存观察流出（件）</th>
-                    <th>监控基线</th>
-                    <th>平台</th>
+                    <th scope="col">差异角色</th>
+                    <th scope="col">代表链接</th>
+                    <th scope="col">当前价格 / 市场结构</th>
+                    <th scope="col">近30天评论日期</th>
+                    <th scope="col">库存观察流出（件）</th>
+                    <th scope="col">监控基线</th>
+                    <th scope="col">平台</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -740,7 +754,7 @@ onBeforeUnmount(() => {
                     class="clickable-detail-row"
                     role="button"
                     tabindex="0"
-                    :aria-label="`打开 ${item.current.title || item.name} 的竞品雷达详情`"
+                    :aria-label="`打开 ${item.current.title || item.name} 的选品雷达详情`"
                     title="点击整行查看雷达详情"
                     @pointerenter="scheduleRadarDetailPrefetch(item)"
                     @pointerleave="cancelRadarDetailPrefetchIntent"
@@ -750,12 +764,12 @@ onBeforeUnmount(() => {
                     @keydown.enter.self="openRadarDetail(item, $event)"
                     @keydown.space.self.prevent="openRadarDetail(item, $event)"
                   >
-                    <td>
+                    <td data-label="差异角色">
                       <div class="role-tags">
                         <span v-for="role in item.role_labels" :key="role">{{ role }}</span>
                       </div>
                     </td>
-                    <td class="representative-name">
+                    <td data-label="代表链接" class="representative-name">
                       <div class="representative-identity">
                         <div class="selection-product-image compact">
                           <img
@@ -777,16 +791,16 @@ onBeforeUnmount(() => {
                         </div>
                       </div>
                     </td>
-                    <td>
+                    <td data-label="当前价格 / 市场结构">
                       <strong>{{ money(item.current.price_zar, "R") }}</strong>
                       <small>累计评论 {{ number(item.current.review_count_total) }}（仅结构）</small>
                       <small>评分 {{ number(item.current.rating, 1) }}</small>
                     </td>
-                    <td>
+                    <td data-label="近30天评论日期">
                       <strong>{{ item.monitoring.recent_dated_review_count }} 条</strong>
                       <small>最新 {{ item.monitoring.latest_review_date || "—" }}</small>
                     </td>
-                    <td class="stock-outflow-cell">
+                    <td data-label="库存观察流出（件）" class="stock-outflow-cell">
                       <CompetitorObservedSalesMetrics
                         :values="item.monitoring.recent_observed_sales"
                         :through-date="item.monitoring.recent_observed_sales_through"
@@ -794,21 +808,20 @@ onBeforeUnmount(() => {
                         embedded
                       />
                     </td>
-                    <td>
+                    <td data-label="监控基线">
                       <span class="status-pill" :class="monitoringTone(item.monitoring.status)">
                         {{ item.monitoring.label }}
                       </span>
                       <small>{{ item.monitoring.snapshot_count }} 次快照 · {{ item.monitoring.baseline_days }} 天</small>
                       <small>加入 {{ chinaDateTime(item.monitoring.added_at) }}</small>
                     </td>
-                    <td class="action-cell">
+                    <td data-label="平台" class="action-cell">
                       <a
                         :href="item.url"
                         target="_blank"
                         rel="noopener noreferrer"
                         @click.stop
                       >平台</a>
-                      <small>整行可查看详情</small>
                     </td>
                   </tr>
                 </tbody>
@@ -829,7 +842,7 @@ onBeforeUnmount(() => {
 
         <details v-if="payload.retained_watchlist.length" class="retained-card">
           <summary>旧批次留观链接（{{ payload.retained_watchlist.length }}）</summary>
-          <p>这些链接继续采集以保留基线，但不计入本轮近期多链接新品结论。</p>
+          <p>继续监控，不计入本轮新品建议。</p>
           <div class="retained-list">
             <article
               v-for="item in payload.retained_watchlist"
@@ -837,7 +850,7 @@ onBeforeUnmount(() => {
               class="clickable-detail-card"
               role="button"
               tabindex="0"
-              :aria-label="`打开 ${item.current.title || item.name} 的竞品雷达详情`"
+              :aria-label="`打开 ${item.current.title || item.name} 的选品雷达详情`"
               title="点击卡片查看雷达详情"
               @pointerenter="scheduleRadarDetailPrefetch(item)"
               @pointerleave="cancelRadarDetailPrefetchIntent"
@@ -876,9 +889,13 @@ onBeforeUnmount(() => {
       </template>
 
       <details class="method-card">
-        <summary>口径与边界</summary>
+        <summary>计算说明</summary>
         <ul>
-          <li v-for="note in payload.evidence_notes" :key="note">{{ note }}</li>
+          <li>补货按近30天有效销量折算；缺失不补0。前30天看趋势，90天仅作背景。</li>
+          <li>各库存阶段分列，避免重复计数。</li>
+          <li>新品采用近30天评论与库存观察，非真实订单。</li>
+          <li>价格与评论极值仅限候选池；采购前复核报价和实测箱规。</li>
+          <li>非带电须无插头、无随货电池；装柜前复核包装清单。</li>
         </ul>
         <p>{{ payload.policy.formula_note }}</p>
       </details>
@@ -1721,4 +1738,21 @@ dd {
   }
 
 }
+
+/* Mobile layout: retain every field and existing action. */
+
+@media (max-width: 760px) {
+  .container-selection-page, .table-shell, .radar-category, .economics-panel { min-width: 0; }
+  .toolbar { align-items: stretch; }
+  .toolbar label, .toolbar :is(input, select) { width: 100%; min-width: 0; }
+  .summary-grid, .category-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .link-grid, .retained-list { grid-template-columns: minmax(0, 1fr); }
+  .category-card { min-width: 0; padding: 14px; }
+  .representative-identity { align-items: flex-start; gap: 10px; }
+  .representative-name, .stock-outflow-cell { min-width: 0; max-width: none; }
+  .selection-product-image.compact { flex: 0 0 52px; width: 52px; height: 52px; }
+  .representative-identity > div:last-child { min-width: 0; }
+  .action-cell button { width: 100%; }
+}
+
 </style>

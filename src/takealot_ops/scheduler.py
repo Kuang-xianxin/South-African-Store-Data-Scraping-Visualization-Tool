@@ -27,6 +27,7 @@ from takealot_ops.collectors import (
     collect_sales,
 )
 from takealot_ops.domain import sast_date
+from takealot_ops.collectors.home import collect_home_finance
 from takealot_ops.metrics.service import MetricService
 from takealot_ops.quality import QualityResult, verify_quality
 from takealot_ops.reporting import ReportPaths, generate_daily_reports
@@ -154,6 +155,7 @@ def run_daily(
                     error=sales_result.error,
                 )
             sales_verified_at = clock.now()
+            collect_home_finance(client, repository, clock.now())
 
             service = MetricService(
                 repository,
@@ -361,6 +363,12 @@ def _backup_mysql_database(
     ]
     if dedicated_url:
         command.insert(-1, "--source-data=2")
+    if url.query.get("ssl_ca"):
+        verify_identity = str(url.query.get("ssl_check_hostname", "true")).casefold() in {"true", "1", "yes"}
+        command[-1:-1] = [
+            "--ssl-mode=" + ("VERIFY_IDENTITY" if verify_identity else "VERIFY_CA"),
+            f"--ssl-ca={url.query['ssl_ca']}",
+        ]
     environment = os.environ.copy()
     if url.password is not None:
         environment["MYSQL_PWD"] = url.password
@@ -600,6 +608,15 @@ def _verify_mysql_integrity(settings: LocalDatabaseSettings) -> None:
 
 
 def _find_mysql_program(name: str) -> Path:
+    configured = os.environ.get("TAKEALOT_MYSQL_BIN", "").strip()
+    if configured:
+        folder = Path(configured)
+        if not folder.is_absolute() or name not in {"mysqldump.exe", "mysql.exe"}:
+            raise RuntimeError("Invalid configured MySQL tool directory or program")
+        candidate = folder / name
+        if not candidate.is_file():
+            raise RuntimeError(f"Configured MySQL tool is missing: {name}")
+        return candidate
     candidates = (
         Path("C:/Program Files/MySQL/MySQL Server 8.0/bin") / name,
         Path("C:/Program Files/MySQL/MySQL Server 8.4/bin") / name,

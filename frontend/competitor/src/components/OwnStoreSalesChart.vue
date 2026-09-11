@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import { useResponsiveChart } from "../useResponsiveChart";
+import { cachedNumberFormatter } from "../numberFormatters";
 import { computed, ref, watch } from "vue";
 
 import {
@@ -17,6 +19,8 @@ const props = defineProps<{
   preferredStoreCode?: string | null;
 }>();
 
+const { chartElement: salesChartElement, chartWidth: salesChartWidth, compact: salesChartCompact } = useResponsiveChart(1200);
+const salesChartLayout = computed(() => ({ ...OWN_STORE_SALES_CHART, width: salesChartWidth.value, plotRight: salesChartWidth.value - 20 }));
 const selectedStoreCode = ref("");
 const activeIndex = ref(0);
 const rangeStart = ref("");
@@ -97,7 +101,7 @@ const aggregatedPoints = computed(() =>
 );
 const displayBuckets = computed(() => aggregatedPoints.value.buckets);
 const geometry = computed(() =>
-  buildOwnStoreSalesChart(displayBuckets.value),
+  buildOwnStoreSalesChart(displayBuckets.value, salesChartLayout.value),
 );
 const activePoint = computed(
   () => displayBuckets.value[activeIndex.value] ?? null,
@@ -111,7 +115,7 @@ const visibleBars = computed(() =>
 const missingBarMarkers = computed(() =>
   geometry.value.points.filter((point) => point.units === null),
 );
-const showBarValueLabels = computed(() => displayBuckets.value.length <= 24);
+const showBarValueLabels = computed(() => displayBuckets.value.length <= Math.min(24, Math.floor(salesChartWidth.value / 36)));
 const isFullRange = computed(
   () =>
     rangeStart.value === availableStart.value &&
@@ -169,7 +173,7 @@ const plotMessage = computed<{
   ].filter(Boolean).join(" · ");
   if (!knownBuckets.length) {
     return {
-      detail: `${evidence} · 缺失不会按 0 件补齐`,
+      detail: evidence,
       title: "所选区间暂无 Seller Sales 覆盖",
       tone: "missing",
     };
@@ -206,6 +210,7 @@ function handlePointer(event: PointerEvent) {
     event.clientX - bounds.left,
     bounds.width,
     displayBuckets.value.length,
+    salesChartLayout.value,
   );
 }
 
@@ -267,12 +272,12 @@ function clampDate(value: string, minimum: string, maximum: string): string {
 }
 
 function number(value: number | null): string {
-  return value === null ? "—" : new Intl.NumberFormat("zh-CN").format(value);
+  return value === null ? "—" : cachedNumberFormatter("zh-CN").format(value);
 }
 
 function decimal(value: number | null): string {
   if (value === null) return "—";
-  return new Intl.NumberFormat("zh-CN", { maximumFractionDigits: 1 }).format(value);
+  return cachedNumberFormatter("zh-CN", { maximumFractionDigits: 1 }).format(value);
 }
 
 function granularityLabel(): string {
@@ -310,7 +315,7 @@ function activePeriodLabel(): string {
     </header>
 
     <div v-if="!selectedSeries" class="own-sales-empty">
-      当前账号可见店铺没有该 PLID 的自有 Offer，未生成销量条形图。
+      暂无可见自有报价的销量数据。
     </div>
     <template v-else>
       <div class="own-sales-summary">
@@ -426,16 +431,11 @@ function activePeriodLabel(): string {
             缺失 {{ rangeSummary.missingDays }} 天
           </span>
         </p>
-        <p
-          v-if="rangeSummary.partialDays || rangeSummary.missingDays"
-          class="own-sales-range-note"
-        >
-          橙色柱为截至采集值；缺失日期不补 0。
-        </p>
       </div>
 
       <div
         v-if="filteredPoints.length"
+        ref="salesChartElement"
         class="own-sales-chart"
         tabindex="0"
         :aria-label="`自有商品销量条形图，当前显示 ${rangeStart} 至 ${rangeEnd}，${granularityLabel()}，使用左右方向键切换柱子`"
@@ -470,7 +470,6 @@ function activePeriodLabel(): string {
               · 截至采集 {{ activePoint.partialDays }} 天
               · 缺失 {{ activePoint.missingDays }} 天
             </strong>
-            <span>Seller Sales /sales</span>
             <span v-if="activePoint.revisionCount">含 {{ activePoint.revisionCount }} 次日终基线后修订</span>
           </div>
         </div>
@@ -483,20 +482,22 @@ function activePeriodLabel(): string {
             <span><i class="zero" aria-hidden="true"></i>完整 0 件基线</span>
             <span><i class="missing" aria-hidden="true">×</i>缺失，不补 0</span>
           </div>
-          <span class="own-sales-chart-hint">移动鼠标或使用 ← → 逐柱查点</span>
+          <span class="own-sales-chart-hint">点选或按 ← → 查看</span>
         </div>
 
+        <p v-if="plotMessage && salesChartCompact" class="own-sales-mobile-message"><strong>{{ plotMessage.title }}</strong><span>{{ plotMessage.detail }}</span></p>
         <svg
-          :viewBox="`0 0 ${OWN_STORE_SALES_CHART.width} ${OWN_STORE_SALES_CHART.height}`"
+          :viewBox="`0 0 ${salesChartLayout.width} ${salesChartLayout.height}`"
           role="img"
           :aria-label="`按北京时间归属并${granularityLabel()}的实际下单件数条形图`"
           @pointermove="handlePointer"
+          @pointerdown="handlePointer"
         >
           <rect
             class="own-sales-surface"
             x="4"
             y="8"
-            :width="OWN_STORE_SALES_CHART.width - 8"
+            :width="salesChartLayout.width - 8"
             height="204"
             rx="10"
           />
@@ -505,9 +506,9 @@ function activePeriodLabel(): string {
             class="own-sales-active-band"
             :class="{ warning: activePoint?.status !== 'verified' }"
             :x="activeChartPoint.focusX"
-            :y="OWN_STORE_SALES_CHART.plotTop - 6"
+            :y="salesChartLayout.plotTop - 6"
             :width="activeChartPoint.focusWidth"
-            :height="OWN_STORE_SALES_CHART.plotBottom - OWN_STORE_SALES_CHART.plotTop + 12"
+            :height="salesChartLayout.plotBottom - salesChartLayout.plotTop + 12"
             rx="7"
           />
           <line
@@ -516,30 +517,30 @@ function activePeriodLabel(): string {
             class="own-sales-grid vertical"
             :x1="tick.x"
             :x2="tick.x"
-            :y1="OWN_STORE_SALES_CHART.plotTop"
-            :y2="OWN_STORE_SALES_CHART.plotBottom"
+            :y1="salesChartLayout.plotTop"
+            :y2="salesChartLayout.plotBottom"
             vector-effect="non-scaling-stroke"
           />
           <g v-for="tick in geometry.yTicks" :key="`y:${tick.value}`">
             <line
               class="own-sales-grid"
               :class="{ baseline: tick.value === 0 }"
-              :x1="OWN_STORE_SALES_CHART.plotLeft"
-              :x2="OWN_STORE_SALES_CHART.plotRight"
+              :x1="salesChartLayout.plotLeft"
+              :x2="salesChartLayout.plotRight"
               :y1="tick.y"
               :y2="tick.y"
               vector-effect="non-scaling-stroke"
             />
             <text
               class="own-sales-axis"
-              :x="OWN_STORE_SALES_CHART.plotLeft - 9"
+              :x="salesChartLayout.plotLeft - 9"
               :y="(tick.y ?? 0) + 4"
               text-anchor="end"
             >{{ tick.label }}</text>
           </g>
           <text class="own-sales-axis-title" x="10" y="22">下单件数（整数）</text>
           <g
-            v-if="plotMessage"
+            v-if="plotMessage && !salesChartCompact"
             class="own-sales-plot-message"
             :class="plotMessage.tone"
             aria-hidden="true"
@@ -562,7 +563,7 @@ function activePeriodLabel(): string {
               zero: point.units === 0,
             }"
             :x="point.barX"
-            :y="point.barY ?? OWN_STORE_SALES_CHART.plotBottom"
+            :y="point.barY ?? salesChartLayout.plotBottom"
             :width="point.barWidth"
             :height="point.barHeight ?? 0"
             rx="1.5"
@@ -575,7 +576,7 @@ function activePeriodLabel(): string {
               class="own-sales-bar-label"
               :class="{ partial: point.status === 'partial' }"
               :x="point.x"
-              :y="Math.max(OWN_STORE_SALES_CHART.plotTop + 11, (point.barY ?? OWN_STORE_SALES_CHART.plotBottom) - 6)"
+              :y="Math.max(salesChartLayout.plotTop + 11, (point.barY ?? salesChartLayout.plotBottom) - 6)"
               text-anchor="middle"
             >{{ number(point.units) }}</text>
           </template>
@@ -584,7 +585,7 @@ function activePeriodLabel(): string {
             :key="`missing:${point.index}`"
             class="own-sales-missing-marker"
             :x="point.x"
-            :y="OWN_STORE_SALES_CHART.plotBottom - 6"
+            :y="salesChartLayout.plotBottom - 6"
             text-anchor="middle"
           >×</text>
           <line
@@ -593,8 +594,8 @@ function activePeriodLabel(): string {
             :class="{ missing: activePoint?.units === null || activePoint?.status === 'partial' }"
             :x1="activeChartPoint.x"
             :x2="activeChartPoint.x"
-            :y1="OWN_STORE_SALES_CHART.plotTop"
-            :y2="OWN_STORE_SALES_CHART.plotBottom"
+            :y1="salesChartLayout.plotTop"
+            :y2="salesChartLayout.plotBottom"
             vector-effect="non-scaling-stroke"
           />
           <text
@@ -1142,4 +1143,18 @@ function activePeriodLabel(): string {
     white-space: normal;
   }
 }
+
+/* Mobile layout: retain every field and existing action. */
+
+.own-sales-mobile-message { display: grid; gap: 5px; padding: 12px; border-radius: 10px; color: #3b5f4f; background: #edf5ef; font-size: 13px; line-height: 1.5; }
+@media (max-width: 760px) {
+  .own-sales { min-width: 0; padding: 14px; }
+  .own-sales-chart { padding-inline: 0; }
+  .own-sales-chart svg { touch-action: pan-y; }
+  .own-sales-range-controls label { flex: 1 1 130px; min-width: 0; }
+  .own-sales-range-controls input { width: 100%; min-width: 0; }
+  .own-sales-range-presets { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .own-sales-summary strong, .own-sales-range-insights strong { overflow-wrap: anywhere; }
+}
+
 </style>

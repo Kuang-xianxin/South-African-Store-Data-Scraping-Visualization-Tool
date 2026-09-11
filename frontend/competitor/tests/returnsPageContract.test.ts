@@ -6,7 +6,6 @@ import { computed, effectScope, nextTick, reactive, ref, shallowRef, watch } fro
 const pageSource = readFileSync(new URL("../src/pages/ReturnsPage.vue", import.meta.url), "utf8");
 const competitorSource = readFileSync(new URL("../src/pages/CompetitorsPage.vue", import.meta.url), "utf8");
 const appSource = readFileSync(new URL("../src/App.vue", import.meta.url), "utf8");
-const apiSource = readFileSync(new URL("../src/api.ts", import.meta.url), "utf8");
 
 test("returns module keeps uncollected distinct from verified zero", () => {
   assert.match(pageSource, /尚未采集退货明细/);
@@ -15,7 +14,7 @@ test("returns module keeps uncollected distinct from verified zero", () => {
 });
 
 test("returns product card opens an exact company SKU history with own-link detail entry", () => {
-  assert.match(pageSource, /查看该公司 SKU 全部退货/);
+  assert.match(pageSource, /查看同款退货/);
   assert.match(pageSource, /filterReturnsForCompanySku\(candidates, companySku\)/);
   assert.match(pageSource, /const requestPageSize = 100/);
   assert.doesNotMatch(pageSource, /忽略主列表当前的关键词、退货原因和处理结果筛选/);
@@ -43,34 +42,32 @@ test("returns whole record row opens the company SKU history by pointer or keybo
   assert.match(pageSource, /tr\.returns-record-row\.is-clickable:hover > td/);
 });
 
-test("full Manage Removal Orders module keeps all stages fields and W8 evidence visible", () => {
-  assert.match(pageSource, /Manage Removal Orders · PO 全部信息/);
-  assert.match(pageSource, /Submitted \(/);
-  assert.match(pageSource, /Ready For Pickup \(/);
-  assert.match(pageSource, /Closed \(/);
-  assert.match(pageSource, /Removal Order、Takealot Removal Order、Returns Removal Order/);
-  assert.match(pageSource, /Date Submitted/);
-  assert.match(pageSource, /Pickup Date/);
-  assert.match(pageSource, /Closed Date/);
-  assert.match(pageSource, /Total Weight \/ Boxes/);
-  assert.match(pageSource, /Qty Requested \/ Prepared \/ Collected/);
-  assert.match(pageSource, /Fees \(Incl VAT\)/);
-  assert.match(pageSource, /RRN \/ Seller Return/);
-  assert.match(pageSource, /刷新 PO 状态/);
-  assert.doesNotMatch(pageSource, /同步移除 PO/);
-  assert.match(pageSource, /runRemovalSync/);
-  assert.match(pageSource, /verifyRemovalOtp/);
-  assert.match(pageSource, /临期 \/ 已过期/);
-  assert.match(pageSource, /要求\/备好\/已取/);
-  assert.match(pageSource, /上架指长睿仓库库存/);
-  assert.match(pageSource, /长睿仓已上架.*不代表已经寄回 Takealot/);
-  assert.match(pageSource, /未把未知数量补成 0/);
-  assert.match(pageSource, /退货与长睿关联概览/);
-  assert.match(pageSource, /removalW8Label\(item\.removal_lifecycle\)/);
-  assert.match(appSource, /canSyncRemovalOrders: canRefresh\.value/);
-  assert.match(apiSource, /refreshReturnRemovalOrders/);
-  assert.match(apiSource, /\/api\/erp\/returns\/removal-orders\/sync/);
-  assert.match(apiSource, /\/api\/erp\/returns\/removal-orders\/verify-otp/);
+test("returns main table fits its container without horizontal scrolling", () => {
+  const columnWidths = Array.from(
+    pageSource.matchAll(/\.returns-column-[a-z-]+ \{ width: (\d+)%; \}/g),
+    (match) => Number(match[1]),
+  );
+
+  assert.match(pageSource, /\.returns-table-wrap \{ overflow: hidden;/);
+  assert.doesNotMatch(pageSource, /\.returns-table-wrap \{[^}]*overflow-x: auto/);
+  assert.match(pageSource, /\.returns-table \{[^}]*min-width: 0;[^}]*table-layout: fixed;/);
+  assert.equal(columnWidths.length, 7);
+  assert.equal(columnWidths.reduce((total, width) => total + width, 0), 100);
+  assert.match(pageSource, /\.returns-product-card \{[^}]*min-width: 0;/);
+  assert.match(pageSource, /\.returns-comment \{ min-width: 0;/);
+  assert.match(pageSource, /\.returns-table th, \.returns-table td \{[^}]*overflow-wrap: anywhere;/);
+});
+
+test("returns module contains only Seller Return details and no PO or booking controls", () => {
+  assert.match(pageSource, /fetchReturns/);
+  assert.match(pageSource, /returns-summary-grid/);
+  assert.match(pageSource, /returns-store-statuses/);
+  assert.match(pageSource, /returns-filters/);
+  assert.match(pageSource, /outcomeText\(item\)/);
+  assert.match(pageSource, /transactionText\(item\)/);
+  assert.doesNotMatch(pageSource, /Manage Removal Orders|Seller Portal|刷新 PO 状态|移除 PO|提货与长睿|returns-column-removal/);
+  assert.doesNotMatch(pageSource, /refreshReturnRemovalOrders|verifyReturnRemovalOrderOtp|removal_lifecycle|removal_order_tracking|removal_orders|ReturnRemoval/);
+  assert.doesNotMatch(appSource, /canSyncRemovalOrders/);
 });
 
 test("own-store detail links to the consolidated returns module", () => {

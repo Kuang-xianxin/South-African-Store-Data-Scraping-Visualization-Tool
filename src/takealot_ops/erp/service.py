@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 from collections.abc import Sequence
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
@@ -12,8 +13,9 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 import pandas as pd
-from sqlalchemy import Engine, func, select
+from sqlalchemy import Engine, func, or_, select, tuple_
 from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.engine import make_url
 from sqlalchemy.orm import Session
 
 from takealot_ops.dashboard.labels import (
@@ -32,7 +34,7 @@ from takealot_ops.metrics.service import (
 )
 from takealot_ops.settings import DashboardSettings
 from takealot_ops.storage.migrations import create_read_only_engine
-from takealot_ops.storage.models import CollectionRun, DailyProductMetric, OfferSnapshot
+from takealot_ops.storage.models import AnomalyEvent, CollectionRun, DailyProductMetric, OfferSnapshot
 from takealot_ops.storage.repository import Repository
 
 
@@ -49,6 +51,18 @@ CHINA = ZoneInfo("Asia/Shanghai")
 
 def create_read_only_erp_engine(database_url: str) -> Engine:
     """Create a read-only engine for the ERP's configured database."""
+    if os.getenv("TAKEALOT_BLUE_READ_REPLICA") == "1":
+        if os.getenv("TAKEALOT_DEPLOYMENT_LABEL") != "blue-stage-laptop":
+            raise ValueError("BLUE replica reads require the isolated laptop deployment")
+        from blue_read_replica import create_read_engine  # type: ignore[import-not-found]
+
+        return create_read_engine(database_url)  # type: ignore[no-any-return]
+    driver = os.getenv("TAKEALOT_ERP_READ_DRIVER", "pymysql").strip().lower()
+    if driver not in {"pymysql", "mysqlclient"}:
+        raise ValueError("TAKEALOT_ERP_READ_DRIVER must be pymysql or mysqlclient")
+    url = make_url(database_url)
+    if driver == "mysqlclient" and url.drivername == "mysql+pymysql":
+        database_url = url.set(drivername="mysql+mysqldb").render_as_string(hide_password=False)
     return create_read_only_engine(database_url)
 
 
@@ -157,6 +171,58 @@ _PRODUCT_DETAIL_OFFER_COLUMNS = (
     "takealot_stock_in_receiving",
     "takealot_stock_on_way",
 )
+
+
+def load_summary_dataset(
+    settings: DashboardSettings,
+    as_of: date,
+    *,
+    engine: Engine | None = None,
+) -> DashboardDataset:
+    """Read latest product evidence and aggregate sales without loading history objects."""
+    database_path = sqlite_database_path(settings.database_url)
+    if database_path is not None and not database_path.exists():
+        return EMPTY_DATASET
+    owned_engine = engine is None
+    read_engine = engine or create_read_only_erp_engine(settings.database_url)
+    store_columns = ("metric_date", "ordered_units", "effective_units", "ordered_revenue")
+    anomaly_columns = ("event_date", "offer_id")
+    try:
+        with Session(read_engine) as session:
+            latest_metric_date = session.scalar(select(func.max(DailyProductMetric.metric_date)).where(
+                DailyProductMetric.metric_date <= as_of,
+            ))
+            product_rows = session.execute(select(*(
+                getattr(DailyProductMetric, column) for column in _QUADRANT_METRIC_COLUMNS
+            )).where(DailyProductMetric.metric_date == latest_metric_date)
+                .order_by(DailyProductMetric.offer_id)).all() if latest_metric_date else []
+            store_rows = session.execute(select(
+                DailyProductMetric.metric_date,
+                *(func.coalesce(func.sum(getattr(DailyProductMetric, column)), 0).label(column)
+                  for column in store_columns[1:]),
+            ).where(DailyProductMetric.metric_date <= as_of)
+                .group_by(DailyProductMetric.metric_date)
+                .order_by(DailyProductMetric.metric_date)).all()
+            latest_offer_date = _latest_offer_scope_date(session, as_of)
+            offer_rows = session.execute(select(*(
+                getattr(OfferSnapshot, column) for column in _PRODUCT_DETAIL_OFFER_COLUMNS
+            )).where(OfferSnapshot.snapshot_date == latest_offer_date)
+                .order_by(OfferSnapshot.offer_id)).all() if latest_offer_date else []
+            anomaly_rows = session.execute(select(
+                AnomalyEvent.event_date, AnomalyEvent.offer_id,
+            ).where(AnomalyEvent.event_date == latest_metric_date)).all() if latest_metric_date else []
+    except SQLAlchemyError:
+        return EMPTY_DATASET
+    finally:
+        if owned_engine:
+            read_engine.dispose()
+    return DashboardDataset(
+        store_daily=_query_rows_frame(store_rows, store_columns),
+        product_daily=_query_rows_frame(product_rows, _QUADRANT_METRIC_COLUMNS),
+        offer_current=_query_rows_frame(offer_rows, _PRODUCT_DETAIL_OFFER_COLUMNS),
+        anomalies=_query_rows_frame(anomaly_rows, anomaly_columns),
+        quality_events=pd.DataFrame(),
+    )
 
 
 def load_product_list_dataset(
@@ -311,11 +377,29 @@ def load_quadrant_dataset(
     read_engine = engine or create_read_only_erp_engine(settings.database_url)
     try:
         with Session(read_engine) as session:
+            latest_date = session.scalar(select(func.max(DailyProductMetric.metric_date)).where(
+                DailyProductMetric.metric_date <= as_of,
+            ))
+            # The chart uses 30 days; retain first/last evidence per offer as well,
+            # including offers absent from the latest date and old listing dates.
+            first_dates = select(DailyProductMetric.offer_id, func.min(DailyProductMetric.metric_date)).where(
+                DailyProductMetric.metric_date <= as_of,
+            ).group_by(DailyProductMetric.offer_id)
+            last_dates = select(DailyProductMetric.offer_id, func.max(DailyProductMetric.metric_date)).where(
+                DailyProductMetric.metric_date <= as_of,
+            ).group_by(DailyProductMetric.offer_id)
             product_rows = session.execute(
                 select(
                     *(getattr(DailyProductMetric, column) for column in _QUADRANT_METRIC_COLUMNS)
                 )
-                .where(DailyProductMetric.metric_date <= as_of)
+                .where(
+                    DailyProductMetric.metric_date <= as_of,
+                    or_(
+                        DailyProductMetric.metric_date >= (latest_date or as_of) - timedelta(days=29),
+                        tuple_(DailyProductMetric.offer_id, DailyProductMetric.metric_date).in_(first_dates),
+                        tuple_(DailyProductMetric.offer_id, DailyProductMetric.metric_date).in_(last_dates),
+                    ),
+                )
                 .order_by(DailyProductMetric.metric_date, DailyProductMetric.offer_id)
             ).all()
             latest_scope_date = _latest_offer_scope_date(session, as_of)
@@ -330,17 +414,7 @@ def load_quadrant_dataset(
                 if latest_scope_date is not None
                 else []
             )
-            history_rows = session.execute(
-                select(
-                    *(getattr(OfferSnapshot, column) for column in _QUADRANT_HISTORY_COLUMNS)
-                )
-                .where(OfferSnapshot.snapshot_date <= as_of)
-                .order_by(
-                    OfferSnapshot.offer_id,
-                    OfferSnapshot.snapshot_date,
-                    OfferSnapshot.captured_at,
-                )
-            ).all()
+            history_rows = _latest_restock_history_rows(session, as_of)
     except SQLAlchemyError:
         return EMPTY_DATASET
     finally:
@@ -357,17 +431,35 @@ def load_quadrant_dataset(
     )
 
 
+def _latest_restock_history_rows(session: Session, as_of: date) -> list[tuple[Any, ...]]:
+    """Read the last increasing adjacent pair, preserving gaps and unknown stock."""
+    order = (OfferSnapshot.snapshot_date, OfferSnapshot.captured_at)
+    history = select(
+        *(getattr(OfferSnapshot, column) for column in _QUADRANT_HISTORY_COLUMNS),
+        func.lag(OfferSnapshot.total_stock).over(partition_by=OfferSnapshot.offer_id, order_by=order).label("previous_stock"),
+        func.lag(OfferSnapshot.snapshot_date).over(partition_by=OfferSnapshot.offer_id, order_by=order).label("previous_date"),
+        func.lag(OfferSnapshot.captured_at).over(partition_by=OfferSnapshot.offer_id, order_by=order).label("previous_capture"),
+    ).where(OfferSnapshot.snapshot_date <= as_of, OfferSnapshot.total_stock.is_not(None)).subquery()
+    increases = select(
+        history,
+        func.row_number().over(
+            partition_by=history.c.offer_id,
+            order_by=(history.c.snapshot_date.desc(), history.c.captured_at.desc()),
+        ).label("position"),
+    ).where(history.c.total_stock > history.c.previous_stock).subquery()
+    rows: list[tuple[Any, ...]] = []
+    for row in session.execute(select(increases).where(increases.c.position == 1)).mappings():
+        rows.extend((
+            (row["previous_date"], row["offer_id"], row["previous_capture"], row["previous_stock"]),
+            (row["snapshot_date"], row["offer_id"], row["captured_at"], row["total_stock"]),
+        ))
+    return rows
+
+
 def _query_rows_frame(rows: Sequence[Any], columns: tuple[str, ...]) -> pd.DataFrame:
     return pd.DataFrame(
         [
-            {
-                column: (
-                    float(value)
-                    if isinstance((value := row._mapping[column]), Decimal)
-                    else value
-                )
-                for column in columns
-            }
+            tuple(float(value) if isinstance(value, Decimal) else value for value in row)
             for row in rows
         ],
         columns=columns,

@@ -1,5 +1,8 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from "vue";
+import { useResponsiveChart } from "../useResponsiveChart";
+import { cachedNumberFormatter } from "../numberFormatters";
+import { useLiveUpdates } from "../liveUpdates";
+import { computed, onMounted, ref, shallowRef, watch } from "vue";
 
 import {
   ApiRequestError,
@@ -27,10 +30,22 @@ const props = defineProps<{
   asOf: string;
   storeScope?: OwnStoreScope;
   multiStoreLabel?: string;
+  requestedOfferId?: string;
+  requestedStoreCode?: string;
+  active?: boolean;
 }>();
+const emit = defineEmits<{ selectProduct: [selection: { offerId: string; storeCode: string }] }>();
 
-const listPayload = ref<KeywordTrafficListPayload | null>(null);
-const detail = ref<KeywordTrafficDetailPayload | null>(null);
+useLiveUpdates("keyword-traffic", async () => {
+  await loadProducts(selectedSummary.value ? productKey(selectedSummary.value) : "", true); return !loadError.value;
+}, {
+  busy: () => loadingProducts.value || loadingDetail.value,
+  editing: () => false,
+  enabled: () => props.active !== false,
+});
+
+const listPayload = shallowRef<KeywordTrafficListPayload | null>(null);
+const detail = shallowRef<KeywordTrafficDetailPayload | null>(null);
 const selectedOfferId = ref("");
 const selectedStoreCode = ref("");
 const selectedEventId = ref<number | null>(null);
@@ -75,19 +90,29 @@ const selectedSummary = computed(() =>
       && String(item.store_code ?? "") === selectedStoreCode.value,
   ) ?? null,
 );
+const productPage = ref(1);
+const productPageSize = 60;
+const productPageCount = computed(() => Math.max(1, Math.ceil(filteredProducts.value.length / productPageSize)));
+const visibleProducts = computed(() => filteredProducts.value.slice(
+  (productPage.value - 1) * productPageSize, productPage.value * productPageSize,
+));
+const productListElement = ref<HTMLElement | null>(null);
+watch([search, productFilter, () => props.asOf, () => props.storeScope], () => { productPage.value = 1; });
+watch(productPageCount, (count) => { productPage.value = Math.min(productPage.value, count); });
+watch(productPage, () => { productListElement.value?.scrollTo({ top: 0 }); });
 const selectedEvent = computed(() => {
   const events = detail.value?.events ?? [];
   return events.find((event) => event.id === selectedEventId.value) ?? events.at(-1) ?? null;
 });
 const currentKeywords = computed(() => detail.value?.product.current_keywords ?? []);
 
-const chartWidth = 1040;
+const { chartElement, chartWidth } = useResponsiveChart(1040);
 const chartHeight = 390;
 const chartLeft = 72;
 const chartRight = 28;
 const chartTop = 54;
 const chartBottom = 62;
-const chartInnerWidth = chartWidth - chartLeft - chartRight;
+const chartInnerWidth = computed(() => chartWidth.value - chartLeft - chartRight);
 const chartInnerHeight = chartHeight - chartTop - chartBottom;
 
 const chartValues = computed(() =>
@@ -200,7 +225,7 @@ const selectedWindowBands = computed(() => {
     return {
       kind: range.kind,
       x: Math.max(chartLeft, startX - 4),
-      width: Math.max(8, Math.min(chartLeft + chartInnerWidth, endX + 4) - Math.max(chartLeft, startX - 4)),
+      width: Math.max(8, Math.min(chartLeft + chartInnerWidth.value, endX + 4) - Math.max(chartLeft, startX - 4)),
     };
   });
 });
@@ -210,6 +235,15 @@ const activePoint = computed(() => {
 });
 
 onMounted(() => void loadProducts());
+watch([() => props.requestedOfferId, () => props.requestedStoreCode], () => {
+  const requested = products.value.find((item) => item.offer_id === props.requestedOfferId
+    && String(item.store_code ?? "") === String(props.requestedStoreCode ?? ""));
+  if (requested && (requested.offer_id !== selectedOfferId.value || String(requested.store_code ?? "") !== selectedStoreCode.value)) {
+    search.value = "";
+    productFilter.value = "all";
+    void selectProduct(requested);
+  }
+});
 watch(
   [() => props.asOf, () => props.storeScope],
   () => void loadProducts(selectedSummary.value ? productKey(selectedSummary.value) : ""),
@@ -218,13 +252,13 @@ watch([historyDays, comparisonDays], () => {
   if (selectedSummary.value) void loadDetail(selectedSummary.value);
 });
 
-async function loadProducts(preferredKey = "") {
+async function loadProducts(preferredKey = "", preserve = false) {
   const requestRevision = ++productsRequestRevision;
   const requestedAsOf = props.asOf;
   const requestedStoreScope = props.storeScope ?? "current";
   detailRequestRevision += 1;
   loadingDetail.value = false;
-  loadingProducts.value = true;
+  loadingProducts.value = !preserve;
   loadError.value = "";
   try {
     const payload = await fetchKeywordTrafficProducts(
@@ -237,12 +271,21 @@ async function loadProducts(preferredKey = "") {
       || requestedStoreScope !== (props.storeScope ?? "current")
     ) return;
     listPayload.value = payload;
-    const preferred = payload.items.find((item) => productKey(item) === preferredKey);
+    loadingProducts.value = false;
+    const preferred = payload.items.find((item) => item.offer_id === props.requestedOfferId
+      && String(item.store_code ?? "") === String(props.requestedStoreCode ?? ""))
+      ?? payload.items.find((item) => productKey(item) === preferredKey);
     const next = preferred
       ?? payload.items.find((item) => item.keyword_change_count > 0)
       ?? payload.items.find((item) => item.keyword_event_count > 0)
       ?? payload.items[0];
-    if (next) await selectProduct(next);
+    if (next) {
+      if (!preserve) {
+        const selectedIndex = filteredProducts.value.findIndex((item) => productKey(item) === productKey(next));
+        if (selectedIndex >= 0) productPage.value = Math.floor(selectedIndex / productPageSize) + 1;
+      }
+      await selectProduct(next, preserve);
+    }
     else {
       selectedOfferId.value = "";
       selectedStoreCode.value = "";
@@ -256,19 +299,22 @@ async function loadProducts(preferredKey = "") {
   }
 }
 
-async function selectProduct(product: KeywordTrafficProductSummary) {
+async function selectProduct(product: KeywordTrafficProductSummary, preserve = false) {
   selectedOfferId.value = product.offer_id;
   selectedStoreCode.value = String(product.store_code ?? "");
-  activePointIndex.value = null;
-  chartTooltipPosition.value = null;
-  await loadDetail(product);
+  emit("selectProduct", { offerId: product.offer_id, storeCode: selectedStoreCode.value });
+  if (!preserve) {
+    activePointIndex.value = null;
+    chartTooltipPosition.value = null;
+  }
+  await loadDetail(product, preserve);
 }
 
-async function loadDetail(product: KeywordTrafficProductSummary) {
+async function loadDetail(product: KeywordTrafficProductSummary, preserve = false) {
   const requestKey = productKey(product);
   const requestRevision = ++detailRequestRevision;
   const requestedAsOf = props.asOf;
-  loadingDetail.value = true;
+  loadingDetail.value = !preserve;
   loadError.value = "";
   try {
     const payload = await fetchKeywordTrafficDetail(
@@ -305,8 +351,8 @@ function productKey(product: KeywordTrafficProductSummary) {
 }
 
 function chartX(index: number, count: number) {
-  if (count <= 1) return chartLeft + chartInnerWidth / 2;
-  return chartLeft + (index / (count - 1)) * chartInnerWidth;
+  if (count <= 1) return chartLeft + chartInnerWidth.value / 2;
+  return chartLeft + (index / (count - 1)) * chartInnerWidth.value;
 }
 
 function chartY(value: number) {
@@ -320,7 +366,7 @@ function handleChartPointer(event: PointerEvent) {
   const svg = event.currentTarget as SVGSVGElement;
   const bounds = svg.getBoundingClientRect();
   if (!bounds.width) return;
-  const viewX = ((event.clientX - bounds.left) / bounds.width) * chartWidth;
+  const viewX = ((event.clientX - bounds.left) / bounds.width) * chartWidth.value;
   activePointIndex.value = chartPointPositions.value.reduce(
     (nearestIndex, point, index) =>
       Math.abs(point.x - viewX)
@@ -377,7 +423,7 @@ function markImageUnavailable(source: string | null | undefined) {
 function formatNumber(value: number | null | undefined) {
   return value === null || value === undefined
     ? "—"
-    : new Intl.NumberFormat("zh-CN", { maximumFractionDigits: 1 }).format(value);
+    : cachedNumberFormatter("zh-CN", { maximumFractionDigits: 1 }).format(value);
 }
 
 function formatSigned(value: number | null | undefined, suffix = "") {
@@ -411,13 +457,6 @@ function firstListingTitle(item: KeywordTrafficDetailPayload["product"]) {
     : "首次上架时间 · 本库最早记录";
 }
 
-function firstListingNotice(item: KeywordTrafficDetailPayload["product"]) {
-  if (!item.first_listed_at) return "当前没有可用的首次上架或本库历史记录";
-  return item.first_listed_source === "platform"
-    ? "取自 Takealot Offers 首次上架字段"
-    : "旧记录缺少平台时间，仅显示本库最早日期";
-}
-
 function errorMessage(error: unknown, fallback: string) {
   return error instanceof ApiRequestError ? error.message : fallback;
 }
@@ -426,29 +465,21 @@ function errorMessage(error: unknown, fallback: string) {
 
 <template>
   <section class="keyword-traffic-page">
-    <header class="keyword-hero">
-      <div>
-        <p class="eyebrow">KEYWORD × TRAFFIC MONITOR</p>
-        <h2>标题关键词档案，流量结果一眼看清</h2>
-      </div>
-    </header>
 
     <p v-if="loadError" class="page-message error" role="alert">{{ loadError }}</p>
-    <div v-if="listPayload" class="overview-metrics">
+    <details v-if="listPayload" class="history-disclosure"><summary>查看记录概况</summary>
+    <div class="overview-metrics">
       <article>
         <span>店铺商品</span>
         <strong>{{ formatNumber(listPayload.summary.product_count) }}</strong>
-        <small>全部现有 Offer</small>
       </article>
       <article>
         <span>今日有流量值</span>
         <strong>{{ formatNumber(listPayload.summary.with_traffic_count) }}</strong>
-        <small>缺失不补零</small>
       </article>
       <article>
         <span>已建档</span>
         <strong>{{ formatNumber(listPayload.summary.archived_product_count) }}</strong>
-        <small>来自每日标题快照</small>
       </article>
       <article class="accent">
         <span>关键词变更节点</span>
@@ -457,6 +488,7 @@ function errorMessage(error: unknown, fallback: string) {
       </article>
     </div>
 
+    </details>
     <div class="monitor-layout">
       <aside class="product-browser">
         <div class="browser-heading">
@@ -475,9 +507,9 @@ function errorMessage(error: unknown, fallback: string) {
           <button :class="{ active: productFilter === 'changed' }" @click="productFilter = 'changed'">有变更</button>
           <button :class="{ active: productFilter === 'untracked' }" @click="productFilter = 'untracked'">待首份快照</button>
         </div>
-        <div class="product-list">
+        <div ref="productListElement" class="product-list">
           <button
-            v-for="item in filteredProducts"
+            v-for="item in visibleProducts"
             :key="productKey(item)"
             type="button"
             class="product-row"
@@ -516,6 +548,11 @@ function errorMessage(error: unknown, fallback: string) {
             没有符合当前条件的商品。
           </div>
         </div>
+        <nav v-if="productPageCount > 1" class="product-pagination" aria-label="商品分页">
+          <button type="button" :disabled="productPage <= 1" @click="productPage -= 1">上一页</button>
+          <span>{{ productPage }} / {{ productPageCount }}</span>
+          <button type="button" :disabled="productPage >= productPageCount" @click="productPage += 1">下一页</button>
+        </nav>
       </aside>
 
       <main class="monitor-workspace">
@@ -569,35 +606,35 @@ function errorMessage(error: unknown, fallback: string) {
             <article>
               <span>{{ firstListingTitle(detail.product) }}</span>
               <strong>{{ detail.product.first_listed_at || "暂无记录" }}</strong>
-              <small>{{ firstListingNotice(detail.product) }}</small>
             </article>
             <article>
               <span>最近补货时间 · 北京时间</span>
               <strong>{{ detail.product.latest_restock_date || "暂无记录" }}</strong>
               <small v-if="detail.product.latest_restock_increase !== null">
-                平台库存较前一条有效快照 +{{ formatNumber(detail.product.latest_restock_increase) }} 件
+                库存增加 {{ formatNumber(detail.product.latest_restock_increase) }} 件
               </small>
-              <small v-else>尚未观察到平台库存增加</small>
             </article>
           </section>
 
+          <details class="history-disclosure"><summary>查看标题拆词</summary>
           <section class="current-keywords">
             <div>
-              <p>当前官方标题关键词</p>
+              <p>所选日期的标题词</p>
               <span v-if="currentKeywords.length">共 {{ currentKeywords.length }} 个</span>
               <span v-else>等待每日 Offer 快照</span>
             </div>
             <div class="keyword-chips">
               <span v-for="keyword in currentKeywords" :key="keyword">{{ keyword }}</span>
-              <em v-if="!currentKeywords.length">无需人工操作；下次完整采集会建立首份标题关键词档案。</em>
+              <em v-if="!currentKeywords.length">采集完成后建立档案。</em>
             </div>
           </section>
 
+          </details>
           <section class="traffic-chart-card">
             <header>
               <div>
                 <p>每日近30天浏览量</p>
-                <h3>关键词节点与滚动流量同轴观察</h3>
+                <h3>标题变化与浏览量趋势</h3>
               </div>
               <div class="chart-legend">
                 <span><i class="line"></i>近30天浏览量</span>
@@ -607,12 +644,13 @@ function errorMessage(error: unknown, fallback: string) {
                 <span><i class="missing-bridge"></i>缺失区间桥接（非补值）</span>
               </div>
             </header>
-            <div class="chart-wrap">
+            <div ref="chartElement" class="chart-wrap">
               <svg
                 :viewBox="`0 0 ${chartWidth} ${chartHeight}`"
                 role="img"
                 aria-label="近30天浏览量与标题关键词变化节点趋势图"
                 @pointermove="handleChartPointer"
+                @pointerdown="handleChartPointer"
                 @pointerleave="clearChartPointer"
               >
                 <rect class="chart-background" :x="chartLeft" :y="chartTop" :width="chartInnerWidth" :height="chartInnerHeight" rx="14" />
@@ -722,8 +760,8 @@ function errorMessage(error: unknown, fallback: string) {
                   <span>滚动指标</span>
                   <strong>近30天浏览量 {{ formatNumber(activePoint.page_views_30_days) }}</strong>
                 </div>
-                <small v-if="activePoint.page_views_30_days === null">平台该日流量字段缺失，折线保留断点且未补零。</small>
-                <small v-else>这是该日看到的滚动30天值，不是单日浏览量。</small>
+                <small v-if="activePoint.page_views_30_days === null">当日流量缺失</small>
+                <small v-else>滚动30天值</small>
               </div>
             </div>
           </section>
@@ -731,8 +769,7 @@ function errorMessage(error: unknown, fallback: string) {
           <section class="event-timeline">
             <header>
               <div>
-                <p>标题关键词变化时间线</p>
-                <h3>点击任一节点切换前后对比</h3>
+                <h3>标题修改记录</h3>
               </div>
               <span>{{ detail.events.length }} 个记录 · {{ Math.max(0, detail.events.length - 1) }} 次变更</span>
             </header>
@@ -752,15 +789,11 @@ function errorMessage(error: unknown, fallback: string) {
                 <span class="event-body">
                   <small>{{ event.effective_date }} · 系统识别</small>
                   <strong>{{ changeSummary(event) }}</strong>
-                  <span class="event-diffs">
-                    <em v-for="keyword in event.added_keywords" :key="`add-${keyword}`" class="added">+ {{ keyword }}</em>
-                    <em v-for="keyword in event.removed_keywords" :key="`remove-${keyword}`" class="removed">− {{ keyword }}</em>
-                    <em v-if="event.event_kind === 'baseline'" class="baseline">{{ event.keywords.join(" · ") }}</em>
-                  </span>
-                  <p class="source-title">标题：{{ event.source_title }}</p>
+                  <p v-if="event.previous_source_title" class="source-title">修改前：{{ event.previous_source_title }}</p>
+                  <p class="source-title">{{ event.event_kind === 'baseline' ? '初始标题' : '修改后' }}：{{ event.source_title }}</p>
                 </span>
                 <span class="event-outcome" :class="event.comparison.traffic_direction">
-                  <small>流量结果</small>
+                  <small>窗口变化观察</small>
                   <strong>{{ directionLabel(event.comparison.traffic_direction) }}</strong>
                   <em>{{ formatSigned(event.comparison.traffic_delta) }}</em>
                 </span>
@@ -768,7 +801,6 @@ function errorMessage(error: unknown, fallback: string) {
             </div>
             <div v-else class="timeline-empty">
               <strong>等待首份完整 Offer 快照</strong>
-              <span>无需人工建档；采集成功后系统提取标题词建立基线，以后发现变化就标记节点。</span>
             </div>
           </section>
         </template>
@@ -779,6 +811,9 @@ function errorMessage(error: unknown, fallback: string) {
 </template>
 
 <style scoped>
+.history-disclosure { padding: 12px 16px; border: 1px solid #dce6e2; border-radius: 10px; background: white; }
+.history-disclosure > summary { cursor: pointer; color: #47675a; font-size: 13px; }
+.history-disclosure[open] > summary { margin-bottom: 14px; }
 .keyword-traffic-page {
   --ink: #162138;
   --muted: #6c7890;
@@ -850,6 +885,9 @@ function errorMessage(error: unknown, fallback: string) {
 .filter-tabs button { background: #f2f5f8; border: 0; border-radius: 9px; color: var(--muted); cursor: pointer; font: inherit; font-size: 0.74rem; padding: 8px 4px; }
 .filter-tabs button.active { background: #203652; color: #fff; font-weight: 700; }
 .product-list { max-height: calc(100vh - 330px); overflow-y: auto; padding: 0 9px 12px; }
+.product-pagination { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 8px 12px; font-size: 12px; }
+.product-pagination button { border: 1px solid #cbd5e1; border-radius: 6px; background: #fff; padding: 5px 10px; cursor: pointer; }
+.product-pagination button:disabled { opacity: .4; cursor: default; }
 .product-row { align-items: center; background: transparent; border: 1px solid transparent; border-radius: 13px; color: inherit; cursor: pointer; display: grid; gap: 9px; grid-template-columns: 56px minmax(0, 1fr) auto; margin-bottom: 5px; padding: 9px; text-align: left; width: 100%; }
 .product-row:hover { background: #f5f7fa; }
 .product-row.active { background: #eef3f9; border-color: #9fb4cf; box-shadow: inset 3px 0 #315e95; }
@@ -1004,5 +1042,21 @@ function errorMessage(error: unknown, fallback: string) {
   .event-card { align-items: start; grid-template-columns: 30px minmax(0, 1fr); }
   .event-outcome { grid-column: 2; justify-items: start; }
   .point-readout { left: 30px; max-width: none; right: 30px; top: 12px; }
+}
+
+/* Mobile layout: retain every field and existing action. */
+
+@media (max-width: 760px) {
+  .keyword-hero { gap: 16px; }
+  .overview-metrics article { min-width: 0; padding: 13px 11px; }
+  .overview-metrics strong { font-size: 25px; overflow-wrap: anywhere; }
+  .hero-controls, .hero-controls label, .hero-controls select { width: 100%; min-width: 0; }
+  .product-list { max-height: min(360px, 45svh); overscroll-behavior: contain; }
+  .product-browser { min-width: 0; }
+  .filter-tabs button { white-space: normal; }
+  .chart-wrap { padding: 4px 0 0; }
+  .chart-legend { gap: 10px; font-size: 12px; }
+  .current-keywords { padding: 12px; }
+  .focus-actions { gap: 8px; }
 }
 </style>

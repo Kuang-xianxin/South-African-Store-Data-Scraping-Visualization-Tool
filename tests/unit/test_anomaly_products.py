@@ -15,6 +15,7 @@ from takealot_ops.erp.anomaly_products import (
     load_cached_anomaly_product_payload,
     merge_return_anomaly_items,
     merge_return_coverage,
+    verified_sales_metric_dates,
 )
 from takealot_ops.erp.auth import StoreIdentity
 from takealot_ops.erp.permissions import STORE_VIEW
@@ -659,6 +660,113 @@ def test_current_stock_does_not_backfill_missing_historical_stock() -> None:
 
     assert payload["slow_moving"] == []
     assert payload["summary"]["slow_moving_by_days"]["4"] == 0
+
+
+@pytest.mark.parametrize(
+    ("verified_at", "complete"),
+    [
+        (datetime(2026, 8, 14, 8, tzinfo=UTC), False),
+        (datetime(2026, 8, 14, 21, 59, 59, tzinfo=UTC), False),
+        (datetime(2026, 8, 14, 22, tzinfo=UTC), True),
+        (datetime(2026, 8, 14, 22), True),
+        (datetime(2026, 8, 15, 8, tzinfo=UTC), True),
+        (None, False),
+    ],
+)
+def test_sales_zero_evidence_requires_collection_after_sast_day_end(
+    verified_at: datetime | None, complete: bool,
+) -> None:
+    state = DailySalesMetricState(
+        metric_date=THROUGH,
+        source_kind="takealot_sales_api",
+        verified_at=verified_at,
+        source_details={},
+    )
+    assert verified_sales_metric_dates([state]) == ({THROUGH} if complete else set())
+    if verified_at is not None:
+        state.source_details = {"collected_at": verified_at.isoformat()}
+        state.verified_at = None
+        assert verified_sales_metric_dates([state]) == ({THROUGH} if complete else set())
+
+
+def test_screenshot_history_lower_bound_is_separate_from_last_sale_interval() -> None:
+    through = date(2026, 9, 6)
+    dates = [date(2026, 8, 4) + timedelta(days=offset) for offset in range(34)]
+    metrics = [
+        _metric("table", date(2026, 7, 30), 1),
+        _metric("table", date(2026, 9, 7), 3),
+        *[_metric("table", metric_date, 0) for metric_date in dates],
+    ]
+    payload = build_anomaly_product_payload(
+        _dataset([_offer("table")], metrics, [_snapshot("table", day, 5) for day in dates]),
+        requested_as_of=date(2026, 9, 7),
+        completed_through=through,
+        verified_dates={*dates, date(2026, 8, 3), date(2026, 7, 30)},
+    )
+    item = payload["slow_moving"][0]
+    assert item["no_sales_days"] == 34
+    assert item["no_sales_days_exact"] is False
+    assert item["slow_moving_started_on"] == "2026-08-04"
+    assert item["slow_moving_boundary_reason"] == "missing_sales"
+    assert item["last_sale_on"] == "2026-07-30"
+    assert item["days_since_last_sale"] == 38
+
+
+def test_known_sale_on_incomplete_day_is_visible_without_proving_zero_days() -> None:
+    dates = sorted(_verified_dates(13))
+    unverified = date(2026, 8, 8)
+    payload = build_anomaly_product_payload(
+        _dataset(
+            [_offer("known-sale")],
+            [_metric("known-sale", day, int(day in {dates[0], unverified})) for day in dates],
+            [_snapshot("known-sale", day, 5) for day in dates],
+        ),
+        requested_as_of=THROUGH,
+        completed_through=THROUGH,
+        verified_dates=set(dates) - {unverified},
+    )
+    item = payload["slow_moving"][0]
+    assert item["no_sales_days"] == 6
+    assert item["no_sales_days_exact"] is False
+    assert item["slow_moving_boundary_reason"] == "sales_gap"
+    assert item["last_sale_on"] == "2026-08-08"
+    assert item["days_since_last_sale"] == 6
+
+
+def test_sibling_variant_sales_do_not_reset_this_offers_streak() -> None:
+    dates = sorted(_verified_dates(10))
+    offers = [_offer("blue"), _offer("green")]
+    for offer in offers:
+        offer["productline_id"] = "12345678"
+    payload = build_anomaly_product_payload(
+        _dataset(
+            offers,
+            [_metric(variant, day, int(variant == "blue" and day == THROUGH))
+             for variant in ("blue", "green") for day in dates],
+            [_snapshot(variant, day, 5) for variant in ("blue", "green") for day in dates],
+        ),
+        requested_as_of=THROUGH,
+        completed_through=THROUGH,
+        verified_dates=set(dates),
+    )
+    assert [item["offer_id"] for item in payload["slow_moving"]] == ["green"]
+    assert payload["slow_moving"][0]["no_sales_days"] == 10
+    assert payload["slow_moving"][0]["last_sale_on"] is None
+    assert payload["slow_moving"][0]["days_since_last_sale"] is None
+
+
+@pytest.mark.parametrize("invalid_units", [-1, 0.5, float("nan")])
+def test_invalid_sales_quantity_is_not_zero_evidence(invalid_units: float) -> None:
+    dates = sorted(_verified_dates(10))
+    metrics = [_metric("invalid", day, 0) for day in dates]
+    metrics[-2]["ordered_units"] = invalid_units
+    payload = build_anomaly_product_payload(
+        _dataset([_offer("invalid")], metrics, [_snapshot("invalid", day, 5) for day in dates]),
+        requested_as_of=THROUGH,
+        completed_through=THROUGH,
+        verified_dates=set(dates),
+    )
+    assert payload["slow_moving"] == []
 
 
 def test_narrow_anomaly_cache_reuses_payload_and_invalidates_after_refresh() -> None:

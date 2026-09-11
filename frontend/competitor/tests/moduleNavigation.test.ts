@@ -20,7 +20,8 @@ const stylesSource = readFileSync(new URL("../src/styles.css", import.meta.url),
 const typesSource = readFileSync(new URL("../src/types.ts", import.meta.url), "utf8");
 
 test("every ERP module has a stable hash link that restores the same module", () => {
-  assert.equal(ERP_MODULE_KEYS.length, 10);
+  assert.equal(ERP_MODULE_KEYS.length, 9);
+  assert.equal(modulePageFromHash("#module=keyword-traffic"), "search-ranking");
   for (const moduleKey of ERP_MODULE_KEYS) {
     const href = modulePageHref(moduleKey);
     assert.equal(modulePageFromHash(href), moduleKey);
@@ -190,7 +191,6 @@ test("ordinary SPA navigation keeps every ERP module instance cached", () => {
   );
   const expectedComponents = new Map([
     ["overview", "OverviewPage"],
-    ["keyword-traffic", "KeywordTrafficPage"],
     ["search-ranking", "SearchRankingPage"],
     ["quadrants", "QuadrantsPage"],
     ["anomaly-products", "AnomalyProductsPage"],

@@ -37,15 +37,16 @@ test("rapid scope changes abort and reject stale responses", () => {
   assert.match(scopeLoaderSource, /const controller = new AbortController\(\)/);
   assert.match(
     scopeLoaderSource,
-    /requestId !== ownStoreRequestId[\s\S]*targetRequestId !== storeTargetRequestId[\s\S]*!ownStoreScopeStillCurrent\(requestScope, requestStoreCode\)/,
+    /requestId !== ownStoreRequestId[\s\S]*!ownStoreScopeStillCurrent\(requestScope, requestStoreCode\)/,
   );
+  assert.match(scopeLoaderSource, /if \(targetRequestId === storeTargetRequestId\) \{[\s\S]*applyStoreTargetPayload/);
   assert.match(
     overviewLoaderSource,
-    /\+\+ownStoreRequestId[\s\S]*ownStoreAbortController\?\.abort\(\)[\s\S]*void loadOwnStoreScope\(\)/,
+    /\+\+ownStoreRequestId[\s\S]*ownStoreAbortController\?\.abort\(\)[\s\S]*void loadOwnStoreScope\(true\)/,
   );
 });
 
-test("full refresh returns the invariant true-competitor partition first", () => {
+test("full refresh prioritizes the visible partition with shared date boundaries", () => {
   assert.match(
     overviewLoaderSource,
     /fetchCompetitors\([\s\S]*controller\.signal,[\s\S]*false,[\s\S]*\)/,
@@ -56,7 +57,7 @@ test("full refresh returns the invariant true-competitor partition first", () =>
   );
   assert.match(
     overviewLoaderSource,
-    /competitors\.value = overview\.items[\s\S]*void loadOwnStoreScope\(\)/,
+    /fetchCompetitorDateRange\(controller\.signal\)[\s\S]*if \(ownStoreFirst\) startSecondaryPartition\(\)[\s\S]*const overviewRequest = fetchCompetitors\([\s\S]*startSecondaryPartition\(\)[\s\S]*await overviewRequest/,
   );
 });
 
@@ -66,11 +67,11 @@ test("scope responses are cached and switching shows an explicit loading state",
   assert.match(scopeLoaderSource, /if \(cachedOverview && cachedTargets\)/);
   assert.match(scopeLoaderSource, /cacheScopeValue\(ownStoreOverviewCache/);
   assert.match(scopeLoaderSource, /cacheScopeValue\(storeTargetCache/);
-  assert.match(pageSource, /v-if="ownStoreScopeLoading"[\s\S]*正在读取自有店铺数据/);
+  assert.match(pageSource, /<LoadingState\s+v-if="ownStoreScopeLoading && !storeCompetitors.length"[\s\S]*label="加载店铺…"/);
   assert.match(overviewLoaderSource, /ownStoreOverviewCache\.clear\(\)/);
   assert.match(
     pageSource,
-    /async function loadTargets\(\) \{\s*storeTargetCache\.clear\(\)/,
+    /async function loadTargets\(preserveDraft = false\) \{\s*storeTargetCache\.clear\(\)/,
   );
 });
 
@@ -96,8 +97,10 @@ test("competitor page remains mounted across store changes", () => {
 test("scope APIs accept cancellation signals and use the narrow endpoint", () => {
   assert.match(
     apiSource,
-    /export function fetchOwnStoreCompetitors\([\s\S]*signal\?: AbortSignal[\s\S]*\/api\/competitors\/own-store\?\$\{query\.toString\(\)\}[\s\S]*\{ signal \}/,
+    /export function fetchOwnStoreCompetitors\([\s\S]*signal\?: AbortSignal[\s\S]*requestRadar<OwnStoreCompetitorOverview>\("\/api\/competitors\/own-store", query, signal, onPreview\)/,
   );
+  assert.match(apiSource, /request<T>\(`\$\{path\}\?\$\{parameters\.toString\(\)\}`, \{ signal \}/);
+  assert.match(apiSource, /authSessionRevision\.isCurrent\(sessionRevision\) && !signal\?\.aborted/);
   assert.match(
     apiSource,
     /export async function fetchCompetitorStoreTargets\([\s\S]*signal\?: AbortSignal[\s\S]*\{ signal \}/,

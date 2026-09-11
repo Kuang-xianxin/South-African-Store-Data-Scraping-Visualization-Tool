@@ -22,11 +22,9 @@ function reloadPage() {
   <App v-if="!failure" />
   <main v-else class="fatal-page" role="alert">
     <section class="fatal-card">
-      <p>PAGE ERROR</p>
-      <h1>页面加载失败，没有影响后台任务</h1>
-      <span>{{ failure }}</span>
+      <h1>系统正在更新升级</h1>
       <small>
-        请重新加载页面。若问题持续出现，请联系管理员检查 ERP 前后端版本。
+        请稍后重新加载页面，后台任务不受影响。
       </small>
       <button type="button" @click="reloadPage">重新加载页面</button>
     </section>
@@ -51,30 +49,14 @@ function reloadPage() {
   box-shadow: 0 18px 50px rgb(39 64 54 / 10%);
 }
 
-.fatal-card p {
-  margin: 0 0 8px;
-  color: #9b6525;
-  font-size: 12px;
-  font-weight: 800;
-  letter-spacing: 0.12em;
-}
-
 .fatal-card h1 {
   margin: 0 0 14px;
   color: #243c33;
 }
 
-.fatal-card span,
 .fatal-card small {
   display: block;
   line-height: 1.7;
-}
-
-.fatal-card span {
-  color: #684d2d;
-}
-
-.fatal-card small {
   margin-top: 8px;
   color: #6d7a74;
 }

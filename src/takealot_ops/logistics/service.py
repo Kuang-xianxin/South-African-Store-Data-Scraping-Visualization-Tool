@@ -5,8 +5,9 @@ from __future__ import annotations
 import re
 import time
 from collections import Counter
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
+from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from threading import Lock
@@ -15,6 +16,7 @@ from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 import httpx
+from sqlalchemy import Engine
 from sqlalchemy.exc import SQLAlchemyError
 
 from takealot_ops.api.client import TakealotClient
@@ -55,6 +57,7 @@ class LogisticsOverviewService:
         force_refresh_min_interval_seconds: float = 10.0,
         w8_transport: httpx.BaseTransport | None = None,
         takealot_transport: httpx.BaseTransport | None = None,
+        read_engine: Engine | None = None,
     ) -> None:
         self._project_root = project_root.resolve()
         self._cache_ttl_seconds = cache_ttl_seconds
@@ -66,6 +69,19 @@ class LogisticsOverviewService:
         self._w8_cached_at = 0.0
         self._w8_cached: dict[str, Any] | None = None
         self._schema_ready = False
+        self._read_engine = read_engine
+
+    @contextmanager
+    def _local_engine(self) -> Iterator[Engine]:
+        if self._read_engine is not None:
+            yield self._read_engine
+            return
+        settings = DashboardSettings.from_env(self._project_root)
+        engine = create_read_only_engine(settings.database_url)
+        try:
+            yield engine
+        finally:
+            engine.dispose()
 
     def load(self, *, force: bool = False) -> dict[str, Any]:
         """Load local snapshots, or explicitly refresh both upstream providers."""
@@ -117,12 +133,8 @@ class LogisticsOverviewService:
     def _load_local_provider(self, provider: str) -> dict[str, Any]:
         """Read one provider's latest successful snapshot without network access."""
         try:
-            settings = DashboardSettings.from_env(self._project_root)
-            engine = create_read_only_engine(settings.database_url)
-            try:
+            with self._local_engine() as engine:
                 snapshot = load_provider_snapshot(engine, provider)
-            finally:
-                engine.dispose()
         except (SettingsError, SQLAlchemyError, ValueError):
             snapshot = None
         if snapshot is None:
@@ -177,9 +189,7 @@ class LogisticsOverviewService:
         }
         confirmed_links: list[dict[str, Any]] = []
         try:
-            database_settings = DashboardSettings.from_env(self._project_root)
-            engine = create_read_only_engine(database_settings.database_url)
-            try:
+            with self._local_engine() as engine:
                 offer_skus = load_offer_sku_map(engine)
                 candidate_tiers = build_logistics_candidates(
                     raw_inbound,
@@ -187,8 +197,6 @@ class LogisticsOverviewService:
                     offer_skus,
                 )
                 confirmed_links = list_confirmed_links(engine)
-            finally:
-                engine.dispose()
         except (SettingsError, SQLAlchemyError, LogisticsLinkError):
             matching_warnings.append(
                 "本地商品SKU映射或人工关联暂时不可读，分级候选未生成。"
@@ -777,6 +785,14 @@ def _explicit_matches(
     matches: list[dict[str, Any]] = []
     matched_inbound: set[str] = set()
     matched_shipments: set[int] = set()
+    searchable_shipments = [
+        (shipment, _as_int(shipment.get("shipment_id")), _normalize_identifier(
+            " ".join(_text(shipment.get(field)) for field in (
+                "reference", "tracking_info", "purchase_order_number",
+            ))
+        ))
+        for shipment in shipments
+    ]
     for inbound_row in inbound:
         inbound_no = _text(inbound_row.get("orderNo"))
         identifiers = [
@@ -787,19 +803,9 @@ def _explicit_matches(
         normalized = [value for value in map(_normalize_identifier, identifiers) if len(value) >= 8]
         if not normalized:
             continue
-        for shipment in shipments:
-            shipment_id = _as_int(shipment.get("shipment_id"))
+        for shipment, shipment_id, searchable in searchable_shipments:
             if shipment_id is None:
                 continue
-            searchable = _normalize_identifier(
-                " ".join(
-                    (
-                        _text(shipment.get("reference")),
-                        _text(shipment.get("tracking_info")),
-                        _text(shipment.get("purchase_order_number")),
-                    )
-                )
-            )
             if not searchable or not any(value in searchable for value in normalized):
                 continue
             matched_inbound.add(inbound_no)

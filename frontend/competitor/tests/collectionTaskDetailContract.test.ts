@@ -88,6 +88,9 @@ function detailRefreshHarness(
   fetchStatus: (detail?: DetailQuery, signal?: AbortSignal) => Promise<TestStatus>,
 ) {
   const state = {
+    canViewGlobalManagement: { value: true },
+    collectionDeploymentReady: { value: true },
+    blueCollectionAvailable: { value: false },
     collectionDetailsOpen: { value: true },
     collectionDetailsLoading: { value: false },
     collectionDetailsError: { value: "" },
@@ -125,6 +128,22 @@ function detailRefreshHarness(
   };
   return { state, ...actions };
 }
+
+test("accounts without workspace access never request batch details or polling status", async () => {
+  let requests = 0;
+  const harness = detailRefreshHarness(async () => {
+    requests += 1;
+    return savedStatus();
+  });
+  harness.state.canViewGlobalManagement.value = false;
+  const previousStatus = harness.state.sharedBatchStatus.value;
+  await harness.refresh();
+  await harness.refresh(false, true);
+  await harness.refresh(true, true);
+  assert.equal(requests, 0);
+  assert.equal(harness.state.sharedBatchStatus.value, previousStatus);
+  assert.equal(harness.state.collectionDetailsLoading.value, false);
+});
 
 test("background detail failures preserve rows and a stable error across retries", async () => {
   let pending = deferred<TestStatus>();
@@ -223,7 +242,7 @@ test("leaving the page cancels status reads without replacing the saved batch", 
 
 test("the polling timer uses background mode and the API forwards read cancellation", async () => {
   assert.ok(
-    /\(\) => void loadSharedBatchStatus\(undefined, true\)/.test(pageSource),
+    /liveUpdateState\.isActive\(\) && document\.visibilityState === "visible"[\s\S]*void loadSharedBatchStatus\(undefined, true\)/.test(pageSource),
     "The two-second timer must use background refresh mode",
   );
   let requestOptions: RequestInit | undefined;

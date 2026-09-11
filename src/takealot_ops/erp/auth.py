@@ -27,6 +27,7 @@ from takealot_ops.erp.permissions import (
 from takealot_ops.settings import DashboardSettings, configured_stores
 from takealot_ops.storage.migrations import (
     create_engine_for_settings,
+    create_read_only_engine,
     create_schema,
     sync_configured_erp_stores,
 )
@@ -120,16 +121,29 @@ class IssuedSession:
     expires_at: datetime
 
 
+@dataclass(frozen=True)
+class _EphemeralSessionRecord:
+    user_id: int
+    csrf_token: str
+    expires_at: datetime
+    last_seen_at: datetime
+
+
 class AuthManager:
     """Lazily connect to the configured database and manage ERP identities."""
 
-    def __init__(self, project_root: Path) -> None:
+    def __init__(self, project_root: Path, *, read_only_test_mode: bool = False) -> None:
         self.project_root = project_root.resolve()
+        self.read_only_test_mode = read_only_test_mode
         self._engine: Engine | None = None
         self._engine_lock = Lock()
         self._bootstrap_lock = Lock()
+        self._ephemeral_session_lock = Lock()
+        self._ephemeral_sessions: dict[str, _EphemeralSessionRecord] = {}
 
     def close(self) -> None:
+        with self._ephemeral_session_lock:
+            self._ephemeral_sessions.clear()
         with self._engine_lock:
             if self._engine is not None:
                 self._engine.dispose()
@@ -202,6 +216,8 @@ class AuthManager:
         display_name: str,
         password: str,
     ) -> IssuedSession:
+        if self.read_only_test_mode:
+            raise AuthConflictError("只读测试环境不能初始化用户")
         normalized = _normalize_username(username)
         shown_name = _validate_display_name(display_name, normalized)
         password_hash = hash_password(password)
@@ -232,6 +248,18 @@ class AuthManager:
     def login(self, username: str, password: str) -> IssuedSession | None:
         normalized = _normalize_username(username)
         now = _utc_now()
+        if self.read_only_test_mode:
+            with Session(self._get_engine()) as session:
+                user = session.scalar(
+                    select(ErpUser).where(ErpUser.username == normalized)
+                )
+                if (
+                    user is None
+                    or not user.active
+                    or not verify_password(password, user.password_hash)
+                ):
+                    return None
+                return self._issue_ephemeral_session(session, user, now)
         with Session(self._get_engine()) as session, session.begin():
             user = session.scalar(select(ErpUser).where(ErpUser.username == normalized))
             if (
@@ -247,6 +275,8 @@ class AuthManager:
     def resolve_session(self, token: str | None) -> SessionIdentity | None:
         if not token:
             return None
+        if self.read_only_test_mode:
+            return self._resolve_ephemeral_session(token)
         now = _utc_now()
         token_hash = _token_hash(token)
         with Session(self._get_engine()) as session, session.begin():
@@ -277,6 +307,10 @@ class AuthManager:
 
     def logout(self, token: str | None) -> None:
         if not token:
+            return
+        if self.read_only_test_mode:
+            with self._ephemeral_session_lock:
+                self._ephemeral_sessions.pop(_token_hash(token), None)
             return
         with Session(self._get_engine()) as session, session.begin():
             session.execute(
@@ -427,19 +461,102 @@ class AuthManager:
         with self._engine_lock:
             if self._engine is None:
                 settings = DashboardSettings.from_env(self.project_root)
-                engine = create_engine_for_settings(settings)
+                engine = (
+                    create_read_only_engine(settings.database_url)
+                    if self.read_only_test_mode
+                    else create_engine_for_settings(settings)
+                )
                 try:
-                    create_schema(engine)
-                    if not settings.database_url.startswith("sqlite"):
-                        sync_configured_erp_stores(
-                            engine,
-                            configured_stores(self.project_root),
-                        )
+                    if not self.read_only_test_mode:
+                        create_schema(engine)
+                        if not settings.database_url.startswith("sqlite"):
+                            sync_configured_erp_stores(
+                                engine,
+                                configured_stores(self.project_root),
+                            )
                 except BaseException:
                     engine.dispose()
                     raise
                 self._engine = engine
         return self._engine
+
+    def _issue_ephemeral_session(
+        self,
+        session: Session,
+        user: ErpUser,
+        now: datetime,
+    ) -> IssuedSession:
+        token = secrets.token_urlsafe(32)
+        csrf_token = secrets.token_urlsafe(24)
+        expires_at = now + SESSION_LIFETIME
+        token_hash = _token_hash(token)
+        with self._ephemeral_session_lock:
+            expired = [
+                stored_hash
+                for stored_hash, record in self._ephemeral_sessions.items()
+                if record.expires_at <= now
+            ]
+            for stored_hash in expired:
+                self._ephemeral_sessions.pop(stored_hash, None)
+            self._ephemeral_sessions[token_hash] = _EphemeralSessionRecord(
+                user_id=user.id,
+                csrf_token=csrf_token,
+                expires_at=expires_at,
+                last_seen_at=now,
+            )
+        return IssuedSession(
+            user=_identity(session, user),
+            token=token,
+            csrf_token=csrf_token,
+            expires_at=expires_at,
+        )
+
+    def _resolve_ephemeral_session(self, token: str) -> SessionIdentity | None:
+        now = _utc_now()
+        token_hash = _token_hash(token)
+        with self._ephemeral_session_lock:
+            record = self._ephemeral_sessions.get(token_hash)
+            if record is None:
+                return None
+            if record.expires_at <= now:
+                self._ephemeral_sessions.pop(token_hash, None)
+                return None
+
+        with Session(self._get_engine()) as session:
+            user = session.get(ErpUser, record.user_id)
+            if user is None or not user.active:
+                with self._ephemeral_session_lock:
+                    self._ephemeral_sessions.pop(token_hash, None)
+                return None
+            identity = _identity(session, user)
+
+        with self._ephemeral_session_lock:
+            current = self._ephemeral_sessions.get(token_hash)
+            if (
+                current is None
+                or current.user_id != record.user_id
+                or current.csrf_token != record.csrf_token
+            ):
+                return None
+            renewed = (
+                now - current.last_seen_at >= SESSION_RENEWAL_INTERVAL
+                or current.expires_at - now
+                < SESSION_LIFETIME - SESSION_RENEWAL_INTERVAL
+            )
+            if renewed:
+                current = _EphemeralSessionRecord(
+                    user_id=current.user_id,
+                    csrf_token=current.csrf_token,
+                    expires_at=now + SESSION_LIFETIME,
+                    last_seen_at=now,
+                )
+                self._ephemeral_sessions[token_hash] = current
+        return SessionIdentity(
+            user=identity,
+            csrf_token=current.csrf_token,
+            expires_at=current.expires_at,
+            renewed=renewed,
+        )
 
     @staticmethod
     def _issue_session(

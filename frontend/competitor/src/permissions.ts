@@ -11,8 +11,8 @@ export const permissionLabels: Record<PermissionKey, string> = {
   "store.view": "查看店铺经营数据",
   "logistics.manage": "管理物流关联",
   "keyword_traffic.manage": "旧版关键词手工记录（已停用）",
-  "search_ranking.run": "调用多模态模型并采集搜索定位",
-  "competitors.view": "查看竞品雷达",
+  "search_ranking.run": "运行标题分析与竞品搜索",
+  "competitors.view": "查看选品雷达",
   "competitors.collect": "采集竞品",
   "refresh.run": "刷新全部店铺数据（仅 kxx 生效）",
   "users.manage": "管理账号与权限",
@@ -53,7 +53,7 @@ export const permissionGroups: Array<{
 }> = [
   {
     title: "店铺经营",
-    description: "经营总览、关键词流量、搜索定位与物流关联",
+    description: "经营总览、标题优化与物流关联",
     permissions: [
       "store.view",
       "logistics.manage",
@@ -62,7 +62,7 @@ export const permissionGroups: Array<{
     ],
   },
   {
-    title: "竞品雷达",
+    title: "选品雷达",
     description: "查看历史与发起公开竞品采集",
     permissions: ["competitors.view", "competitors.collect"],
   },

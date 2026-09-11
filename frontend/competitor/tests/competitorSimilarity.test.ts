@@ -85,7 +85,7 @@ test("allows adjacent-category same-demand matches only with strong title eviden
   assert.equal(matches[0]!.kind, "same_need");
 });
 
-test("excludes the source PLID, own-store rows, duplicates, and accessory-main conflicts", () => {
+test("includes own-store alternatives but excludes the source, duplicates, and accessory-main conflicts", () => {
   const source: CompetitorMatchSource = {
     plid: "source",
     商品: "10 Inch Android Tablet 128GB",
@@ -100,8 +100,57 @@ test("excludes the source PLID, own-store rows, duplicates, and accessory-main c
     item("kept", "10 Inch Android Tablet 128GB WiFi Latest", path, "competitor", "2026-09-05T11:00:00Z"),
   ]);
 
-  assert.deepEqual(matches.map((match) => match.item.plid), ["kept"]);
-  assert.equal(matches[0]!.item.采集时间, "2026-09-05T11:00:00Z");
+  assert.deepEqual(matches.map((match) => match.item.plid), ["own", "kept"]);
+  assert.equal(matches[1]!.item.采集时间, "2026-09-05T11:00:00Z");
+});
+
+const health = category("Health", "health");
+const healthCare = category("Health Care", "health-care");
+const firstAidPath = [health, healthCare, category("First Aid", "first-aid"), category("First Aid Supplies", "first-aid-supplies"), category("Equipment", "equipment")];
+const chokingPath = [health, healthCare, category("Health Supplies & Equipment", "health-supplies"), category("Health Equipment", "health-equipment"), category("Anti-Choking Devices", "anti-choking")];
+const chokingProducts = [
+  item("100472483", "Anti Choking Device Rescue Kit Portable for Adult Child Emergency Aid", [], "own_store"),
+  item("100146502", "Anti Choking Device Kit Adult Child Infant Pocket Resuscitator", firstAidPath, "own_store"),
+  item("100409965", "Anti Choking Device Portable Rescue Kit for Adult Child and Infant", firstAidPath, "own_store"),
+  item("100472178", "Anti-Choking Device Portable Rescue Kit for Adult, Child and Infant", firstAidPath, "own_store"),
+  item("93447568", "Anti Choking Kit (Adult & Child)", chokingPath),
+];
+
+test("each anti-choking link finds the other own links and the monitored link across missing or different leaves", () => {
+  for (const source of chokingProducts) {
+    const matches = rankCompetitorMatches(source, chokingProducts);
+    assert.deepEqual(
+      new Set(matches.map((match) => match.item.plid)),
+      new Set(chokingProducts.filter((item) => item.plid !== source.plid).map((item) => item.plid)),
+      `Missing alternatives for ${source.plid}`,
+    );
+  }
+});
+
+test("retains own identity even when a newer public snapshot has the same PLID", () => {
+  const owned = chokingProducts[1]!;
+  const publicCopy = { ...owned, 来源: "competitor" as const, 采集时间: "2026-09-07T12:00:00Z" };
+  for (const candidates of [[owned, publicCopy], [publicCopy, owned]]) {
+    const matches = rankCompetitorMatches(chokingProducts[0]!, candidates);
+    assert.equal(matches.length, 1);
+    assert.equal(matches[0]!.item, owned);
+  }
+});
+
+test("title evidence tolerates missing categories without matching generic emergency products or replacement accessories", () => {
+  const unrelated = [
+    item("first-aid", "Portable First Aid Emergency Rescue Kit for Adult Child", firstAidPath),
+    item("mask", "Replacement Mask for Anti Choking Device Adult Child Kit", chokingPath),
+    item("bag", "Carry Case for Anti Choking Device Kit Adult Child", chokingPath),
+  ];
+  for (const source of chokingProducts) {
+    assert.deepEqual(rankCompetitorMatches(source, unrelated), [], `False match for ${source.plid}`);
+  }
+  const matches = rankCompetitorMatches(
+    { plid: "source", 商品: "Portable Retractable Projector Screen with Stand", 类目路径: [] },
+    [item("screen", "Retractable Projector Screen with Tripod Stand", [])],
+  );
+  assert.equal(matches.length, 1);
 });
 
 test("keeps a high-confidence title match clickable when category evidence is missing", () => {
@@ -115,6 +164,30 @@ test("keeps a high-confidence title match clickable when category evidence is mi
   assert.equal(matches[0]!.score, 100);
 });
 
+test("cat houses and climbing towers match reciprocally by explicit use across marketplace categories", () => {
+  const pets = [category("Pets", "17"), category("Equipment & Accessories", "26669")];
+  const cats = [
+    item("102111538", "Cat Foldable Villa Cat Storage Box With Scratching Pad Yellow", [...pets, category("Litter & Accessories", "26711"), category("Litter Boxes", "26714")], "own_store"),
+    item("103316517", "Cat Tree Tower Cat Scratching Post Tower Climb Play House", [...pets, category("Toys & Scratchers", "26715"), category("Scratchers", "26721")], "own_store"),
+    item("103316653", "Cat Tree Tower Cat Scratching Post Tower Climb Play House", [], "own_store"),
+  ];
+  const unrelated = [
+    item("1", "Automatic Cat Litter Box", cats[0]!.类目路径!),
+    item("2", "Enclosed Cat Toilet Box with Drawer and Litter Scoop", cats[0]!.类目路径!),
+    item("3", "Replacement Scratching Pad for Cat Tree Tower", cats[1]!.类目路径!),
+    item("4", "Cat Carrier Transport House Bag", cats[1]!.类目路径!),
+    item("5", "Cat Food Storage Box Yellow", cats[0]!.类目路径!),
+  ];
+  const candidates = [...cats, ...unrelated];
+  for (const source of cats) {
+    const matches = rankCompetitorMatches(source, candidates);
+    assert.deepEqual(new Set(matches.map((m) => m.item.plid)), new Set(cats.filter((x) => x !== source).map((x) => x.plid)));
+    if (source === cats[0]) assert.ok(matches.every((m) => m.kind === "same_need"));
+    assert.deepEqual(rankCompetitorMatches(source, candidates), matches, "warm inverted index must preserve results");
+  }
+  for (const source of unrelated) assert.deepEqual(rankCompetitorMatches(source, cats), []);
+});
+
 test("every radar product-card surface exposes competitor query and the modal reuses the outer card", () => {
   assert.match(radarCardSource, />\s*竞品查询\s*<\/button>/);
   assert.match(pageSource, /openPersonalWatchlistCompetitorMatches\(card, \$event\)/);
@@ -123,8 +196,8 @@ test("every radar product-card surface exposes competitor query and the modal re
   );
   assert.equal(pageSource.match(/<CompetitorRadarProductCard/g)?.length, 2);
   assert.match(pageSource, /COMPETITOR MATCHING/);
-  assert.match(pageSource, /几乎同款/);
-  assert.match(pageSource, /相同需求/);
+  assert.match(pageSource, /系统已有商品（含自有链接） · 按相关度排序/);
+  assert.match(pageSource, /rankCompetitorMatches\(competitorMatchSource\.value, competitorMatchCandidates\.value\)/);
   assert.doesNotMatch(pageSource, /competitorMatchKindFilter|competitor-match-evidence/);
   assert.match(radarCardSource, /<footer class="competitor-card-query-actions">[\s\S]*竞品查询/);
   assert.equal(pageSource.match(/<footer class="competitor-card-query-actions">/g)?.length, 3);

@@ -106,11 +106,14 @@ test("radar and category cards use link totals while seller workbench separates 
       .map((match) => match[1]?.replace(/\s/g, "")),
     ["7,15,30,60,90"],
   );
-  assert.match(observedSalesSource, /近期库存观察售出/);
-  assert.match(observedSalesSource, /<dl class="competitor-observed-sales-list">/);
+  assert.match(observedSalesSource, /库存观察售出/);
+  assert.match(observedSalesSource, /<table v-if="compact && !embedded" class="competitor-observed-sales-table">/);
+  assert.match(observedSalesSource, /<dl v-else class="competitor-observed-sales-list">/);
+  assert.match(observedSalesSource, /总销量<small>库存观察累计/);
+  assert.match(ownSalesComparisonSource, /总销量<small>已采集累计/);
   assert.match(observedSalesSource, /<dt>\{\{ days \}\}天：<\/dt>/);
   assert.match(observedSalesSource, /<dd>\{\{ observedUnitsLabel\(days\) \}\}<\/dd>/);
-  assert.match(observedSalesSource, /库存观察 · 不等同订单/);
+  assert.doesNotMatch(observedSalesSource, /库存观察 · 不等同订单/);
   assert.match(observedSalesSource, /embedded\?: boolean/);
   assert.match(observedSalesSource, /title\?: string/);
   assert.match(observedSalesSource, /contextLabel\?: string \| null/);
@@ -148,8 +151,10 @@ test("radar and category cards use link totals while seller workbench separates 
   assert.doesNotMatch(stylesSource, /competitor-observed-sales-grid/);
   assert.equal(
     productCardSources.match(/<CompetitorObservedSalesMetrics/g)?.length,
-    6,
+    7,
   );
+  assert.match(pageSource, /v-if="selected.来源 !== 'own_store' && selectedOfferIsHistorical"/);
+  assert.match(pageSource, /title="商品全部报价库存观察售出（件）"/);
   assert.match(pageSource, /:values="card\.competitor\?\.近期观察售出"/);
   assert.match(productCardSources, /全部卖家 · 全部变体/);
   assert.equal(
@@ -163,7 +168,7 @@ test("radar and category cards use link totals while seller workbench separates 
   assert.match(pageSource, /:follower-values="card\.competitor\.跟卖近期观察售出"/);
   assert.match(ownSalesComparisonSource, /自有官方/);
   assert.match(ownSalesComparisonSource, /跟卖观察/);
-  assert.match(ownSalesComparisonSource, /Seller Sales；跟卖为库存观察，不等同订单/);
+  assert.doesNotMatch(ownSalesComparisonSource, /Seller Sales；跟卖为库存观察，不等同订单/);
   assert.match(ownSalesComparisonSource, /const windowDays = \[7, 15, 30, 60, 90\]/);
   assert.match(pageSource, /:values="selectedOffer\?\.卖家近期观察售出"/);
   assert.match(pageSource, /:values="selectedOffer\?\.变体近期观察售出"/);
@@ -282,16 +287,12 @@ test("personal watchlist does not classify replenished inventory as unchanged", 
   );
 });
 
-test("date-range apply shows true competitors before restoring the own-store partition", () => {
+test("default observation range loads both partitions consistently", () => {
   assert.doesNotMatch(pageSource, /日期按北京时间自然日筛选/);
   assert.doesNotMatch(pageSource, /上述金额只是公开库存变化的观察口径/);
   assert.match(
     apiSource,
     /if \(startDate\) query\.set\("start_date", startDate\);[\s\S]*if \(endDate\) query\.set\("end_date", endDate\);/,
-  );
-  assert.match(
-    pageSource,
-    /async function applyDateRange\(\): Promise<void> \{[\s\S]*appliedStartDate\.value = rangeStartDate\.value;[\s\S]*appliedEndDate\.value = rangeEndDate\.value;[\s\S]*await loadOverview\(\);[\s\S]*?\n\}/,
   );
   const overviewLoader = pageSource.slice(
     pageSource.indexOf("async function loadOverview"),
@@ -299,12 +300,12 @@ test("date-range apply shows true competitors before restoring the own-store par
   );
   assert.match(
     overviewLoader,
-    /fetchCompetitors\(\s*appliedStartDate\.value,\s*appliedEndDate\.value,\s*requestScope,\s*controller\.signal,\s*false,\s*\)/,
+    /fetchCompetitors\(\s*appliedStartDate\.value,\s*appliedEndDate\.value,\s*requestScope,\s*controller\.signal,\s*false,\s*\(preview, generatedAt\) =>/,
   );
   assert.match(overviewLoader, /competitors\.value = overview\.items/);
   assert.match(
     overviewLoader,
-    /trueCompetitorDateRange\.value = overview\.date_range[\s\S]*void loadOwnStoreScope\(\)/,
+    /const overviewRequest = fetchCompetitors\([\s\S]*startSecondaryPartition\(\)[\s\S]*await overviewRequest[\s\S]*trueCompetitorDateRange\.value = overview\.date_range/,
   );
   assert.match(
     pageSource,
@@ -312,7 +313,7 @@ test("date-range apply shows true competitors before restoring the own-store par
   );
 });
 
-test("personal watchlist hydrates its PLIDs before the full radar projection", () => {
+test("personal watchlist hydrates its PLIDs after the prepared first radar page", () => {
   assert.match(
     apiSource,
     /\/api\/competitors\/personal-watchlist\/overview\$\{suffix\}/,
@@ -325,7 +326,7 @@ test("personal watchlist hydrates its PLIDs before the full radar projection", (
   assert.doesNotMatch(projectionSource, /ownStoreScope|own_store_scope/);
   assert.match(
     pageSource,
-    /async function loadOverview\(\)[\s\S]*void loadPersonalWatchlistOverview\(\);[\s\S]*competitors\.value = overview\.items;/,
+    /async function loadOverview\(\)[\s\S]*competitors\.value = overview\.items;[\s\S]*void loadPersonalWatchlistOverview\(\);/,
   );
   assert.match(
     pageSource,

@@ -24,9 +24,9 @@ const windowDays = [7, 15, 30, 60, 90] as const;
 
 function valueLabel(
   values: CompetitorObservedSalesWindows,
-  days: typeof windowDays[number],
+  days: typeof windowDays[number] | "total",
 ): string {
-  const value = values[String(days) as CompetitorObservedSalesWindowKey];
+  const value = values[String(days) as CompetitorObservedSalesWindowKey | "total"];
   return typeof value === "number" ? value.toLocaleString("zh-CN") : "数据不足";
 }
 </script>
@@ -61,12 +61,23 @@ function valueLabel(
             {{ valueLabel(followerValues, days) }}
           </td>
         </tr>
+        <tr class="sales-total-row">
+          <th scope="row">总销量<small>已采集累计</small></th>
+          <td :class="{ unavailable: valueLabel(ownValues, 'total') === '数据不足' }"
+            :title="`当前可见官方累计 · 尚未完整 ${ownValues.total_partial_days ?? 0}天 · 缺失 ${ownValues.total_missing_days ?? 0}天`">
+            {{ valueLabel(ownValues, 'total') }}
+            <small v-if="ownValues.total_partial_days || ownValues.total_missing_days">未完整</small>
+          </td>
+          <td :class="{ unavailable: valueLabel(followerValues, 'total') === '数据不足' }"
+            title="全部已采集跟卖报价的累计库存观察售出，不等同订单">
+            {{ valueLabel(followerValues, 'total') }}
+          </td>
+        </tr>
       </tbody>
     </table>
     <footer>
       <span>自有截至 {{ ownThroughDate || "数据不足" }}</span>
       <span>跟卖截至 {{ followerThroughDate || "数据不足" }}</span>
-      <small>自有为 Seller Sales；跟卖为库存观察，不等同订单</small>
     </footer>
   </section>
 </template>

@@ -222,7 +222,7 @@ def test_local_backup_retention_keeps_tiered_restore_points(tmp_path: Path) -> N
     assert not (backup_dir / f"{names[-1]}.json").exists()
 
 
-def test_scheduler_script_installs_daily_jobs_and_current_user_erp_startup() -> None:
+def test_scheduler_script_installs_daily_jobs_and_current_user_erp_guards() -> None:
     script = (PROJECT_ROOT / "scripts" / "install_scheduled_task.ps1").read_text(
         encoding="utf-8"
     )
@@ -251,6 +251,15 @@ def test_scheduler_script_installs_daily_jobs_and_current_user_erp_startup() -> 
     assert "-RestartInterval (New-TimeSpan -Minutes 1)" in script
     assert "-AllowStartIfOnBatteries" in script
     assert "-DontStopIfGoingOnBatteries" in script
+    assert "[int]$ErpHealthIntervalMinutes = 1" in script
+    assert "$ChineseErpHealthGuard = -join [char[]](" in script
+    assert "0x5065, 0x5EB7, 0x5B88, 0x62A4" in script
+    assert "-QuietWhenHealthy" in script
+    assert "New-ScheduledTaskTrigger `" in script
+    assert "-RepetitionInterval (New-TimeSpan -Minutes $ErpHealthIntervalMinutes)" in (
+        script
+    )
+    assert "-Description 'Silently check the formal ERP" in script
 
 
 def test_erp_startup_guard_is_idempotent_and_uses_formal_restart_chain() -> None:
@@ -269,6 +278,8 @@ def test_erp_startup_guard_is_idempotent_and_uses_formal_restart_chain() -> None
     assert "System.Threading.Mutex" in script
     assert "Local\\TakealotErpStartup" in script
     assert "$StartupMutex.WaitOne" in script
+    assert "[switch]$QuietWhenHealthy" in script
+    assert "if (-not $QuietWhenHealthy)" in script
 
     restart_script = (PROJECT_ROOT / "scripts" / "restart_erp.ps1").read_text(
         encoding="utf-8"
@@ -323,4 +334,16 @@ def test_binlog_scheduler_requires_d_drive_and_continuous_restart() -> None:
     assert "TAKEALOT_BACKUP_ROOT" in configurator
     assert "D'" in configurator
     assert "--password" not in configurator
+
+
+def test_laptop_witness_guard_restarts_after_boot_or_lease_failure() -> None:
+    script = (
+        PROJECT_ROOT / "scripts" / "ha" / "install_laptop_witness_guard_task.ps1"
+    ).read_text(encoding="utf-8")
+
+    assert "New-ScheduledTaskTrigger -AtStartup" in script
+    assert "-RestartCount 1440" in script
+    assert "-RestartInterval (New-TimeSpan -Minutes 1)" in script
+    assert "-StartWhenAvailable" in script
+    assert "-ExecutionTimeLimit ([TimeSpan]::Zero)" in script
 

@@ -42,7 +42,7 @@ async function submit() {
       <div class="login-brand">
         <span>T</span>
         <div>
-          <strong>南非运营 ERP</strong>
+          <strong>昂古古科技有限公司ERP</strong>
           <small>TAKEALOT OPERATIONS</small>
         </div>
       </div>
@@ -60,7 +60,7 @@ async function submit() {
         <p class="eyebrow">{{ isSetup ? "FIRST TIME SETUP" : "SECURE SIGN IN" }}</p>
         <h1>{{ isSetup ? "创建首个管理员" : "登录经营系统" }}</h1>
         <p class="login-copy">
-          {{ isSetup ? "账号只保存在本机 MySQL，不会写入浏览器或代码。" : "请输入公司分配的 ERP 账号。" }}
+          {{ isSetup ? "请创建首个管理员账号。" : "请输入公司账号。" }}
         </p>
 
         <label>
@@ -68,6 +68,8 @@ async function submit() {
           <input
             v-model.trim="username"
             autocomplete="username"
+            autocapitalize="none"
+            :spellcheck="false"
             minlength="3"
             maxlength="64"
             pattern="[a-z0-9][a-z0-9._-]{2,63}"

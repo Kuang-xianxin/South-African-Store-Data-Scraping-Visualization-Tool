@@ -191,7 +191,7 @@ class MetricService:
         *,
         sales_source: Mapping[str, Any] | None = None,
     ) -> int:
-        """Atomically replace daily metrics and events for an inclusive range."""
+        """Calculate one range consistently, then replace each date atomically."""
         if start > end:
             raise ValueError("start must be on or before end")
         lookback_days = self._rules.sales_long_window_days - 1
@@ -202,16 +202,27 @@ class MetricService:
             product_rows, anomalies, quality_events = self._calculate(
                 start, end, sales, snapshots, scope_dates
             )
-            self._repository.replace_metric_range(
-                start,
-                end,
-                product_metrics=product_rows,
-                anomalies=anomalies,
-                quality_events=quality_events,
-                anomaly_types=METRIC_ANOMALY_TYPES,
-                sales_source=sales_source,
-                observed_at=self._now(),
-            )
+        observed_at = self._now()
+        for metric_date in _date_range(start, end):
+            with self._repository.transaction():
+                self._repository.replace_metric_range(
+                    metric_date,
+                    metric_date,
+                    product_metrics=[
+                        row for row in product_rows if row["metric_date"] == metric_date
+                    ],
+                    anomalies=[
+                        row for row in anomalies if row["event_date"] == metric_date
+                    ],
+                    quality_events=[
+                        row for row in quality_events if row["event_date"] == metric_date
+                    ],
+                    anomaly_types=METRIC_ANOMALY_TYPES,
+                    sales_source=sales_source,
+                    observed_at=observed_at,
+                    source_range_start=start,
+                    source_range_end=end,
+                )
         return len(product_rows)
 
     def dashboard_dataset(self, as_of: date) -> DashboardDataset:
@@ -535,7 +546,7 @@ def build_quadrant_window(frame: pd.DataFrame, as_of: date, days: int = 7) -> pd
     window_start = window_end - timedelta(days=days - 1)
     latest = (
         scoped.assign(_metric_date=metric_dates)
-        .sort_values("_metric_date")
+        .sort_values("_metric_date", kind="stable")
         .drop_duplicates("offer_id", keep="last")
         .drop(columns="_metric_date")
     )

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import UTC, date, datetime, time, timedelta
 from collections import defaultdict
+from functools import lru_cache
 from typing import Any, Iterable, Mapping
 from zoneinfo import ZoneInfo
 
@@ -352,7 +353,7 @@ def aggregate_own_store_sales_series(
 def summarize_own_store_sales_windows(
     series: Mapping[str, Any],
 ) -> dict[str, int | None]:
-    """Return the fixed list-card windows from a scope aggregate series."""
+    """Return fixed windows and the visible collected total with coverage counts."""
 
     listing_date = _iso_date(series.get("listing_date"))
     through_date = _iso_date(series.get("through_date"))
@@ -363,7 +364,7 @@ def summarize_own_store_sales_windows(
         or listing_date > through_date
         or not isinstance(raw_points, list)
     ):
-        return {str(days): None for days in OWN_STORE_SALES_WINDOW_DAYS}
+        return {**{str(days): None for days in OWN_STORE_SALES_WINDOW_DAYS}, "total": None}
     points: list[tuple[date, int]] = []
     for raw_point in raw_points:
         if not isinstance(raw_point, Mapping):
@@ -382,6 +383,16 @@ def summarize_own_store_sales_windows(
             if start_date <= point_date <= through_date
         ]
         result[str(days)] = sum(values) if values else None
+    total_values = [units for point_date, units in points if listing_date <= point_date <= through_date]
+    series_start = _iso_date(series.get("series_start_date"))
+    # A deliberately clipped series must never masquerade as an all-history total.
+    result["total"] = (
+        sum(total_values)
+        if total_values and (series_start is None or series_start <= listing_date)
+        else None
+    )
+    result["total_partial_days"] = int(series.get("partial_days") or 0)
+    result["total_missing_days"] = int(series.get("missing_days") or 0)
     return result
 
 
@@ -660,6 +671,28 @@ def _store_sales_series_bulk(
                 revision_counts.get(revision.metric_date, 0) + 1
             )
 
+    # Completeness belongs to a store/date, not a product. Calculate it once
+    # for this read so later corrections and other stores cannot share stale state.
+    day_evidence: dict[date, tuple[str, int]] = {}
+    first_day = min((item["series_start_date"] for item in prepared.values()), default=through)
+    for metric_date in _date_range(first_day, through):
+        source_dates = _sast_dates_for_china_day(metric_date)
+        source_states = [states.get(source_date) for source_date in source_dates]
+        source_verified = all(
+            state is not None and _state_is_sales_api_verified(state)
+            for state in source_states
+        )
+        fully_verified = source_verified and all(
+            state is not None
+            and (verified_at := _state_verified_at(state)) is not None
+            and verified_at >= _china_day_end_utc(metric_date)
+            for state in source_states
+        )
+        day_evidence[metric_date] = (
+            "verified" if fully_verified else "partial" if source_verified else "missing",
+            sum(revision_counts.get(source_date, 0) for source_date in source_dates),
+        )
+
     result: dict[str, dict[str, Any]] = {}
     for plid, evidence in prepared.items():
         listing_date = evidence["listing_date"]
@@ -670,31 +703,13 @@ def _store_sales_series_bulk(
         partial_dates: list[date] = []
         total_ordered_units = 0
         for metric_date in _date_range(series_start_date, through):
-            source_dates = _sast_dates_for_china_day(metric_date)
-            source_states = [states.get(source_date) for source_date in source_dates]
-            source_verified = all(
-                state is not None and _state_is_sales_api_verified(state)
-                for state in source_states
-            )
-            fully_verified = source_verified and all(
-                state is not None
-                and (verified_at := _state_verified_at(state)) is not None
-                and verified_at >= _china_day_end_utc(metric_date)
-                for state in source_states
-            )
-            data_status = (
-                "verified"
-                if fully_verified
-                else "partial"
-                if source_verified
-                else "missing"
-            )
+            data_status, day_revision_count = day_evidence[metric_date]
             ordered_units = (
                 units_by_date.get(metric_date, 0)
                 if data_status != "missing"
                 else None
             )
-            if fully_verified:
+            if data_status == "verified":
                 covered_dates.append(metric_date)
             elif data_status == "partial":
                 partial_dates.append(metric_date)
@@ -705,10 +720,7 @@ def _store_sales_series_bulk(
                     "date": metric_date.isoformat(),
                     "ordered_units": ordered_units,
                     "data_status": data_status,
-                    "revision_count": sum(
-                        revision_counts.get(source_date, 0)
-                        for source_date in source_dates
-                    ),
+                    "revision_count": day_revision_count,
                 }
             )
         result[plid] = {
@@ -1103,6 +1115,7 @@ def _china_datetime(value: datetime | None) -> datetime | None:
     return normalized.astimezone(CHINA)
 
 
+@lru_cache(maxsize=4096)
 def _sast_dates_for_china_day(display_date: date) -> tuple[date, ...]:
     start = datetime.combine(display_date, time.min, tzinfo=CHINA).astimezone(SAST)
     end = (
@@ -1139,6 +1152,7 @@ def _state_verified_at(state: DailySalesMetricState) -> datetime | None:
     return parsed.astimezone(UTC)
 
 
+@lru_cache(maxsize=4096)
 def _china_day_end_utc(display_date: date) -> datetime:
     return datetime.combine(
         display_date + timedelta(days=1),

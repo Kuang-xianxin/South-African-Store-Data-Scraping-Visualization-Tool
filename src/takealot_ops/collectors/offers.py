@@ -59,6 +59,9 @@ def collect_offers(
             )
             for record in records:
                 repository.upsert_offer_snapshot(record, snapshot_date)
+            from takealot_ops.collectors.home import save_snapshot, warehouse_payload
+
+            save_snapshot(repository._session, "warehouse", warehouse_payload(raw_items), captured_at)
             repository.finish_run(run_id, "success", counts, None)
     except Exception as error:
         return _persist_run_failure(repository, run_id, error)

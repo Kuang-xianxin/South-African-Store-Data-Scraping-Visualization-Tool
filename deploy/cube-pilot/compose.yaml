@@ -1,0 +1,60 @@
+# Shadow pilot only. Credentials and reviewed image digests must be supplied.
+# Do not start this stack on the current 2 GiB proxy/arbiter host.
+name: takealot-cube-blue-pilot
+x-cube-env: &cube-env
+  CUBEJS_DB_TYPE: mysql
+  CUBEJS_DB_HOST: ${PILOT_DB_HOST:?Set the dedicated read-only BLUE shadow source}
+  CUBEJS_DB_PORT: ${PILOT_DB_PORT:-3306}
+  CUBEJS_DB_NAME: ${PILOT_DB_NAME:?Set the isolated pilot database}
+  CUBEJS_DB_USER: ${PILOT_DB_USER:?Read-only account required}
+  CUBEJS_DB_PASS: ${PILOT_DB_PASS:?Provide outside the repository}
+  CUBEJS_API_SECRET: ${CUBEJS_API_SECRET:?Provide a new pilot-only secret}
+  CUBEJS_DEV_MODE: 'false'
+  CUBEJS_CUBESTORE_HOST: store-router
+  CUBEJS_CONCURRENCY: '1'
+services:
+  api:
+    image: ${CUBE_IMAGE:?Pin a reviewed cubejs/cube image digest}
+    restart: 'no'
+    ports: ['127.0.0.1:4400:4000']
+    environment:
+      <<: *cube-env
+      CUBEJS_REFRESH_WORKER: 'false'
+      CUBEJS_ROLLUP_ONLY: 'true'
+    volumes: ['./conf:/cube/conf:ro']
+    mem_limit: 768m
+    cpus: 1
+  refresh:
+    image: ${CUBE_IMAGE:?Pin a reviewed cubejs/cube image digest}
+    restart: 'no'
+    environment:
+      <<: *cube-env
+      CUBEJS_REFRESH_WORKER: 'true'
+    volumes: ['./conf:/cube/conf:ro']
+    mem_limit: 768m
+    cpus: 1
+  store-router:
+    image: ${CUBESTORE_IMAGE:?Pin a compatible cubejs/cubestore image digest}
+    restart: 'no'
+    environment:
+      CUBESTORE_WORKERS: store-worker:10001
+      CUBESTORE_REMOTE_DIR: /cube/data
+      CUBESTORE_META_PORT: '9999'
+      CUBESTORE_SERVER_NAME: store-router:9999
+    volumes: ['store-data:/cube/data']
+    mem_limit: 512m
+    cpus: 1
+  store-worker:
+    image: ${CUBESTORE_IMAGE:?Pin a compatible cubejs/cubestore image digest}
+    restart: 'no'
+    environment:
+      CUBESTORE_WORKERS: store-worker:10001
+      CUBESTORE_REMOTE_DIR: /cube/data
+      CUBESTORE_WORKER_PORT: '10001'
+      CUBESTORE_SERVER_NAME: store-worker:10001
+      CUBESTORE_META_ADDR: store-router:9999
+    volumes: ['store-data:/cube/data']
+    mem_limit: 1536m
+    cpus: 1
+volumes:
+  store-data:

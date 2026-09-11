@@ -124,10 +124,12 @@ class CompetitorPublicClient:
         timeout_seconds: float = 30.0,
         headless: bool = True,
         search_endpoint_retries: int = 3,
+        proxy_server: str | None = None,
     ) -> None:
         self._timeout_ms = int(timeout_seconds * 1000)
         self._headless = headless
         self._search_endpoint_retries = max(0, min(3, search_endpoint_retries))
+        self._proxy_server = (proxy_server or "").strip() or None
         self._started = False
         self._playwright: Playwright | None = None
         self._browser: Browser | None = None
@@ -161,6 +163,11 @@ class CompetitorPublicClient:
             browser = await playwright.chromium.launch(
                 executable_path=str(executable),
                 headless=self._headless,
+                proxy=(
+                    {"server": self._proxy_server}
+                    if self._proxy_server is not None
+                    else None
+                ),
                 args=[
                     "--disable-background-timer-throttling",
                     "--disable-blink-features=AutomationControlled",
@@ -426,6 +433,27 @@ class CompetitorPublicClient:
             offers=tuple(compact_offers),
             variants=variants,
             category_path=_category_breadcrumbs(detail),
+        )
+
+    async def fetch_product_category_path(
+        self,
+        url: str,
+    ) -> tuple[dict[str, str | None], ...]:
+        """Read one product's formal Takealot breadcrumb path without loading offers."""
+
+        plid = extract_plid(url)
+        detail = await self._get_json(
+            f"{PUBLIC_API_BASE}/product-details/PLID{plid}",
+            retries=getattr(self, "_search_endpoint_retries", 0),
+        )
+        return tuple(
+            {
+                "name": item.name,
+                "id": item.category_id,
+                "type": item.category_type,
+                "slug": item.slug,
+            }
+            for item in _category_breadcrumbs(detail)
         )
 
     async def _fetch_variant_details(

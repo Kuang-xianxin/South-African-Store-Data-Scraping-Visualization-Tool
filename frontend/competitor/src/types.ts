@@ -63,7 +63,12 @@ export interface CompetitorOfferItem extends ProductMasterIdentity {
 export type CompetitorObservedSalesWindowKey = "7" | "15" | "30" | "60" | "90";
 export type CompetitorObservedSalesWindows = Partial<
   Record<CompetitorObservedSalesWindowKey, number | null>
->;
+> & {
+  /** Collected history only; never the sum of overlapping windows. */
+  total?: number | null;
+  total_partial_days?: number | null;
+  total_missing_days?: number | null;
+};
 
 export interface CompetitorItem {
   来源: "competitor" | "own_store";
@@ -90,6 +95,9 @@ export interface CompetitorItem {
   上次成功库存时间: string | null;
   /** Earliest locally stored observation for this product card. */
   首次监控时间?: string | null;
+  /** Earliest platform listing in the visible own-store scope; never a local observation. */
+  自有上架时间?: string | null;
+  自有上架日期?: string | null;
   评论数: number;
   评论数可用?: boolean;
   /** Latest locally fetched PLID-level review total, independent of the list date range. */
@@ -193,7 +201,33 @@ export interface CompetitorDateRange {
   selected_end: string | null;
 }
 
+export interface RadarListRequest {
+  page: number;
+  page_size: number;
+  q: string;
+  seller: string;
+  stock: string;
+  status: string;
+  follower: string;
+  signal: string;
+  direction: string;
+  sort?: string;
+  watchlist: boolean;
+}
+
+export interface RadarPagination {
+  page: number;
+  page_size: number;
+  total: number;
+  source_total: number;
+  exact_stock_count: number;
+  average_rating: number | null;
+  latest_collection: string | null;
+  seller_groups: Array<{ key: string; sellerId: string | null; productCount: number; names: Array<{ value: string; count: number }> }>;
+}
+
 export interface CompetitorOverview {
+  pagination?: RadarPagination;
   items: CompetitorItem[];
   store_items: CompetitorItem[];
   own_follower_events: OwnFollowerHistoryItem[];
@@ -201,6 +235,7 @@ export interface CompetitorOverview {
 }
 
 export interface OwnStoreCompetitorOverview {
+  pagination?: RadarPagination;
   store_items: CompetitorItem[];
   date_range: CompetitorDateRange;
 }
@@ -853,7 +888,25 @@ export interface OwnStoreProfitFeeBasis {
   message: string;
 }
 
+export interface NfProfitResult {
+  status: "available" | "unavailable";
+  source: { file?: string; sheet?: string; sha256?: string };
+  source_rows: number[];
+  message: string;
+  calculation: {
+    cells: Record<string, number>;
+    price_rmb: number;
+    cost_rmb: number;
+    fees_rmb: number;
+    total_cost_rmb: number;
+    profit_rmb: number;
+    profit_zar: number;
+    margin_percentage: number;
+  } | null;
+}
+
 export interface OwnStoreProfitabilityItem extends ProductMasterIdentity {
+  workbook_profit?: NfProfitResult;
   offer_key: string;
   store_code: string;
   store_name: string;
@@ -1333,6 +1386,8 @@ export interface AnomalyProductItem extends ProductMasterIdentity {
   no_sales_days_exact: boolean;
   last_sale_on: string | null;
   slow_moving_started_on?: string | null;
+  slow_moving_boundary_reason?: "sale" | "out_of_stock" | "missing_sales" | "missing_stock" | "sales_gap";
+  days_since_last_sale?: number | null;
   stop_started_on?: string;
   zero_sales_dates?: string[];
   baseline_start_on?: string;
@@ -1711,12 +1766,12 @@ export interface SearchRankingStatus {
   fallback_model: string | null;
   configured_provider_count: number;
   pricing_snapshot_date: string;
-  pricing_mode: "api_unit_price";
+  pricing_mode: "api_unit_price" | "codex_subscription_quota";
   model_policy: {
-    transport: "openai_compatible_https";
+    transport: "openai_compatible_https" | "codex_app_server_stdio";
     model_fallback_allowed: boolean;
     codex_cli_integration_retained: true;
-    codex_cli_execution_enabled: false;
+    codex_cli_execution_enabled: boolean;
   };
   max_pages: number;
   max_keywords: number;
@@ -1917,6 +1972,8 @@ export interface SearchRankingFirstPageResultClassification {
     | "ordered_same_product_name_or_alias"
     | "identity_tokens_scattered_not_direct_proof"
     | "conflicting_product_family_in_subtitle"
+    | "formal_category_conflicts_with_target"
+    | "query_category_cluster_invalidates_model_identity"
     | "no_complete_same_product_identity";
   matched_identity_terms: string[];
   matched_loose_identity_terms: string[];
@@ -1925,6 +1982,17 @@ export interface SearchRankingFirstPageResultClassification {
   matched_source_title_signatures: string[];
   matched_same_demand_terms?: string[];
   matched_subtitle_same_demand_terms?: string[];
+  category_evidence_status?: string;
+  category_path?: CompetitorCategoryBreadcrumb[];
+  category_relation_to_target?:
+    | "shared_category_branch"
+    | "related_category_labels"
+    | "disjoint_department"
+    | "disjoint_category_branch"
+    | "unavailable";
+  category_conflicts_target?: boolean;
+  category_original_classification?: SearchRankingFirstPageResultClassification["classification"];
+  category_original_reason?: string;
 }
 
 export interface SearchRankingKeywordResult {
@@ -1998,10 +2066,43 @@ export interface SearchRankingKeywordResult {
     semantic_relation_adjacent_result_titles?: string[];
     semantic_relation_evidence_scope?:
       | "first_page_organic_result_titles"
-      | "first_page_organic_result_title_subtitle_and_product_metadata";
+      | "first_page_organic_result_title_subtitle_and_product_metadata"
+      | "first_page_organic_result_title_subtitle_metadata_and_sampled_formal_categories";
     first_page_result_classifications?: SearchRankingFirstPageResultClassification[];
     source_title_identity_signatures?: string[];
-    semantic_relation_uses_per_result_image_or_category?: false;
+    semantic_relation_category_policy_version?: string;
+    semantic_relation_category_validation_required?: boolean;
+    semantic_relation_category_validation_status?:
+      | "not_required"
+      | "target_category_unavailable"
+      | "no_core_results"
+      | "completed"
+      | "partial"
+      | "unavailable";
+    semantic_relation_target_category_status?: string;
+    semantic_relation_target_category_path?: CompetitorCategoryBreadcrumb[];
+    semantic_relation_category_sample_limit?: number;
+    semantic_relation_category_sample_count?: number;
+    semantic_relation_category_available_count?: number;
+    semantic_relation_category_conflict_count?: number;
+    semantic_relation_category_support_count?: number;
+    semantic_relation_category_samples?: Array<{
+      organic_position: number;
+      plid: string;
+      status: string;
+      category_path: CompetitorCategoryBreadcrumb[];
+      relation_to_target: string;
+      conflicts_target: boolean;
+      terminal_category_key: string | null;
+    }>;
+    semantic_relation_category_conflict_cluster?: {
+      terminal_category_key: string | null;
+      sample_count: number;
+      category_path: CompetitorCategoryBreadcrumb[];
+    } | null;
+    semantic_relation_category_vetoed_s?: boolean;
+    semantic_relation_uses_per_result_category?: boolean;
+    semantic_relation_uses_per_result_image_or_category?: boolean;
     semantic_relation_limitations?: string;
     page_validation_status?: "completed" | "not_run";
     first_page_majority?: boolean;
@@ -2115,7 +2216,8 @@ export interface SearchRankingKeywordResult {
       | "canonicalized_title_token_subset_with_controlled_product_aliases"
       | "semantic_alias_token_subset_with_retarget_rejection"
       | "ordered_identity_phrase_with_exclusion_and_title_signature_audit"
-      | "exact_identity_and_same_demand_family_page_audit";
+      | "exact_identity_and_same_demand_family_page_audit"
+      | "exact_identity_same_demand_and_sampled_formal_category_audit";
     same_type_validation_controlled_aliases?: string[];
     same_type_validation_term_source?:
       | "image_primary_physical_form"
@@ -2123,6 +2225,7 @@ export interface SearchRankingKeywordResult {
       | "image_title_fused_same_product_terms"
       | "semantic_verified_same_product_terms";
     same_type_validation_uses_multimodal_per_result?: false;
+    same_type_validation_uses_formal_category_sample?: boolean;
     same_type_validation_requires_contiguous_phrase?: boolean;
     same_type_validation_limitations?: string;
     journey_type?:
@@ -2239,6 +2342,7 @@ export interface SearchRankingTitleScore {
 
 export type SearchRankingSameProductLexiconSource =
   | "human_confirmed_product_fact"
+  | "formal_category_title_identity_phrase"
   | "seller_title_identity_phrase"
   | "fusion_product_type_terms"
   | "fusion_same_product_aliases"
@@ -2248,6 +2352,7 @@ export interface SearchRankingSameProductLexicon {
   policy_version:
     | "same-product-lexicon-v1"
     | "same-product-lexicon-v2"
+    | "same-product-lexicon-v3"
     | "historical-profile-projection";
   selection_policy: string;
   search_use: "priority_direct_query_and_complete_root_expansion";
@@ -2268,6 +2373,16 @@ export interface SearchRankingSameProductLexicon {
 }
 
 export interface SearchRankingAnalysis extends SearchRankingAnalysisSummary {
+  title_benchmarks?: {
+    review_status?: "pending" | "complete" | "failed" | "empty";
+    review_error?: string | null;
+    review_fingerprint?: string;
+    items: TitleBenchmark[];
+    candidate_count: number;
+    evaluated_count: number;
+    limit: number;
+    scope: string;
+  };
   product_name: string | null;
   category: string | null;
   profile: {
@@ -2332,7 +2447,8 @@ export interface SearchRankingAnalysis extends SearchRankingAnalysisSummary {
       | "confirmed_fact_support_continue"
       | "unresolved_conflict_stop"
       | "moderate_difference_warning"
-      | "large_difference_warning";
+      | "large_difference_warning"
+      | "formal_category_title_resolution";
     title_reference_role?: "post_recognition_cross_check_only";
     cross_validation_isolated?: true;
     cross_validation_completed_before_fusion_generation?: true;
@@ -2351,6 +2467,32 @@ export interface SearchRankingAnalysis extends SearchRankingAnalysisSummary {
     variant_parameter_source?: "current_seller_offer_titles";
     variant_parameters_visually_verified?: false;
     family_variant_count?: number;
+    formal_category_identity_resolution?: {
+      policy_version: "formal-category-title-identity-v1";
+      status:
+        | "not_applied"
+        | "applied"
+        | "model_identity_aligned"
+        | "human_identity_preserved";
+      applied: boolean;
+      reason: string;
+      target_category_path: Array<{
+        name: string;
+        id: string | null;
+        type: string | null;
+        slug: string | null;
+      }>;
+      target_category_label?: string | null;
+      category_identity_tokens: string[];
+      title_identity_base?: string | null;
+      title_identity_terms: string[];
+      same_demand_family_terms: string[];
+      visual_supported_modifiers: string[];
+      suppressed_model_terms: string[];
+      excluded_broad_title_terms: string[];
+      aligned_model_terms?: string[];
+      human_confirmed_identity_terms?: string[];
+    };
   };
   autocomplete_checks?: Array<{
     seed: string;
@@ -2459,11 +2601,15 @@ export interface SearchRankingAnalysis extends SearchRankingAnalysisSummary {
       adaptive_recovery: number;
     };
     same_product_lexicon?: {
-      policy_version: "same-product-lexicon-v1";
+      policy_version:
+        | "same-product-lexicon-v1"
+        | "same-product-lexicon-v2"
+        | "same-product-lexicon-v3";
       entry_count: number;
       direct_query_priority: true;
       complete_root_expansion_enabled: true;
       complete_root_expansion_limit: number;
+      formal_category_identity_resolution_applied?: true;
     };
     adaptive_policy?: {
       base_query_target: number;
@@ -2562,7 +2708,8 @@ export interface SearchRankingAnalysis extends SearchRankingAnalysisSummary {
     source_policy?: string;
   };
   product_fact_recommendation: SearchRankingProductFactRecommendation;
-  variant_family?: SearchRankingVariantFamily;
+  // Historical analyses can contain an empty family object without stored variants.
+  variant_family?: Partial<SearchRankingVariantFamily> | null;
   variant_projection?: {
     family_analysis_shared: true;
     applied: boolean;
@@ -2755,7 +2902,7 @@ export interface SearchRankingBatchPreviewPayload {
     fallback_model: string | null;
     model_fallback_allowed: boolean;
     codex_cli_integration_retained: true;
-    codex_cli_execution_enabled: false;
+    codex_cli_execution_enabled: boolean;
     public_request_min_interval_seconds: number;
     public_request_max_interval_seconds: number;
   };
@@ -2793,8 +2940,8 @@ export interface SearchRankingBatchPreviewPayload {
     };
     estimated_cost: {
       currency: "CNY";
-      pricing_mode: "api_unit_price";
-      cost_estimate_applicable: true;
+      pricing_mode: "api_unit_price" | "codex_subscription_quota";
+      cost_estimate_applicable: boolean;
       base_cny: number;
       typical_low_cny: number;
       typical_high_cny: number;
@@ -2821,6 +2968,39 @@ export interface SearchRankingBatchPreviewPayload {
 
 export interface SearchRankingBatchStatusPayload {
   batch: SearchRankingBatchState | null;
+}
+
+export interface TitleBenchmark {
+  comparison_reason?: string;
+  title_analysis_status?: "pending" | "complete";
+  plid: string;
+  title: string;
+  url: string;
+  image_url: string | null;
+  relation: string;
+  category_path: CompetitorCategoryBreadcrumb[];
+  core_phrases: string[];
+  detail_phrases: string[];
+  specifications: string[];
+  borrowable_phrases: string[];
+  requires_confirmation: string[];
+  comparison_points: string[];
+  title_assessment: string;
+  search_evidence: Array<{
+    keyword: string;
+    organic_position: number;
+    target_organic_position: number | null;
+    captured_at: string | null;
+    title: string;
+  }>;
+  monitoring_status: "not_requested" | "available" | "not_monitored" | "no_access" | "unavailable";
+  monitored_evidence: {
+    price: number | null;
+    captured_at: string | null;
+    observed_sales_30: number | null;
+    observed_sales_through: string | null;
+    title: string | null;
+  } | null;
 }
 
 export interface SearchRankingDetailPayload {

@@ -76,7 +76,7 @@ class ReadProjectionCache:
                 if generation == self._generation:
                     self._entries[key] = _Entry(
                         value=value,
-                        expires_at=self._clock() + self._ttl_seconds,
+                        expires_at=self._clock() + self._entry_ttl(key),
                         generation=generation,
                     )
                     self._entries.move_to_end(key)
@@ -84,6 +84,9 @@ class ReadProjectionCache:
                         self._entries.popitem(last=False)
                 event.set()
             return value
+
+    def _entry_ttl(self, key: Hashable) -> float:
+        return self._ttl_seconds
 
     def clear(self) -> None:
         """Invalidate all cached values and prevent older loaders from repopulating."""

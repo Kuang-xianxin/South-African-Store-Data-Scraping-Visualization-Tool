@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { cachedNumberFormatter } from "../numberFormatters";
 import { computed } from "vue";
 
 import {
@@ -23,8 +24,8 @@ const props = withDefaults(defineProps<{
   ariaLabel: "整条自有链接上架以来官方销量",
   listingLabel: "链接上架时间",
   contextLabel: null,
-  emptyMessage: "当前账号可见店铺暂无该链接的 Seller Sales 数据。",
-  sourceLabel: "Seller Sales · 整条链接全部 Offer · 从链接上架日起读取",
+  emptyMessage: "暂无该链接的官方销量。",
+  sourceLabel: "官方销量 · 全部自有报价",
 });
 
 const selectedSeries = computed(() =>
@@ -35,7 +36,7 @@ const periodSummaries = computed(() =>
 function unitsLabel(value: number | null): string {
   return value === null
     ? "数据不足"
-    : `${new Intl.NumberFormat("zh-CN").format(value)} 件`;
+    : `${cachedNumberFormatter("zh-CN").format(value)} 件`;
 }
 
 function periodCoverageLabel(summary: OwnStoreSalesWindowSummary): string {
@@ -102,12 +103,11 @@ function listingTimeLabel(series: OwnStoreSalesSeries): string {
         <div class="own-store-sales-overview-listing">
           <dt>{{ listingLabel }}</dt>
           <dd>{{ listingTimeLabel(selectedSeries) }}</dd>
-          <small>{{ selectedSeries.listing_date_source === "platform" ? "平台 created_at" : "本库最早记录" }}</small>
+          <small>{{ selectedSeries.listing_date_source === "platform" ? "平台上架时间" : "本库最早记录" }}</small>
         </div>
       </dl>
       <footer>
         <span>{{ sourceLabel }}</span>
-        <span>不受列表区间影响 · 尚未完整的日期销量仍可能增加 · 缺失日期不补 0</span>
       </footer>
     </template>
   </section>

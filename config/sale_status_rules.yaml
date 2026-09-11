@@ -5,4 +5,5 @@ included:
 excluded:
   - Returned
   - Cancelled by Takealot - DC Stock Inquiry
+  - Cancelled by Customer
 unknown: []

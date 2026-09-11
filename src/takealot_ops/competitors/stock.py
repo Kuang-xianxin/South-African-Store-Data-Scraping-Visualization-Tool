@@ -91,6 +91,7 @@ async def probe_stock(
     *,
     profile_dir: Path,
     visible: bool = False,
+    proxy_server: str | None = None,
 ) -> StockProbeResult:
     """Probe the current seller/SKU cart limit in an isolated browser profile."""
     executable = _find_browser_executable()
@@ -100,6 +101,11 @@ async def probe_stock(
             str(profile_dir),
             executable_path=str(executable),
             headless=False,
+            proxy=(
+                {"server": proxy_server.strip()}
+                if proxy_server and proxy_server.strip()
+                else None
+            ),
             locale="en-ZA",
             viewport={"width": 1365, "height": 900},
             args=[
@@ -135,12 +141,14 @@ async def probe_variant_stocks(
     *,
     profile_dir: Path,
     visible: bool = False,
+    proxy_server: str | None = None,
 ) -> list[VariantStockObservation]:
     """Backward-compatible wrapper returning the main offer of every variant."""
     variant_stocks, _ = await probe_product_stocks(
         product,
         profile_dir=profile_dir,
         visible=visible,
+        proxy_server=proxy_server,
     )
     return variant_stocks
 
@@ -152,6 +160,7 @@ async def probe_product_stocks(
     visible: bool = False,
     probe_buyboxes: bool = True,
     probe_offer_buyboxes: bool = False,
+    proxy_server: str | None = None,
 ) -> tuple[list[VariantStockObservation], list[OfferStockObservation]]:
     """Probe variant buyboxes and follower offers in one isolated product session."""
     results: dict[str, StockProbeResult] = {}
@@ -201,6 +210,11 @@ async def probe_product_stocks(
                 str(profile_dir),
                 executable_path=str(executable),
                 headless=False,
+                proxy=(
+                    {"server": proxy_server.strip()}
+                    if proxy_server and proxy_server.strip()
+                    else None
+                ),
                 locale="en-ZA",
                 viewport={"width": 1365, "height": 900},
                 args=[

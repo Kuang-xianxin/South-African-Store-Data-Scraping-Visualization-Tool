@@ -44,7 +44,7 @@ test("keeps internal collection and calculation manuals out of default page copy
 test("keeps short decisions, state and evidence boundaries visible", () => {
   assert.match(competitorSource, /等待首次采集/);
   assert.match(competitorSource, /未含仓储、广告、月租、头程、税费和退货损失；不等同净利润/);
-  assert.match(searchRankingSource, /商品类型优先，规格参数默认后置/);
+  assert.match(searchRankingSource, /商品类型优先，规格默认后置/);
   assert.match(returnsSource, /已有明细可查看；未覆盖部分不按 0 计算/);
   assert.match(appSource, /完成该店铺数据接入后即可查看/);
 });

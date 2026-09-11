@@ -14,6 +14,24 @@ import type {
   CompetitorTargetItem,
 } from "../src/types.ts";
 
+test("personal sales ranking remains global before paging and preserves unavailable memberships", () => {
+  const cards = buildPersonalWatchlistWorkspaceCards(
+    ["1", "2", "3", "4"].map(plid => ({
+      plid, added_at: "2026-09-08T03:00:00Z", source: "own_store" as const, library_ids: [],
+    })), [],
+    [30, 0, 100].map((value, index) => ({
+      plid: String(index + 1), 来源: "own_store", 自有官方销量: { total: value },
+      跟卖近期观察售出: { total: 100 - value },
+    }) as CompetitorItem),
+  );
+  assert.deepEqual(sortPersonalWatchlistWorkspaceCards(cards, "全部", "desc", "sales_total")
+    .map(row => row.plid), ["3", "1", "2", "4"]);
+  assert.deepEqual(sortPersonalWatchlistWorkspaceCards(cards, "全部", "asc", "follower_sales_total")
+    .map(row => row.plid), ["3", "1", "2", "4"]);
+  assert.equal(personalWatchlistPageForPlid(
+    sortPersonalWatchlistWorkspaceCards(cards, "全部", "asc", "sales_total"), "3", 2), 2);
+});
+
 test("personal workspace keeps every membership even before first capture", () => {
   const target = {
     plid: "22",

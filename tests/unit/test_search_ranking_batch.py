@@ -143,6 +143,22 @@ class _FakeService:
         return None
 
 
+def test_empty_preview_has_zero_duration(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    database_url = f"sqlite:///{(tmp_path / 'empty.db').as_posix()}"
+    monkeypatch.setenv("TAKEALOT_DATABASE_URL", database_url)
+    engine = create_engine_for_database_url(database_url)
+    create_schema(engine)
+    engine.dispose()
+    controller = SearchRankingBatchController(
+        tmp_path, service=SearchRankingService(tmp_path),
+        analysis_lock=asyncio.Lock(), state_path=tmp_path / "batch.json",
+    )
+    preview = controller._build_preview(_stores())
+    assert preview["eligible_count"] == 0
+    assert preview["estimated_duration"]["likely_min_hours"] == 0
+    assert preview["estimated_duration"]["likely_max_hours"] == 0
+
+
 def test_preview_counts_existing_and_same_batch_vision_reuse(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

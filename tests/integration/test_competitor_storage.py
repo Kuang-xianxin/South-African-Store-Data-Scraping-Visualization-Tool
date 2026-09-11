@@ -30,6 +30,7 @@ from takealot_ops.competitors.service import (
     _variant_row,
     load_competitor_dataset,
     load_competitor_link_health,
+    load_true_competitor_date_range,
 )
 from takealot_ops.competitors.stock import skipped_stock_probe
 from takealot_ops.competitors.web import create_app
@@ -89,6 +90,11 @@ def test_store_offer_points_filter_scope_and_skip_observation_duplicates(
             [
                 point(StoreOfferObservation, "duplicate", "11111111", captured_at),
                 point(StoreOfferBaseline, "duplicate", "11111111", captured_at),
+                point(StoreOfferObservation, "newer-b", "11111111", datetime(2026, 8, 14, 3, tzinfo=UTC)),
+                point(StoreOfferObservation, "newer-a", "11111111", datetime(2026, 8, 14, 3, tzinfo=UTC)),
+                # The exact observation wins even if its PLID was corrected.
+                point(StoreOfferObservation, "corrected", "22222222", captured_at),
+                point(StoreOfferBaseline, "corrected", "11111111", captured_at),
                 point(
                     StoreOfferBaseline,
                     "legacy-only",
@@ -122,13 +128,20 @@ def test_store_offer_points_filter_scope_and_skip_observation_duplicates(
         )
     engine.dispose()
 
-    assert [point.offer_id for point in points] == ["duplicate", "legacy-only"]
-    assert [point.source_kind for point in points] == ["observation", "baseline"]
+    assert [point.offer_id for point in points] == [
+        "newer-a", "newer-b", "duplicate", "legacy-only"
+    ]
+    assert [point.source_kind for point in points] == [
+        "observation", "observation", "observation", "baseline"
+    ]
     assert {point.store_code for point in points} == {"current"}
     assert {point.store_code for point in all_store_points} == {
         "current",
         "store-02",
     }
+    assert [point.offer_id for point in all_store_points] == [
+        "newer-a", "newer-b", "duplicate", "legacy-only", "other-store"
+    ]
     point_queries = [
         statement
         for statement in statements
@@ -538,7 +551,18 @@ def test_competitor_observation_persists_snapshot_and_deduplicated_reviews(
         include_detail_frames=False,
         include_store_projection=False,
     )
-    link_health = load_competitor_link_health(engine)
+    assert load_true_competitor_date_range(engine) == true_competitor_list.date_range_payload()
+    loaded_snapshot_ids: list[int] = []
+
+    def record_loaded_snapshot(snapshot, _context) -> None:
+        loaded_snapshot_ids.append(snapshot.id)
+
+    event.listen(CompetitorSnapshot, "load", record_loaded_snapshot)
+    try:
+        link_health = load_competitor_link_health(engine)
+    finally:
+        event.remove(CompetitorSnapshot, "load", record_loaded_snapshot)
+    assert len(loaded_snapshot_ids) == 1
     engine.dispose()
 
     assert len(dataset.current) == 1
@@ -1266,6 +1290,7 @@ def test_own_store_product_is_separated_and_only_exposes_follower_offers(
         "30": 1,
         "60": 1,
         "90": 1,
+        "total": 1,
     }
     assert item["近期观察售出截至"] == date(2026, 8, 2)
     assert item["首次监控时间"].date() == date(2026, 8, 2)
@@ -1487,6 +1512,7 @@ def test_own_store_follower_sales_excludes_every_known_own_offer(
         "30": 1,
         "60": 1,
         "90": 1,
+        "total": 1,
     }
     assert item["跟卖近期观察售出截至"] == date(2026, 8, 22)
     offers = {offer["offer_id"]: offer for offer in item["跟卖报价"]}
@@ -1906,6 +1932,7 @@ def test_competitor_signals_recompute_from_oldest_and_latest_in_date_range(
         "30": 6,
         "60": 6,
         "90": 6,
+        "total": 6,
     }
     assert all_signal["近期观察售出截至"] == date(2026, 7, 24)
     assert all_signal["首次监控时间"].date() == date(2026, 7, 22)
@@ -2091,6 +2118,7 @@ def test_observed_sales_separates_link_seller_and_variant_scopes(
         "30": 3,
         "60": 3,
         "90": 3,
+        "total": 3,
     }
     assert item["近期观察售出截至"] == date(2026, 8, 22)
     offers = {offer["offer_id"]: offer for offer in item["对比报价"]}
@@ -2101,6 +2129,7 @@ def test_observed_sales_separates_link_seller_and_variant_scopes(
             "30": 1,
             "60": 1,
             "90": 1,
+            "total": 1,
         }
         assert offers[offer_id]["卖家近期观察售出截至"] == date(2026, 8, 22)
     for offer_id in ("offer-b-black", "offer-b-green"):
@@ -2110,6 +2139,7 @@ def test_observed_sales_separates_link_seller_and_variant_scopes(
             "30": 2,
             "60": 2,
             "90": 2,
+            "total": 2,
         }
         assert offers[offer_id]["卖家近期观察售出截至"] == date(2026, 8, 22)
     assert offers["offer-a-red"]["变体近期观察售出"]["7"] == 1

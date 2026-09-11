@@ -10,6 +10,7 @@ import os
 import random
 import re
 import time
+from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
 from contextvars import ContextVar
 from dataclasses import dataclass, replace
@@ -33,13 +34,14 @@ from takealot_ops.erp.product_images import (
     trusted_product_image_url,
 )
 from takealot_ops.search_ranking.codex_cli import (
-    CODEX_TERRA_MODEL,
+    CODEX_TITLE_MODEL,
     CodexAppServerClient,
     CodexCliConfigurationError,
     CodexCliProviderError,
     CodexCliQuotaExceededError,
     CodexWeeklyQuotaGuard,
 )
+from takealot_ops.search_ranking.title_optimization import build_title_benchmarks, request_title_readings
 from takealot_ops.settings import DashboardSettings
 from takealot_ops.storage.migrations import (
     create_engine_for_database_url,
@@ -94,7 +96,60 @@ MODEL_DIRECT_QUERY_MIN_WORDS = 2
 MODEL_DIRECT_QUERY_MAX_WORDS = 4
 MODEL_DIRECT_QUERY_PREFERRED_MAX_WORDS = 3
 MODEL_DIRECT_QUERY_MIN_PREFERRED_COUNT = 4
-SAME_PRODUCT_LEXICON_POLICY_VERSION = "same-product-lexicon-v2"
+SAME_PRODUCT_LEXICON_POLICY_VERSION = "same-product-lexicon-v3"
+FORMAL_CATEGORY_VALIDATION_POLICY_VERSION = "formal-breadcrumbs-v1"
+FORMAL_CATEGORY_TITLE_IDENTITY_POLICY_VERSION = "formal-category-title-identity-v1"
+FORMAL_CATEGORY_RESULT_SAMPLE_LIMIT = 3
+FORMAL_CATEGORY_LOOKUP_REQUEST_LIMIT = 16
+FORMAL_CATEGORY_CONFLICT_MIN_SAMPLE = 2
+FORMAL_CATEGORY_TRUSTED_IDENTITY_SOURCES = {
+    "human_confirmed_product_fact",
+    "human_confirmed_decision_parameter",
+    "seller_title_complete_phrase",
+    "seller_title_identity_phrase",
+    "formal_category_title_identity_phrase",
+    "title_verified_parameter",
+}
+FORMAL_CATEGORY_GENERIC_LABEL_TOKENS = {
+    "accessories",
+    "accessory",
+    "and",
+    "category",
+    "decor",
+    "decorative",
+    "department",
+    "equipment",
+    "floor",
+    "for",
+    "furniture",
+    "general",
+    "household",
+    "home",
+    "indoor",
+    "kitchen",
+    "living",
+    "office",
+    "outdoor",
+    "products",
+    "room",
+    "smart",
+    "storage",
+    "supplies",
+    "table",
+    "the",
+    "wall",
+}
+FORMAL_CATEGORY_TOKEN_ALIASES = {
+    "lamp": "light",
+    "lamps": "light",
+    "lighting": "light",
+    "lights": "light",
+    "shelves": "shelf",
+    "shelving": "shelf",
+}
+FORMAL_CATEGORY_TITLE_MODIFIER_ALIASES = {
+    "hexagonal": "hexagon",
+}
 SAME_PRODUCT_LEXICON_ROOT_LIMIT = 4
 ROOT_EXPANSION_CORE_QUERY_TARGET = 6
 SELLER_TITLE_COMPLETE_PHRASE_QUERY_MAX = 1
@@ -1022,7 +1077,9 @@ class SearchRankingRuntimeSettings:
         configured = [
             provider
             for provider in self.providers
-            if provider.name in {"doubao", "qwen"} and bool(provider.api_key)
+            if (provider.name == "codex_cli" and self.codex_cli_path is not None
+                and self.codex_cli_path.is_file())
+            or (provider.name in {"doubao", "qwen"} and bool(provider.api_key))
         ]
         priority = {"doubao": 0, "qwen": 1}
         return tuple(sorted(configured, key=lambda item: priority.get(item.name, 99)))
@@ -1057,58 +1114,25 @@ class SearchRankingRuntimeSettings:
     def from_env(cls, project_root: Path) -> SearchRankingRuntimeSettings:
         load_dotenv(project_root / ".env", override=False)
         resolved_root = project_root.resolve()
-        qwen = VisionProviderSettings(
-            name="qwen",
-            display_name="阿里云百炼千问",
-            api_key=os.environ.get("DASHSCOPE_API_KEY", "").strip(),
-            base_url=_https_base_url(
-                "TAKEALOT_SEARCH_QWEN_BASE_URL",
-                "https://dashscope.aliyuncs.com/compatible-mode/v1",
-            ),
-            model=os.environ.get("TAKEALOT_SEARCH_QWEN_MODEL", "qwen3.7-plus").strip(),
-            input_price_cny_per_million=_bounded_float(
-                "TAKEALOT_SEARCH_QWEN_INPUT_PRICE_CNY_PER_MILLION",
-                QWEN_INPUT_PRICE_CNY_PER_MILLION,
-                0.0,
-                100.0,
-            ),
-            output_price_cny_per_million=_bounded_float(
-                "TAKEALOT_SEARCH_QWEN_OUTPUT_PRICE_CNY_PER_MILLION",
-                QWEN_OUTPUT_PRICE_CNY_PER_MILLION,
-                0.0,
-                100.0,
-            ),
+        cli_override = os.environ.get("TAKEALOT_SEARCH_CODEX_CLI_PATH", "").strip()
+        cli_candidates = sorted(
+            (resolved_root / "tools" / "codex-cli" / "node_modules" / "@openai").glob(
+                "codex-*/vendor/*/bin/codex.exe"
+            )
         )
-        doubao = VisionProviderSettings(
-            name="doubao",
-            display_name="火山方舟豆包",
-            api_key=os.environ.get("ARK_API_KEY", "").strip(),
-            base_url=_https_base_url(
-                "TAKEALOT_SEARCH_DOUBAO_BASE_URL",
-                "https://ark.cn-beijing.volces.com/api/v3",
-            ),
-            model=os.environ.get(
-                "TAKEALOT_SEARCH_DOUBAO_MODEL",
-                "doubao-seed-2-0-lite-260215",
-            ).strip(),
-            input_price_cny_per_million=_bounded_float(
-                "TAKEALOT_SEARCH_DOUBAO_INPUT_PRICE_CNY_PER_MILLION",
-                DOUBAO_INPUT_PRICE_CNY_PER_MILLION,
-                0.0,
-                100.0,
-            ),
-            output_price_cny_per_million=_bounded_float(
-                "TAKEALOT_SEARCH_DOUBAO_OUTPUT_PRICE_CNY_PER_MILLION",
-                DOUBAO_OUTPUT_PRICE_CNY_PER_MILLION,
-                0.0,
-                100.0,
-            ),
+        cli_path = Path(cli_override).expanduser() if cli_override else (
+            cli_candidates[0] if len(cli_candidates) == 1 else None
         )
-        if not qwen.model or not doubao.model:
-            raise SearchRankingConfigurationError("搜索定位模型名称不能为空")
+        if cli_path is not None and not cli_path.is_absolute():
+            cli_path = resolved_root / cli_path
+        provider = VisionProviderSettings(
+            name="codex_cli", display_name="OpenAI GPT-5.6 Sol",
+            api_key="", base_url="", model=CODEX_TITLE_MODEL,
+            input_price_cny_per_million=0.0, output_price_cny_per_million=0.0,
+        )
         return cls(
             project_root=resolved_root,
-            providers=(doubao, qwen),
+            providers=(provider,),
             max_pages=_bounded_int("TAKEALOT_SEARCH_MAX_PAGES", 5, 1, 10),
             max_keywords=_bounded_int("TAKEALOT_SEARCH_MAX_KEYWORDS", 14, 6, 16),
             confidence_threshold=_bounded_float(
@@ -1130,7 +1154,7 @@ class SearchRankingRuntimeSettings:
             page_delay_jitter_seconds=_bounded_float(
                 "TAKEALOT_SEARCH_PAGE_DELAY_JITTER_SECONDS", 2.0, 0.0, 5.0
             ),
-            codex_cli_path=None,
+            codex_cli_path=cli_path,
             codex_quota_state_path=None,
         )
 
@@ -1158,6 +1182,11 @@ class SearchPublicClient(Protocol):
         request_url: str,
         after: str,
     ) -> dict[str, Any]: ...
+
+    async def fetch_product_category_path(
+        self,
+        url: str,
+    ) -> Sequence[Mapping[str, Any]] | Mapping[str, Any]: ...
 
 
 class _PublicRequestThrottle:
@@ -1422,6 +1451,9 @@ class _PacedSearchClient:
         )
         self._autocomplete_cache = autocomplete_cache
         self._autocomplete_evidence: dict[str, dict[str, Any]] = {}
+        self._category_lookup_cache: dict[str, dict[str, Any]] = {}
+        self.category_request_count = 0
+        self.category_cache_hit_count = 0
         self.request_count = 0
 
     async def _pace(self) -> None:
@@ -1466,6 +1498,54 @@ class _PacedSearchClient:
     ) -> dict[str, Any]:
         await self._pace()
         return await self._client.fetch_search_next_page(request_url, after)
+
+    async def fetch_product_category_path(self, url: str) -> dict[str, Any]:
+        """Fetch and cache a bounded formal breadcrumb lookup for this analysis."""
+
+        match = re.search(r"PLID(\d+)", url, flags=re.IGNORECASE)
+        cache_key = match.group(1) if match is not None else url.casefold()
+        cached = self._category_lookup_cache.get(cache_key)
+        if cached is not None:
+            self.category_cache_hit_count += 1
+            return cached
+
+        evidence: dict[str, Any]
+        resolver = getattr(self._client, "fetch_product_category_path", None)
+        if not callable(resolver):
+            evidence = {
+                "status": "unsupported",
+                "plid": match.group(1) if match is not None else None,
+                "category_path": [],
+            }
+            self._category_lookup_cache[cache_key] = evidence
+            return evidence
+        if self.category_request_count >= FORMAL_CATEGORY_LOOKUP_REQUEST_LIMIT:
+            return {
+                "status": "budget_exhausted",
+                "plid": match.group(1) if match is not None else None,
+                "category_path": [],
+            }
+
+        await self._pace()
+        self.category_request_count += 1
+        try:
+            raw_path = await resolver(url)
+        except Exception as exc:
+            evidence = {
+                "status": "request_failed",
+                "plid": match.group(1) if match is not None else None,
+                "category_path": [],
+                "error_type": type(exc).__name__,
+            }
+        else:
+            category_path = _normalize_category_path(raw_path)
+            evidence = {
+                "status": "available" if category_path else "missing",
+                "plid": match.group(1) if match is not None else None,
+                "category_path": category_path,
+            }
+        self._category_lookup_cache[cache_key] = evidence
+        return evidence
 
 
 class OpenAICompatibleProductVisionClient:
@@ -1837,7 +1917,7 @@ class OpenAICompatibleProductVisionClient:
 
 
 class CodexCliProductVisionClient:
-    """Two-stage product vision through a Terra-only local Codex App Server."""
+    """Two-stage product vision through a Sol-only local Codex App Server."""
 
     def __init__(self, settings: SearchRankingRuntimeSettings) -> None:
         self.settings = settings
@@ -1917,14 +1997,14 @@ class CodexCliProductVisionClient:
                         "raw_payload": dict(visual_result.payload),
                     }
                     raise _CountedVisionProviderError(
-                        "Codex Terra 隔离图片识别结果校验失败："
+                        "Codex Sol 隔离图片识别结果校验失败："
                         + validation_summary,
                         usage=dict(aggregate_usage),
                         estimated_cost_cny=0.0,
                         provider_attempts=(
                             {
                                 "provider": "codex_cli",
-                                "model": CODEX_TERRA_MODEL,
+                                "model": CODEX_TITLE_MODEL,
                                 "status": "local_validation_failed",
                                 "stage": "isolated_image_observation",
                                 "usage": dict(aggregate_usage),
@@ -2001,14 +2081,14 @@ class CodexCliProductVisionClient:
                         "normalized_payload": normalized_fusion_payload,
                     }
                     raise _CountedVisionProviderError(
-                        "Codex Terra 图片标题融合结果无法安全校正："
+                        "Codex Sol 图片标题融合结果无法安全校正："
                         + validation_summary,
                         usage=dict(aggregate_usage),
                         estimated_cost_cny=0.0,
                         provider_attempts=(
                             {
                                 "provider": "codex_cli",
-                                "model": CODEX_TERRA_MODEL,
+                                "model": CODEX_TITLE_MODEL,
                                 "status": "local_validation_failed",
                                 "stage": "image_title_fusion",
                                 "usage": dict(aggregate_usage),
@@ -2045,7 +2125,7 @@ class CodexCliProductVisionClient:
                     provider_attempts=(
                         {
                             "provider": "codex_cli",
-                            "model": CODEX_TERRA_MODEL,
+                            "model": CODEX_TITLE_MODEL,
                             "status": "request_or_schema_failed",
                             "stage": failed_stage,
                             "reason": type(exc).__name__,
@@ -2057,11 +2137,11 @@ class CodexCliProductVisionClient:
             raise SearchRankingProviderError(str(exc)) from exc
 
         if visual_result is None or fusion_result is None:
-            raise SearchRankingProviderError("Codex Terra 识别流程未完整结束")
+            raise SearchRankingProviderError("Codex Sol 识别流程未完整结束")
         return VisionCallResult(
             profile=fusion_profile,
             provider="codex_cli",
-            model=CODEX_TERRA_MODEL,
+            model=CODEX_TITLE_MODEL,
             response_id=fusion_result.turn_id,
             usage=dict(aggregate_usage),
             estimated_cost_cny=0.0,
@@ -2073,7 +2153,7 @@ class CodexCliProductVisionClient:
                         "isolated_image_observation",
                         "image_title_fusion",
                     ],
-                    "model": CODEX_TERRA_MODEL,
+                    "model": CODEX_TITLE_MODEL,
                     "model_fallback_allowed": False,
                     "weekly_quota": dict(fusion_result.quota),
                     "usage": dict(aggregate_usage),
@@ -2095,9 +2175,9 @@ class CodexCliProductVisionClient:
                 "未安装项目锁定的 Codex CLI；搜索定位不会回退到其他模型"
             )
         provider = self.settings.primary_provider
-        if provider.name != "codex_cli" or provider.model != CODEX_TERRA_MODEL:
+        if provider.name != "codex_cli" or provider.model != CODEX_TITLE_MODEL:
             raise SearchRankingConfigurationError(
-                f"搜索定位只允许模型 {CODEX_TERRA_MODEL}"
+                f"搜索定位只允许模型 {CODEX_TITLE_MODEL}"
             )
         return executable
 
@@ -2243,7 +2323,7 @@ class SearchRankingService:
         self.project_root = project_root.resolve()
         self.runtime = SearchRankingRuntimeSettings.from_env(self.project_root)
         self.database_url = DashboardSettings.from_env(self.project_root).database_url
-        self._vision_client_factory = vision_client_factory or OpenAICompatibleProductVisionClient
+        self._vision_client_factory = vision_client_factory or CodexCliProductVisionClient
         self._search_client_factory = search_client_factory or (
             lambda: CompetitorPublicClient(
                 timeout_seconds=45.0,
@@ -2269,12 +2349,12 @@ class SearchRankingService:
             "fallback_model": fallback.model if fallback else None,
             "configured_provider_count": len(self.runtime.configured_providers),
             "pricing_snapshot_date": PRICING_SNAPSHOT_DATE,
-            "pricing_mode": "api_unit_price",
+            "pricing_mode": "codex_subscription_quota" if primary.name == "codex_cli" else "api_unit_price",
             "model_policy": {
-                "transport": "openai_compatible_https",
+                "transport": "codex_app_server_stdio" if primary.name == "codex_cli" else "openai_compatible_https",
                 "model_fallback_allowed": fallback is not None,
                 "codex_cli_integration_retained": True,
-                "codex_cli_execution_enabled": False,
+                "codex_cli_execution_enabled": primary.name == "codex_cli",
             },
             "max_pages": self.runtime.max_pages,
             "max_keywords": self.runtime.max_keywords,
@@ -2327,6 +2407,21 @@ class SearchRankingService:
                 CORE_DEMAND_COMPETITOR_MIN_RESULTS
             ),
             "core_min_platform_results": CORE_MIN_PLATFORM_RESULTS,
+            "formal_category_validation": {
+                "policy_version": FORMAL_CATEGORY_VALIDATION_POLICY_VERSION,
+                "source": "product_details_breadcrumbs_items",
+                "pre_search_identity_resolution_policy_version": (
+                    FORMAL_CATEGORY_TITLE_IDENTITY_POLICY_VERSION
+                ),
+                "pre_search_identity_resolution": True,
+                "pre_search_resolution_requires_title_and_visual_support": True,
+                "human_confirmed_identity_has_priority": True,
+                "model_only_provisional_s_only": True,
+                "result_sample_limit": FORMAL_CATEGORY_RESULT_SAMPLE_LIMIT,
+                "request_limit_per_analysis": FORMAL_CATEGORY_LOOKUP_REQUEST_LIMIT,
+                "conflict_min_sample": FORMAL_CATEGORY_CONFLICT_MIN_SAMPLE,
+                "missing_category_is_inferred": False,
+            },
             "platform_result_count_is_search_volume": False,
             "platform_result_count_role": "core_keyword_supply_breadth_gate",
             "semantic_relation_grades": ["S", "A", "C/I"],
@@ -2691,6 +2786,59 @@ class SearchRankingService:
         finally:
             engine.dispose()
         return payload
+
+    async def review_title_benchmarks(self, offer_id: str) -> dict[str, Any]:
+        """Explicit model operation over saved search evidence; never recollect ranks."""
+        detail = self.detail_payload(offer_id)
+        if detail is None or not detail.get("analysis"):
+            raise SearchRankingInputError("请先完成商品分析，再分析竞品标题")
+        analysis = detail["analysis"]
+        benchmarks = analysis["title_benchmarks"]
+        if not benchmarks["items"] or benchmarks["review_status"] == "complete":
+            return detail
+        executable = self.runtime.codex_cli_path
+        if self.runtime.primary_provider.name != "codex_cli" or executable is None or not executable.is_file():
+            raise SearchRankingConfigurationError("竞品标题分析需要已登录的项目Codex CLI")
+        fingerprint = benchmarks["review_fingerprint"]
+        current_title = str(detail["product"].get("title") or "")
+        try:
+            review = await request_title_readings(
+                items=benchmarks["items"], current_title=current_title,
+                project_root=self.runtime.project_root, executable=executable,
+                quota_path=self.runtime.codex_quota_path,
+                timeout_seconds=self.runtime.request_timeout_seconds,
+            )
+        except (CodexCliConfigurationError, CodexCliProviderError) as exc:
+            review = {"status": "failed", "error": str(exc), "usage": dict(getattr(exc, "usage", {}))}
+        # A title, offer or newer analysis may change while the model is working.
+        current = self.detail_payload(offer_id)
+        stale = (current is None or not current.get("analysis") or
+                 current["analysis"]["id"] != analysis["id"] or
+                 current["analysis"]["title_benchmarks"]["review_fingerprint"] != fingerprint)
+        stale_message = "商品或搜索证据已更新，本次竞品标题结果未应用，请重试"
+        if stale:
+            # Keep the cost audit, but discard obsolete extracted content.
+            review = {"status": "failed", "error": stale_message, "usage": review.get("usage") or {}}
+        engine = create_engine_for_database_url(self.database_url)
+        try:
+            with Session(engine) as session, session.begin():
+                record = session.scalar(select(SearchRankingAnalysis).where(
+                    SearchRankingAnalysis.id == analysis["id"],
+                    SearchRankingAnalysis.status == "completed",
+                ).with_for_update())
+                if record is None:
+                    raise SearchRankingInputError("原分析记录已不可用")
+                vision = dict(record.vision_payload or {})
+                reviews = dict(vision.get("competitor_title_reviews") or {})
+                reviews[fingerprint] = review
+                vision["competitor_title_reviews"] = dict(list(reviews.items())[-20:])
+                vision["usage"] = _sum_usage(vision.get("usage") or {}, review.get("usage") or {})
+                record.vision_payload = vision
+        finally:
+            engine.dispose()
+        if stale:
+            raise SearchRankingInputError(stale_message)
+        return self.detail_payload(offer_id) or detail
 
     def confirm_decision_parameters(
         self,
@@ -3435,6 +3583,61 @@ class SearchRankingService:
                         throttle=self._public_request_throttle,
                         autocomplete_cache=self._autocomplete_cache,
                     )
+                    target_category_evidence = (
+                        await paced_search_client.fetch_product_category_path(
+                            f"https://www.takealot.com/product/PLID{plid}"
+                        )
+                    )
+                    recognition["formal_target_category_evidence"] = (
+                        target_category_evidence
+                    )
+                    (
+                        profile,
+                        formal_category_identity_resolution,
+                    ) = _formal_category_title_identity_resolution(
+                        profile,
+                        visual_profile=visual_profile,
+                        source_title=title,
+                        target_category_evidence=target_category_evidence,
+                        confirmed_fact_records=applied_product_fact_records,
+                    )
+                    recognition["formal_category_identity_resolution"] = (
+                        formal_category_identity_resolution
+                    )
+                    formal_category_identity_applied = bool(
+                        formal_category_identity_resolution.get("applied")
+                    )
+                    if formal_category_identity_applied:
+                        recognition["identity_difference_warning"] = (
+                            "图片模型商品主体与链接正式类目冲突；已在搜索前按正式类目、"
+                            "当前标题和隔离图片共同区分词完成裁决。"
+                        )
+                        recognition["identity_deviation_branch"] = (
+                            "formal_category_title_resolution"
+                        )
+                        same_product_lexicon = _same_product_lexicon(
+                            profile,
+                            model_profile=model_profile,
+                            confirmed_fact_records=applied_product_fact_records,
+                            source_title=title,
+                            formal_category_identity_resolution=(
+                                formal_category_identity_resolution
+                            ),
+                        )
+                        vision_payload["same_product_lexicon"] = same_product_lexicon
+                        shopper_journey["same_product_lexicon"].update(
+                            {
+                                "policy_version": SAME_PRODUCT_LEXICON_POLICY_VERSION,
+                                "entry_count": len(same_product_lexicon["entries"]),
+                                "formal_category_identity_resolution_applied": True,
+                            }
+                        )
+                        recognition["title_reference_terms"] = list(
+                            formal_category_identity_resolution["title_identity_terms"]
+                        )
+                        recognition["title_root_expansions"] = list(
+                            formal_category_identity_resolution["title_identity_terms"]
+                        )
                     candidates, autocomplete_checks = await _discover_keyword_candidates(
                         paced_search_client,
                         profile=profile,
@@ -3447,8 +3650,28 @@ class SearchRankingService:
                             if item["applied_to_current_image"]
                         ],
                         same_product_lexicon=same_product_lexicon,
-                        model_autocomplete_seeds=model_profile.autocomplete_seeds,
-                        model_opportunity_seeds=model_profile.opportunity_seeds,
+                        model_autocomplete_seeds=(
+                            profile.autocomplete_seeds
+                            if formal_category_identity_applied
+                            else model_profile.autocomplete_seeds
+                        ),
+                        model_opportunity_seeds=(
+                            profile.opportunity_seeds
+                            if formal_category_identity_applied
+                            else model_profile.opportunity_seeds
+                        ),
+                        title_root_overrides=(
+                            formal_category_identity_resolution["title_identity_terms"]
+                            if formal_category_identity_applied
+                            else None
+                        ),
+                        blocked_exact_terms=(
+                            formal_category_identity_resolution[
+                                "excluded_broad_title_terms"
+                            ]
+                            if formal_category_identity_applied
+                            else ()
+                        ),
                         decision_parameter_values=applied_decision_parameter_values,
                         max_keywords=self.runtime.max_keywords,
                     )
@@ -3457,6 +3680,16 @@ class SearchRankingService:
                         previous=previous,
                         current_title=title,
                         max_keywords=self.runtime.max_keywords,
+                        allowed_comparison_keywords=(
+                            {
+                                str(term).casefold()
+                                for term in formal_category_identity_resolution[
+                                    "title_identity_terms"
+                                ]
+                            }
+                            if formal_category_identity_applied
+                            else None
+                        ),
                     )
                     (
                         observations,
@@ -3472,10 +3705,27 @@ class SearchRankingService:
                         max_keywords=self.runtime.max_keywords,
                         relevance_threshold=self.runtime.relevance_threshold,
                         source_title=evidence_source_title,
+                        target_category_evidence=target_category_evidence,
                     )
                     shopper_journey["steps"] = journey_steps
                     shopper_journey.update(adaptive_summary)
                     shopper_journey["public_request_count"] = paced_search_client.request_count
+                    shopper_journey["formal_category_validation"] = {
+                        "policy_version": FORMAL_CATEGORY_VALIDATION_POLICY_VERSION,
+                        "target": target_category_evidence,
+                        "result_sample_limit_per_provisional_s": (
+                            FORMAL_CATEGORY_RESULT_SAMPLE_LIMIT
+                        ),
+                        "request_limit_per_analysis": (
+                            FORMAL_CATEGORY_LOOKUP_REQUEST_LIMIT
+                        ),
+                        "request_count": paced_search_client.category_request_count,
+                        "cache_hit_count": paced_search_client.category_cache_hit_count,
+                        "missing_category_is_inferred": False,
+                        "pre_search_identity_resolution": (
+                            formal_category_identity_resolution
+                        ),
+                    }
 
             with Session(engine) as session, session.begin():
                 persisted_analysis = session.get(SearchRankingAnalysis, analysis_id)
@@ -3576,12 +3826,18 @@ class SearchRankingService:
             detail = self.detail_payload(requested_offer_id)
             if detail is None:
                 raise RuntimeError("搜索定位结果保存后无法读取")
+            if self.runtime.primary_provider.name == "codex_cli":
+                try:
+                    return await self.review_title_benchmarks(requested_offer_id)
+                except (SearchRankingInputError, SearchRankingConfigurationError):
+                    # Saved ranking/vision work remains usable; the explicit review button can retry.
+                    return detail
             return detail
         except Exception as exc:
             if analysis_id is not None:
                 with Session(engine) as session, session.begin():
                     failed_analysis = session.get(SearchRankingAnalysis, analysis_id)
-                    if failed_analysis is not None:
+                    if failed_analysis is not None and failed_analysis.status != "completed":
                         if isinstance(
                             exc,
                             (
@@ -3672,6 +3928,7 @@ async def _collect_keyword_observation(
     relevance_threshold: float,
     page_delay_seconds: float,
     source_title: str = "",
+    target_category_evidence: Mapping[str, Any] | None = None,
 ) -> KeywordObservation:
     keyword = candidate.phrase
     request_url, payload = await client.fetch_search_first_page(keyword)
@@ -3697,6 +3954,12 @@ async def _collect_keyword_observation(
         source_title=source_title,
         target_plid=target_plid,
         total_num_found=total,
+    )
+    semantic_relation = await _apply_formal_category_validation(
+        client,
+        candidate=candidate,
+        semantic_relation=semantic_relation,
+        target_category_evidence=target_category_evidence,
     )
     validation_terms = [
         str(term)
@@ -3748,6 +4011,12 @@ async def _collect_keyword_observation(
     ]
     evaluated_count = len(relevant_flags)
     semantic_grade = str(semantic_relation["semantic_relation_grade"])
+    formal_category_required = bool(
+        semantic_relation.get("semantic_relation_category_validation_required")
+    )
+    formal_category_sampled = bool(
+        semantic_relation.get("semantic_relation_category_available_count")
+    )
     provenance = _candidate_provenance(candidate)
     comparison_resample = (
         candidate.candidate_source == "comparison_resample"
@@ -3935,15 +4204,33 @@ async def _collect_keyword_observation(
         **semantic_relation,
         "page_validation_status": "completed",
         "same_type_validation_method": (
-            "exact_identity_and_same_demand_family_page_audit"
+            "exact_identity_same_demand_and_sampled_formal_category_audit"
+            if formal_category_sampled
+            else "exact_identity_and_same_demand_family_page_audit"
         ),
         "same_type_validation_controlled_aliases": controlled_validation_aliases,
         "same_type_validation_term_source": validation_term_source,
         "same_type_validation_uses_multimodal_per_result": False,
+        "same_type_validation_uses_formal_category_sample": formal_category_sampled,
         "same_type_validation_requires_contiguous_phrase": True,
         "same_type_validation_limitations": (
             "首页36个自然商品分开核验完全同款、同需求替代品和无关商品；"
-            "平台图片链接随判定保存供人工复核，但自动统计不会为每个结果再次调用视觉模型。"
+            "模型独立身份且标题规则初判可达S时，最多抽查3条候选商品链接的正式类目；"
+            "类目缺失保持未知，不从标题或URL猜测。平台图片链接随判定保存供人工复核，"
+            "但自动统计不会为每个结果再次调用视觉模型。"
+            if formal_category_sampled
+            else (
+                "首页36个自然商品分开核验完全同款、同需求替代品和无关商品；"
+                "本词已触发商品链接正式类目抽查，但目标或样本类目证据不足，"
+                "因此没有依据类目降级，也不从标题或URL猜测。平台图片链接随判定保存供人工复核，"
+                "但自动统计不会为每个结果再次调用视觉模型。"
+            )
+            if formal_category_required
+            else (
+                "首页36个自然商品分开核验完全同款、同需求替代品和无关商品；"
+                "本词未触发正式类目抽查。平台图片链接随判定保存供人工复核，"
+                "但自动统计不会为每个结果再次调用视觉模型。"
+            )
         ),
         "first_page_majority": (
             direct_count / evaluated_count >= CORE_MAJORITY_FLOOR
@@ -4152,6 +4439,7 @@ async def _collect_shopper_journey(
     max_keywords: int,
     relevance_threshold: float,
     source_title: str,
+    target_category_evidence: Mapping[str, Any] | None = None,
 ) -> tuple[list[KeywordObservation], list[dict[str, Any]], dict[str, Any]]:
     """Validate a bounded shopper path while preserving one-click operator UX."""
 
@@ -4183,6 +4471,7 @@ async def _collect_shopper_journey(
             # cursor requests. Do not add a second delay between cursor pages.
             page_delay_seconds=0,
             source_title=source_title,
+            target_category_evidence=target_category_evidence,
         )
         observations.append(observation)
         evaluated_pairs.append((candidate, observation))
@@ -5362,6 +5651,7 @@ def _semantic_relation_evidence(
         ),
         "first_page_result_classifications": result_classifications,
         "source_title_identity_signatures": source_title_signatures,
+        "semantic_relation_uses_per_result_category": False,
         "semantic_relation_uses_per_result_image_or_category": False,
         "semantic_relation_limitations": (
             "S级核心词必须同时命中当前商品身份、达到首页同款加同需求竞品的最低数量与占比，"
@@ -5370,6 +5660,762 @@ def _semantic_relation_evidence(
             "系统保存平台图片供人工核验，但当前自动判定不对每条结果再次调用多模态模型。"
         ),
     }
+
+
+def _normalize_category_path(raw_path: Any) -> list[dict[str, str | None]]:
+    """Normalize formal product breadcrumbs without inferring from titles or URLs."""
+
+    if isinstance(raw_path, Mapping) and "category_path" in raw_path:
+        raw_path = raw_path.get("category_path")
+    if not isinstance(raw_path, Sequence) or isinstance(raw_path, (str, bytes)):
+        return []
+    output: list[dict[str, str | None]] = []
+    seen: set[tuple[str, str | None, str | None]] = set()
+    for raw_item in list(raw_path)[:12]:
+        if isinstance(raw_item, Mapping):
+            raw_name = raw_item.get("name")
+            raw_id = raw_item.get("id", raw_item.get("category_id"))
+            raw_type = raw_item.get("type", raw_item.get("category_type"))
+            raw_slug = raw_item.get("slug")
+        else:
+            raw_name = getattr(raw_item, "name", None)
+            raw_id = getattr(raw_item, "category_id", None)
+            raw_type = getattr(raw_item, "category_type", None)
+            raw_slug = getattr(raw_item, "slug", None)
+        name = " ".join(str(raw_name or "").split())[:200]
+        if not name:
+            continue
+        category_id = " ".join(str(raw_id).split())[:100] if raw_id is not None else None
+        category_type = (
+            " ".join(str(raw_type).split())[:50] if raw_type is not None else None
+        )
+        slug = " ".join(str(raw_slug).split())[:255] if raw_slug is not None else None
+        identity = (name.casefold(), category_id, category_type)
+        if identity in seen:
+            continue
+        seen.add(identity)
+        output.append(
+            {
+                "name": name,
+                "id": category_id,
+                "type": category_type,
+                "slug": slug,
+            }
+        )
+    return output
+
+
+def _category_path_specific_items(
+    path: Sequence[Mapping[str, Any]],
+) -> list[Mapping[str, Any]]:
+    return [
+        item
+        for item in path
+        if str(item.get("type") or "").casefold() != "department"
+    ]
+
+
+def _category_path_label_tokens(path: Sequence[Mapping[str, Any]]) -> set[str]:
+    return set(_category_path_terminal_tokens(path))
+
+
+def _category_path_terminal_tokens(
+    path: Sequence[Mapping[str, Any]],
+) -> tuple[str, ...]:
+    categories = _category_path_specific_items(path)
+    if not categories:
+        return ()
+    terminal = categories[-1]
+    output: list[str] = []
+    for raw_token in TOKEN_PATTERN.findall(str(terminal.get("name") or "").casefold()):
+        for canonical_part in _canonical_token_parts(raw_token):
+            token = IDENTITY_TOKEN_ALIASES.get(canonical_part, canonical_part)
+            token = FORMAL_CATEGORY_TOKEN_ALIASES.get(token, token)
+            if (
+                token
+                and token not in FORMAL_CATEGORY_GENERIC_LABEL_TOKENS
+                and token not in output
+            ):
+                output.append(token)
+    return tuple(output)
+
+
+def _formal_category_identity_tokens(value: str) -> tuple[str, ...]:
+    return tuple(
+        FORMAL_CATEGORY_TOKEN_ALIASES.get(token, token)
+        for token in _identity_term_tokens(value)
+    )
+
+
+def _formal_category_title_modifier_token(value: str) -> str:
+    token = FORMAL_CATEGORY_TOKEN_ALIASES.get(value, value)
+    return FORMAL_CATEGORY_TITLE_MODIFIER_ALIASES.get(token, token)
+
+
+def _formal_category_title_identity_resolution(
+    profile: VisionProfile,
+    *,
+    visual_profile: VisionProfile,
+    source_title: str,
+    target_category_evidence: Any,
+    confirmed_fact_records: Sequence[Mapping[str, Any]] = (),
+) -> tuple[VisionProfile, dict[str, Any]]:
+    """Resolve a model/category identity conflict before any search query is sent.
+
+    Formal breadcrumbs establish the product family, while the current title and
+    isolated image may only contribute words they independently share. This is a
+    conservative escape hatch for obvious model failures such as classifying an
+    LED wall light as a wall shelf; unavailable or broad categories never replace
+    the model profile.
+    """
+
+    category_path = _normalize_category_path(target_category_evidence)
+    category_label = " > ".join(
+        str(item.get("name") or "").strip() for item in category_path
+    )[:160]
+    category_tokens = _category_path_terminal_tokens(category_path)
+    evidence: dict[str, Any] = {
+        "policy_version": FORMAL_CATEGORY_TITLE_IDENTITY_POLICY_VERSION,
+        "status": "not_applied",
+        "applied": False,
+        "reason": "formal_category_unavailable",
+        "target_category_path": category_path,
+        "target_category_label": category_label or None,
+        "category_identity_tokens": list(category_tokens),
+        "title_identity_base": None,
+        "title_identity_terms": [],
+        "same_demand_family_terms": [],
+        "visual_supported_modifiers": [],
+        "suppressed_model_terms": [],
+        "excluded_broad_title_terms": [],
+    }
+    if not category_path or not category_tokens:
+        return profile, evidence
+    if all(token in GENERIC_IDENTITY_HEAD_TOKENS for token in category_tokens):
+        evidence["reason"] = "formal_category_too_broad"
+        return profile, evidence
+
+    confirmed_identity_terms = list(
+        dict.fromkeys(
+            term
+            for record in confirmed_fact_records
+            if str(record.get("fact_type") or "product_type") == "product_type"
+            and (term := " ".join(str(record.get("fact_term") or "").split()))
+        )
+    )
+    if confirmed_identity_terms:
+        evidence.update(
+            {
+                "status": "human_identity_preserved",
+                "reason": "human_confirmed_product_identity_has_priority",
+                "human_confirmed_identity_terms": confirmed_identity_terms,
+            }
+        )
+        return profile, evidence
+
+    category_token_set = set(category_tokens)
+    category_head = category_tokens[-1]
+    model_identity_terms = list(
+        dict.fromkeys((*profile.product_type_terms, *profile.same_product_aliases))
+    )
+    aligned_model_terms = [
+        term
+        for term in model_identity_terms
+        if (
+            (tokens := _formal_category_identity_tokens(term))
+            and tokens[-1] == category_head
+            and bool(set(tokens) & category_token_set)
+        )
+    ]
+    if aligned_model_terms:
+        evidence.update(
+            {
+                "status": "model_identity_aligned",
+                "reason": "model_identity_matches_formal_category",
+                "aligned_model_terms": aligned_model_terms,
+            }
+        )
+        return profile, evidence
+
+    title_tokens = tuple(
+        _formal_category_title_modifier_token(token)
+        for token in _source_title_signature_tokens(source_title)
+    )
+    matched_positions: list[int] = []
+    cursor = 0
+    for category_token in category_tokens:
+        position = next(
+            (
+                index
+                for index in range(cursor, len(title_tokens))
+                if title_tokens[index] == category_token
+            ),
+            None,
+        )
+        if position is None:
+            evidence["reason"] = "seller_title_does_not_support_formal_category"
+            return profile, evidence
+        matched_positions.append(position)
+        cursor = position + 1
+    base_tokens = title_tokens[matched_positions[0] : matched_positions[-1] + 1]
+    if not 2 <= len(base_tokens) <= MODEL_DIRECT_QUERY_MAX_WORDS:
+        evidence["reason"] = "formal_category_title_span_not_query_ready"
+        return profile, evidence
+    base_phrase = " ".join(base_tokens)
+    evidence["title_identity_base"] = base_phrase
+
+    visual_values = (
+        visual_profile.product_name,
+        visual_profile.category,
+        *visual_profile.product_type_terms,
+        *visual_profile.same_product_aliases,
+        *visual_profile.distinctive_terms,
+        *(candidate.phrase for candidate in visual_profile.keywords),
+        *(candidate.phrase for candidate in visual_profile.autocomplete_seeds),
+    )
+    visual_tokens = {
+        _formal_category_title_modifier_token(token)
+        for value in visual_values
+        for token in _identity_term_tokens(str(value or ""))
+    }
+    modifiers: list[str] = []
+    for token in title_tokens[: matched_positions[0]]:
+        if (
+            token not in visual_tokens
+            or token in category_token_set
+            or token in FORMAL_CATEGORY_GENERIC_LABEL_TOKENS
+            or token in GENERIC_IDENTITY_HEAD_TOKENS
+            or token in HIGH_RISK_CLAIM_TOKENS
+            or token in TITLE_ROOT_EXPANSION_NOISE_TOKENS
+            or len(token) < 3
+            or token in modifiers
+        ):
+            continue
+        modifiers.append(token)
+        if len(modifiers) >= 2:
+            break
+    evidence["visual_supported_modifiers"] = modifiers
+    if not modifiers:
+        evidence["reason"] = "no_visual_supported_title_modifier"
+        return profile, evidence
+
+    identity_terms: list[str] = []
+
+    def add_identity_term(tokens: Sequence[str]) -> None:
+        phrase = " ".join(tokens)
+        word_count = len(tokens)
+        if (
+            MODEL_DIRECT_QUERY_MIN_WORDS <= word_count <= MODEL_DIRECT_QUERY_MAX_WORDS
+            and phrase not in identity_terms
+        ):
+            identity_terms.append(phrase)
+
+    for modifier in modifiers:
+        add_identity_term((modifier, *base_tokens))
+    shorter_base = (
+        base_tokens[1:]
+        if len(base_tokens) >= 3 and base_tokens[0] in category_token_set
+        else base_tokens
+    )
+    if shorter_base != base_tokens:
+        for modifier in modifiers:
+            add_identity_term((modifier, *shorter_base))
+    if len(identity_terms) < 2:
+        evidence["reason"] = "insufficient_narrow_identity_terms"
+        return profile, evidence
+
+    suppressed_model_terms = list(
+        dict.fromkeys(
+            normalized
+            for value in (
+                *profile.product_type_terms,
+                *profile.same_product_aliases,
+                *profile.same_demand_product_terms,
+                *(candidate.phrase for candidate in profile.keywords),
+                *(candidate.phrase for candidate in profile.autocomplete_seeds),
+                *(candidate.phrase for candidate in profile.opportunity_seeds),
+            )
+            if (normalized := " ".join(str(value or "").split()))
+            and normalized.casefold() not in {term.casefold() for term in identity_terms}
+        )
+    )
+    display_name = " ".join(
+        token.upper() if token in {"led", "rgb", "usb"} else token.title()
+        for token in identity_terms[0].split()
+    )
+    keyword_candidates = [
+        KeywordCandidate(
+            phrase=term,
+            rationale="正式商品类目、当前标题与隔离图片共同支持的窄商品身份词",
+        )
+        for term in identity_terms
+    ]
+    resolved = profile.model_copy(
+        update={
+            "product_name": display_name,
+            "category": category_label or profile.category,
+            "product_type_terms": identity_terms[:2],
+            "same_product_aliases": identity_terms[2:6],
+            "same_demand_product_terms": [base_phrase],
+            "distinctive_terms": modifiers,
+            "keywords": keyword_candidates,
+            "autocomplete_seeds": [
+                candidate.model_copy(
+                    update={
+                        "rationale": "正式类目裁决后的窄商品词根，用于平台补全验证"
+                    }
+                )
+                for candidate in keyword_candidates
+            ],
+            "opportunity_seeds": [],
+            "exclusions": [],
+            "title_suggestion": display_name,
+            "title_reason": "正式商品类目与当前标题一致，并由隔离图片形状词缩窄。",
+        }
+    )
+    evidence.update(
+        {
+            "status": "applied",
+            "applied": True,
+            "reason": "formal_category_and_title_override_conflicting_model_identity",
+            "title_identity_terms": identity_terms,
+            "same_demand_family_terms": [base_phrase],
+            "suppressed_model_terms": suppressed_model_terms,
+            "excluded_broad_title_terms": [base_phrase],
+        }
+    )
+    return resolved, evidence
+
+
+def _category_path_terminal_ids(path: Sequence[Mapping[str, Any]]) -> set[str]:
+    categories = _category_path_specific_items(path)
+    if not categories:
+        return set()
+    terminal = categories[-1]
+    category_id = str(terminal.get("id") or "").strip()
+    return {category_id} if category_id else set()
+
+
+def _category_path_department_key(path: Sequence[Mapping[str, Any]]) -> str | None:
+    department = next(
+        (
+            item
+            for item in path
+            if str(item.get("type") or "").casefold() == "department"
+        ),
+        None,
+    )
+    if department is None:
+        return None
+    category_id = str(department.get("id") or "").strip()
+    name = " ".join(str(department.get("name") or "").casefold().split())
+    return f"id:{category_id}" if category_id else f"name:{name}" if name else None
+
+
+def _category_path_terminal_key(path: Sequence[Mapping[str, Any]]) -> str | None:
+    categories = _category_path_specific_items(path)
+    if not categories:
+        return None
+    terminal = categories[-1]
+    category_id = str(terminal.get("id") or "").strip()
+    name = " ".join(str(terminal.get("name") or "").casefold().split())
+    return f"id:{category_id}" if category_id else f"name:{name}" if name else None
+
+
+def _formal_category_relation(
+    target_path: Sequence[Mapping[str, Any]],
+    result_path: Sequence[Mapping[str, Any]],
+) -> str:
+    if (
+        not _category_path_specific_items(target_path)
+        or not _category_path_specific_items(result_path)
+    ):
+        return "unavailable"
+    shared_ids = _category_path_terminal_ids(target_path) & _category_path_terminal_ids(
+        result_path
+    )
+    if shared_ids:
+        return "shared_category_branch"
+    shared_label_tokens = _category_path_label_tokens(target_path) & _category_path_label_tokens(
+        result_path
+    )
+    if shared_label_tokens:
+        return "related_category_labels"
+    target_department = _category_path_department_key(target_path)
+    result_department = _category_path_department_key(result_path)
+    if target_department and result_department and target_department != result_department:
+        return "disjoint_department"
+    return "disjoint_category_branch"
+
+
+def _candidate_identity_evidence_sources(candidate: SearchKeywordCandidate) -> set[str]:
+    output: set[str] = set()
+    for item in _candidate_provenance(candidate):
+        for key in (
+            "candidate_source",
+            "seed_source",
+            "root_source",
+            "query_source_channel",
+        ):
+            value = str(item.get(key) or "").strip().casefold()
+            if value:
+                output.add(value)
+        raw_lexicon_sources = item.get("same_product_lexicon_sources")
+        if isinstance(raw_lexicon_sources, list):
+            output.update(
+                str(value).strip().casefold()
+                for value in raw_lexicon_sources
+                if str(value or "").strip()
+            )
+    return output
+
+
+def _formal_category_validation_required(
+    candidate: SearchKeywordCandidate,
+    semantic_relation: Mapping[str, Any],
+) -> bool:
+    """Require category corroboration only for a model-only provisional S identity."""
+
+    if (
+        semantic_relation.get("semantic_relation_grade") != "S"
+        or not semantic_relation.get("semantic_relation_core_page_qualified")
+        or not semantic_relation.get("semantic_relation_query_identity_supported")
+        or semantic_relation.get("semantic_relation_current_title_alias")
+    ):
+        return False
+    sources = _candidate_identity_evidence_sources(candidate)
+    return not bool(sources & FORMAL_CATEGORY_TRUSTED_IDENTITY_SOURCES)
+
+
+async def _product_category_lookup(
+    client: SearchPublicClient,
+    url: str,
+) -> dict[str, Any]:
+    resolver = getattr(client, "fetch_product_category_path", None)
+    if not callable(resolver):
+        return {"status": "unsupported", "category_path": []}
+    try:
+        raw = await resolver(url)
+    except Exception as exc:
+        return {
+            "status": "request_failed",
+            "category_path": [],
+            "error_type": type(exc).__name__,
+        }
+    if isinstance(raw, Mapping) and "status" in raw:
+        evidence = dict(raw)
+        evidence["category_path"] = _normalize_category_path(raw.get("category_path"))
+        return evidence
+    category_path = _normalize_category_path(raw)
+    return {
+        "status": "available" if category_path else "missing",
+        "category_path": category_path,
+    }
+
+
+def _recount_semantic_relation(
+    evidence: dict[str, Any],
+    classifications: list[dict[str, Any]],
+    *,
+    category_vetoed_s: bool,
+) -> None:
+    evaluated_count = len(classifications)
+    same_count = sum(bool(item.get("is_direct_competitor")) for item in classifications)
+    same_demand_count = sum(
+        bool(item.get("is_same_demand_competitor")) for item in classifications
+    )
+    supported_count = same_count + same_demand_count
+    same_ratio = same_count / evaluated_count if evaluated_count else 0.0
+    same_demand_ratio = same_demand_count / evaluated_count if evaluated_count else 0.0
+    supported_ratio = supported_count / evaluated_count if evaluated_count else 0.0
+    competitor_density_qualified = bool(
+        supported_count >= CORE_DEMAND_COMPETITOR_MIN_RESULTS
+        and supported_ratio >= CORE_DEMAND_COMPETITOR_RATIO_FLOOR
+    )
+    core_page_qualified = bool(
+        evidence.get("semantic_relation_query_identity_supported")
+        and evidence.get("semantic_relation_platform_supply_qualified")
+        and competitor_density_qualified
+        and not category_vetoed_s
+    )
+    evidence.update(
+        {
+            "semantic_relation_same_product_result_count": same_count,
+            "semantic_relation_same_demand_result_count": same_demand_count,
+            "semantic_relation_adjacent_result_count": same_demand_count,
+            "semantic_relation_rejected_result_count": max(
+                0, evaluated_count - supported_count
+            ),
+            "semantic_relation_evaluated_result_count": evaluated_count,
+            "semantic_relation_same_product_ratio": round(same_ratio, 4),
+            "semantic_relation_same_demand_ratio": round(same_demand_ratio, 4),
+            "semantic_relation_adjacent_ratio": round(same_demand_ratio, 4),
+            "semantic_relation_supported_ratio": round(supported_ratio, 4),
+            "semantic_relation_core_competitor_result_count": supported_count,
+            "semantic_relation_core_competitor_ratio": round(supported_ratio, 4),
+            "semantic_relation_core_density_qualified": competitor_density_qualified,
+            "semantic_relation_core_page_qualified": core_page_qualified,
+            "semantic_relation_same_product_result_titles": [
+                str(item.get("title") or "")
+                for item in classifications
+                if item.get("is_direct_competitor")
+            ][:8],
+            "semantic_relation_adjacent_result_titles": [
+                str(item.get("title") or "")
+                for item in classifications
+                if item.get("is_same_demand_competitor")
+            ][:8],
+            "semantic_relation_same_demand_result_titles": [
+                str(item.get("title") or "")
+                for item in classifications
+                if item.get("is_same_demand_competitor")
+            ][:8],
+            "first_page_result_classifications": classifications,
+        }
+    )
+    if category_vetoed_s:
+        evidence.update(
+            {
+                "semantic_relation_grade": "C/I",
+                "semantic_relation_label": "complementary_or_irrelevant_rejected",
+                "semantic_relation_decision": (
+                    "formal_category_cluster_conflicts_with_target"
+                ),
+            }
+        )
+    elif core_page_qualified:
+        evidence.update(
+            {
+                "semantic_relation_grade": "S",
+                "semantic_relation_label": (
+                    "core_query_with_same_demand_competitor_density"
+                ),
+                "semantic_relation_decision": (
+                    "first_page_same_demand_competitor_density"
+                ),
+            }
+        )
+    else:
+        evidence.update(
+            {
+                "semantic_relation_grade": "C/I",
+                "semantic_relation_label": "complementary_or_irrelevant_rejected",
+                "semantic_relation_decision": (
+                    "same_demand_competitor_density_below_core_threshold"
+                ),
+            }
+        )
+
+
+async def _apply_formal_category_validation(
+    client: SearchPublicClient,
+    *,
+    candidate: SearchKeywordCandidate,
+    semantic_relation: Mapping[str, Any],
+    target_category_evidence: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    """Use a bounded formal-category sample to veto a model-only false S grade."""
+
+    evidence = dict(semantic_relation)
+    required = _formal_category_validation_required(candidate, evidence)
+    target_status = str((target_category_evidence or {}).get("status") or "unavailable")
+    target_path = _normalize_category_path(
+        (target_category_evidence or {}).get("category_path")
+    )
+    evidence.update(
+        {
+            "semantic_relation_category_policy_version": (
+                FORMAL_CATEGORY_VALIDATION_POLICY_VERSION
+            ),
+            "semantic_relation_category_validation_required": required,
+            "semantic_relation_category_validation_status": "not_required",
+            "semantic_relation_target_category_status": target_status,
+            "semantic_relation_target_category_path": target_path,
+            "semantic_relation_category_sample_limit": (
+                FORMAL_CATEGORY_RESULT_SAMPLE_LIMIT
+            ),
+            "semantic_relation_category_sample_count": 0,
+            "semantic_relation_category_available_count": 0,
+            "semantic_relation_category_conflict_count": 0,
+            "semantic_relation_category_support_count": 0,
+            "semantic_relation_category_vetoed_s": False,
+        }
+    )
+    if not required:
+        return evidence
+    if not _category_path_specific_items(target_path):
+        evidence["semantic_relation_category_validation_status"] = (
+            "target_category_unavailable"
+        )
+        return evidence
+
+    raw_classifications = evidence.get("first_page_result_classifications")
+    classifications = [
+        dict(item)
+        for item in raw_classifications
+        if isinstance(item, Mapping)
+    ] if isinstance(raw_classifications, list) else []
+    sorted_core = sorted(
+        (
+            item
+            for item in classifications
+            if item.get("is_core_competitor") and not item.get("is_target")
+        ),
+        key=lambda item: (
+            not bool(item.get("is_direct_competitor")),
+            int(item.get("organic_position") or 0),
+        ),
+    )
+    provisional_core: list[dict[str, Any]] = []
+    sampled_product_keys: set[str] = set()
+    for item in sorted_core:
+        plid = str(item.get("plid") or "").strip()
+        url = str(item.get("url") or "").strip().casefold()
+        sample_key = f"plid:{plid}" if plid else f"url:{url}" if url else ""
+        if sample_key and sample_key in sampled_product_keys:
+            continue
+        if sample_key:
+            sampled_product_keys.add(sample_key)
+        provisional_core.append(item)
+        if len(provisional_core) >= FORMAL_CATEGORY_RESULT_SAMPLE_LIMIT:
+            break
+    if not provisional_core:
+        evidence["semantic_relation_category_validation_status"] = "no_core_results"
+        return evidence
+
+    samples: list[dict[str, Any]] = []
+    classification_by_position = {
+        int(item.get("organic_position") or 0): item for item in classifications
+    }
+    for item in provisional_core:
+        plid = str(item.get("plid") or "").strip()
+        url = str(item.get("url") or "").strip()
+        if not url and plid:
+            url = f"https://www.takealot.com/product/PLID{plid}"
+        lookup = await _product_category_lookup(client, url) if url else {
+            "status": "missing_url",
+            "category_path": [],
+        }
+        result_path = _normalize_category_path(lookup.get("category_path"))
+        relation = _formal_category_relation(target_path, result_path)
+        conflict = relation in {"disjoint_department", "disjoint_category_branch"}
+        sample: dict[str, Any] = {
+            "organic_position": int(item.get("organic_position") or 0),
+            "plid": plid,
+            "status": str(lookup.get("status") or "unavailable"),
+            "category_path": result_path,
+            "relation_to_target": relation,
+            "conflicts_target": conflict,
+            "terminal_category_key": _category_path_terminal_key(result_path),
+        }
+        samples.append(sample)
+        classified = classification_by_position.get(sample["organic_position"])
+        if classified is not None:
+            classified.update(
+                {
+                    "category_evidence_status": sample["status"],
+                    "category_path": result_path,
+                    "category_relation_to_target": relation,
+                    "category_conflicts_target": conflict,
+                }
+            )
+
+    available_samples = [
+        item
+        for item in samples
+        if item["category_path"] and item["relation_to_target"] != "unavailable"
+    ]
+    conflict_samples = [item for item in available_samples if item["conflicts_target"]]
+    support_samples = [item for item in available_samples if not item["conflicts_target"]]
+    conflict_clusters = Counter(
+        str(item["terminal_category_key"])
+        for item in conflict_samples
+        if item["terminal_category_key"]
+    )
+    cluster_key, cluster_count = (
+        conflict_clusters.most_common(1)[0] if conflict_clusters else (None, 0)
+    )
+    category_vetoed_s = bool(
+        len(available_samples) >= FORMAL_CATEGORY_CONFLICT_MIN_SAMPLE
+        and len(conflict_samples) == len(available_samples)
+        and cluster_count >= FORMAL_CATEGORY_CONFLICT_MIN_SAMPLE
+    )
+    if category_vetoed_s:
+        sampled_conflict_positions = {
+            int(sample["organic_position"]) for sample in conflict_samples
+        }
+        for classified in classifications:
+            if classified.get("is_target") or not classified.get("is_core_competitor"):
+                continue
+            organic_position = int(classified.get("organic_position") or 0)
+            classified.update(
+                {
+                    "category_original_classification": classified.get("classification"),
+                    "category_original_reason": classified.get("reason"),
+                    "classification": "unrelated",
+                    "reason": (
+                        "formal_category_conflicts_with_target"
+                        if organic_position in sampled_conflict_positions
+                        else "query_category_cluster_invalidates_model_identity"
+                    ),
+                    "is_direct_competitor": False,
+                    "is_same_demand_competitor": False,
+                    "is_core_competitor": False,
+                }
+            )
+
+    status = (
+        "completed"
+        if len(available_samples) == len(provisional_core)
+        else "partial"
+        if available_samples
+        else "unavailable"
+    )
+    conflict_cluster_path: list[dict[str, Any]] = next(
+        (
+            item["category_path"]
+            for item in conflict_samples
+            if item["terminal_category_key"] == cluster_key
+        ),
+        [],
+    )
+    evidence.update(
+        {
+            "semantic_relation_category_validation_status": status,
+            "semantic_relation_category_samples": samples,
+            "semantic_relation_category_sample_count": len(provisional_core),
+            "semantic_relation_category_available_count": len(available_samples),
+            "semantic_relation_category_conflict_count": len(conflict_samples),
+            "semantic_relation_category_support_count": len(support_samples),
+            "semantic_relation_category_conflict_cluster": (
+                {
+                    "terminal_category_key": cluster_key,
+                    "sample_count": cluster_count,
+                    "category_path": conflict_cluster_path,
+                }
+                if cluster_key
+                else None
+            ),
+            "semantic_relation_category_vetoed_s": category_vetoed_s,
+            "semantic_relation_uses_per_result_category": bool(available_samples),
+            "semantic_relation_uses_per_result_image_or_category": bool(
+                available_samples
+            ),
+        }
+    )
+    if available_samples:
+        evidence["semantic_relation_evidence_scope"] = (
+            "first_page_organic_result_title_subtitle_metadata_and_sampled_formal_categories"
+        )
+    if category_vetoed_s:
+        _recount_semantic_relation(
+            evidence,
+            classifications,
+            category_vetoed_s=True,
+        )
+    else:
+        evidence["first_page_result_classifications"] = classifications
+    return evidence
 
 
 def _validation_token_sets(value: str) -> list[set[str]]:
@@ -7521,6 +8567,7 @@ def _same_product_lexicon(
     model_profile: VisionProfile | None = None,
     confirmed_fact_records: Sequence[Mapping[str, Any]] = (),
     source_title: str = "",
+    formal_category_identity_resolution: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build one auditable, query-ready same-product lexicon.
 
@@ -7544,24 +8591,30 @@ def _same_product_lexicon(
     excluded: list[dict[str, Any]] = []
     excluded_keys: set[tuple[str, str, str]] = set()
 
+    def exclude(raw_term: Any, source: str, reason: str) -> None:
+        term = " ".join(str(raw_term or "").split())
+        if not term:
+            return
+        excluded_key = (term.casefold(), source, reason)
+        if excluded_key in excluded_keys:
+            return
+        excluded_keys.add(excluded_key)
+        excluded.append(
+            {
+                "term": term,
+                "source": source,
+                "word_count": len(TOKEN_PATTERN.findall(term.casefold())),
+                "reason": reason,
+            }
+        )
+
     def add(raw_term: Any, source: str) -> None:
         term = " ".join(str(raw_term or "").split())
         if not term:
             return
         word_count = len(TOKEN_PATTERN.findall(term.casefold()))
         if not MODEL_DIRECT_QUERY_MIN_WORDS <= word_count <= MODEL_DIRECT_QUERY_MAX_WORDS:
-            reason = "outside_2_to_4_words"
-            excluded_key = (term.casefold(), source, reason)
-            if excluded_key not in excluded_keys:
-                excluded_keys.add(excluded_key)
-                excluded.append(
-                    {
-                        "term": term,
-                        "source": source,
-                        "word_count": word_count,
-                        "reason": reason,
-                    }
-                )
+            exclude(term, source, "outside_2_to_4_words")
             return
         term_tokens = _identity_term_tokens(term)
         broad_head = bool(
@@ -7581,18 +8634,11 @@ def _same_product_lexicon(
             )
         )
         if source.startswith("fusion_") and broad_head and not broad_identity_supported:
-            reason = "broad_identity_head_without_title_or_primary_shape"
-            excluded_key = (term.casefold(), source, reason)
-            if excluded_key not in excluded_keys:
-                excluded_keys.add(excluded_key)
-                excluded.append(
-                    {
-                        "term": term,
-                        "source": source,
-                        "word_count": word_count,
-                        "reason": reason,
-                    }
-                )
+            exclude(
+                term,
+                source,
+                "broad_identity_head_without_title_or_primary_shape",
+            )
             return
         key = term.casefold()
         index = indexes.get(key)
@@ -7620,17 +8666,42 @@ def _same_product_lexicon(
             and key in enriched_alias_keys
         ):
             add(term, "human_confirmed_product_fact")
-    for term in _seller_title_identity_query_terms(source_title, raw_model_profile):
-        add(term, "seller_title_identity_phrase")
-    for term in raw_model_profile.product_type_terms:
-        add(term, "fusion_product_type_terms")
-    for term in raw_model_profile.same_product_aliases:
-        add(term, "fusion_same_product_aliases")
+    resolution = dict(formal_category_identity_resolution or {})
+    if resolution.get("applied"):
+        for term in resolution.get("title_identity_terms") or []:
+            add(term, "formal_category_title_identity_phrase")
+        for term in resolution.get("excluded_broad_title_terms") or []:
+            exclude(
+                term,
+                "seller_title_identity_phrase",
+                "formal_category_requires_visual_modifier",
+            )
+        for term in raw_model_profile.product_type_terms:
+            exclude(
+                term,
+                "fusion_product_type_terms",
+                "formal_category_title_identity_conflict",
+            )
+        for term in raw_model_profile.same_product_aliases:
+            exclude(
+                term,
+                "fusion_same_product_aliases",
+                "formal_category_title_identity_conflict",
+            )
+    else:
+        for term in _seller_title_identity_query_terms(source_title, raw_model_profile):
+            add(term, "seller_title_identity_phrase")
+        for term in raw_model_profile.product_type_terms:
+            add(term, "fusion_product_type_terms")
+        for term in raw_model_profile.same_product_aliases:
+            add(term, "fusion_same_product_aliases")
 
     return {
         "policy_version": SAME_PRODUCT_LEXICON_POLICY_VERSION,
         "selection_policy": (
-            "manual_identity_then_title_phrase_then_fusion_types_then_aliases"
+            "manual_identity_then_formal_category_title_identity_then_fusion_identity"
+            if resolution.get("applied")
+            else "manual_identity_then_title_phrase_then_fusion_types_then_aliases"
         ),
         "search_use": "priority_direct_query_and_complete_root_expansion",
         "direct_query_limit": MODEL_DIRECT_QUERY_TARGET,
@@ -7644,6 +8715,8 @@ def _same_product_lexicon_root_source(entry: Mapping[str, Any]) -> str:
     sources = entry.get("sources")
     if isinstance(sources, list) and "human_confirmed_product_fact" in sources:
         return "human_confirmed_product_fact"
+    if isinstance(sources, list) and "formal_category_title_identity_phrase" in sources:
+        return "title_word_root"
     return "image_title_same_product_lexicon"
 
 
@@ -7727,9 +8800,13 @@ def _precise_candidates(
             "human_confirmed_product_fact"
             if "human_confirmed_product_fact" in lexicon_sources
             else (
-                "image_title_same_product_lexicon"
-                if from_lexicon
-                else "image_title_fusion_model"
+                "title_word_root"
+                if "formal_category_title_identity_phrase" in lexicon_sources
+                else (
+                    "image_title_same_product_lexicon"
+                    if from_lexicon
+                    else "image_title_fusion_model"
+                )
             )
         )
         journey_type = "same_product_lexicon_direct" if from_lexicon else "concise_direct"
@@ -7814,6 +8891,8 @@ async def _discover_keyword_candidates(
     same_product_lexicon: Mapping[str, Any] | None = None,
     model_autocomplete_seeds: Sequence[KeywordCandidate] | None = None,
     model_opportunity_seeds: Sequence[KeywordCandidate] | None = None,
+    title_root_overrides: Sequence[str] | None = None,
+    blocked_exact_terms: Sequence[str] = (),
 ) -> tuple[list[SearchKeywordCandidate], list[dict[str, Any]]]:
     lexicon = dict(same_product_lexicon or _same_product_lexicon(profile))
     precise = _precise_candidates(
@@ -7821,9 +8900,19 @@ async def _discover_keyword_candidates(
         source_title=source_title,
         same_product_lexicon=lexicon,
     )
-    title_roots = _title_root_expansions(
-        official_title or source_title,
-        identity_terms=(*profile.product_type_terms, *profile.same_product_aliases),
+    title_roots = (
+        list(
+            dict.fromkeys(
+                root
+                for value in title_root_overrides
+                if (root := _complete_root_expansion_input(str(value or "")))
+            )
+        )[:TITLE_ROOT_EXPANSION_LIMIT]
+        if title_root_overrides is not None
+        else _title_root_expansions(
+            official_title or source_title,
+            identity_terms=(*profile.product_type_terms, *profile.same_product_aliases),
+        )
     )
     manual_fact_seeds = _confirmed_fact_root_seed_specs(confirmed_fact_records)
     lexicon_core_seeds = _same_product_lexicon_root_seed_specs(lexicon)
@@ -7931,6 +9020,11 @@ async def _discover_keyword_candidates(
     checks: list[dict[str, Any]] = []
     observed_root_keys: set[str] = set()
     followup_roots: list[dict[str, Any]] = []
+    blocked_exact_keys = {
+        " ".join(str(value or "").split()).casefold()
+        for value in blocked_exact_terms
+        if " ".join(str(value or "").split())
+    }
 
     async def observe_root(
         *,
@@ -7995,11 +9089,20 @@ async def _discover_keyword_candidates(
         expansion_rows: list[dict[str, Any]] = []
         for rank, phrase in enumerate(suggestions, start=1):
             normalized_phrase = " ".join(phrase.split())
-            decision = _root_expansion_relevance_decision(
-                normalized_phrase,
-                profile,
-                source_title=source_title,
-            )
+            decision: dict[str, Any]
+            if normalized_phrase.casefold() in blocked_exact_keys:
+                decision = {
+                    "accepted": False,
+                    "relation": "irrelevant",
+                    "reason": "formal_category_requires_visual_modifier",
+                    "matched_terms": [],
+                }
+            else:
+                decision = _root_expansion_relevance_decision(
+                    normalized_phrase,
+                    profile,
+                    source_title=source_title,
+                )
             if decision["relation"] == "adjacent_demand" and not any(
                 intended_strategy == "opportunity"
                 for _, intended_strategy in seed_intents
@@ -8600,6 +9703,8 @@ def _root_seed_origin_phrases(
             sources = raw_sources if isinstance(raw_sources, list) else []
             if "human_confirmed_product_fact" in sources:
                 remember(phrase, "human_confirmed_product_fact", "core")
+            if "formal_category_title_identity_phrase" in sources:
+                remember(phrase, "title_word_root", "core")
             if any(str(source).startswith("fusion_") for source in sources):
                 remember(phrase, "image_title_same_product_lexicon", "core")
     for term in title_reference_terms:
@@ -10198,6 +11303,7 @@ def _inject_comparison_resample_candidates(
     previous: Mapping[str, Any] | None,
     current_title: str,
     max_keywords: int,
+    allowed_comparison_keywords: set[str] | None = None,
 ) -> list[SearchKeywordCandidate]:
     matched_strategy = _matched_previous_strategy(previous, current_title)
     if matched_strategy is None or previous is None:
@@ -10221,6 +11327,11 @@ def _inject_comparison_resample_candidates(
     for keyword in ordered_keywords:
         if len(output) >= max_keywords:
             break
+        if (
+            allowed_comparison_keywords is not None
+            and keyword.casefold() not in allowed_comparison_keywords
+        ):
+            continue
         if (
             len(TOKEN_PATTERN.findall(keyword.casefold()))
             > MODEL_DIRECT_QUERY_MAX_WORDS
@@ -11529,7 +12640,7 @@ def _analysis_payload(
             and str(current_image_url).strip() == str(analysis.source_image_url).strip()
         ),
     }
-    return {
+    payload = {
         **_analysis_history_item(
             analysis,
             current_offer_id=current_offer_id,
@@ -11598,6 +12709,11 @@ def _analysis_payload(
             for item in results
         ],
     }
+    payload["title_benchmarks"] = build_title_benchmarks(
+        payload, target_plid=str(analysis.productline_id), current_title=effective_title,
+        reviews=vision.get("competitor_title_reviews") if isinstance(vision, Mapping) else None,
+    )
+    return payload
 
 
 def _keyword_payload(

@@ -25,6 +25,7 @@ PRIMARY_IMAGE_PATH_PREFIX = "/covers_images/"
 THUMBNAIL_IMAGE_PATH_PREFIXES = (
     "/covers_images/",
     "/covers_tsins/",
+    "/covers/",
 )
 DEFAULT_MAX_DIMENSION = 192
 SUPPORTED_MAX_DIMENSIONS = frozenset({192, 384, 640})
@@ -249,7 +250,7 @@ def trusted_product_image_url(image_url: str) -> str:
 
 
 def trusted_product_thumbnail_url(image_url: str) -> str:
-    """Validate an official Takealot primary or legacy TSIN gallery image."""
+    """Validate official primary, TSIN gallery and legacy cover images."""
     return _trusted_takealot_image_url(
         image_url,
         allowed_path_prefixes=THUMBNAIL_IMAGE_PATH_PREFIXES,

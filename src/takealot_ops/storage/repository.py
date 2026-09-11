@@ -245,6 +245,8 @@ class Repository:
         anomaly_types: Sequence[str],
         sales_source: Mapping[str, Any] | None = None,
         observed_at: datetime | None = None,
+        source_range_start: date | None = None,
+        source_range_end: date | None = None,
     ) -> None:
         """Stage a complete replacement of calculated outputs for a date range."""
         self._reconcile_daily_sales_metric_states(
@@ -253,6 +255,8 @@ class Repository:
             product_metrics,
             sales_source=sales_source,
             observed_at=observed_at,
+            source_range_start=source_range_start,
+            source_range_end=source_range_end,
         )
 
         self._session.execute(
@@ -287,14 +291,16 @@ class Repository:
         *,
         sales_source: Mapping[str, Any] | None,
         observed_at: datetime | None,
+        source_range_start: date | None,
+        source_range_end: date | None,
     ) -> None:
         """Refresh store-day provenance and append audits only when totals changed."""
         detected_at = _aware_utc(observed_at or datetime.now(UTC))
         store_code = current_store_code()
         source = _sales_source_details(
             sales_source,
-            start=start,
-            end=end,
+            start=source_range_start or start,
+            end=source_range_end or end,
             detected_at=detected_at,
         )
         source_kind = str(source["kind"])

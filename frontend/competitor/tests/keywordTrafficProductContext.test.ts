@@ -13,8 +13,8 @@ test("keyword traffic keeps listing and restock time in one fixed product contex
   assert.match(pageSource, /首次上架时间 · 南非时间/);
   assert.match(pageSource, /首次上架时间 · 本库最早记录/);
   assert.match(pageSource, /最近补货时间 · 北京时间/);
-  assert.match(pageSource, /当前没有可用的首次上架或本库历史记录/);
-  assert.match(pageSource, /尚未观察到平台库存增加/);
+  assert.match(pageSource, /detail\.product\.first_listed_at \|\| "暂无记录"/);
+  assert.match(pageSource, /detail\.product\.latest_restock_date \|\| "暂无记录"/);
   assert.match(pageSource, /latest_restock_increase/);
   assert.match(pageSource, /\.product-lifecycle \{[^}]*grid-template-columns: repeat\(2,/s);
 });

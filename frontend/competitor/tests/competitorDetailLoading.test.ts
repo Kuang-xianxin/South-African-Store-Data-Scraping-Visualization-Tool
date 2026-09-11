@@ -47,7 +47,7 @@ test("the shared product detail modal always exposes the persisted category path
   assert.match(pageSource, /商品具体类目/);
   assert.match(pageSource, /selectedCategoryPathText/);
   assert.match(pageSource, /末级类目 ID/);
-  assert.match(pageSource, /成功完成一次公开商品采集后自动补齐/);
+  assert.match(pageSource, /暂无类目，采集成功后补齐/);
 });
 
 test("monitoring-link actions are the first card below the product detail header", () => {
@@ -84,7 +84,7 @@ test("only own-store cards leave the current page", () => {
   );
   assert.match(dispatcher, /openOwnStoreDetailTab\(\{/);
   assert.match(pageSource, /class="competitor-status-card own-store-card"[\s\S]*新标签页/);
-  assert.match(radarCardSource, /class="competitor-status-card"[\s\S]*aria-haspopup="dialog"/);
+  assert.match(radarCardSource, /class="competitor-status-card"[\s\S]*:aria-haspopup="props\.item\.来源 === 'own_store' \? undefined : 'dialog'"/);
 });
 
 test("standalone own-link detail loads its full local evidence concurrently", () => {
@@ -161,7 +161,7 @@ test("standalone own-link detail groups its modules behind an accessible tab bar
   );
   assert.match(
     pageSource,
-    /class="standalone-own-detail-tabs-heading"[\s\S]*详情标签页[\s\S]*点击下方标签切换不同内容[\s\S]*当前查看：/,
+    /class="standalone-own-detail-tabs-heading"[\s\S]*详情标签页[\s\S]*当前查看：/,
   );
   assert.match(pageSource, /class="standalone-own-detail-tabs" role="tablist"/);
   assert.match(pageSource, /role="tab"[\s\S]*:aria-selected=/);

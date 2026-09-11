@@ -14,6 +14,7 @@ import {
 import {
   sortCompetitorItems,
   type CompetitorListSortDirection,
+  type CompetitorListSortMetric,
 } from "./competitorListSort.ts";
 import {
   matchesCompetitorProductSearchValues,
@@ -200,12 +201,14 @@ export function sortPersonalWatchlistWorkspaceCards(
   cards: PersonalWatchlistWorkspaceCard[],
   signal: CompetitorOperatingSignal,
   direction: CompetitorListSortDirection,
+  metric: CompetitorListSortMetric = "signal",
 ): PersonalWatchlistWorkspaceCard[] {
-  if (signal === "全部") return [...cards];
+  if (metric === "signal" && signal === "全部") return [...cards];
   const rankedItems = sortCompetitorItems(
     cards.flatMap((card) => card.competitor ? [card.competitor] : []),
     signal,
     direction,
+    metric,
   );
   const rankByPlid = new Map(rankedItems.map((item, index) => [item.plid, index]));
   return [...cards].sort((left, right) => (

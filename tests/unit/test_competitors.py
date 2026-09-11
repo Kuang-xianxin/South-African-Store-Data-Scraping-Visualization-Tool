@@ -203,6 +203,27 @@ async def test_public_client_uses_conservative_warmup_delay() -> None:
     playwright.stop.assert_awaited_once()
 
 
+async def test_public_client_passes_explicit_loopback_proxy_to_browser() -> None:
+    manager, playwright, _, _, page = _failing_browser_stack(OSError("unused"))
+    page.goto = AsyncMock()
+    client = CompetitorPublicClient(proxy_server=" socks5://127.0.0.1:17890 ")
+
+    with (
+        patch("takealot_ops.competitors.api.async_playwright", return_value=manager),
+        patch(
+            "takealot_ops.competitors.api._find_browser_executable",
+            return_value=Path("chrome.exe"),
+        ),
+        patch.object(client, "_human_delay", AsyncMock()),
+    ):
+        await client.start()
+        await client.close()
+
+    assert playwright.chromium.launch.await_args.kwargs["proxy"] == {
+        "server": "socks5://127.0.0.1:17890"
+    }
+
+
 async def test_collector_marks_takealot_network_failure_as_retryable(
     tmp_path: Path,
 ) -> None:
@@ -533,7 +554,12 @@ async def test_collection_lanes_use_separate_persistent_stock_profiles(
         offers=(),
         variants=(),
     )
-    collector = CompetitorCollector(engine=engine, project_root=tmp_path, client=MagicMock())
+    collector = CompetitorCollector(
+        engine=engine,
+        project_root=tmp_path,
+        client=MagicMock(),
+        browser_proxy_server="socks5://127.0.0.1:17890",
+    )
     with patch(
         "takealot_ops.competitors.service.probe_product_stocks",
         new=AsyncMock(return_value=([], [])),
@@ -558,6 +584,14 @@ async def test_collection_lanes_use_separate_persistent_stock_profiles(
     )
     assert probe.await_args_list[0].kwargs["probe_offer_buyboxes"] is False
     assert probe.await_args_list[1].kwargs["probe_offer_buyboxes"] is True
+    assert (
+        probe.await_args_list[0].kwargs["proxy_server"]
+        == "socks5://127.0.0.1:17890"
+    )
+    assert (
+        probe.await_args_list[1].kwargs["proxy_server"]
+        == "socks5://127.0.0.1:17890"
+    )
     engine.dispose()
 
 
@@ -1326,6 +1360,9 @@ async def test_public_client_parses_product_offers_and_all_review_pages() -> Non
         client = CompetitorPublicClient()
         client._page = MagicMock()
         product = await client.fetch_product("https://www.takealot.com/example/PLID123")
+        category_path = await client.fetch_product_category_path(
+            "https://www.takealot.com/example/PLID123"
+        )
         reviews = await client.fetch_all_reviews("123", page_delay_seconds=0)
 
     assert product.plid == "123"
@@ -1339,6 +1376,20 @@ async def test_public_client_parses_product_offers_and_all_review_pages() -> Non
     assert product.category_path[-1].category_id == "1234"
     assert product.category_path[-1].category_type == "category"
     assert product.category_path[-1].slug == "small-appliances-1234"
+    assert category_path == (
+        {
+            "name": "Home & Kitchen",
+            "id": "10",
+            "type": "department",
+            "slug": "home-kitchen",
+        },
+        {
+            "name": "Small Appliances",
+            "id": "1234",
+            "type": "category",
+            "slug": "small-appliances-1234",
+        },
+    )
     assert len(product.offers) == 4
     assert product.offers[0].plid == "123"
     assert product.offers[0].url == "https://www.takealot.com/example/PLID123"

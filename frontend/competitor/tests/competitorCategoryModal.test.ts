@@ -72,10 +72,10 @@ test("deduplicates PLIDs, lets own-store evidence win, and lists own links first
   ]);
 });
 
-test("all four radar category hierarchies expose buttons and the catalog uses all-store data", () => {
-  assert.equal(pageSource.match(/class="competitor-category-node-button"/g)?.length, 3);
+test("radar cards and own detail hierarchies expose buttons and share the all-store catalog", () => {
+  assert.equal(pageSource.match(/class="competitor-category-node-button"/g)?.length, 4);
   assert.equal(radarCardSource.match(/class="competitor-category-node-button"/g)?.length, 1);
-  assert.equal(pageSource.match(/@click\.stop="openCategoryModal\(category, \$event\)"/g)?.length, 3);
+  assert.equal(pageSource.match(/@click\.stop="openCategoryModal\(category, \$event\)"/g)?.length, 4);
   assert.match(radarCardSource, /emit\('open-category', category, \$event\)/);
   assert.match(pageSource, /@open-category="openCategoryModal"/);
   assert.match(pageSource, /class="competitor-modal competitor-category-modal"/);
@@ -98,7 +98,7 @@ test("category directory cards expose the radar card operating details", () => {
   assert.match(cardSource, /class="competitor-status-summary"/);
   assert.match(cardSource, /categoryItemOfferSummary\(item\)/);
   assert.match(cardSource, /competitor-first-monitored-badge/);
-  assert.match(cardSource, /competitorOfferPriceRange\(item\)/);
+  assert.match(cardSource, /<CompetitorPriceSummary :item="item"/);
   assert.match(cardSource, /item\.库存上限/);
   assert.match(cardSource, /item\.周期销售额/);
   assert.match(cardSource, /class="competitor-card-category"/);

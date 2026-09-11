@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections import defaultdict
 from collections.abc import Sequence
 from datetime import date, timedelta
+from functools import lru_cache
 from math import isfinite
 import re
 from typing import Any
@@ -39,10 +40,15 @@ def extract_title_keywords(title: str | None) -> list[str]:
 
 def build_keyword_product_list(session: Session, *, as_of: date) -> dict[str, Any]:
     """Return automatic title-keyword archive status for every current offer."""
-    offers = list(session.scalars(select(OfferCurrent).order_by(OfferCurrent.offer_id)))
+    offers = session.execute(select(
+        OfferCurrent.offer_id, OfferCurrent.sku, OfferCurrent.title, OfferCurrent.image_url,
+    ).order_by(OfferCurrent.offer_id)).all()
     snapshots = list(
-        session.scalars(
-            select(OfferSnapshot)
+        session.execute(
+            select(
+                OfferSnapshot.offer_id, OfferSnapshot.id, OfferSnapshot.snapshot_date,
+                OfferSnapshot.title, OfferSnapshot.page_views_30_days,
+            )
             .where(OfferSnapshot.snapshot_date <= as_of)
             .order_by(
                 OfferSnapshot.offer_id,
@@ -51,7 +57,7 @@ def build_keyword_product_list(session: Session, *, as_of: date) -> dict[str, An
             )
         )
     )
-    snapshots_by_offer: dict[str, list[OfferSnapshot]] = defaultdict(list)
+    snapshots_by_offer: dict[str, list[Any]] = defaultdict(list)
     for snapshot in snapshots:
         snapshots_by_offer[snapshot.offer_id].append(snapshot)
 
@@ -252,6 +258,7 @@ def _title_states(rows: Sequence[OfferSnapshot]) -> list[dict[str, Any]]:
     return states
 
 
+@lru_cache(maxsize=4096)
 def _title_signature(title: str | None) -> tuple[str, ...]:
     return tuple(
         match.group(0).strip("-.'’").casefold()

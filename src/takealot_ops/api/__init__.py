@@ -7,6 +7,9 @@ from takealot_ops.api.errors import (
     AuthenticationError,
     RateLimitError,
 )
+from takealot_ops.api.authority import install_local_authority
+
+install_local_authority(TakealotClient)
 
 __all__ = [
     "ApiResponseError",

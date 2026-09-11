@@ -198,7 +198,7 @@ export function buildOwnStoreTrafficTrend(
 
 export function alignOwnStoreTrafficTrendToOfferTrend(
   trafficTrend: OwnStoreTrafficTrendPoint[],
-  offerTrend: CompetitorOfferTrendPoint[],
+  offerTrend: Pick<CompetitorOfferTrendPoint, "capturedAtMs">[],
 ): AlignedOwnStoreTrafficTrendPoint[] {
   const offerIndexByCapturedAt = new Map(
     offerTrend.map((point, index) => [point.capturedAtMs, index]),

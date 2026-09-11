@@ -1,13 +1,16 @@
+import { DATA_MUTATED_EVENT, type DataVersions } from "./liveUpdates";
 import type {
   AnomalyProductPayload,
   CollectResult,
   CompetitorDetail,
+  CompetitorDateRange,
   CompetitorLinkHealthItem,
   CompetitorListingCommitResult,
   CompetitorListingOperationItemPayload,
   CompetitorListingOperationPayload,
   CompetitorListingPreview,
   CompetitorOverview,
+  RadarListRequest,
   CompetitorPersonalWatchlistItem,
   CompetitorPersonalWatchlistPayload,
   PersonalWatchlistLibrary,
@@ -46,6 +49,7 @@ import type {
 } from "./types";
 import { templatePermissions } from "./permissions";
 import { AuthSessionRevision } from "./authSessionRevision";
+import { readRadarWithPreview } from "./radarPreviewRequest";
 import {
   getActiveStoreCode,
   setActiveStoreCode,
@@ -107,7 +111,10 @@ function normalizeAuthSession(session: AuthSession): AuthSession {
   };
 }
 
-async function request<T>(url: string, init?: RequestInit & { signal?: AbortSignal }): Promise<T> {
+async function request<T>(
+  url: string, init?: RequestInit & { signal?: AbortSignal },
+  onResponse?: (response: Response) => void,
+): Promise<T> {
   const requestAuthSessionRevision = authSessionRevision.snapshot();
   const headers = new Headers(init?.headers);
   const method = (init?.method ?? "GET").toUpperCase();
@@ -146,7 +153,28 @@ async function request<T>(url: string, init?: RequestInit & { signal?: AbortSign
         : `本机接口返回异常（HTTP ${response.status}）`;
     throw new ApiRequestError(message, response.status);
   }
+  if (
+    !["GET", "HEAD", "OPTIONS"].includes(method)
+    && !url.startsWith("/api/auth/")
+    && !url.includes("/batch-events")
+    && authSessionRevision.isCurrent(requestAuthSessionRevision)
+  ) window.dispatchEvent(new CustomEvent(DATA_MUTATED_EVENT));
+  onResponse?.(response);
   return payload as T;
+}
+
+export function fetchHomeDashboard(scope: OwnStoreScope, start: string, end: string, signal?: AbortSignal) {
+  const params = new URLSearchParams({ store_scope: scope, start_date: start, end_date: end });
+  return request<import("./homeDashboard").HomeDashboard>(`/api/erp/summary/home?${params}`, { signal });
+}
+
+export function fetchDataUpdates(scope: OwnStoreScope, signal?: AbortSignal): Promise<{
+  versions: DataVersions;
+  freshness: FreshnessPayload;
+  poll_after_ms: number;
+  session_revision: string;
+}> {
+  return request(`/api/erp/data-updates?scope=${encodeURIComponent(scope)}`, { signal });
 }
 
 export function fetchAuthStatus(): Promise<AuthStatus> {
@@ -272,20 +300,26 @@ export async function updateUser(
   return result.user;
 }
 
+export function fetchCompetitorDateRange(signal?: AbortSignal): Promise<CompetitorDateRange> {
+  return request<CompetitorDateRange>("/api/competitors/date-range", { signal });
+}
+
 export function fetchCompetitors(
   startDate?: string,
   endDate?: string,
   ownStoreScope: OwnStoreScope = "current",
   signal?: AbortSignal,
   includeOwnStore = true,
+  onPreview?: (value: CompetitorOverview, generatedAt: string) => void,
+  paging?: RadarListRequest,
 ): Promise<CompetitorOverview> {
   const query = new URLSearchParams();
   if (startDate) query.set("start_date", startDate);
   if (endDate) query.set("end_date", endDate);
   query.set("own_store_scope", ownStoreScope);
   if (!includeOwnStore) query.set("include_own_store", "false");
-  const suffix = query.size ? `?${query.toString()}` : "";
-  return request<CompetitorOverview>(`/api/competitors${suffix}`, { signal });
+  if (paging) for (const [key, value] of Object.entries(paging)) query.set(key, String(value));
+  return requestRadar<CompetitorOverview>("/api/competitors", query, signal, onPreview);
 }
 
 export function fetchOwnStoreCompetitors(
@@ -294,16 +328,61 @@ export function fetchOwnStoreCompetitors(
   ownStoreScope: OwnStoreScope = "current",
   signal?: AbortSignal,
   plid?: string,
+  onPreview?: (value: OwnStoreCompetitorOverview, generatedAt: string) => void,
+  paging?: RadarListRequest,
 ): Promise<OwnStoreCompetitorOverview> {
   const query = new URLSearchParams();
   if (startDate) query.set("start_date", startDate);
   if (endDate) query.set("end_date", endDate);
   query.set("own_store_scope", ownStoreScope);
   if (plid) query.set("plid", plid);
-  return request<OwnStoreCompetitorOverview>(
-    `/api/competitors/own-store?${query.toString()}`,
-    { signal },
-  );
+  if (paging) for (const [key, value] of Object.entries(paging)) query.set(key, String(value));
+  return requestRadar<OwnStoreCompetitorOverview>("/api/competitors/own-store", query, signal, onPreview);
+}
+
+export interface CompetitorMatchCatalog {
+  items: import("./competitorSimilarity").CompetitorMatchCandidate[];
+  revision: string;
+}
+
+export interface CompetitorMatchCards {
+  items: import("./types").CompetitorItem[];
+  unavailable_plids: string[];
+}
+
+export function fetchCompetitorMatchCatalog(
+  signal: AbortSignal, onPreview: (value: CompetitorMatchCatalog, generatedAt: string) => void,
+): Promise<CompetitorMatchCatalog> {
+  return requestRadar("/api/competitors/matching/catalog", new URLSearchParams(), signal, onPreview);
+}
+
+export function fetchCompetitorMatchCards(
+  plids: string[], start: string, end: string, signal: AbortSignal,
+  onPreview: (value: CompetitorMatchCards, generatedAt: string) => void,
+): Promise<CompetitorMatchCards> {
+  const query = new URLSearchParams({ plids: plids.join(",") });
+  if (start) query.set("start_date", start);
+  if (end) query.set("end_date", end);
+  return requestRadar("/api/competitors/matching/cards", query, signal, onPreview);
+}
+
+function requestRadar<T>(
+  path: string, query: URLSearchParams, signal: AbortSignal | undefined,
+  onPreview: ((value: T, generatedAt: string) => void) | undefined,
+): Promise<T> {
+  const sessionRevision = authSessionRevision.snapshot();
+  return readRadarWithPreview(async (preferCached) => {
+    const parameters = new URLSearchParams(query);
+    if (preferCached) parameters.set("prefer_cached", "true");
+    let refreshing = false;
+    let generatedAt = "";
+    const value = await request<T>(`${path}?${parameters.toString()}`, { signal }, (response) => {
+      refreshing = response.headers.get("X-ERP-Refreshing") === "1";
+      const timestamp = Number(response.headers.get("X-ERP-Generated-At"));
+      if (Number.isFinite(timestamp) && timestamp > 0) generatedAt = new Date(timestamp * 1000).toISOString();
+    });
+    return { value, refreshing, generatedAt };
+  }, onPreview, () => authSessionRevision.isCurrent(sessionRevision) && !signal?.aborted);
 }
 
 export async function fetchCompetitorLinkHealth(): Promise<
@@ -1150,6 +1229,16 @@ export function analyzeSearchRanking(
   );
 }
 
+export function reviewSearchRankingTitles(
+  offerId: string,
+  storeCode?: string | null,
+): Promise<SearchRankingDetailPayload> {
+  return request<SearchRankingDetailPayload>(
+    `/api/erp/search-ranking/${encodeURIComponent(offerId)}/title-review`,
+    { method: "POST", headers: storeHeaders(storeCode) },
+  );
+}
+
 export function confirmSearchRankingDecisionParameters(
   offerId: string,
   choices: Array<{
@@ -1291,4 +1380,38 @@ export async function refreshStoreData(): Promise<{
   refresh_status: RefreshStatus;
 }> {
   return request("/api/erp/refresh", { method: "POST" });
+}
+
+
+// BLUE-only requests share the ERP session, CSRF and store-scope handling.
+export async function fetchBlueDeployment(signal?: AbortSignal): Promise<boolean> {
+  let deployment = "";
+  await request("/api/health", { signal, cache: "no-store" }, response => {
+    deployment = response.headers.get("X-Takealot-Deployment") ?? "";
+  });
+  return /^blue-stage-(main|laptop)$/.test(deployment);
+}
+
+export function fetchBlueCrawlStatus(signal?: AbortSignal): Promise<import("./blueDistributedCrawl").BlueCrawlStatus> {
+  return request("/api/competitors/distributed/status", { signal, cache: "no-store" });
+}
+
+export function fetchBlueCrawlPreview(signal?: AbortSignal): Promise<import("./blueDistributedCrawl").BlueCrawlPreview> {
+  return request("/api/competitors/distributed/preview", { signal, cache: "no-store" });
+}
+
+export function startBlueCrawl(pending: import("./blueDistributedCrawl").BlueCrawlPending): Promise<{
+  batch_id: string; total: number; reused: boolean;
+}> {
+  return request(`/api/competitors/distributed/${pending.mode === "full" ? "start-full" : "start"}`, {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(pending.mode === "full" ? { request_id: pending.request_id }
+      : { request_id: pending.request_id, plids: pending.plids }),
+  });
+}
+
+export function controlBlueCrawl(action: "stop" | "resume", batchId: string): Promise<{ message: string }> {
+  return request(`/api/competitors/distributed/${action}`, {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ batch_id: batchId }),
+  });
 }

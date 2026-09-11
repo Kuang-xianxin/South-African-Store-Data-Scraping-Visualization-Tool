@@ -2,7 +2,6 @@ import type { OwnStoreScope } from "./types";
 
 export const ERP_MODULE_KEYS = [
   "overview",
-  "keyword-traffic",
   "search-ranking",
   "quadrants",
   "anomaly-products",
@@ -29,6 +28,7 @@ export function modulePageFromHash(hash: string): ErpModuleKey | null {
   const normalizedHash = hash.trim().replace(/^#/, "");
   if (!normalizedHash) return null;
   const requestedModule = new URLSearchParams(normalizedHash).get("module");
+  if (requestedModule === "keyword-traffic") return "search-ranking";
   return isErpModuleKey(requestedModule) ? requestedModule : null;
 }
 

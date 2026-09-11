@@ -6,6 +6,10 @@ import {
   ANOMALY_PRODUCT_VIEWS,
   countForAnomalyView,
   itemsForAnomalyView,
+  lastRecordedSaleLabel,
+  slowMovingBoundaryLabel,
+  slowMovingDaysLabel,
+  slowMovingPeriodLabel,
 } from "../src/anomalyProducts.ts";
 import type { AnomalyProductItem, AnomalyProductPayload } from "../src/types.ts";
 
@@ -155,7 +159,7 @@ test("review and return anomalies show their evidence and missing-data boundarie
   );
 
   assert.match(pageSource, /低于 5 星 · 按所选日期首次发现/);
-  assert.match(pageSource, /低于五星 · 首次抓取基线不计入/);
+  assert.match(pageSource, /低于五星 · 不含首次基线/);
   assert.match(pageSource, /review\.first_seen_on/);
   assert.match(pageSource, /item\.new_bad_reviews \|\| \[\]/);
   assert.match(pageSource, /review\.body \|\| "买家未留下文字内容"/);
@@ -176,7 +180,7 @@ test("all collection timestamps are explicitly rendered in Beijing time", () => 
   assert.match(pageSource, /import \{ formatChinaDateTime \} from "\.\.\/time"/);
   assert.match(pageSource, /<span>最近一次拉取<\/span>/);
   assert.match(pageSource, /库存 \{\{ formatChinaDateTime\(payload\?\.collection_times\.offers_at/);
-  assert.match(pageSource, /均为北京时间 · 完整销量证据至/);
+  assert.match(pageSource, /北京时间 · 完整销量至/);
   assert.match(pageSource, /sourceCollectionLabel\("销量"/);
   assert.match(pageSource, /sourceCollectionLabel\("库存"/);
   assert.match(pageSource, /sourceCollectionLabel\("评论"/);
@@ -194,6 +198,25 @@ test("slow-moving selector includes items exactly on the selected threshold", ()
   assert.equal(countForAnomalyView(payload, "slow_moving", 20), 1);
 });
 
+test("slow-moving sort orders the combined store list without changing its source", () => {
+  const a34 = { ...item("a34", "slow_moving", 34), store_code: "store-a", available_stock: 5 };
+  const a7 = { ...item("a7", "slow_moving", 7), store_code: "store-a", available_stock: 3,
+    days_since_last_sale: 1000 };
+  const b48 = { ...item("b48", "slow_moving", 48), store_code: "store-b", available_stock: 2 };
+  const b7 = { ...item("b7", "slow_moving", 7), store_code: "store-b", available_stock: 9 };
+  const c34 = { ...item("c34", "slow_moving", 34), store_code: "store-c", available_stock: 8,
+    no_sales_days_exact: false };
+  const belowThreshold = item("below", "slow_moving", 6);
+  const combined = [a34, a7, b48, b7, c34, belowThreshold];
+  const merged = { ...payload, slow_moving: combined };
+
+  assert.deepEqual(itemsForAnomalyView(merged, "slow_moving", 7), [b48, c34, a34, b7, a7]);
+  assert.deepEqual(itemsForAnomalyView(merged, "slow_moving", 7, "asc"), [b7, a7, c34, a34, b48]);
+  assert.deepEqual(itemsForAnomalyView(merged, "slow_moving", 30, "asc"), [c34, a34, b48]);
+  assert.deepEqual(combined, [a34, a7, b48, b7, c34, belowThreshold]);
+  assert.deepEqual(itemsForAnomalyView(merged, "sudden_sales_stop", 7, "asc"), [sudden]);
+});
+
 test("slow-moving control keeps the inclusive threshold visible", () => {
   const pageSource = readFileSync(
     new URL("../src/pages/AnomalyProductsPage.vue", import.meta.url),
@@ -203,7 +226,42 @@ test("slow-moving control keeps the inclusive threshold visible", () => {
   assert.match(pageSource, /\{\{ days \}\} 天及以上未动销/);
   assert.match(pageSource, /连续 \$\{slowDays\.value\} 天及以上未动销/);
   assert.doesNotMatch(pageSource, /有库存 \{\{ days \}\} 天没动销/);
-  assert.match(pageSource, /滞销起算 \{\{ item\.slow_moving_started_on/);
+  assert.match(pageSource, /本店本变体 · 有货未动销/);
+  assert.match(pageSource, /slowMovingPeriodLabel\(item\)/);
+  assert.doesNotMatch(pageSource, /实际滞销天数|滞销起算|现有完整历史内未见销量/);
+});
+
+test("incomplete history shows the confirmed interval separately from time since a sale", () => {
+  const partial = {
+    ...item("table", "slow_moving", 34),
+    no_sales_days_exact: false,
+    slow_moving_started_on: "2026-08-04",
+    data_through: "2026-09-06",
+    last_sale_on: "2026-07-30",
+    days_since_last_sale: 38,
+  };
+  assert.equal(slowMovingDaysLabel(partial), "至少 34 天");
+  assert.equal(slowMovingPeriodLabel(partial), "已确认区间 2026-08-04 至 2026-09-06");
+  assert.equal(slowMovingBoundaryLabel(partial), "更早记录不足，实际起点未确认");
+  assert.equal(lastRecordedSaleLabel(partial), "最近已记录动销 2026-07-30（距截止日 38 天）");
+  assert.equal(lastRecordedSaleLabel({ ...partial, last_sale_on: null, days_since_last_sale: null }),
+    "已采集销量中暂无动销记录");
+  assert.equal(lastRecordedSaleLabel({ ...partial, days_since_last_sale: undefined }),
+    "最近已记录动销 2026-07-30");
+});
+
+test("restocking starts a new in-stock period independently of the last sale", () => {
+  const restocked = { ...item("restocked", "slow_moving", 4),
+    slow_moving_started_on: "2026-08-11",
+    slow_moving_boundary_reason: "out_of_stock" as const,
+  };
+  assert.equal(slowMovingDaysLabel(restocked), "4 天");
+  assert.equal(slowMovingPeriodLabel(restocked), "有货未动销 2026-08-11 至 2026-08-14");
+  assert.equal(slowMovingBoundaryLabel(restocked), "缺货后重新有货，从本轮起算");
+  assert.equal(slowMovingBoundaryLabel({ ...restocked, slow_moving_boundary_reason: "sale" }),
+    "从上次动销次日起算");
+  assert.equal(slowMovingPeriodLabel({ ...restocked, slow_moving_started_on: null }),
+    "有货未动销区间待确认");
 });
 
 test("cards open the shared full own-link detail as a standalone browser page", () => {

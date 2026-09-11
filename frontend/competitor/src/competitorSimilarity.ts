@@ -10,7 +10,18 @@ export interface CompetitorMatchSource {
   价格?: number | null;
 }
 
-export interface CompetitorMatchResult<T extends CompetitorItem = CompetitorItem> {
+export interface CompetitorMatchCandidate extends CompetitorMatchSource {
+  来源: "competitor" | "own_store";
+  采集时间?: string;
+  链接?: string;
+  当前卖家?: string | null;
+  周期销售额?: number | null;
+  近期观察售出?: Partial<Record<string, number | null>>;
+  最新评论数?: number | null;
+  评论数?: number | null;
+}
+
+export interface CompetitorMatchResult<T extends CompetitorMatchCandidate = CompetitorItem> {
   item: T;
   kind: CompetitorMatchKind;
   score: number;
@@ -39,6 +50,7 @@ const STOP_WORDS = new Set([
 ]);
 
 const TOKEN_ALIASES = new Map<string, string>([
+  ["children", "child"],
   ["centimeter", "cm"],
   ["centimeters", "cm"],
   ["centimetre", "cm"],
@@ -56,6 +68,12 @@ const TOKEN_ALIASES = new Map<string, string>([
   ["pcs", "piece"],
   ["pieces", "piece"],
   ["television", "tv"],
+]);
+
+// Audience, packaging and marketing words cannot establish product identity alone.
+const GENERIC_PRODUCT_TERMS = new Set([
+  "adult", "child", "infant", "portable", "device", "kit", "set", "pack",
+  "rescue", "emergency", "aid", "professional", "home", "use", "new",
 ]);
 
 const STRONG_ACCESSORY_PATTERN = /\b(?:accessor(?:y|ies)|attachment|bracket|case|cover|holder|parts?|protector|refill|replacement|sleeve|spare)\b/i;
@@ -173,33 +191,112 @@ function categoryRelation(
   };
 }
 
-function commercialPriority(item: CompetitorItem): number {
+function commercialPriority(item: CompetitorMatchCandidate): number {
   const observedThirtyDays = item.近期观察售出?.["30"] ?? 0;
   return (item.周期销售额 ?? 0)
     + observedThirtyDays * Math.max(item.价格 ?? 0, 1)
     + (item.最新评论数 ?? item.评论数 ?? 0) * 0.01;
 }
 
-function scoreCandidate<T extends CompetitorItem>(
+interface MatchFeatures {
+  title: string;
+  tokens: string[];
+  bigrams: string[];
+  models: string[];
+  specs: string[];
+  needs: string[];
+}
+
+// Explicit shared-use evidence can bridge differing marketplace categories.
+// A pet/audience word alone never establishes a competing product.
+function sharedUseFamilies(title: string): string[] {
+  const cat = /\b(?:cat|cats|kitten|kittens|feline)\b/.test(title);
+  const scratching = /\b(?:scratch|scratching|scratcher|scratchers)\b/.test(title);
+  const furniture = /\b(?:tree|tower|post|house|condo|villa|furniture|bed|lounge|lounger|board|pad|mat)\b/.test(title);
+  const climbingFurniture = /\b(?:cat|kitten)\s+(?:tree|tower|condo|house|villa)\b/.test(title);
+  const accessory = STRONG_ACCESSORY_PATTERN.test(title)
+    || /\b(?:carri(?:er|ers)|transport|waste|bag|bags|liner|liners)\b/.test(title);
+  return cat && ((scratching && furniture) || climbingFurniture) && !accessory
+    ? ["猫咪抓挠、攀爬与休憩家具"] : [];
+}
+
+const featureCache = new WeakMap<CompetitorMatchSource, { raw: string; features: MatchFeatures }>();
+function matchFeatures(item: CompetitorMatchSource): MatchFeatures {
+  const cached = featureCache.get(item);
+  if (cached?.raw === item.商品) return cached.features;
+  const title = normalizeTitle(item.商品);
+  const tokens = titleTokens(item.商品);
+  const features = { title, tokens, bigrams: titleBigrams(tokens), models: modelTokens(tokens),
+    specs: titleSpecs(item.商品), needs: sharedUseFamilies(title) };
+  featureCache.set(item, { raw: item.商品, features });
+  return features;
+}
+
+interface MatchIndex {
+  terms: Map<string, Set<CompetitorMatchCandidate>>;
+  titles: Map<string, Set<CompetitorMatchCandidate>>;
+  needs: Map<string, Set<CompetitorMatchCandidate>>;
+}
+// Catalog arrays are immutable generations. Inventory/card refreshes are separate.
+const indexCache = new WeakMap<readonly CompetitorMatchCandidate[], MatchIndex>();
+function indexedCandidates<T extends CompetitorMatchCandidate>(source: CompetitorMatchSource, candidates: readonly T[]): T[] {
+  let index = indexCache.get(candidates);
+  if (!index) {
+    index = { terms: new Map(), titles: new Map(), needs: new Map() };
+    const add = (map: Map<string, Set<CompetitorMatchCandidate>>, key: string, item: T) => {
+      if (!map.has(key)) map.set(key, new Set());
+      map.get(key)!.add(item);
+    };
+    for (const item of candidates) {
+      const features = matchFeatures(item);
+      for (const token of features.tokens) add(index.terms, token, item);
+      add(index.titles, features.title, item);
+      for (const need of features.needs) add(index.needs, need, item);
+    }
+    indexCache.set(candidates, index);
+  }
+  const features = matchFeatures(source);
+  const selected = new Set<CompetitorMatchCandidate>(index.titles.get(features.title));
+  for (const term of features.tokens) for (const item of index.terms.get(term) ?? []) selected.add(item);
+  for (const need of features.needs) for (const item of index.needs.get(need) ?? []) selected.add(item);
+  return [...selected] as T[];
+}
+
+function scoreCandidate<T extends CompetitorMatchCandidate>(
   source: CompetitorMatchSource,
   candidate: T,
 ): CompetitorMatchResult<T> | null {
-  const sourceTitle = normalizeTitle(source.商品);
-  const candidateTitle = normalizeTitle(candidate.商品);
+  const left = matchFeatures(source);
+  const right = matchFeatures(candidate);
+  const sourceTitle = left.title;
+  const candidateTitle = right.title;
   if (!sourceTitle || !candidateTitle) return null;
+  const differentCatUse = (furniture: MatchFeatures, other: MatchFeatures) => furniture.needs.length > 0
+    && other.needs.length === 0 && /\b(?:litter|toilet|scoop|carri(?:er|ers)|transport|food|feeding|bowl|fountain)\b/.test(other.title);
+  if (differentCatUse(left, right) || differentCatUse(right, left)) return null;
 
-  const sourceTokens = titleTokens(source.商品);
-  const candidateTokens = titleTokens(candidate.商品);
+  const sourceTokens = left.tokens;
+  const candidateTokens = right.tokens;
   const sharedTerms = sharedValues(sourceTokens, candidateTokens)
     .sort((left, right) => tokenWeight(right) - tokenWeight(left) || left.localeCompare(right));
+  const sharedCoreTerms = sharedTerms.filter((term) => !GENERIC_PRODUCT_TERMS.has(term));
+  const sharedBigrams = sharedValues(left.bigrams, right.bigrams);
+  const sharedCoreWeight = sharedCoreTerms.reduce((total, term) => total + tokenWeight(term), 0);
+  const shorterCoreWeight = Math.min(
+    ...[sourceTokens, candidateTokens].map((tokens) => (
+      unique(tokens).filter((term) => !GENERIC_PRODUCT_TERMS.has(term))
+        .reduce((total, term) => total + tokenWeight(term), 0)
+    )),
+  );
+  const coreContainment = shorterCoreWeight ? sharedCoreWeight / shorterCoreWeight : 0;
   const tokenSimilarity = weightedDice(sourceTokens, candidateTokens);
   const bigramSimilarity = weightedDice(
-    titleBigrams(sourceTokens),
-    titleBigrams(candidateTokens),
+    left.bigrams,
+    right.bigrams,
   );
-  const sharedModels = sharedValues(modelTokens(sourceTokens), modelTokens(candidateTokens));
-  const sourceSpecs = titleSpecs(source.商品);
-  const candidateSpecs = titleSpecs(candidate.商品);
+  const sharedModels = sharedValues(left.models, right.models);
+  const sourceSpecs = left.specs;
+  const candidateSpecs = right.specs;
   const sharedSpecs = sharedValues(sourceSpecs, candidateSpecs);
   const specsComparable = sourceSpecs.length > 0 && candidateSpecs.length > 0;
   const specSimilarity = specsComparable
@@ -229,7 +326,16 @@ function scoreCandidate<T extends CompetitorItem>(
     )
     && (!specsComparable || specSimilarity >= 0.3)
   );
-  const sameNeed = (
+  // Missing or differently assigned leaves must not veto strong title evidence.
+  // Use coverage of the shorter title so long listing copy does not drown it out.
+  const strongTitleEvidence = !accessoryMismatch
+    && sharedCoreTerms.length >= 2
+    && sharedTerms.length >= 3
+    && (tokenSimilarity >= 0.78 || (
+      coreContainment >= 0.85 && tokenSimilarity >= 0.35 && sharedBigrams.length > 0
+    ));
+  const sharedNeeds = sharedValues(left.needs, right.needs);
+  const sameNeed = sharedNeeds.length > 0 || sharedCoreTerms.length > 0 && ((
     categories.exactLeaf
     && score >= 30
     && (sharedTerms.length > 0 || tokenSimilarity >= 0.14)
@@ -238,15 +344,15 @@ function scoreCandidate<T extends CompetitorItem>(
     && score >= 45
     && sharedTerms.length >= 2
   ) || (
-    !categories.sharedCategory
-    && score >= 72
-    && tokenSimilarity >= 0.65
-  );
+    strongTitleEvidence
+  ));
 
   if (!nearIdentical && !sameNeed) return null;
   if (accessoryMismatch && score < 74) return null;
 
+  if (!nearIdentical && sharedNeeds.length) score = Math.max(score, 42);
   const reasons: string[] = [];
+  if (sharedNeeds.length && !nearIdentical) reasons.push(`同一用途：${sharedNeeds[0]}`);
   if (exactTitle) reasons.push("商品标题完全一致");
   if (categories.exactLeaf) {
     reasons.push(`同一精确类目：${categoryPath(source).at(-1)?.name ?? "已采集类目"}`);
@@ -271,18 +377,21 @@ function scoreCandidate<T extends CompetitorItem>(
   };
 }
 
-export function rankCompetitorMatches<T extends CompetitorItem>(
+export function rankCompetitorMatches<T extends CompetitorMatchCandidate>(
   source: CompetitorMatchSource,
   candidates: readonly T[],
 ): CompetitorMatchResult<T>[] {
   const sourcePlid = String(source.plid ?? "").trim().toLocaleLowerCase();
   const byPlid = new Map<string, T>();
-  for (const candidate of candidates) {
-    if (candidate.来源 !== "competitor") continue;
+  for (const candidate of indexedCandidates(source, candidates)) {
     const plid = String(candidate.plid ?? "").trim().toLocaleLowerCase();
     if (!plid || plid === sourcePlid) continue;
     const existing = byPlid.get(plid);
-    if (!existing || candidate.采集时间 > existing.采集时间) byPlid.set(plid, candidate);
+    if (
+      !existing
+      || (existing.来源 !== "own_store" && candidate.来源 === "own_store")
+      || (existing.来源 === candidate.来源 && (candidate.采集时间 ?? "") > (existing.采集时间 ?? ""))
+    ) byPlid.set(plid, candidate);
   }
 
   return [...byPlid.values()]

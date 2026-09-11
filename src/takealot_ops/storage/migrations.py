@@ -12,6 +12,7 @@ from sqlalchemy import Engine, create_engine, event, insert, inspect, select, up
 from sqlalchemy.engine import make_url
 from sqlalchemy.orm import Session
 
+from takealot_ops.storage.data_revisions import install_data_revision_tracking
 from takealot_ops.storage.models import (
     Base,
     CollectionRun,
@@ -51,9 +52,9 @@ def create_engine_for_settings(settings: DatabaseSettings) -> Engine:
 def create_engine_for_database_url(database_url: str) -> Engine:
     """Create a writable engine with backend-specific reliability settings."""
     url = make_url(database_url)
-    supported = {"sqlite", "sqlite+pysqlite", "mysql+pymysql"}
+    supported = {"sqlite", "sqlite+pysqlite", "mysql+pymysql", "mysql+mysqldb"}
     if url.drivername not in supported:
-        raise ValueError("database must use sqlite+pysqlite or mysql+pymysql synchronous driver")
+        raise ValueError("database must use sqlite+pysqlite, mysql+pymysql or mysql+mysqldb")
     if url.drivername in {"sqlite", "sqlite+pysqlite"} and url.database not in {
         None,
         ":memory:",
@@ -65,6 +66,7 @@ def create_engine_for_database_url(database_url: str) -> Engine:
     engine = create_engine(database_url, **options)
     if url.get_backend_name() == "sqlite":
         _configure_sqlite(engine)
+    install_data_revision_tracking(engine)
     return engine
 
 
@@ -374,6 +376,10 @@ def _add_store_scope_columns_and_keys(engine: Engine) -> None:
 
 
 _READ_PROJECTION_INDEXES: dict[str, tuple[str, tuple[str, ...]]] = {
+    "daily_report_observations": (
+        "ix_daily_report_observations_store_run_views",
+        ("store_code", "run_id", "page_views_30_days"),
+    ),
     "collection_runs": (
         "ix_collection_runs_store_type_status_scope",
         ("store_code", "run_type", "status", "scope_date"),

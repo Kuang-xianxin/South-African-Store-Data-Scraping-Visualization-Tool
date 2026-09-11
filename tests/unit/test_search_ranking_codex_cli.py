@@ -9,7 +9,7 @@ import pytest
 import takealot_ops.search_ranking.codex_cli as codex_cli_module
 from takealot_ops.search_ranking.codex_cli import (
     CodexAppServerClient,
-    CODEX_TERRA_MODEL,
+    CODEX_TITLE_MODEL,
     CodexCliConfigurationError,
     CodexCliProviderError,
     CodexRateLimitWindow,
@@ -39,7 +39,7 @@ def test_quota_guard_persists_one_ten_point_budget_per_weekly_window(
     middle = guard.observe(_window(used_percent=49))
     exhausted = guard.observe(_window(used_percent=53))
 
-    assert baseline["model"] == CODEX_TERRA_MODEL
+    assert baseline["model"] == CODEX_TITLE_MODEL
     assert baseline["baseline_used_percent"] == 43
     assert baseline["ceiling_used_percent"] == 53
     assert middle["baseline_used_percent"] == 43
@@ -194,8 +194,10 @@ def test_quota_refresh_retries_only_the_read_before_failing_closed(
     assert quota["current_used_percent"] == 45
 
 
+@pytest.mark.parametrize("with_image", [True, False])
 def test_completed_turn_keeps_usage_when_post_turn_quota_read_fails(
     tmp_path: Path,
+    with_image: bool,
 ) -> None:
     class PostTurnQuotaFailureClient(CodexAppServerClient):
         def __init__(self) -> None:
@@ -214,10 +216,14 @@ def test_completed_turn_keeps_usage_when_post_turn_quota_read_fails(
             raise CodexCliConfigurationError("temporary quota read failure")
 
         async def _request(self, method: str, params: object) -> dict[str, object]:
-            del params
+            assert isinstance(params, dict)
+            assert params["model"] == "gpt-5.6-sol"
             if method == "thread/start":
                 return {"thread": {"id": "thread-1", "modelProvider": "openai"}}
             if method == "turn/start":
+                assert params["effort"] == "high"
+                assert [item["type"] for item in params["input"]] == (["text", "localImage"] if with_image else ["text"])
+                assert params["outputSchema"]["additionalProperties"] is False
                 return {"turn": {"id": "turn-1"}}
             raise AssertionError(method)
 
@@ -235,7 +241,7 @@ def test_completed_turn_keeps_usage_when_post_turn_quota_read_fails(
                 stage="image_title_fusion",
                 system_prompt="Return a product",
                 user_text="Product context",
-                image_path=tmp_path / "image.jpg",
+                image_path=tmp_path / "image.jpg" if with_image else None,
                 output_schema={
                     "type": "object",
                     "properties": {"name": {"type": "string"}},
@@ -249,3 +255,18 @@ def test_completed_turn_keeps_usage_when_post_turn_quota_read_fails(
         "output_tokens": 30,
         "total_tokens": 150,
     }
+
+
+def test_model_switch_preserves_shared_weekly_budget(tmp_path: Path) -> None:
+    path = tmp_path / "quota.json"
+    guard = CodexWeeklyQuotaGuard(path)
+    old = guard.observe(_window(used_percent=43))
+    old["model"] = "gpt-5.6-terra"
+    path.write_text(json.dumps(old), encoding="utf-8")
+
+    migrated = guard.observe(_window(used_percent=49))
+
+    assert migrated["model"] == "gpt-5.6-sol"
+    assert migrated["baseline_used_percent"] == 43
+    assert migrated["ceiling_used_percent"] == 53
+    assert migrated["remaining_percentage_points"] == 4

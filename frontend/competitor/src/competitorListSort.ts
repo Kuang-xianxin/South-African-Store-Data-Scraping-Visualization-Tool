@@ -1,7 +1,43 @@
-import type { CompetitorItem } from "./types";
+import type { CompetitorItem, CompetitorObservedSalesWindowKey } from "./types";
 import type { CompetitorOperatingSignal } from "./competitorOperatingSignals";
 
 export type CompetitorListSortDirection = "asc" | "desc";
+export type CompetitorListSortMetric = "signal"
+  | `sales_${CompetitorObservedSalesWindowKey | "total"}`
+  | `follower_sales_${CompetitorObservedSalesWindowKey | "total"}`;
+
+const salesWindows = ["7", "15", "30", "60", "90", "total"] as const;
+
+export function competitorListSortOptions(own: boolean, signal: CompetitorOperatingSignal) {
+  const options: Array<{ value: CompetitorListSortMetric; label: string }> = [
+    { value: "signal", label: signal === "全部" ? "默认顺序" : competitorListSortMetricLabel(signal) },
+  ];
+  for (const days of salesWindows) {
+    const label = days === "total" ? "总销量" : `${days}天销量`;
+    options.push({ value: `sales_${days}`, label: `${own ? "自有官方" : "库存观察"} · ${label}` });
+  }
+  if (own) for (const days of salesWindows) {
+    options.push({ value: `follower_sales_${days}`, label: `跟卖观察 · ${days === "total" ? "总销量" : `${days}天销量`}` });
+  }
+  return options;
+}
+
+export function effectiveCompetitorSortMetric(
+  metric: CompetitorListSortMetric, own: boolean,
+): CompetitorListSortMetric {
+  return !own && metric.startsWith("follower_")
+    ? metric.replace("follower_", "") as CompetitorListSortMetric : metric;
+}
+
+function salesValue(item: CompetitorItem, metric: CompetitorListSortMetric): number | null {
+  const own = item.来源 === "own_store";
+  const effective = effectiveCompetitorSortMetric(metric, own);
+  const values = effective.startsWith("follower_sales_") ? item.跟卖近期观察售出
+    : own ? item.自有官方销量 : item.近期观察售出;
+  const key = effective.replace(/^(follower_)?sales_/, "") as CompetitorObservedSalesWindowKey | "total";
+  const value = values?.[key];
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
 
 function sortValue(
   item: CompetitorItem,
@@ -34,11 +70,15 @@ export function sortCompetitorItems(
   items: CompetitorItem[],
   signal: CompetitorOperatingSignal,
   direction: CompetitorListSortDirection,
+  metric: CompetitorListSortMetric = "signal",
 ): CompetitorItem[] {
-  if (signal === "全部") return [...items];
+  if (metric === "signal" && signal === "全部") return [...items];
   const multiplier = direction === "asc" ? 1 : -1;
   return items
-    .map((item, index) => ({ item, index, value: sortValue(item, signal) }))
+    .map((item, index) => {
+      const value = metric === "signal" ? sortValue(item, signal) : salesValue(item, metric);
+      return { item, index, value: typeof value === "number" && Number.isFinite(value) ? value : null };
+    })
     .sort((first, second) => {
       if (first.value === null && second.value === null) return first.index - second.index;
       if (first.value === null) return 1;

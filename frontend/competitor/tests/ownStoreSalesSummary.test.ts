@@ -141,11 +141,11 @@ test("own-link detail compares scope-wide official sales with exact variant and 
   );
   assert.match(pageSource, /detail\.value\.own_store_sales_scope/);
   assert.match(pageSource, /title="当前范围全部自有链接官方销量（件）"/);
-  assert.match(pageSource, /当前范围全部自有店铺与 Offer/);
+  assert.match(pageSource, /当前范围全部自有报价/);
   assert.match(pageSource, /selectOwnStoreVariantSalesSeries\([\s\S]{0,260}?selectedOffer\.value\.offer_id/);
   assert.match(pageSource, /title="当前变体官方销量（件）"/);
   assert.match(pageSource, /listing-label="变体上架时间"/);
-  assert.match(pageSource, /仅统计当前 Offer ID/);
+  assert.match(pageSource, /官方销量 · 当前变体报价/);
   assert.match(pageSource, /title="全部跟卖报价库存观察售出（件）"/);
   assert.match(pageSource, /:series="selectedOwnScopeSales"/);
   assert.doesNotMatch(
@@ -154,7 +154,7 @@ test("own-link detail compares scope-wide official sales with exact variant and 
   );
   assert.match(
     pageSource,
-    /<template v-else>[\s\S]{0,1800}?:values="selectedOffer\?\.卖家近期观察售出"[\s\S]{0,1800}?:values="selectedOffer\?\.变体近期观察售出"/,
+    /<template v-else-if="!selectedOfferIsHistorical">[\s\S]{0,1800}?:values="selectedOffer\?\.卖家近期观察售出"[\s\S]{0,1800}?:values="selectedOffer\?\.变体近期观察售出"/,
   );
   assert.match(componentSource, /近\{\{ summary\.days \}\}天/);
   assert.match(componentSource, /总销量/);
@@ -162,8 +162,8 @@ test("own-link detail compares scope-wide official sales with exact variant and 
   assert.match(componentSource, /整条链接官方销量（件）/);
   assert.match(componentSource, /listingLabel/);
   assert.match(componentSource, /series\.listing_at/);
-  assert.match(componentSource, /整条链接全部 Offer/);
-  assert.match(componentSource, /不受列表区间影响/);
+  assert.match(componentSource, /官方销量 · 全部自有报价/);
+  assert.doesNotMatch(componentSource, /不受列表区间影响/);
   assert.match(componentSource, /已完整 \$\{summary\.verifiedDays\}天 · 尚未完整 \$\{summary\.partialDays\}天/);
   assert.doesNotMatch(componentSource, /日内/);
   assert.doesNotMatch(componentSource, /appliedStartDate|appliedEndDate|activeRangeLabel/);

@@ -630,6 +630,7 @@ def test_client_rejects_non_get_requests() -> None:
     }
     assert public_methods == {
         "iter_items",
+        "get_balances",
         "list_offers",
         "list_sales",
         "list_returns",

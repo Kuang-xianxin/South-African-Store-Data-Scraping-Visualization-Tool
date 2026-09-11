@@ -31,10 +31,13 @@ from takealot_ops.erp.web import (
     _aggregate_logistics_payloads,
     _aggregate_platform_warehouse_payloads,
     _aggregate_store_revenue_series,
+    _competitor_browser_proxy_from_environment,
+    _environment_flag_enabled,
     _load_own_store_returns,
     _own_store_sales_comparison_records,
     create_app,
 )
+from takealot_ops.settings import SettingsError
 from takealot_ops.logistics.service import LogisticsOverviewService
 from takealot_ops.storage.migrations import create_schema
 from takealot_ops.storage.models import (
@@ -62,6 +65,90 @@ PROJECT_ROOT = Path(__file__).parents[2]
 TRUSTED_PRODUCT_IMAGE_URL = (
     "https://takealot.s3.amazonaws.com/covers_images/37b5fc661b694ed5969280cc0cea2ce4/s.file"
 )
+
+
+def test_competitor_browser_proxy_defaults_to_direct(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("TAKEALOT_COMPETITOR_BROWSER_PROXY", raising=False)
+
+    assert _competitor_browser_proxy_from_environment() is None
+
+
+def test_competitor_browser_proxy_accepts_only_canonical_loopback_socks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(
+        "TAKEALOT_COMPETITOR_BROWSER_PROXY",
+        "socks5://localhost:17890/",
+    )
+
+    assert (
+        _competitor_browser_proxy_from_environment()
+        == "socks5://127.0.0.1:17890"
+    )
+
+
+@pytest.mark.parametrize(
+    "proxy",
+    (
+        "http://127.0.0.1:17890",
+        "socks5://192.168.110.13:17890",
+        "socks5://user:password@127.0.0.1:17890",
+        "socks5://127.0.0.1:17890/path",
+        "socks5://127.0.0.1:not-a-port",
+    ),
+)
+def test_competitor_browser_proxy_rejects_non_loopback_or_ambiguous_values(
+    monkeypatch: pytest.MonkeyPatch,
+    proxy: str,
+) -> None:
+    monkeypatch.setenv("TAKEALOT_COMPETITOR_BROWSER_PROXY", proxy)
+
+    with pytest.raises(SettingsError, match="竞品浏览器代理"):
+        _competitor_browser_proxy_from_environment()
+
+
+@pytest.mark.parametrize("value", ("1", "true", "YES", " on "))
+def test_environment_flag_accepts_only_explicit_truthy_values(
+    monkeypatch: pytest.MonkeyPatch,
+    value: str,
+) -> None:
+    monkeypatch.setenv("TAKEALOT_WEB_ONLY", value)
+
+    assert _environment_flag_enabled("TAKEALOT_WEB_ONLY") is True
+
+
+def test_web_only_skips_scheduled_runner_and_blocks_loopback_trigger(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database_path = tmp_path / "web-only.db"
+    monkeypatch.setenv(
+        "TAKEALOT_DATABASE_URL",
+        f"sqlite:///{database_path.as_posix()}",
+    )
+    monkeypatch.setenv("TAKEALOT_WEB_ONLY", "1")
+    monkeypatch.setenv("TAKEALOT_DEPLOYMENT_LABEL", "green-main")
+    starts: list[bool] = []
+    monkeypatch.setattr(
+        "takealot_ops.erp.web.ScheduledCompetitorBatchRunner.start",
+        lambda _self: starts.append(True),
+    )
+    app = create_app(tmp_path)
+
+    with TestClient(app, client=("127.0.0.1", 50000)) as client:
+        health = client.get("/api/health")
+        trigger = client.post("/api/internal/competitors/scheduled-trigger", json={})
+
+    assert health.status_code == 200
+    assert health.json() == {"status": "ok", "application": "takealot-erp"}
+    assert health.headers["X-Takealot-Deployment"] == "green-main"
+    assert trigger.status_code == 503
+    assert trigger.json()["detail"] == "蓝绿过渡网页实例不启动竞品自动批次"
+    assert starts == []
+    assert app.state.web_only is True
+    assert app.state.scheduled_competitor_runner.status()["run_status"] == "idle"
 
 
 def test_store_revenue_series_excludes_the_open_sast_day() -> None:
@@ -369,64 +456,6 @@ def test_competitor_detail_requests_only_the_selected_plid(
     assert profitability_calls[0]["engine"] is app.state.read_engine
 
 
-def test_competitor_overview_attaches_persisted_category_paths_to_cards(
-    tmp_path: Path,
-    monkeypatch,
-) -> None:
-    database_path = tmp_path / "competitor-card-categories.db"
-    monkeypatch.setenv(
-        "TAKEALOT_DATABASE_URL",
-        f"sqlite:///{database_path.as_posix()}",
-    )
-    category_path = [
-        {
-            "name": "Home & Kitchen",
-            "id": "10",
-            "type": "department",
-            "slug": "home-kitchen",
-        },
-        {
-            "name": "Bathroom Safety",
-            "id": "4321",
-            "type": "category",
-            "slug": "bathroom-safety-4321",
-        },
-    ]
-
-    def load_overview_dataset(_root: Path, **_kwargs):
-        return SimpleNamespace(
-            current=pd.DataFrame(
-                [
-                    {
-                        "plid": "101163999",
-                        "商品": "Raised Toilet Seat",
-                        "来源": "competitor",
-                    }
-                ]
-            ),
-            store_current=pd.DataFrame(),
-            category_paths={"101163999": category_path},
-            own_follower_events=[],
-            date_range_payload=lambda: {},
-        )
-
-    monkeypatch.setattr(
-        "takealot_ops.erp.web._load_competitor_dataset",
-        load_overview_dataset,
-    )
-    app = create_app(tmp_path)
-
-    with TestClient(app, client=("127.0.0.1", 50000)) as client:
-        _bootstrap(client)
-        response = client.get("/api/competitors?include_own_store=false")
-
-    assert response.status_code == 200
-    assert response.json()["items"][0]["类目路径"] == category_path
-    assert [
-        item["name"] for item in response.json()["items"][0]["类目路径"]
-    ] == ["Home & Kitchen", "Bathroom Safety"]
-
-
 def test_own_store_sales_comparison_matches_the_visible_store_scope(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -501,18 +530,80 @@ def test_own_store_sales_comparison_matches_the_visible_store_scope(
             "plids": {"scope-plid"},
             "store_codes": {"store-a", "store-b"},
             "through": date(2026, 8, 3),
-            "start": date(2026, 8, 3) - timedelta(days=89),
         }
     ]
     assert records == [
         {
             "plid": "scope-plid",
-            "自有官方销量": {"7": 3, "15": 3, "30": 3, "60": 3, "90": 3},
+            "自有官方销量": {
+                "7": 3, "15": 3, "30": 3, "60": 3, "90": 3,
+                "total": 3, "total_partial_days": 0, "total_missing_days": 2,
+            },
             "自有官方销量截至": "2026-08-03",
             "自有官方销量店铺数": 2,
             "自有官方销量Offer数": 2,
+            "自有上架时间": "2026-08-01T09:00:00+08:00",
+            "自有上架日期": "2026-08-01",
         }
     ]
+
+
+def test_competitor_overview_attaches_persisted_category_paths_to_cards(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    database_path = tmp_path / "competitor-card-categories.db"
+    monkeypatch.setenv(
+        "TAKEALOT_DATABASE_URL",
+        f"sqlite:///{database_path.as_posix()}",
+    )
+    category_path = [
+        {
+            "name": "Home & Kitchen",
+            "id": "10",
+            "type": "department",
+            "slug": "home-kitchen",
+        },
+        {
+            "name": "Bathroom Safety",
+            "id": "4321",
+            "type": "category",
+            "slug": "bathroom-safety-4321",
+        },
+    ]
+
+    def load_overview_dataset(_root: Path, **_kwargs):
+        return SimpleNamespace(
+            current=pd.DataFrame(
+                [
+                    {
+                        "plid": "101163999",
+                        "商品": "Raised Toilet Seat",
+                        "来源": "competitor",
+                    }
+                ]
+            ),
+            store_current=pd.DataFrame(),
+            category_paths={"101163999": category_path},
+            own_follower_events=[],
+            date_range_payload=lambda: {},
+        )
+
+    monkeypatch.setattr(
+        "takealot_ops.erp.web._load_competitor_dataset",
+        load_overview_dataset,
+    )
+    app = create_app(tmp_path)
+
+    with TestClient(app, client=("127.0.0.1", 50000)) as client:
+        _bootstrap(client)
+        response = client.get("/api/competitors?include_own_store=false")
+
+    assert response.status_code == 200
+    assert response.json()["items"][0]["类目路径"] == category_path
+    assert [
+        item["name"] for item in response.json()["items"][0]["类目路径"]
+    ] == ["Home & Kitchen", "Bathroom Safety"]
 
 
 def test_competitor_detail_returns_the_selected_current_radar_item(
@@ -1020,12 +1111,12 @@ def test_personal_watchlist_overview_projects_only_visible_membership_plids(
             current_store.data_connected = True
             session.add(
                 ErpStore(
-                        code="store-02",
-                        display_name="Beta Store",
-                        active=True,
-                        data_connected=True,
-                        created_at=now,
-                        updated_at=now,
+                    code="store-02",
+                    display_name="Beta Store",
+                    active=True,
+                    data_connected=True,
+                    created_at=now,
+                    updated_at=now,
                 )
             )
         engine.dispose()
@@ -1214,6 +1305,9 @@ def test_competitor_radar_returns_automatic_store_targets_and_separate_items(
         true_competitor_overview = client.get(
             "/api/competitors?include_own_store=false"
         )
+        initial_dates = client.get("/api/competitors/date-range")
+        assert initial_dates.status_code == 200
+        assert initial_dates.json() == true_competitor_overview.json()["date_range"]
         all_store_overview = client.get("/api/competitors?own_store_scope=all")
         operating_store_overview = client.get(
             "/api/competitors?own_store_scope=operating"
@@ -1222,9 +1316,11 @@ def test_competitor_radar_returns_automatic_store_targets_and_separate_items(
         all_store_own_store_overview = client.get(
             "/api/competitors/own-store?own_store_scope=all"
         )
+        prepared_lists = dict(app.state.radar_page_cache._entries)
         one_plid_own_store_overview = client.get(
             "/api/competitors/own-store?own_store_scope=all&plid=87654321"
         )
+        assert dict(app.state.radar_page_cache._entries) == prepared_lists
         operating_own_store_overview = client.get(
             "/api/competitors/own-store?own_store_scope=operating"
         )
@@ -2384,7 +2480,7 @@ def test_store_summary_compares_only_accessible_connected_stores(
             }
 
         monkeypatch.setattr(
-            "takealot_ops.erp.web.load_erp_dataset",
+            "takealot_ops.erp.web.load_summary_dataset",
             fake_load_dataset,
         )
         monkeypatch.setattr(
@@ -3394,6 +3490,7 @@ def test_erp_reuses_and_recycles_hidden_competitor_browser(
     monkeypatch,
 ) -> None:
     public_clients: list[object] = []
+    public_client_proxies: list[str | None] = []
     collector_clients: list[object] = []
     link_delays: list[float] = []
     link_delay_ranges: list[tuple[float, float]] = []
@@ -3406,9 +3503,10 @@ def test_erp_reuses_and_recycles_hidden_competitor_browser(
         return (min_seconds + max_seconds) / 2
 
     class FakePublicClient:
-        def __init__(self) -> None:
+        def __init__(self, *, proxy_server: str | None = None) -> None:
             self.close_calls = 0
             public_clients.append(self)
+            public_client_proxies.append(proxy_server)
 
         async def close(self) -> None:
             self.close_calls += 1
@@ -3451,6 +3549,10 @@ def test_erp_reuses_and_recycles_hidden_competitor_browser(
         "TAKEALOT_DATABASE_URL",
         f"sqlite:///{database_path.as_posix()}",
     )
+    monkeypatch.setenv(
+        "TAKEALOT_COMPETITOR_BROWSER_PROXY",
+        "socks5://127.0.0.1:17890",
+    )
     monkeypatch.setattr(
         "takealot_ops.erp.web.CompetitorPublicClient",
         FakePublicClient,
@@ -3483,6 +3585,7 @@ def test_erp_reuses_and_recycles_hidden_competitor_browser(
 
     assert statuses == [200, 200, 503, 200]
     assert len(public_clients) == 2
+    assert public_client_proxies == ["socks5://127.0.0.1:17890"] * 2
     assert collector_clients[:3] == [public_clients[0]] * 3
     assert collector_clients[3] is public_clients[1]
     assert [client.close_calls for client in public_clients] == [1, 1]

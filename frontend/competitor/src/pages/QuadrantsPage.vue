@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import { cachedNumberFormatter } from "../numberFormatters";
+import { useLiveUpdates } from "../liveUpdates";
 import { computed, onBeforeUnmount, ref, shallowRef, watch } from "vue";
 
 import { fetchQuadrants } from "../api";
@@ -17,6 +19,13 @@ const props = defineProps<{
   currentStoreCode?: string;
   onPermissionDenied?: () => void;
 }>();
+useLiveUpdates("quadrants", async () => {
+  await load(true);
+}, {
+  busy: () => loading.value,
+  editing: () => false,
+});
+
 const data = shallowRef<QuadrantPayload | null>(null);
 const loading = ref(true);
 const copiedOfferId = ref("");
@@ -126,12 +135,13 @@ watch(productPageCount, (pageCount) => {
   if (productPage.value > pageCount) productPage.value = pageCount;
 });
 
-async function load() {
+async function load(background: unknown = false) {
+  const preserve = background === true;
   const requestRevision = ++loadRequestRevision;
   const requestedAsOf = props.asOf;
   const requestedStoreScope = props.storeScope ?? "current";
-  loading.value = true;
-  markerImagesReady.value = false;
+  loading.value = !preserve;
+  if (!preserve) markerImagesReady.value = false;
   cancelMarkerImageFrame();
   try {
     const nextData = await fetchQuadrants(
@@ -145,7 +155,7 @@ async function load() {
       || requestedStoreScope !== (props.storeScope ?? "current")
     ) return;
     data.value = nextData;
-    productPage.value = 1;
+    if (!preserve) productPage.value = 1;
     scheduleMarkerImages();
   } finally {
     if (requestRevision === loadRequestRevision) loading.value = false;
@@ -163,7 +173,7 @@ function rankValue(value: number | null) {
 function number(value: number | null | undefined) {
   return value === null || value === undefined
     ? "—"
-    : new Intl.NumberFormat("zh-CN").format(value);
+    : cachedNumberFormatter("zh-CN").format(value);
 }
 
 function productName(item: QuadrantItem) {
@@ -369,7 +379,7 @@ onBeforeUnmount(() => {
           </div>
           <span>
             已定位 {{ plottableItems.length }} 个 ·
-            缺少坐标 {{ missingCoordinateCount }} 个保留在下表
+            缺少坐标 {{ missingCoordinateCount }} 个
           </span>
         </div>
         <div class="matrix-shell">
@@ -516,7 +526,7 @@ onBeforeUnmount(() => {
                 <b>{{ firstListingLabel(hoveredItem) }}</b>
               </span>
               <span>
-                <small>最近补货时间 · 平台库存增加记录</small>
+                <small>最近补货时间</small>
                 <b>{{ restockLabel(hoveredItem) }}</b>
               </span>
               <em>
@@ -640,7 +650,7 @@ onBeforeUnmount(() => {
                 <dd>{{ firstListingLabel(item) }}</dd>
               </div>
               <div class="wide">
-                <dt>最近补货时间 · 平台库存增加记录</dt>
+                <dt>最近补货时间</dt>
                 <dd>{{ restockLabel(item) }}</dd>
               </div>
               <div class="wide">

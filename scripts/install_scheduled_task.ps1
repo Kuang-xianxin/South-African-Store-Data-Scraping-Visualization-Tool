@@ -8,6 +8,10 @@ param(
 
     [Parameter(Mandatory = $false)]
     [ValidatePattern('^(?:[01]\d|2[0-3]):[0-5]\d$')]
+    [string]$AfternoonAt = '14:00',
+
+    [Parameter(Mandatory = $false)]
+    [ValidatePattern('^(?:[01]\d|2[0-3]):[0-5]\d$')]
     [string]$EveningAt = '18:00',
 
     [Parameter(Mandatory = $false)]
@@ -20,18 +24,30 @@ param(
 
     [Parameter(Mandatory = $false)]
     [ValidatePattern('^(?:[01]\d|2[0-3]):[0-5]\d$')]
-    [string]$CompetitorCollectionAt = '09:00'
+    [string]$CompetitorCollectionAt = '09:00',
+
+    [Parameter(Mandatory = $false)]
+    [ValidateRange(1, 60)]
+    [int]$ErpHealthIntervalMinutes = 1
 )
 
 $ErrorActionPreference = 'Stop'
 $ResolvedProjectPath = (Resolve-Path -LiteralPath $ProjectPath).Path
 $PythonPath = Join-Path $ResolvedProjectPath '.venv\Scripts\python.exe'
+$PythonWindowlessPath = Join-Path $ResolvedProjectPath '.venv\Scripts\pythonw.exe'
+$ErpHealthLauncherPath = Join-Path $ResolvedProjectPath 'scripts\run_erp_health_guard.pyw'
 $ErpStartupScriptPath = Join-Path $ResolvedProjectPath 'scripts\ensure_erp_started.ps1'
 if (-not (Test-Path -LiteralPath $PythonPath -PathType Leaf)) {
     throw "Project Python environment not found: $PythonPath"
 }
 if (-not (Test-Path -LiteralPath $ErpStartupScriptPath -PathType Leaf)) {
     throw "ERP startup script not found: $ErpStartupScriptPath"
+}
+if (-not (Test-Path -LiteralPath $PythonWindowlessPath -PathType Leaf)) {
+    throw "Windowless project Python not found: $PythonWindowlessPath"
+}
+if (-not (Test-Path -LiteralPath $ErpHealthLauncherPath -PathType Leaf)) {
+    throw "ERP health launcher not found: $ErpHealthLauncherPath"
 }
 
 $EscapedProjectPath = $ResolvedProjectPath.Replace("'", "''")
@@ -58,6 +74,9 @@ $ChineseDailyUpdate = -join [char[]](
 $ChineseEveningReview = -join [char[]](
     0x8FD0, 0x8425, 0x65E5, 0x62A5, 0x665A, 0x95F4, 0x590D, 0x6838
 )
+$ChineseAfternoonUpdate = -join [char[]](
+    0x5E97, 0x94FA, 0x6570, 0x636E, 0x5348, 0x95F4, 0x66F4, 0x65B0
+)
 $ChinesePreCloseUpdate = -join [char[]](
     0x8FD0, 0x8425, 0x65E5, 0x62A5, 0x5468, 0x671F, 0x672B, 0x66F4, 0x65B0
 )
@@ -75,6 +94,9 @@ $ChineseObsoleteFollowerTracking = -join [char[]](
 $ChineseErpStartup = -join [char[]](
     0x767B, 0x5F55, 0x540E, 0x81EA, 0x52A8, 0x542F, 0x52A8
 )
+$ChineseErpHealthGuard = -join [char[]](
+    0x5065, 0x5EB7, 0x5B88, 0x62A4
+)
 
 $TaskDefinitions = @(
     @{
@@ -82,6 +104,13 @@ $TaskDefinitions = @(
         At = $MorningAt
         Arguments = 'daily-report-run --slot morning --all-stores'
         Description = 'Morning collection and immutable operations report capture.'
+    },
+    @{
+        Name = "Takealot $ChineseAfternoonUpdate"
+        At = $AfternoonAt
+        # Supplemental capture: retain morning/evening/pre-close report baselines.
+        Arguments = 'daily-report-run --slot manual --all-stores'
+        Description = 'Afternoon supplemental full-store refresh with an immutable additional report capture.'
     },
     @{
         Name = "Takealot $ChineseEveningReview"
@@ -161,3 +190,26 @@ Register-ScheduledTask `
     -InputObject $StartupTask `
     -Force
 Write-Host "Installed $StartupTaskName for $CurrentUser with a 30-second logon delay"
+
+$HealthGuardTaskName = "Takealot ERP $ChineseErpHealthGuard"
+# The windowless launcher forwards -QuietWhenHealthy and the original exit code.
+$HealthGuardActionArguments = '"' + $ErpHealthLauncherPath + '"'
+$HealthGuardAction = New-ScheduledTaskAction `
+    -Execute $PythonWindowlessPath `
+    -Argument $HealthGuardActionArguments `
+    -WorkingDirectory $ResolvedProjectPath
+$HealthGuardTrigger = New-ScheduledTaskTrigger `
+    -Once `
+    -At (Get-Date).AddMinutes($ErpHealthIntervalMinutes) `
+    -RepetitionInterval (New-TimeSpan -Minutes $ErpHealthIntervalMinutes)
+$HealthGuardTask = New-ScheduledTask `
+    -Action $HealthGuardAction `
+    -Trigger $HealthGuardTrigger `
+    -Settings $StartupSettings `
+    -Principal $StartupPrincipal `
+    -Description 'Silently check the formal ERP and recover it through the guarded restart chain when unhealthy.'
+Register-ScheduledTask `
+    -TaskName $HealthGuardTaskName `
+    -InputObject $HealthGuardTask `
+    -Force
+Write-Host "Installed $HealthGuardTaskName every $ErpHealthIntervalMinutes minute(s) for $CurrentUser"

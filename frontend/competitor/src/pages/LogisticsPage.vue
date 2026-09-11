@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import { cachedNumberFormatter } from "../numberFormatters";
+import { useLiveUpdates } from "../liveUpdates";
 import { computed, ref, watch } from "vue";
 
 import {
@@ -22,6 +24,13 @@ const props = defineProps<{
   onPermissionDenied?: () => void;
 }>();
 void props.asOf;
+
+useLiveUpdates("logistics", async () => {
+  await load(false, true); return !error.value;
+}, {
+  busy: () => loading.value || refreshing.value || Boolean(savingKey.value),
+  editing: () => Boolean(revokingLinkKey.value || revokeNote.value),
+});
 
 const loading = ref(true);
 const refreshing = ref(false);
@@ -75,15 +84,15 @@ const candidateGroups = computed(() => {
 
 watch(() => props.storeScope, () => void load(false), { immediate: true });
 
-async function load(force: boolean) {
+async function load(force: boolean, preserve = false) {
   if (force && multiStore.value) {
-    actionMessage.value = "全部店铺查看只读本地快照；请切换到明确单店后再手动同步。";
+    actionMessage.value = "请切换到单店后同步。";
     return;
   }
   const requestRevision = ++loadRequestRevision;
   const requestedStoreScope = props.storeScope ?? "current";
   if (force) refreshing.value = true;
-  else loading.value = true;
+  else loading.value = !preserve;
   error.value = "";
   try {
     const nextPayload = await fetchLogisticsOverview(
@@ -178,7 +187,7 @@ function linkKey(link: LogisticsConfirmedLink) {
 }
 
 function number(value: number | null | undefined) {
-  return new Intl.NumberFormat("zh-CN").format(value ?? 0);
+  return cachedNumberFormatter("zh-CN").format(value ?? 0);
 }
 
 function text(value: string | number | null | undefined, fallback = "—") {
@@ -227,7 +236,7 @@ function providerStatus(
     </header>
 
     <div v-if="loading" class="state-card">正在读取本地物流快照……</div>
-    <div v-else-if="error" class="state-card error">{{ error }}</div>
+    <div v-else-if="error && !payload" class="state-card error">{{ error }}</div>
     <template v-else-if="payload">
       <section class="connection-grid">
         <article :class="['connection-card', { disconnected: !payload.w8.live_connected }]">
@@ -320,7 +329,7 @@ function providerStatus(
             <p>OPERATOR CONFIRMATION</p>
             <h3>分级候选与永久关联</h3>
           </div>
-          <span>候选不是平台原生确认关系；人工确认后写入本地审计表</span>
+          <span>候选关联需人工确认</span>
         </div>
 
         <div v-if="candidateGroups.length" class="candidate-groups">
@@ -394,7 +403,7 @@ function providerStatus(
           <article v-for="group in payload.matching.split_batch_groups" :key="`${group.w8_order_no}-${group.takealot_shipment_ids.join('-')}`">
             <strong>{{ group.w8_order_no }} ↔ {{ group.shipment_count }} 个 Takealot Shipment</strong>
             <span>#{{ group.takealot_shipment_ids.join('、#') }} · 合计 {{ number(group.w8_quantity) }} 件 · 最大日期差 {{ group.max_date_gap_days }} 天</span>
-            <small>{{ group.method }}；这里只提示组合，不自动建立多单关联。</small>
+            <small>{{ group.method }}；组合待人工核对。</small>
           </article>
         </div>
 
@@ -467,17 +476,17 @@ function providerStatus(
           <span>头程号与箱唛可用于关联平台货件</span>
         </div>
         <div class="table-scroll">
-          <table>
-            <thead><tr><th>长睿入库单</th><th>状态</th><th>头程号</th><th>箱唛</th><th>SKU种类</th><th>预报数量</th><th>上架时间</th></tr></thead>
+          <table class="mobile-record-table">
+            <thead><tr><th scope="col">长睿入库单</th><th scope="col">状态</th><th scope="col">头程号</th><th scope="col">箱唛</th><th scope="col">SKU种类</th><th scope="col">预报数量</th><th scope="col">上架时间</th></tr></thead>
             <tbody>
               <tr v-for="row in payload.w8.recent_inbound" :key="row.order_no">
-                <td><strong>{{ text(row.order_no) }}</strong></td>
-                <td><span class="status-chip success">{{ text(row.status) }}</span></td>
-                <td>{{ text(row.headway_no) }}</td>
-                <td>{{ text(row.shipping_mark) }}</td>
-                <td>{{ number(row.sku_types) }}</td>
-                <td>{{ number(row.forecast_quantity) }}</td>
-                <td>{{ text(row.shelf_date) }}</td>
+                <td data-label="长睿入库单"><strong>{{ text(row.order_no) }}</strong></td>
+                <td data-label="状态"><span class="status-chip success">{{ text(row.status) }}</span></td>
+                <td data-label="头程号">{{ text(row.headway_no) }}</td>
+                <td data-label="箱唛">{{ text(row.shipping_mark) }}</td>
+                <td data-label="SKU种类">{{ number(row.sku_types) }}</td>
+                <td data-label="预报数量">{{ number(row.forecast_quantity) }}</td>
+                <td data-label="上架时间">{{ text(row.shelf_date) }}</td>
               </tr>
               <tr v-if="!payload.w8.recent_inbound.length"><td colspan="7">暂无入库单</td></tr>
             </tbody>
@@ -488,20 +497,19 @@ function providerStatus(
       <section class="logistics-section table-section">
         <div class="logistics-section-heading">
           <div><p>RECENT OUTBOUND</p><h3>最近长睿出库单</h3></div>
-          <span>只显示单号、运单和作业状态，不展示收件人地址</span>
         </div>
         <div class="table-scroll">
-          <table>
-            <thead><tr><th>长睿出库单</th><th>状态</th><th>运单号</th><th>物流类型</th><th>SKU种类</th><th>数量</th><th>创建时间</th></tr></thead>
+          <table class="mobile-record-table">
+            <thead><tr><th scope="col">长睿出库单</th><th scope="col">状态</th><th scope="col">运单号</th><th scope="col">物流类型</th><th scope="col">SKU种类</th><th scope="col">数量</th><th scope="col">创建时间</th></tr></thead>
             <tbody>
               <tr v-for="row in payload.w8.recent_outbound" :key="row.order_no">
-                <td><strong>{{ text(row.order_no) }}</strong></td>
-                <td><span class="status-chip">{{ text(row.status) }}</span></td>
-                <td class="mono">{{ text(row.waybill_no) }}</td>
-                <td>{{ text(row.logistics_type) }}</td>
-                <td>{{ number(row.sku_types) }}</td>
-                <td>{{ number(row.total_quantity) }}</td>
-                <td>{{ text(row.created_at) }}</td>
+                <td data-label="长睿出库单"><strong>{{ text(row.order_no) }}</strong></td>
+                <td data-label="状态"><span class="status-chip">{{ text(row.status) }}</span></td>
+                <td data-label="运单号" class="mono">{{ text(row.waybill_no) }}</td>
+                <td data-label="物流类型">{{ text(row.logistics_type) }}</td>
+                <td data-label="SKU种类">{{ number(row.sku_types) }}</td>
+                <td data-label="数量">{{ number(row.total_quantity) }}</td>
+                <td data-label="创建时间">{{ text(row.created_at) }}</td>
               </tr>
               <tr v-if="!payload.w8.recent_outbound.length"><td colspan="7">暂无出库单</td></tr>
             </tbody>
@@ -515,18 +523,18 @@ function providerStatus(
           <span>发送、实收和破损来自 Shipment Items</span>
         </div>
         <div class="table-scroll">
-          <table>
-            <thead><tr><th>Shipment / PO</th><th>状态</th><th>目的仓</th><th>发送</th><th>实收</th><th>破损</th><th>要求到仓</th><th>Tracking Info</th></tr></thead>
+          <table class="mobile-record-table">
+            <thead><tr><th scope="col">Shipment / PO</th><th scope="col">状态</th><th scope="col">目的仓</th><th scope="col">发送</th><th scope="col">实收</th><th scope="col">破损</th><th scope="col">要求到仓</th><th scope="col">Tracking Info</th></tr></thead>
             <tbody>
               <tr v-for="row in payload.takealot.recent_shipments" :key="row.store_scope_key || `${row.store_code || 'current'}:${row.shipment_id || row.reference}`">
-                <td><strong>#{{ text(row.shipment_id) }}</strong><small>{{ text(row.purchase_order_number) }}</small><small v-if="multiStore">{{ row.store_name || row.store_code || "—" }}</small></td>
-                <td><span class="status-chip platform">{{ shipmentState(row) }}</span></td>
-                <td>{{ text(row.destination_region) }}</td>
-                <td>{{ number(row.quantity_sending) }}</td>
-                <td>{{ number(row.quantity_received) }}</td>
-                <td>{{ number(row.quantity_damaged) }}</td>
-                <td>{{ text(row.due_date) }}</td>
-                <td>{{ text(row.tracking_info) }}</td>
+                <td data-label="Shipment / PO"><strong>#{{ text(row.shipment_id) }}</strong><small>{{ text(row.purchase_order_number) }}</small><small v-if="multiStore">{{ row.store_name || row.store_code || "—" }}</small></td>
+                <td data-label="状态"><span class="status-chip platform">{{ shipmentState(row) }}</span></td>
+                <td data-label="目的仓">{{ text(row.destination_region) }}</td>
+                <td data-label="发送">{{ number(row.quantity_sending) }}</td>
+                <td data-label="实收">{{ number(row.quantity_received) }}</td>
+                <td data-label="破损">{{ number(row.quantity_damaged) }}</td>
+                <td data-label="要求到仓">{{ text(row.due_date) }}</td>
+                <td data-label="物流追踪信息" data-mobile-wide>{{ text(row.tracking_info) }}</td>
               </tr>
               <tr v-if="!payload.takealot.recent_shipments.length"><td colspan="8">暂无平台货件</td></tr>
             </tbody>
@@ -535,15 +543,14 @@ function providerStatus(
       </section>
 
       <section
-        v-if="payload.w8.warnings.length || payload.takealot.warnings?.length || payload.matching.warnings.length || payload.boundaries.length"
+        v-if="payload.w8.warnings.length || payload.takealot.warnings?.length || payload.matching.warnings.length"
         class="boundary-panel"
       >
-        <h3>当前口径与待完善项</h3>
+        <h3>数据提示</h3>
         <ul>
           <li v-for="warning in payload.w8.warnings" :key="warning">{{ warning }}</li>
           <li v-for="warning in payload.takealot.warnings || []" :key="warning">{{ warning }}</li>
           <li v-for="warning in payload.matching.warnings" :key="warning">{{ warning }}</li>
-          <li v-for="boundary in payload.boundaries" :key="boundary">{{ boundary }}</li>
         </ul>
       </section>
     </template>
@@ -645,4 +652,20 @@ td small { display: block; margin-top: 4px; color: #829088; }
 @media (max-width: 1050px) { .metric-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } .relation-panel { grid-template-columns: 1fr; } }
 @media (max-width: 720px) { .logistics-hero { align-items: stretch; flex-direction: column; } .connection-grid, .dual-panel, .relation-stats, .candidate-grid { grid-template-columns: 1fr; } .metric-grid { grid-template-columns: 1fr 1fr; } .logistics-section-heading { align-items: start; flex-direction: column; } .confirmed-links > article { grid-template-columns: 1fr; } .confirmed-links form { align-items: stretch; flex-direction: column; } }
 @media (max-width: 460px) { .metric-grid { grid-template-columns: 1fr; } }
+
+/* Mobile layout: retain every field and existing action. */
+
+@media (max-width: 760px) {
+  .logistics-page, .logistics-section, .connection-card { min-width: 0; }
+  .logistics-hero { padding: 18px 16px; }
+  .logistics-section { padding: 14px; }
+  .candidate-route { grid-template-columns: minmax(0, 1fr); }
+  .candidate-route > span { justify-self: center; }
+  .candidate-actions, .logistics-actions { flex-wrap: wrap; }
+  .candidate-actions > button { flex: 1 1 120px; }
+  .metric-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .metric-grid article { min-width: 0; padding: 14px 12px; }
+  .metric-grid strong { overflow-wrap: anywhere; }
+}
+
 </style>

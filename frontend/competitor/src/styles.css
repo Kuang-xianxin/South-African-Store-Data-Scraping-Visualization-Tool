@@ -5512,6 +5512,38 @@ td small {
   font-weight: 500;
 }
 
+.own-detail-category-nodes {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  width: 100%;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.own-detail-category-nodes li {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.own-detail-category-nodes .competitor-category-node-button {
+  min-height: 36px;
+  overflow-wrap: anywhere;
+}
+
+.own-detail-competitor-query {
+  margin-top: 8px;
+}
+
+.catalog-from-detail-backdrop {
+  z-index: 102;
+}
+
+.catalog-result-detail-backdrop {
+  z-index: 106;
+}
+
 .competitor-modal-close {
   flex: 0 0 auto;
   width: 38px;

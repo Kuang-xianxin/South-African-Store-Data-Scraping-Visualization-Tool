@@ -9,7 +9,7 @@ from statistics import median
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import and_, func, select
+from sqlalchemy import and_, func, select, tuple_
 from sqlalchemy.engine import Engine
 
 from takealot_ops.storage.models import (
@@ -349,7 +349,6 @@ def load_store_traffic_series(
         )
         aggregates: dict[tuple[str, str], tuple[int, int, int | None]] = {}
         if successful_keys:
-            run_ids = tuple(sorted({run_id for _, run_id in successful_keys}))
             aggregate_statement = (
                 select(
                     observation.c.store_code,
@@ -359,8 +358,7 @@ def load_store_traffic_series(
                     func.sum(observation.c.page_views_30_days).label("total"),
                 )
                 .where(
-                    observation.c.store_code.in_(codes),
-                    observation.c.run_id.in_(run_ids),
+                    tuple_(observation.c.store_code, observation.c.run_id).in_(sorted(successful_keys)),
                 )
                 .group_by(observation.c.store_code, observation.c.run_id)
             )

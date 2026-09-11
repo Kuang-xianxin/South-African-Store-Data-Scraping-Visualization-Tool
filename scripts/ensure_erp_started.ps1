@@ -1,7 +1,8 @@
 [CmdletBinding()]
 param(
     [int]$MySqlWaitSeconds = 60,
-    [int]$HealthTimeoutSeconds = 60
+    [int]$HealthTimeoutSeconds = 60,
+    [switch]$QuietWhenHealthy
 )
 
 $ErrorActionPreference = 'Stop'
@@ -83,8 +84,10 @@ try {
         $HealthResponse.status -eq 'ok' -and
         $HealthResponse.application -eq 'takealot-erp'
     ) {
-        Write-ErpStartupLog "ERP already healthy at $HealthUrl; no restart needed."
-        Write-Output "ERP already healthy: $HealthUrl"
+        if (-not $QuietWhenHealthy) {
+            Write-ErpStartupLog "ERP already healthy at $HealthUrl; no restart needed."
+            Write-Output "ERP already healthy: $HealthUrl"
+        }
         return
     }
 

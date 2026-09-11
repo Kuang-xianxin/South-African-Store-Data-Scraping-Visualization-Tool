@@ -9,6 +9,8 @@ export const OWN_STORE_SALES_CHART = {
   plotBottom: 188,
 } as const;
 
+export type OwnStoreSalesChartLayout = { [Key in keyof typeof OWN_STORE_SALES_CHART]: number };
+
 export type OwnStoreSalesGranularity = "day" | "week" | "month";
 export type OwnStoreSalesGranularityRequest = OwnStoreSalesGranularity | "auto";
 
@@ -163,8 +165,9 @@ export function getOwnStoreSalesRecentRange(
 
 export function buildOwnStoreSalesChart(
   source: OwnStoreSalesBucket[],
+  layout: OwnStoreSalesChartLayout = OWN_STORE_SALES_CHART,
 ): OwnStoreSalesChartGeometry {
-  const { plotLeft, plotRight, plotTop, plotBottom } = OWN_STORE_SALES_CHART;
+  const { plotLeft, plotRight, plotTop, plotBottom } = layout;
   const sourceMaximum = source.reduce(
     (maximum, point) => Math.max(maximum, point.units ?? 0),
     0,
@@ -213,7 +216,7 @@ export function buildOwnStoreSalesChart(
     label: numberLabel(value),
     y: plotBottom - ((plotBottom - plotTop) * value) / yMaximum,
   }));
-  const xIndexes = uniqueIndexes(source.length);
+  const xIndexes = uniqueIndexes(source.length, Math.max(2, Math.min(7, Math.floor((plotRight - plotLeft) / 70))));
   const xTicks = xIndexes.map((index, position) => ({
     label: bucketAxisLabel(source[index]),
     x: points[index]?.x ?? plotLeft,
@@ -231,9 +234,10 @@ export function nearestOwnStoreSalesPointIndex(
   localPointerX: number,
   renderedWidth: number,
   pointCount: number,
+  layout: OwnStoreSalesChartLayout = OWN_STORE_SALES_CHART,
 ): number {
   if (pointCount <= 1 || renderedWidth <= 0) return 0;
-  const { width, plotLeft, plotRight } = OWN_STORE_SALES_CHART;
+  const { width, plotLeft, plotRight } = layout;
   const viewBoxX = (localPointerX / renderedWidth) * width;
   const ratio = Math.max(
     0,
@@ -266,9 +270,8 @@ function niceSalesTickStep(roughStep: number): number {
   return Math.max(1, step * magnitude);
 }
 
-function uniqueIndexes(length: number): number[] {
+function uniqueIndexes(length: number, maximumTickCount = 7): number[] {
   if (length <= 0) return [];
-  const maximumTickCount = 7;
   if (length <= maximumTickCount) {
     return Array.from({ length }, (_, index) => index);
   }

@@ -1,4 +1,9 @@
 <script setup lang="ts">
+import HomeDashboard from "../components/HomeDashboard.vue";
+import { useResponsiveChart } from "../useResponsiveChart";
+import { useStablePageHeight } from "../useStablePageHeight";
+import { cachedNumberFormatter } from "../numberFormatters";
+import { useLiveUpdates } from "../liveUpdates";
 import { computed, ref, watch } from "vue";
 
 import {
@@ -42,16 +47,28 @@ const props = defineProps<{
 const emit = defineEmits<{
   selectStore: [storeCode: string];
 }>();
+useLiveUpdates("overview", async () => {
+  await load(true);
+  if (salesAuditOpen.value) await loadSalesAudit(salesAuditData.value?.page ?? 1, true);
+  return !error.value && !storeError.value && (!salesAuditOpen.value || !salesAuditError.value);
+}, {
+  busy: () => loading.value || storeLoading.value || salesAuditLoading.value,
+  editing: () => false,
+});
+
 const data = ref<SummaryPayload | null>(null);
 const storeData = ref<StoreOverviewPayload | null>(null);
 const loading = ref(true);
 const storeLoading = ref(true);
+const homeLoading = ref(false);
+const { pageElement, pageStyle } = useStablePageHeight(
+  () => [props.rangeStart, props.rangeEnd],
+  () => loading.value || storeLoading.value || homeLoading.value,
+);
 const error = ref("");
 const storeError = ref("");
 const activeTrafficIndex = ref<number | null>(null);
-const activeRevenueIndex = ref<number | null>(null);
 const trafficTooltipPosition = ref<FloatingChartTooltipPosition | null>(null);
-const revenueTooltipPosition = ref<FloatingChartTooltipPosition | null>(null);
 const salesAuditOpen = ref(false);
 const salesAuditLoading = ref(false);
 const salesAuditError = ref("");
@@ -61,11 +78,7 @@ const salesAuditEnd = ref(props.rangeEnd);
 let loadRequestId = 0;
 let salesAuditRequestId = 0;
 
-const maxUnits = computed(() =>
-  Math.max(1, ...(data.value?.sales_series.map((item) => item.ordered_units ?? 0) ?? [1])),
-);
-
-const TRAFFIC_WIDTH = 760;
+const { chartElement: trafficChartElement, chartWidth: TRAFFIC_WIDTH } = useResponsiveChart(760);
 const TRAFFIC_HEIGHT = 250;
 const TRAFFIC_LEFT = 64;
 const TRAFFIC_RIGHT = 18;
@@ -102,7 +115,7 @@ const trafficChart = computed(() => {
   const padding = rawMin === rawMax ? Math.max(1, rawMax * 0.08) : (rawMax - rawMin) * 0.12;
   const minimum = Math.max(0, rawMin - padding);
   const maximum = Math.max(minimum + 1, rawMax + padding);
-  const plotWidth = TRAFFIC_WIDTH - TRAFFIC_LEFT - TRAFFIC_RIGHT;
+  const plotWidth = TRAFFIC_WIDTH.value - TRAFFIC_LEFT - TRAFFIC_RIGHT;
   const plotHeight = TRAFFIC_HEIGHT - TRAFFIC_TOP - TRAFFIC_BOTTOM;
   const x = (index: number) =>
     TRAFFIC_LEFT + (source.length === 1 ? plotWidth / 2 : (index / (source.length - 1)) * plotWidth);
@@ -157,7 +170,7 @@ const trafficChart = computed(() => {
     value,
     y: y(value),
   }));
-  const labelEvery = Math.max(1, Math.ceil(source.length / 6));
+  const labelEvery = Math.max(1, Math.ceil(source.length / (TRAFFIC_WIDTH.value < 500 ? 3 : 6)));
   const labels = dots.filter((_, index) => {
     if (index === 0 || index === dots.length - 1) return true;
     if (index % labelEvery !== 0) return false;
@@ -201,8 +214,6 @@ function aggregateKpi(key: SummableKpi, requireMetricDate = false) {
 }
 
 const storeTotals = computed(() => ({
-  latestUnits: aggregateKpi("latest_ordered_units"),
-  latestRevenue: aggregateKpi("latest_ordered_revenue"),
   sevenDayUnits: aggregateKpi("seven_day_ordered_units"),
   stockouts: aggregateKpi("stockout_products", true),
 }));
@@ -241,104 +252,6 @@ const singleStoreRevenueProjection = computed(() =>
   ),
 );
 
-const REVENUE_WIDTH = 760;
-const REVENUE_HEIGHT = 250;
-const REVENUE_LEFT = 76;
-const REVENUE_RIGHT = 18;
-const REVENUE_TOP = 20;
-const REVENUE_BOTTOM = 38;
-
-const revenueChart = computed(() => {
-  const source = storeData.value?.sales_revenue_series ?? [];
-  const values = source
-    .map((point) => point.total_ordered_revenue)
-    .filter((value): value is number => value !== null);
-  if (!source.length) {
-    return {
-      dots: [],
-      segments: [],
-      pendingSegments: [],
-      revisedSegments: [],
-      missingBridgeSegments: [],
-      ticks: [],
-      labels: [],
-    };
-  }
-  const maximum = Math.max(1, ...(values.map((value) => value * 1.08)));
-  const plotWidth = REVENUE_WIDTH - REVENUE_LEFT - REVENUE_RIGHT;
-  const plotHeight = REVENUE_HEIGHT - REVENUE_TOP - REVENUE_BOTTOM;
-  const x = (index: number) =>
-    REVENUE_LEFT
-    + (source.length === 1 ? plotWidth / 2 : (index / (source.length - 1)) * plotWidth);
-  const y = (value: number) => REVENUE_TOP + ((maximum - value) / maximum) * plotHeight;
-  const dots = source.map((point, index) => ({
-    point,
-    value: point.total_ordered_revenue,
-    x: x(index),
-    y: point.total_ordered_revenue === null
-      ? REVENUE_TOP + plotHeight
-      : y(point.total_ordered_revenue),
-  }));
-  const segments: string[] = [];
-  const pendingSegments: string[] = [];
-  const revisedSegments: string[] = [];
-  for (let index = 1; index < dots.length; index += 1) {
-    const previous = dots[index - 1];
-    const current = dots[index];
-    if (previous.value === null || current.value === null) continue;
-    const segment = `${previous.x},${previous.y} ${current.x},${current.y}`;
-    if (previous.point.data_status === "pending" || current.point.data_status === "pending") {
-      pendingSegments.push(segment);
-    } else if (
-      previous.point.data_status === "revised"
-      || current.point.data_status === "revised"
-    ) {
-      revisedSegments.push(segment);
-    } else {
-      segments.push(segment);
-    }
-  }
-  const missingBridgeSegments: string[] = [];
-  let previousKnownIndex: number | null = null;
-  let crossedMissingPoint = false;
-  dots.forEach((dot, index) => {
-    if (dot.value === null) {
-      if (previousKnownIndex !== null) crossedMissingPoint = true;
-      return;
-    }
-    if (crossedMissingPoint && previousKnownIndex !== null) {
-      const previous = dots[previousKnownIndex];
-      missingBridgeSegments.push(`${previous.x},${previous.y} ${dot.x},${dot.y}`);
-    }
-    previousKnownIndex = index;
-    crossedMissingPoint = false;
-  });
-  const ticks = [maximum, maximum / 2, 0].map((value) => ({
-    value,
-    y: y(value),
-  }));
-  const labelEvery = Math.max(1, Math.ceil(source.length / 6));
-  const labels = dots.filter((_, index) => {
-    if (index === 0 || index === dots.length - 1) return true;
-    if (index % labelEvery !== 0) return false;
-    return dots.length - 1 - index >= Math.max(2, Math.floor(labelEvery * 0.6));
-  });
-  return {
-    dots,
-    segments,
-    pendingSegments,
-    revisedSegments,
-    missingBridgeSegments,
-    ticks,
-    labels,
-  };
-});
-
-const latestRevenuePoint = computed(() => storeData.value?.sales_revenue_series.at(-1) ?? null);
-const activeRevenueDot = computed(() => {
-  const index = activeRevenueIndex.value;
-  return index === null ? null : revenueChart.value.dots[index] ?? null;
-});
 const salesAuditPageCount = computed(() => Math.max(
   1,
   Math.ceil((salesAuditData.value?.total ?? 0) / (salesAuditData.value?.page_size ?? 20)),
@@ -373,10 +286,11 @@ watch(
   },
 );
 
-async function load() {
+async function load(background: unknown = false) {
+  const preserve = background === true;
   const requestId = ++loadRequestId;
-  loading.value = !props.allStoresSelected;
-  storeLoading.value = props.allStoresSelected;
+  loading.value = !props.allStoresSelected && !preserve;
+  storeLoading.value = props.allStoresSelected && !preserve;
   error.value = "";
   storeError.value = "";
   if (props.allStoresSelected) {
@@ -391,7 +305,7 @@ async function load() {
       storeData.value = nextStoreData;
     } catch (reason) {
       if (requestId !== loadRequestId) return;
-      storeData.value = null;
+      if (!preserve) storeData.value = null;
       storeError.value = reason instanceof Error
         ? reason.message
         : `${props.multiStoreLabel}经营总览读取失败`;
@@ -408,7 +322,7 @@ async function load() {
     data.value = nextData;
   } catch (reason) {
     if (requestId !== loadRequestId) return;
-    data.value = null;
+    if (!preserve) data.value = null;
     error.value = reason instanceof Error
       ? reason.message
       : "当前店铺经营数据读取失败";
@@ -483,13 +397,13 @@ function trafficCoverage(point: StoreTrafficPoint | null) {
 function number(value: number | null | undefined) {
   return value === null || value === undefined
     ? "—"
-    : new Intl.NumberFormat("zh-CN").format(value);
+    : cachedNumberFormatter("zh-CN").format(value);
 }
 
 function currency(value: number | null | undefined) {
   return value === null || value === undefined
     ? "—"
-    : new Intl.NumberFormat("en-ZA", {
+    : cachedNumberFormatter("en-ZA", {
         style: "currency",
         currency: "ZAR",
         maximumFractionDigits: 0,
@@ -505,7 +419,7 @@ function day(value: string) {
 }
 
 function compactCurrency(value: number) {
-  return new Intl.NumberFormat("en-ZA", {
+  return cachedNumberFormatter("en-ZA", {
     style: "currency",
     currency: "ZAR",
     notation: "compact",
@@ -520,9 +434,9 @@ async function toggleSalesAudit() {
   }
 }
 
-async function loadSalesAudit(page = 1) {
+async function loadSalesAudit(page = 1, preserve = false) {
   const requestId = ++salesAuditRequestId;
-  salesAuditLoading.value = true;
+  salesAuditLoading.value = !preserve;
   salesAuditError.value = "";
   try {
     const payload = await fetchSalesRevenueRevisions({
@@ -575,34 +489,8 @@ function nearestChartPointIndex(
   );
 }
 
-function handleRevenuePointer(event: PointerEvent) {
-  const index = nearestChartPointIndex(event, REVENUE_WIDTH, revenueChart.value.dots);
-  if (index === null) return;
-  activeRevenueIndex.value = index;
-  revenueTooltipPosition.value = floatingChartTooltipFromEvent(event);
-}
-
-function clearRevenuePointer() {
-  activeRevenueIndex.value = null;
-  revenueTooltipPosition.value = null;
-}
-
-function setRevenuePoint(index: number, event: Event) {
-  activeRevenueIndex.value = index;
-  revenueTooltipPosition.value = floatingChartTooltipFromEvent(event);
-}
-
-function stepRevenuePoint(index: number, direction: -1 | 1, event: KeyboardEvent) {
-  const current = activeRevenueIndex.value ?? index;
-  activeRevenueIndex.value = Math.min(
-    revenueChart.value.dots.length - 1,
-    Math.max(0, current + direction),
-  );
-  revenueTooltipPosition.value = floatingChartTooltipFromEvent(event);
-}
-
 function handleTrafficPointer(event: PointerEvent) {
-  const index = nearestChartPointIndex(event, TRAFFIC_WIDTH, trafficChart.value.dots);
+  const index = nearestChartPointIndex(event, TRAFFIC_WIDTH.value, trafficChart.value.dots);
   if (index === null) return;
   activeTrafficIndex.value = index;
   trafficTooltipPosition.value = floatingChartTooltipFromEvent(event);
@@ -625,21 +513,6 @@ function stepTrafficPoint(index: number, direction: -1 | 1, event: KeyboardEvent
     Math.max(0, current + direction),
   );
   trafficTooltipPosition.value = floatingChartTooltipFromEvent(event);
-}
-
-function revenuePointTitle(point: MultiStoreRevenuePoint) {
-  if (point.total_ordered_revenue !== null) {
-    const status = point.data_status === "pending"
-      ? `；${revenuePendingStatus(point)}`
-      : point.data_status === "revised"
-        ? `；已记录 ${point.revision_count} 条日终基线后修订`
-        : "；来源已核验";
-    const coverage = point.missing_store_count
-      ? `；已有 ${point.covered_store_count}/${point.store_count} 家合计，缺失 ${point.missing_store_count} 家且未按 0 补齐`
-      : `；店铺覆盖 ${point.covered_store_count}/${point.store_count}`;
-    return `${point.metric_date}（南非业务日）：下单金额${point.missing_store_count ? "部分合计" : "合计"} ${currency(point.total_ordered_revenue)}${coverage}${status}`;
-  }
-  return `${point.metric_date}（南非业务日）：没有任何店铺返回销售额，折线保留断点`;
 }
 
 function revenuePendingStatus(point: MultiStoreRevenuePoint) {
@@ -676,7 +549,7 @@ function trafficPointTitle(point: StoreTrafficPoint) {
 </script>
 
 <template>
-  <div class="erp-page overview-page">
+  <div ref="pageElement" class="erp-page overview-page" :style="pageStyle">
     <div class="page-intro">
       <div>
         <p class="section-kicker">
@@ -686,324 +559,82 @@ function trafficPointTitle(point: StoreTrafficPoint) {
       </div>
     </div>
 
-    <section v-if="allStoresSelected" class="erp-panel multi-store-panel">
-      <div class="panel-heading multi-store-heading">
-        <div>
-          <p class="section-kicker">
-            {{ storeScope === "operating" ? "MY OPERATING STORES" : "ALL CONNECTED STORES" }}
-          </p>
-          <h3>店铺经营对比</h3>
+    <HomeDashboard
+      :scope="allStoresSelected ? storeScope : 'current'" :start="rangeStart" :end="rangeEnd"
+      :store-name="allStoresSelected ? multiStoreLabel : currentStoreName"
+      :store-inventory="allStoresSelected && !storeLoading ? storeData?.stores : undefined"
+      @loading-change="homeLoading = $event"
+    >
+      <template #forecast>
+        <div v-if="allStoresSelected && storeData && !storeLoading" class="forecast-strip">
+          <div><span>{{ periodRevenueLabels.projectedTotal }} <small>估算</small></span><strong>{{ currency(multiStoreRevenueProjection.projectedTotal) }}</strong><small>{{ periodRevenueProjectionBasis(multiStoreRevenueProjection, multiStorePeriodRevenue) }}</small></div>
+          <div><span>{{ periodRevenueLabels.dailyAverage }} · 已结束日</span><strong>{{ currency(multiStorePeriodRevenue.dailyAverage) }}</strong><small>{{ periodRevenueAverageBasis(multiStorePeriodRevenue) }}</small></div>
+          <details class="forecast-basis"><summary>查看预测依据与覆盖</summary><p>{{ rangeStart }} 至 {{ storeData.sales_revenue_completed_through }} · {{ periodRevenueLabels.total }} {{ currency(multiStorePeriodRevenue.total) }}</p><p>{{ periodRevenueCoverage(multiStorePeriodRevenue) }}；当日进行中金额不参与此预测。</p></details>
         </div>
-        <span v-if="storeData">当前可见 {{ storeData.store_count }} 家</span>
-      </div>
-      <div v-if="storeLoading" class="state-card slim">正在汇总各店经营数据……</div>
-      <div v-else-if="storeError" class="state-card error slim">{{ storeError }}</div>
-      <template v-else-if="storeData">
-        <div
-          class="command-health"
-          :class="{
-            attention: storeData.health_summary.attention > 0,
-            'data-gap': storeData.health_summary.attention === 0
-              && storeData.health_summary.data_gap > 0,
-          }"
-        >
-          <div>
-            <span>全盘健康定位</span>
-            <strong>{{ overallHealthText }}</strong>
-          </div>
-          <dl>
-            <div>
-              <dt>需关注</dt>
-              <dd>{{ storeData.health_summary.attention }}</dd>
-            </div>
-            <div>
-              <dt>数据待补</dt>
-              <dd>{{ storeData.health_summary.data_gap }}</dd>
-            </div>
-            <div>
-              <dt>当前正常</dt>
-              <dd>{{ storeData.health_summary.healthy }}</dd>
-            </div>
-          </dl>
+        <div v-else-if="!allStoresSelected && data && !loading" class="forecast-strip">
+          <div><span>{{ periodRevenueLabels.projectedTotal }} <small>估算</small></span><strong>{{ currency(singleStoreRevenueProjection.projectedTotal) }}</strong><small>{{ periodRevenueProjectionBasis(singleStoreRevenueProjection, singleStorePeriodRevenue) }}</small></div>
+          <div><span>{{ periodRevenueLabels.dailyAverage }}</span><strong>{{ currency(singleStorePeriodRevenue.dailyAverage) }}</strong><small>{{ periodRevenueAverageBasis(singleStorePeriodRevenue) }}</small></div>
+          <details class="forecast-basis"><summary>查看预测依据与覆盖</summary><p>{{ rangeStart }} 至 {{ rangeEnd }} · {{ periodRevenueLabels.total }} {{ currency(singleStorePeriodRevenue.total) }}</p><p>{{ periodRevenueCoverage(singleStorePeriodRevenue) }}；采用单店所选区间已有指标日。</p></details>
         </div>
-
-        <div class="multi-total-grid">
-          <article class="multi-total-primary">
-            <span>最新日下单件数合计</span>
-            <strong>{{ number(storeTotals.latestUnits.value) }}</strong>
-            <small>{{ coverageLabel(storeTotals.latestUnits.coverage, storeTotals.latestUnits.total) }}</small>
-          </article>
-          <article>
-            <span>最新日下单金额合计</span>
-            <strong>{{ currency(storeTotals.latestRevenue.value) }}</strong>
-            <small>{{ coverageLabel(storeTotals.latestRevenue.coverage, storeTotals.latestRevenue.total) }}</small>
-          </article>
-          <article>
-            <span>近 7 日下单件数合计</span>
-            <strong>{{ number(storeTotals.sevenDayUnits.value) }}</strong>
-            <small>{{ coverageLabel(storeTotals.sevenDayUnits.coverage, storeTotals.sevenDayUnits.total) }}</small>
-          </article>
-          <article class="multi-total-alert">
-            <span>缺货商品合计</span>
-            <strong>{{ number(storeTotals.stockouts.value) }}</strong>
-            <small>{{ coverageLabel(storeTotals.stockouts.coverage, storeTotals.stockouts.total) }}</small>
-          </article>
+      </template>
+      <template #warehouse-logistics>
+        <div v-if="storeData && !storeLoading" class="warehouse-logistics">
+          <div class="platform-stages">
+            <span>待入官方仓</span>
+            <span :title="offerCoverage(storeData.logistics.platform_warehouse.platform_stock_on_way_coverage, storeData.logistics.platform_warehouse.offer_count)">在途 <b>{{ number(storeData.logistics.platform_warehouse.platform_stock_on_way) }}</b> 件 <small v-if="storeData.logistics.platform_warehouse.platform_stock_on_way_coverage < storeData.logistics.platform_warehouse.offer_count">部分覆盖</small></span>
+            <span :title="offerCoverage(storeData.logistics.platform_warehouse.platform_stock_in_receiving_coverage, storeData.logistics.platform_warehouse.offer_count)">收货中 <b>{{ number(storeData.logistics.platform_warehouse.platform_stock_in_receiving) }}</b> 件 <small v-if="storeData.logistics.platform_warehouse.platform_stock_in_receiving_coverage < storeData.logistics.platform_warehouse.offer_count">部分覆盖</small></span>
+          </div>
+          <div class="shared-warehouse">
+            <div><h4>共享海外仓</h4><span>{{ storeData.logistics.overseas_warehouse.warehouse_name || '南非仓' }} · 多店只计一次</span><small>{{ formatChinaDateTime(storeData.logistics.overseas_warehouse.snapshot_at) }}</small></div>
+            <dl>
+              <div><dt>库存总数</dt><dd>{{ number(storeData.logistics.overseas_warehouse.stock_total) }}</dd></div>
+              <div><dt>可用</dt><dd>{{ number(storeData.logistics.overseas_warehouse.usable_stock) }}</dd></div>
+              <div><dt>锁定</dt><dd>{{ number(storeData.logistics.overseas_warehouse.locked_stock) }}</dd></div>
+              <div><dt>已分配出库</dt><dd>{{ number(storeData.logistics.overseas_warehouse.outbound_allocated) }}</dd></div>
+              <div><dt>海外仓在途</dt><dd>{{ number(storeData.logistics.overseas_warehouse.transit_stock) }}</dd></div>
+            </dl>
+          </div>
+          <small class="stage-note">各库存阶段可能重叠，请勿相加。</small>
         </div>
-
-        <div class="multi-total-grid revenue-period-grid">
-          <article class="multi-total-primary">
-            <span>{{ periodRevenueLabels.total }}</span>
-            <strong>{{ currency(multiStorePeriodRevenue.total) }}</strong>
-            <small>{{ periodRevenueCoverage(multiStorePeriodRevenue) }}</small>
-          </article>
-          <article>
-            <span>{{ periodRevenueLabels.dailyAverage }}</span>
-            <strong>{{ currency(multiStorePeriodRevenue.dailyAverage) }}</strong>
-            <small>{{ periodRevenueAverageBasis(multiStorePeriodRevenue) }}</small>
-          </article>
-          <article class="revenue-projection-card">
-            <span>{{ periodRevenueLabels.projectedTotal }}</span>
-            <strong>{{ currency(multiStoreRevenueProjection.projectedTotal) }}</strong>
-            <small>
-              {{ periodRevenueProjectionBasis(multiStoreRevenueProjection, multiStorePeriodRevenue) }}
-            </small>
-          </article>
-        </div>
-
-        <section class="revenue-command" aria-labelledby="multi-store-revenue-title">
-          <div class="logistics-command-heading revenue-heading">
-            <div>
-              <p class="section-kicker">SELECTED RANGE REVENUE</p>
-              <h4 id="multi-store-revenue-title">{{ storeData.store_count }} 店总销售额趋势</h4>
-            </div>
-            <span>
-              {{ storeData.range_start }} 至 {{ storeData.range_end }} · 已结束南非业务日至
-              {{ storeData.sales_revenue_completed_through }}
-            </span>
-          </div>
-          <div
-            v-if="storeData.sales_reconciliation.pending_store_count"
-            class="sales-reconciliation-alert pending"
-            role="alert"
-          >
-            <strong>
-              周期末失败后仍有 {{ storeData.sales_reconciliation.pending_store_count }} 家店待新 Sales 批次核验
-            </strong>
-            <span>
-              {{ storeData.sales_reconciliation.failed_store_count }} 家失败，
-              {{ storeData.sales_reconciliation.recovered_store_count }} 家已恢复。
-              仅对应失败业务日与来源未建档日以橙色显示。
-            </span>
-          </div>
-          <div
-            v-else-if="storeData.sales_reconciliation.failed_store_count"
-            class="sales-reconciliation-alert recovered"
-          >
-            <strong>周期末失败事实已保留，后续 Sales 批次已完成数值核验</strong>
-          </div>
-          <div
-            v-if="storeData.sales_reconciliation.revision_count"
-            class="sales-reconciliation-alert revised"
-          >
-            <strong>已记录 {{ storeData.sales_reconciliation.revision_count }} 条日终后销售额历史修订</strong>
-            <span>最近修订：{{ formatChinaDateTime(storeData.sales_reconciliation.latest_revision_at) }}</span>
-          </div>
-          <div v-if="!storeData.sales_revenue_series.length" class="state-card slim">
-            暂无跨店销售额趋势数据。
-          </div>
-          <template v-else>
-            <div
-              class="revenue-latest"
-              :class="{
-                incomplete: (latestRevenuePoint?.missing_store_count ?? 0) > 0 || latestRevenuePoint?.total_ordered_revenue === null,
-                pending: latestRevenuePoint?.data_status === 'pending',
-                revised: latestRevenuePoint?.data_status === 'revised',
-              }"
-            >
-              <strong>{{ currency(latestRevenuePoint?.total_ordered_revenue) }}</strong>
-              <span v-if="latestRevenuePoint?.total_ordered_revenue === null">
-                {{ latestRevenuePoint?.metric_date }} · 暂无任何店铺销售额，折线保留断点
-              </span>
-              <span v-else-if="latestRevenuePoint?.missing_store_count">
-                {{ latestRevenuePoint?.metric_date }} · 已有
-                {{ latestRevenuePoint?.covered_store_count }}/{{ latestRevenuePoint?.store_count }} 家合计，
-                缺失 {{ latestRevenuePoint?.missing_store_count }} 家且未按 0 补齐
-              </span>
-              <span v-else>
-                {{ latestRevenuePoint?.metric_date }} · 店铺覆盖
-                {{ latestRevenuePoint?.covered_store_count }}/{{ latestRevenuePoint?.store_count }} 家
-              </span>
-            </div>
-            <div class="traffic-chart-scroll">
-              <div class="trend-chart-stage">
-                <svg
-                  class="traffic-chart"
-                  :viewBox="`0 0 ${REVENUE_WIDTH} ${REVENUE_HEIGHT}`"
-                  role="img"
-                  aria-labelledby="multi-store-revenue-svg-title multi-store-revenue-svg-description"
-                  @pointermove="handleRevenuePointer"
-                  @pointerleave="clearRevenuePointer"
-                >
-                <title id="multi-store-revenue-svg-title">合并范围内店铺已结束业务日总销售额折线图</title>
-                <desc id="multi-store-revenue-svg-description">当前仍在进行的SAST日不进入折线；绿色折线为来源已核验的完整店铺日；橙色虚线只标记来源未建档日或对应的周期末失败业务日，不把当前店铺级待核验状态铺到全部历史日期；蓝色线表示该日已有可审计历史修订；店铺覆盖不完整时绘制已有店铺合计并披露覆盖数，缺失店铺不按0补齐。</desc>
-                <g class="traffic-grid">
-                  <template v-for="tick in revenueChart.ticks" :key="tick.y">
-                    <line :x1="REVENUE_LEFT" :x2="REVENUE_WIDTH - REVENUE_RIGHT" :y1="tick.y" :y2="tick.y" />
-                    <text :x="REVENUE_LEFT - 10" :y="tick.y + 4">{{ compactCurrency(tick.value) }}</text>
-                  </template>
-                </g>
-                <line
-                  v-if="activeRevenueDot"
-                  class="trend-crosshair"
-                  :x1="activeRevenueDot.x"
-                  :x2="activeRevenueDot.x"
-                  :y1="REVENUE_TOP"
-                  :y2="REVENUE_HEIGHT - REVENUE_BOTTOM"
-                />
-                <polyline
-                  v-for="(segment, index) in revenueChart.segments"
-                  :key="`revenue-${index}`"
-                  class="revenue-line"
-                  :points="segment"
-                />
-                <polyline
-                  v-for="(segment, index) in revenueChart.pendingSegments"
-                  :key="`revenue-pending-${index}`"
-                  class="revenue-line reconciliation-pending"
-                  :points="segment"
-                />
-                <polyline
-                  v-for="(segment, index) in revenueChart.revisedSegments"
-                  :key="`revenue-revised-${index}`"
-                  class="revenue-line revised"
-                  :points="segment"
-                />
-                <polyline
-                  v-for="(segment, index) in revenueChart.missingBridgeSegments"
-                  :key="`revenue-missing-bridge-${index}`"
-                  class="revenue-line missing-bridge"
-                  :points="segment"
-                />
-                <g
-                  v-for="(dot, index) in revenueChart.dots"
-                  :key="dot.point.metric_date"
-                  class="trend-data-point"
-                  :class="{ active: index === activeRevenueIndex }"
-                  tabindex="0"
-                  role="button"
-                  :aria-label="revenuePointTitle(dot.point)"
-                  @pointerenter="setRevenuePoint(index, $event)"
-                  @focus="setRevenuePoint(index, $event)"
-                  @click="setRevenuePoint(index, $event)"
-                  @keydown.left.prevent="stepRevenuePoint(index, -1, $event)"
-                  @keydown.right.prevent="stepRevenuePoint(index, 1, $event)"
-                >
-                  <circle class="trend-point-hit" :cx="dot.x" :cy="dot.y" r="14" />
-                  <circle
-                    v-if="index === activeRevenueIndex"
-                    class="trend-point-halo"
-                    :cx="dot.x"
-                    :cy="dot.y"
-                    r="9"
-                  />
-                  <circle
-                    v-if="dot.value !== null"
-                    :class="[
-                      'revenue-dot',
-                      {
-                        pending: dot.point.data_status === 'pending',
-                        revised: dot.point.data_status === 'revised',
-                      },
-                    ]"
-                    :cx="dot.x"
-                    :cy="dot.y"
-                    r="4"
-                  />
-                  <path
-                    v-else
-                    class="trend-missing-mark"
-                    :d="`M ${dot.x - 5} ${dot.y - 5} L ${dot.x + 5} ${dot.y + 5} M ${dot.x + 5} ${dot.y - 5} L ${dot.x - 5} ${dot.y + 5}`"
-                  />
-                </g>
-                <g class="traffic-axis-labels">
-                  <text
-                    v-for="label in revenueChart.labels"
-                    :key="label.point.metric_date"
-                    :x="label.x"
-                    :y="REVENUE_HEIGHT - 12"
-                  >{{ day(label.point.metric_date) }}</text>
-                </g>
-                </svg>
-                <div
-                  v-if="activeRevenueDot && revenueTooltipPosition"
-                  class="trend-hover-card"
-                  :class="floatingChartTooltipClasses(revenueTooltipPosition)"
-                  :style="floatingChartTooltipStyle(revenueTooltipPosition, 310)"
-                  role="status"
-                  aria-live="polite"
-                >
-                  <div class="trend-hover-heading">
-                    <span>南非业务日</span>
-                    <strong>{{ activeRevenueDot.point.metric_date }}</strong>
-                  </div>
-                  <dl>
-                    <div>
-                      <dt>{{ activeRevenueDot.point.missing_store_count ? "已有店铺销售额合计" : `${storeData.store_count} 店总销售额` }}</dt>
-                      <dd>{{ currency(activeRevenueDot.value) }}</dd>
-                    </div>
-                    <div>
-                      <dt>店铺覆盖</dt>
-                      <dd>{{ activeRevenueDot.point.covered_store_count }}/{{ activeRevenueDot.point.store_count }} 家</dd>
-                    </div>
-                    <div v-if="activeRevenueDot.point.missing_store_count">
-                      <dt>数据状态</dt>
-                      <dd class="warning">
-                        缺失 {{ activeRevenueDot.point.missing_store_count }} 家；当前金额仅合计已有店铺，缺失店铺未按 0 补齐
-                      </dd>
-                    </div>
-                    <div v-else-if="activeRevenueDot.point.data_status === 'pending'">
-                      <dt>数据状态</dt>
-                      <dd class="warning">
-                        {{ revenuePendingStatus(activeRevenueDot.point) }}
-                      </dd>
-                    </div>
-                    <div v-else-if="activeRevenueDot.point.data_status === 'revised'">
-                      <dt>数据状态</dt>
-                      <dd class="revised">
-                        日终后已纠偏 · {{ activeRevenueDot.point.revision_count }} 条修订，
-                        {{ activeRevenueDot.point.revised_store_count }} 家涉及变化
-                      </dd>
-                    </div>
-                    <div v-else>
-                      <dt>数据状态</dt>
-                      <dd>合并范围内店铺完整且来源已核验</dd>
-                    </div>
-                    <div v-if="activeRevenueDot.point.latest_sales_verified_at">
-                      <dt>最近来源核验</dt>
-                      <dd>{{ formatChinaDateTime(activeRevenueDot.point.latest_sales_verified_at) }}</dd>
-                    </div>
-                  </dl>
-                </div>
-              </div>
-            </div>
-            <div class="traffic-legend revenue-legend">
-              <span><i></i>合并范围内店铺完整且来源已核验</span>
-              <span><i class="reconciliation-pending"></i>该业务日来源待核验（含对应周期末失败日）</span>
-              <span><i class="revised"></i>日终正式基线后被 Sales 数据纠偏并留审计</span>
-              <span><i class="missing"></i>店铺缺失，未展示部分合计</span>
-              <span><i class="missing-bridge"></i>缺失区间虚线桥接，仅连接两端真实值</span>
+      </template>
+      <template #store-comparison>
+        <section v-if="allStoresSelected" class="operations-panel">
+          <header class="operations-heading"><div><h3>店铺经营对比</h3><span>{{ rangeEnd }} · {{ storeData?.store_count ?? '—' }} 家店铺</span></div><p v-if="storeData && !storeLoading" class="health-summary"><b>{{ overallHealthText }}</b><span>待补数据 {{ storeData.health_summary.data_gap }} · 正常 {{ storeData.health_summary.healthy }}</span></p></header>
+          <div v-if="storeLoading" class="state-card slim">正在汇总各店经营数据……</div>
+          <div v-else-if="storeError" class="state-card error slim">{{ storeError }}{{ storeData ? '，保留最近成功结果。' : '' }}</div>
+          <template v-if="storeData && !storeLoading">
+            <div v-if="!storeData.stores.length" class="state-card slim">当前账号暂无可见且已接入的店铺。</div>
+            <div v-else class="operations-table-wrap">
+              <table class="operations-table">
+                <thead><tr><th>店铺 / 负责运营</th><th>经营状态</th><th>近7日件数</th><th>缺货商品</th><th>近30天转化率中位数</th><th>周期末近30天浏览量</th><th></th></tr></thead>
+                <tbody><tr v-for="store in storeData.stores" :key="store.store_code">
+                  <td><b>{{ store.store_name }}</b><small>{{ operatorNames(store.operators) }}</small></td>
+                  <td><details class="store-health-detail"><summary :class="store.health.state">{{ store.health.label }} <span>查看原因</span></summary><div><p v-for="reason in [...store.health.business_reasons, ...store.health.data_reasons]" :key="reason">{{ reason }}</p><p v-if="!store.health.business_reasons.length && !store.health.data_reasons.length">当前未发现既定风险项</p><small>最新指标日 {{ store.latest_metric_date || '暂无' }}</small><small v-for="operator in store.operators" :key="operator.user_id">{{ operator.display_name }} · {{ operatorRoleLabel(operator.role) }}</small></div></details></td>
+                  <td>{{ number(store.kpis.seven_day_ordered_units) }}</td>
+                  <td :class="{ 'stockout-cell': (store.kpis.stockout_products ?? 0) > 0 }">{{ store.latest_metric_date ? number(store.kpis.stockout_products) : '—' }}</td>
+                  <td>{{ percent(store.kpis.median_conversion) }}</td>
+                  <td>{{ number(trafficValue(store.latest_traffic_point)) }}<small>{{ trafficCoverage(store.latest_traffic_point) }}</small></td>
+                  <td><button type="button" class="store-link" :aria-label="`查看 ${store.store_name} 明细`" @click="emit('selectStore', store.store_code)">明细 ↗</button></td>
+                </tr></tbody>
+                <tfoot><tr><th colspan="2">合计 <small>缺失不补 0</small></th><td>{{ number(storeTotals.sevenDayUnits.value) }}<small>{{ coverageLabel(storeTotals.sevenDayUnits.coverage, storeTotals.sevenDayUnits.total) }}</small></td><td>{{ number(storeTotals.stockouts.value) }}<small>{{ coverageLabel(storeTotals.stockouts.coverage, storeTotals.stockouts.total) }}</small></td><td colspan="3">浏览量为滚动30天商品合计，非当天流量或独立访客。</td></tr></tfoot>
+              </table>
             </div>
           </template>
         </section>
-
+      </template>
+      <template #revenue-evidence>
+        <details v-if="allStoresSelected && storeData && !storeLoading" class="revenue-evidence">
+          <summary><b>销售数据与历史修订</b><span>历史共 {{ storeData.sales_reconciliation.revision_count }} 条修订<span v-if="storeData.sales_reconciliation.pending_store_count"> · {{ storeData.sales_reconciliation.pending_store_count }} 家待核验</span> · 查看来源与记录</span></summary>
+          <p class="evidence-range">{{ rangeStart }} 至 {{ storeData.sales_revenue_completed_through }} · 已结束南非业务日；店铺缺失不补 0。</p>
+          <div class="operations-table-wrap"><table class="operations-table"><thead><tr><th>业务日</th><th>已结束日销售额</th><th>店铺覆盖</th><th>来源核验</th><th>修订记录</th></tr></thead><tbody><tr v-for="point in storeData.sales_revenue_series" :key="point.metric_date"><td>{{ point.metric_date }}</td><td>{{ currency(point.total_ordered_revenue) }}<small v-if="point.missing_store_count">部分合计 · 缺 {{ point.missing_store_count }} 家</small></td><td>{{ point.covered_store_count }}/{{ point.store_count }}</td><td>{{ point.data_status === 'pending' ? revenuePendingStatus(point) : '已核验' }}<small>{{ formatChinaDateTime(point.latest_sales_verified_at) }}</small></td><td>{{ point.revision_count ? `${point.revision_count} 条` : '—' }}<small v-if="point.latest_revision_at">{{ formatChinaDateTime(point.latest_revision_at) }}</small></td></tr></tbody></table></div>
         <section class="sales-audit-panel" aria-labelledby="sales-audit-title">
           <div class="sales-audit-heading">
             <div>
               <p class="section-kicker">REVISION AUDIT</p>
               <h4 id="sales-audit-title">销售额日终后历史修订记录</h4>
-              <span>业务日内正常累计和第一次日终基线不计纠偏；记录只保留基线建立后的再次变化。</span>
+              <span>仅记录日终基线后的变化</span>
             </div>
-            <button type="button" class="secondary-button" @click="toggleSalesAudit">
+            <button type="button" class="secondary-button" :aria-expanded="salesAuditOpen" @click="toggleSalesAudit">
               {{ salesAuditOpen ? "收起记录" : "展开记录" }}
             </button>
           </div>
@@ -1027,7 +658,7 @@ function trafficPointTitle(point: StoreTrafficPoint) {
               v-else-if="salesAuditData && !salesAuditData.items.length"
               class="state-card slim"
             >
-              所选日期没有日终基线后的数值修订；日内累计和来源核验时间仍会正常更新。
+              所选日期暂无日终后修订。
             </div>
             <template v-else-if="salesAuditData">
               <div class="table-scroll sales-audit-table-wrap">
@@ -1091,193 +722,9 @@ function trafficPointTitle(point: StoreTrafficPoint) {
             </template>
           </template>
         </section>
-
-        <section class="logistics-command" aria-labelledby="logistics-command-title">
-          <div class="logistics-command-heading">
-            <div>
-              <p class="section-kicker">INVENTORY &amp; LOGISTICS</p>
-              <h4 id="logistics-command-title">库存与物流全盘</h4>
-            </div>
-            <span>海外仓共享库存只计一次；平台库存按合并范围汇总</span>
-          </div>
-          <div class="logistics-total-grid">
-            <article class="overseas-card">
-              <span>海外仓库存</span>
-              <strong>{{ number(storeData.logistics.overseas_warehouse.stock_total) }}</strong>
-              <small>
-                {{ storeData.logistics.overseas_warehouse.warehouse_name || "W8 共享海外仓" }}
-                · 多店共享只计一次
-              </small>
-            </article>
-            <article>
-              <span>平台仓可售</span>
-              <strong>{{ number(storeData.logistics.platform_warehouse.platform_available_stock) }}</strong>
-              <small>
-                {{ offerCoverage(
-                  storeData.logistics.platform_warehouse.platform_available_coverage,
-                  storeData.logistics.platform_warehouse.offer_count,
-                ) }}
-              </small>
-            </article>
-            <article class="transit-card">
-              <span>平台在途</span>
-              <strong>{{ number(storeData.logistics.platform_warehouse.platform_stock_on_way) }}</strong>
-              <small>
-                {{ offerCoverage(
-                  storeData.logistics.platform_warehouse.platform_stock_on_way_coverage,
-                  storeData.logistics.platform_warehouse.offer_count,
-                ) }}
-              </small>
-            </article>
-            <article>
-              <span>平台收货中</span>
-              <strong>{{ number(storeData.logistics.platform_warehouse.platform_stock_in_receiving) }}</strong>
-              <small>
-                {{ offerCoverage(
-                  storeData.logistics.platform_warehouse.platform_stock_in_receiving_coverage,
-                  storeData.logistics.platform_warehouse.offer_count,
-                ) }}
-              </small>
-            </article>
-          </div>
-          <dl class="overseas-breakdown">
-            <div>
-              <dt>海外仓可用</dt>
-              <dd>{{ number(storeData.logistics.overseas_warehouse.usable_stock) }}</dd>
-            </div>
-            <div>
-              <dt>海外仓锁定</dt>
-              <dd>{{ number(storeData.logistics.overseas_warehouse.locked_stock) }}</dd>
-            </div>
-            <div>
-              <dt>海外仓已分配出库</dt>
-              <dd>{{ number(storeData.logistics.overseas_warehouse.outbound_allocated) }}</dd>
-            </div>
-            <div>
-              <dt>海外仓在途</dt>
-              <dd>{{ number(storeData.logistics.overseas_warehouse.transit_stock) }}</dd>
-            </div>
-          </dl>
-          <p class="logistics-definition">
-            海外仓“已分配出库”可能包含在锁定或库存总量内，平台在途与平台收货中也是不同阶段；
-            页面分开展示，不将这些阶段相加成可能重复的“总库存”。
-          </p>
-        </section>
-
-        <div v-if="!storeData.stores.length" class="state-card slim">
-          当前账号暂无可见且已接入的店铺。
-        </div>
-        <div v-else class="store-overview-grid">
-          <article
-            v-for="store in storeData.stores"
-            :key="store.store_code"
-            class="store-overview-card"
-            :class="[
-              store.health.state,
-              { empty: !store.latest_metric_date },
-            ]"
-          >
-            <header>
-              <div>
-                <span class="store-code">{{ store.store_code }}</span>
-                <h4>{{ store.store_name }}</h4>
-              </div>
-              <div class="store-card-status">
-                <span class="health-badge">{{ store.health.label }}</span>
-                <time>{{ store.latest_metric_date || "暂无指标日" }}</time>
-              </div>
-            </header>
-            <div class="store-operators">
-              <span>负责运营</span>
-              <div v-if="store.operators.length">
-                <span
-                  v-for="operator in store.operators"
-                  :key="operator.user_id"
-                  class="operator-chip"
-                >
-                  {{ operator.display_name }}
-                  <small>{{ operatorRoleLabel(operator.role) }}</small>
-                </span>
-              </div>
-              <strong v-else>暂未分配运营账号</strong>
-            </div>
-            <div class="health-reasons">
-              <span
-                v-for="reason in store.health.business_reasons"
-                :key="`business-${reason}`"
-                class="business-risk"
-              >{{ reason }}</span>
-              <span
-                v-for="reason in store.health.data_reasons"
-                :key="`data-${reason}`"
-                class="data-risk"
-              >{{ reason }}</span>
-              <span
-                v-if="!store.health.business_reasons.length && !store.health.data_reasons.length"
-                class="healthy-signal"
-              >当前未发现既定风险项</span>
-            </div>
-            <div class="store-main-kpi">
-              <span>最新日下单件数</span>
-              <strong>{{ number(store.kpis.latest_ordered_units) }}</strong>
-            </div>
-            <dl class="store-metrics">
-              <div>
-                <dt>最新日金额</dt>
-                <dd>{{ currency(store.kpis.latest_ordered_revenue) }}</dd>
-              </div>
-              <div>
-                <dt>近 7 日件数</dt>
-                <dd>{{ number(store.kpis.seven_day_ordered_units) }}</dd>
-              </div>
-              <div>
-                <dt>在售商品</dt>
-                <dd>{{ number(store.kpis.selling_products) }}</dd>
-              </div>
-              <div>
-                <dt>中位转化率</dt>
-                <dd>{{ percent(store.kpis.median_conversion) }}</dd>
-              </div>
-              <div>
-                <dt>缺货商品</dt>
-                <dd>{{ store.latest_metric_date ? number(store.kpis.stockout_products) : "—" }}</dd>
-              </div>
-            </dl>
-            <dl class="store-inventory-grid">
-              <div>
-                <dt>平台可售</dt>
-                <dd>{{ number(store.inventory.platform_available_stock) }}</dd>
-              </div>
-              <div>
-                <dt>平台在途</dt>
-                <dd>{{ number(store.inventory.platform_stock_on_way) }}</dd>
-              </div>
-              <div>
-                <dt>平台收货中</dt>
-                <dd>{{ number(store.inventory.platform_stock_in_receiving) }}</dd>
-              </div>
-            </dl>
-            <div
-              class="store-traffic-kpi"
-              :class="{
-                incomplete: !store.latest_traffic_point
-                  || (store.latest_traffic_point?.missing_product_count ?? 0) > 0
-                  || store.latest_traffic_point?.page_views_30_days_total === null,
-              }"
-            >
-              <span>周期末商品近30天浏览量合计</span>
-              <strong>{{ number(trafficValue(store.latest_traffic_point)) }}</strong>
-              <small>{{ trafficCoverage(store.latest_traffic_point) }}</small>
-            </div>
-            <button
-              type="button"
-              class="store-drilldown"
-              @click="emit('selectStore', store.store_code)"
-            >进入该店明细</button>
-          </article>
-        </div>
+        </details>
       </template>
-    </section>
+    </HomeDashboard>
 
     <div v-if="!allStoresSelected" class="selected-store-heading">
       <div>
@@ -1291,101 +738,14 @@ function trafficPointTitle(point: StoreTrafficPoint) {
     </div>
 
     <div v-if="!allStoresSelected && loading" class="state-card">正在读取经营数据……</div>
-    <div v-else-if="!allStoresSelected && error" class="state-card error">{{ error }}</div>
+    <div v-else-if="!allStoresSelected && error && !data" class="state-card error">{{ error }}</div>
     <template v-else-if="!allStoresSelected && data">
-      <section class="erp-kpi-grid">
-        <article class="kpi-primary">
-          <span>最新日下单件数</span>
-          <strong>{{ number(data.kpis.latest_ordered_units) }}</strong>
-          <small>最新可用指标日</small>
-        </article>
-        <article>
-          <span>最新日下单金额</span>
-          <strong>{{ currency(data.kpis.latest_ordered_revenue) }}</strong>
-          <small>订单行金额口径</small>
-        </article>
-        <article>
-          <span>近 7 日下单件数</span>
-          <strong>{{ number(data.kpis.seven_day_ordered_units) }}</strong>
-          <small>自然日窗口</small>
-        </article>
-      </section>
-
-      <div class="multi-total-grid revenue-period-grid">
-        <article class="multi-total-primary">
-          <span>{{ periodRevenueLabels.total }}</span>
-          <strong>{{ currency(singleStorePeriodRevenue.total) }}</strong>
-          <small>{{ periodRevenueCoverage(singleStorePeriodRevenue) }}</small>
-        </article>
-        <article>
-          <span>{{ periodRevenueLabels.dailyAverage }}</span>
-          <strong>{{ currency(singleStorePeriodRevenue.dailyAverage) }}</strong>
-          <small>{{ periodRevenueAverageBasis(singleStorePeriodRevenue) }}</small>
-        </article>
-        <article class="revenue-projection-card">
-          <span>{{ periodRevenueLabels.projectedTotal }}</span>
-          <strong>{{ currency(singleStoreRevenueProjection.projectedTotal) }}</strong>
-          <small>
-            {{ periodRevenueProjectionBasis(singleStoreRevenueProjection, singleStorePeriodRevenue) }}
-          </small>
-        </article>
+      <div class="single-health-strip">
+        <span>近7日下单 <b>{{ number(data.kpis.seven_day_ordered_units) }}</b> 件</span>
+        <span>缺货商品 <b>{{ number(data.kpis.stockout_products) }}</b></span>
+        <span>近30天转化率中位数 <b>{{ percent(data.kpis.median_conversion) }}</b></span>
+        <details><summary>查看所选区间每日件数</summary><div class="operations-table-wrap"><table class="operations-table"><thead><tr><th>业务日</th><th>下单件数</th></tr></thead><tbody><tr v-for="point in data.sales_series" :key="point.metric_date"><td>{{ point.metric_date }}</td><td>{{ number(point.ordered_units) }}</td></tr></tbody></table></div></details>
       </div>
-
-      <section class="overview-grid">
-        <article class="erp-panel sales-trend-panel">
-          <div class="panel-heading">
-            <div>
-              <p class="section-kicker">SELECTED RANGE ORDERS</p>
-              <h3>店铺下单趋势</h3>
-            </div>
-            <span>真实整数件数</span>
-          </div>
-          <div v-if="!data.sales_series.length" class="state-card slim">暂无趋势数据</div>
-          <div v-else class="bar-chart">
-            <div
-              v-for="point in data.sales_series"
-              :key="point.metric_date"
-              class="bar-column"
-              :title="`${point.metric_date}：${point.ordered_units ?? 0} 件`"
-            >
-              <span>{{ point.ordered_units ?? 0 }}</span>
-              <i
-                :style="{
-                  height: `${Math.max(3, ((point.ordered_units ?? 0) / maxUnits) * 100)}%`,
-                }"
-              ></i>
-              <small>{{ day(point.metric_date) }}</small>
-            </div>
-          </div>
-        </article>
-
-        <article class="erp-panel health-panel">
-          <div class="panel-heading">
-            <div>
-              <p class="section-kicker">STORE HEALTH</p>
-              <h3>经营健康度</h3>
-            </div>
-          </div>
-          <div class="health-list">
-            <div>
-              <span>近30天浏览量合计</span>
-              <strong>{{ number(data.kpis.page_views_30_days) }}</strong>
-            </div>
-            <div>
-              <span>近30天转化率中位数</span>
-              <strong>{{ percent(data.kpis.median_conversion) }}</strong>
-            </div>
-            <div>
-              <span>今日售出商品</span>
-              <strong>{{ data.kpis.selling_products }}</strong>
-            </div>
-            <div>
-              <span>缺货商品</span>
-              <strong>{{ data.kpis.stockout_products }}</strong>
-            </div>
-          </div>
-        </article>
-      </section>
 
       <section class="erp-panel traffic-trend-panel">
         <div class="panel-heading traffic-heading">
@@ -1393,13 +753,13 @@ function trafficPointTitle(point: StoreTrafficPoint) {
             <p class="section-kicker">PERIOD-END TRAFFIC</p>
             <h3>店铺商品近30天浏览量汇总趋势</h3>
           </div>
-          <span>每日次日 09:00 周期末刷新成功后更新</span>
+          <span>每日 09:00 更新</span>
         </div>
         <p class="traffic-definition">
           橙色虚线为参考值；缺失商品不补 0。
         </p>
         <div v-if="!data.traffic_series.length" class="state-card slim">
-          暂无周期末流量快照；下次 09:00 周期末刷新成功后开始记录。
+          暂无流量快照，等待下次采集。
         </div>
         <template v-else>
           <div
@@ -1430,7 +790,7 @@ function trafficPointTitle(point: StoreTrafficPoint) {
               {{ latestTrafficPoint?.business_date }} 有 {{ latestTrafficPoint?.missing_product_count }} 个商品缺失，未展示部分合计
             </span>
           </div>
-          <div class="traffic-chart-scroll">
+          <div ref="trafficChartElement" class="traffic-chart-scroll">
             <div class="trend-chart-stage">
               <svg
                 class="traffic-chart"
@@ -1438,6 +798,7 @@ function trafficPointTitle(point: StoreTrafficPoint) {
                 role="img"
                 aria-labelledby="traffic-chart-title traffic-chart-description"
                 @pointermove="handleTrafficPointer"
+                  @pointerdown="handleTrafficPointer"
                 @pointerleave="clearTrafficPointer"
               >
               <title id="traffic-chart-title">店铺商品近30天浏览量每日周期末汇总折线图</title>
@@ -1602,28 +963,28 @@ function trafficPointTitle(point: StoreTrafficPoint) {
           <span>按下单件数排序</span>
         </div>
         <div class="erp-table-wrap">
-          <table class="erp-table">
+          <table class="erp-table mobile-record-table">
             <thead>
               <tr>
-                <th>商品</th>
-                <th>下单件数</th>
-                <th>下单金额</th>
-                <th>近30天浏览量</th>
-                <th>转化率</th>
-                <th>库存</th>
+                <th scope="col">商品</th>
+                <th scope="col">下单件数</th>
+                <th scope="col">下单金额</th>
+                <th scope="col">近30天浏览量</th>
+                <th scope="col">转化率</th>
+                <th scope="col">库存</th>
               </tr>
             </thead>
             <tbody>
               <tr v-for="item in data.top_products" :key="item.offer_id">
-                <td>
+                <td data-label="商品" data-mobile-wide>
                   <strong>{{ item.title || item.sku || item.offer_id }}</strong>
                   <small>平台 {{ item.sku || "无库存编码" }} · 公司 {{ item.company_sku || "未关联" }}</small>
                 </td>
-                <td>{{ number(item.ordered_units) }}</td>
-                <td>{{ currency(item.ordered_revenue) }}</td>
-                <td>{{ number(item.page_views_30_days) }}</td>
-                <td>{{ percent(item.conversion_percentage_30_days) }}</td>
-                <td>{{ number(item.total_stock) }}</td>
+                <td data-label="下单件数">{{ number(item.ordered_units) }}</td>
+                <td data-label="下单金额">{{ currency(item.ordered_revenue) }}</td>
+                <td data-label="近30天浏览量">{{ number(item.page_views_30_days) }}</td>
+                <td data-label="转化率">{{ percent(item.conversion_percentage_30_days) }}</td>
+                <td data-label="库存">{{ number(item.total_stock) }}</td>
               </tr>
             </tbody>
           </table>
@@ -1634,300 +995,63 @@ function trafficPointTitle(point: StoreTrafficPoint) {
 </template>
 
 <style scoped>
-.multi-store-panel {
-  overflow: hidden;
-  border-color: rgba(55, 93, 74, 0.2);
-  background:
-    radial-gradient(circle at 92% -15%, rgba(184, 217, 109, 0.22), transparent 35%),
-    rgba(249, 251, 248, 0.96);
-}
-
-.multi-store-heading {
-  align-items: flex-start;
-}
-
-.multi-store-heading > span {
-  padding: 6px 10px;
-  border: 1px solid rgba(55, 93, 74, 0.18);
-  border-radius: 999px;
-  background: rgba(255, 255, 255, 0.72);
-  color: var(--green);
-}
-
-.command-health {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 20px;
-  margin-bottom: 12px;
-  padding: 17px 18px;
-  border: 1px solid rgba(55, 93, 74, 0.18);
-  border-left: 5px solid var(--green);
-  border-radius: 13px;
-  background: rgba(255, 255, 255, 0.78);
-}
-
-.command-health.attention {
-  border-left-color: var(--erp-red);
-  background: rgba(255, 247, 244, 0.9);
-}
-
-.command-health.data-gap {
-  border-left-color: #c88224;
-  background: rgba(255, 250, 238, 0.9);
-}
-
-.command-health > div > span,
-.command-health > div > small {
-  display: block;
-  color: var(--muted);
-  font-size: 0.65rem;
-}
-
-.command-health > div > strong {
-  display: block;
-  margin: 5px 0 4px;
-  color: var(--green);
-  font-size: clamp(1rem, 2.2vw, 1.38rem);
-}
-
-.command-health.attention > div > strong {
-  color: var(--erp-red);
-}
-
-.command-health dl {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(70px, 1fr));
-  gap: 8px;
-  margin: 0;
-}
-
-.command-health dl div {
-  padding: 8px 10px;
-  border-radius: 9px;
-  background: rgba(238, 243, 238, 0.9);
-  text-align: center;
-}
-
-.command-health dt {
-  color: var(--muted);
-  font-size: 0.58rem;
-}
-
-.command-health dd {
-  margin: 3px 0 0;
-  font-family: "Cascadia Mono", Consolas, monospace;
-  font-size: 1rem;
-  font-weight: 800;
-}
-
-.multi-total-grid {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 10px;
-  margin-bottom: 14px;
-}
-
-.revenue-period-grid {
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-}
-
-.multi-total-grid .revenue-projection-card {
-  border-color: rgba(24, 103, 78, 0.22);
-  background: rgba(239, 248, 244, 0.88);
-}
-
-.multi-total-grid article {
-  min-width: 0;
-  padding: 16px;
-  border: 1px solid rgba(24, 37, 31, 0.08);
-  border-radius: 12px;
-  background: rgba(255, 255, 255, 0.72);
-}
-
-.multi-total-grid span,
-.multi-total-grid small {
-  display: block;
-  color: var(--muted);
-  font-size: 0.65rem;
-}
-
-.multi-total-grid strong {
-  display: block;
-  margin: 8px 0 5px;
-  overflow: hidden;
-  color: var(--green);
-  font-family: "Cascadia Mono", Consolas, monospace;
-  font-size: clamp(1.08rem, 2vw, 1.55rem);
-  letter-spacing: -0.05em;
-  text-overflow: ellipsis;
-}
-
-.multi-total-grid .multi-total-primary {
-  border-color: var(--green);
-  background: var(--green);
-}
-
-.multi-total-grid .multi-total-primary span,
-.multi-total-grid .multi-total-primary small {
-  color: rgba(255, 255, 255, 0.65);
-}
-
-.multi-total-grid .multi-total-primary strong {
-  color: var(--erp-accent);
-}
-
-.multi-total-grid .multi-total-alert {
-  border-top: 3px solid var(--erp-red);
-}
-
-.revenue-command {
-  margin-bottom: 14px;
-  padding: 16px;
-  border: 1px solid rgba(55, 93, 74, 0.18);
-  border-radius: 13px;
-  background: rgba(255, 255, 255, 0.78);
-}
-
-.revenue-heading {
-  margin-bottom: 8px;
-}
-
-.sales-reconciliation-alert {
-  display: grid;
-  gap: 4px;
-  margin: 0 0 10px;
-  padding: 10px 12px;
-  border: 1px solid rgba(54, 93, 74, 0.2);
-  border-left-width: 4px;
-  border-radius: 9px;
-  font-size: 0.68rem;
-  line-height: 1.55;
-}
-
-.sales-reconciliation-alert strong {
-  font-size: 0.74rem;
-}
-
-.sales-reconciliation-alert.pending {
-  border-color: rgba(184, 111, 23, 0.4);
-  border-left-color: #b86f17;
-  background: #fff6e7;
-  color: #75470f;
-}
-
-.sales-reconciliation-alert.recovered {
-  border-left-color: var(--green);
-  background: #eef7f1;
-  color: #28543e;
-}
-
-.sales-reconciliation-alert.revised {
-  border-left-color: #3a6f9d;
-  background: #eef6fc;
-  color: #285777;
-}
-
-.revenue-latest {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 16px;
-  margin-bottom: 8px;
-  padding: 10px 12px;
-  border-radius: 10px;
-  background: rgba(238, 243, 238, 0.8);
-}
-
-.revenue-latest strong {
-  color: var(--green);
-  font-family: "Cascadia Mono", Consolas, monospace;
-  font-size: clamp(1.35rem, 3vw, 2rem);
-}
-
-.revenue-latest span {
-  color: var(--muted);
-  font-size: 0.68rem;
-  text-align: right;
-}
-
-.revenue-latest.incomplete strong,
-.revenue-latest.incomplete span {
-  color: #9a6420;
-}
-
-.revenue-latest.pending {
-  background: #fff4df;
-}
-
-.revenue-latest.pending strong,
-.revenue-latest.pending span {
-  color: #8a5517;
-}
-
-.revenue-latest.revised {
-  background: #edf5fb;
-}
-
-.revenue-latest.revised strong,
-.revenue-latest.revised span {
-  color: #285f88;
-}
-
-.revenue-line {
-  fill: none;
-  stroke: var(--green);
-  stroke-linecap: round;
-  stroke-linejoin: round;
-  stroke-width: 4;
-  filter: drop-shadow(0 2px 3px rgba(31, 86, 62, 0.18));
-}
-
-.revenue-line.reconciliation-pending {
-  stroke: #b86f17;
-  stroke-dasharray: 8 6;
-  filter: none;
-}
-
-.revenue-line.revised {
-  stroke: #3a78a8;
-  filter: drop-shadow(0 2px 3px rgba(58, 120, 168, 0.18));
-}
-
-.revenue-line.missing-bridge {
-  stroke: #9a6a2d;
-  stroke-dasharray: 8 7;
-  stroke-width: 3;
-  filter: none;
-}
-
-.revenue-dot {
-  fill: var(--erp-accent);
-  stroke: var(--green);
-  stroke-width: 2;
-}
-
-.revenue-dot.pending {
-  fill: #fff2d8;
-  stroke: #b86f17;
-  stroke-width: 3;
-}
-
-.revenue-dot.revised {
-  fill: #dceef9;
-  stroke: #3a78a8;
-  stroke-width: 3;
-}
-
-.revenue-dot.missing {
-  fill: #fff3d8;
-  stroke: #c88224;
-}
-
-.revenue-dot:focus {
-  outline: none;
-  stroke: #162d24;
-  stroke-width: 4;
+.forecast-strip { display:flex; align-items:center; flex-wrap:wrap; gap:18px 30px; padding:16px 20px; background:#eff4e7; border:1px solid var(--line); border-radius:12px; }
+.forecast-strip>div { display:grid; gap:6px; }
+.forecast-strip span { font-size:12px; color:#61735a; }
+.forecast-strip strong { font-size:23px; color:#305338; font-variant-numeric:tabular-nums; }
+.forecast-strip small { font-size:10px; color:#798672; }
+.forecast-basis { margin-left:auto; font-size:11px; color:var(--muted); max-width:390px; }
+.forecast-basis summary,.store-health-detail summary,.revenue-evidence>summary,.single-health-strip summary { cursor:pointer; }
+.forecast-basis p { line-height:1.6; margin-bottom:0; }
+.warehouse-logistics { margin-top:16px; border-top:1px solid var(--line); padding-top:14px; }
+.platform-stages { display:flex; align-items:center; flex-wrap:wrap; gap:12px 24px; font-size:12px; color:#6c7865; }
+.platform-stages b { margin:0 4px; font-size:19px; color:#35563b; font-variant-numeric:tabular-nums; }
+.platform-stages small { color:#9e6e27; }
+.shared-warehouse { display:flex; align-items:center; flex-wrap:wrap; gap:18px; background:#f4f6ee; padding:16px; border-radius:10px; margin:14px 0 8px; }
+.shared-warehouse h4 { margin:0 0 6px; font-size:14px; }
+.shared-warehouse span,.shared-warehouse small { display:block; font-size:10px; color:#7b8473; line-height:1.7; }
+.shared-warehouse dl { display:grid; grid-template-columns:repeat(5,minmax(0,1fr)); flex:1; gap:18px; margin:0; }
+.shared-warehouse dt { font-size:11px; color:#7b8473; }
+.shared-warehouse dd { margin:7px 0 0; font-size:20px; color:#45603d; font-variant-numeric:tabular-nums; }
+.stage-note { font-size:10px; color:var(--muted); }
+.operations-panel { min-width:0; padding:20px; border:1px solid var(--line); border-radius:16px; background:var(--paper); }
+.operations-heading { display:flex; align-items:center; justify-content:space-between; gap:16px; margin-bottom:18px; }
+.operations-heading h3 { margin:0 0 6px; font-size:17px; }
+.operations-heading span { font-size:11px; color:var(--muted); }
+.health-summary { display:flex; align-items:center; flex-wrap:wrap; gap:12px; margin:0; font-size:12px; }
+.health-summary b { font-weight:500; color:#8e6b31; }
+.operations-table-wrap { max-width:100%; overflow-x:auto; }
+.operations-table { width:100%; border-collapse:collapse; font-size:12px; font-variant-numeric:tabular-nums; }
+.operations-table th,.operations-table td { padding:12px 10px; text-align:right; border-bottom:1px solid #e4e9df; white-space:nowrap; }
+.operations-table th { font-size:11px; font-weight:500; background:#f0f4eb; color:#718069; }
+.operations-table td:first-child,.operations-table th:first-child { text-align:left; }
+.operations-table tbody td:first-child b { font-weight:500; }
+.operations-table small { display:block; font-size:10px; color:#88907f; line-height:1.7; }
+.operations-table tbody tr:hover { background:#f8faf3; }
+.operations-table tfoot td { font-size:11px; background:#f7f9f2; }
+.operations-table tfoot td:last-child { white-space:normal; color:var(--muted); }
+.operations-table .stockout-cell { color:#a17a34; }
+.store-health-detail { text-align:left; min-width:116px; }
+.store-health-detail summary { font-size:11px; }
+.store-health-detail summary span { font-size:10px; color:#879180; margin-left:4px; }
+.store-health-detail .attention { color:#a17a34; }.store-health-detail .data_gap { color:#ac7f31; }.store-health-detail .healthy { color:#3a7250; }
+.store-health-detail>div { max-width:220px; white-space:normal; font-size:11px; line-height:1.5; color:var(--muted); }
+.store-health-detail p { margin:8px 0; }
+.store-link { border:0; background:transparent; color:#4a7957; padding:8px 4px; font-size:11px; cursor:pointer; white-space:nowrap; }
+.store-link:hover { text-decoration:underline; }
+.revenue-evidence { min-width:0; border:1px solid var(--line); border-radius:12px; padding:16px 20px; background:#f6f8f1; }
+.revenue-evidence>summary { font-size:13px; color:#536a4d; }
+.revenue-evidence>summary>b { font-weight:500; }
+.revenue-evidence>summary>span { margin-left:14px; font-size:11px; color:#7d8877; }
+.evidence-range { font-size:11px; color:var(--muted); margin:18px 0 12px; }
+.single-health-strip { display:flex; flex-wrap:wrap; gap:16px 25px; padding:15px 20px; border:1px solid var(--line); border-radius:12px; background:#f5f7ef; color:#75846e; font-size:12px; }
+.single-health-strip b { color:#3f6043; margin-left:6px; }
+.single-health-strip details { margin-left:auto; }.single-health-strip details[open] { width:100%; }
+@media(max-width:760px) {
+  .forecast-strip { padding:14px 12px; gap:18px; }.forecast-strip>div { flex:1; min-width:125px; }.forecast-strip strong { font-size:21px; }.forecast-basis { margin-left:0; }
+  .shared-warehouse { padding:14px 12px; }.shared-warehouse>div { width:100%; }.shared-warehouse dl { grid-template-columns:repeat(3,minmax(0,1fr)); gap:16px; }.shared-warehouse dd { font-size:18px; }
+  .operations-panel { padding:16px 12px; }.operations-heading { align-items:flex-start; flex-direction:column; gap:10px; }.operations-table th,.operations-table td { padding:12px 8px; }
+  .revenue-evidence { padding:14px 12px; }.revenue-evidence>summary>span { display:block; margin:8px 0 0; }.single-health-strip details { margin-left:0; }
 }
 
 .sales-audit-panel {
@@ -2032,379 +1156,6 @@ function trafficPointTitle(point: StoreTrafficPoint) {
 .sales-audit-pagination > div {
   display: flex;
   gap: 8px;
-}
-
-.logistics-command {
-  margin-bottom: 14px;
-  padding: 16px;
-  border: 1px solid rgba(24, 37, 31, 0.08);
-  border-radius: 13px;
-  background: rgba(238, 243, 238, 0.72);
-}
-
-.logistics-command-heading {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 20px;
-  margin-bottom: 12px;
-}
-
-.logistics-command-heading h4 {
-  margin: 2px 0 0;
-  font-size: 0.98rem;
-}
-
-.logistics-command-heading > span {
-  max-width: 360px;
-  color: var(--muted);
-  font-size: 0.64rem;
-  line-height: 1.55;
-  text-align: right;
-}
-
-.logistics-total-grid {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 9px;
-}
-
-.logistics-total-grid article {
-  min-width: 0;
-  padding: 13px;
-  border: 1px solid rgba(24, 37, 31, 0.08);
-  border-radius: 10px;
-  background: rgba(255, 255, 255, 0.82);
-}
-
-.logistics-total-grid article.overseas-card {
-  border-color: rgba(55, 93, 74, 0.3);
-}
-
-.logistics-total-grid article.transit-card {
-  border-color: rgba(200, 130, 36, 0.35);
-}
-
-.logistics-total-grid span,
-.logistics-total-grid small {
-  display: block;
-  color: var(--muted);
-  font-size: 0.61rem;
-}
-
-.logistics-total-grid strong {
-  display: block;
-  margin: 6px 0 4px;
-  color: var(--green);
-  font-family: "Cascadia Mono", Consolas, monospace;
-  font-size: clamp(1.08rem, 2vw, 1.48rem);
-}
-
-.overseas-breakdown {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 8px;
-  margin: 10px 0 0;
-}
-
-.overseas-breakdown div {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 8px;
-  padding: 7px 9px;
-  border-radius: 8px;
-  background: rgba(255, 255, 255, 0.58);
-}
-
-.overseas-breakdown dt {
-  color: var(--muted);
-  font-size: 0.58rem;
-}
-
-.overseas-breakdown dd {
-  margin: 0;
-  font-family: "Cascadia Mono", Consolas, monospace;
-  font-size: 0.68rem;
-  font-weight: 800;
-}
-
-.logistics-definition {
-  margin: 9px 0 0;
-  color: var(--muted);
-  font-size: 0.61rem;
-  line-height: 1.55;
-}
-
-.store-overview-grid {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 12px;
-}
-
-.store-overview-card {
-  min-width: 0;
-  padding: 17px;
-  border: 1px solid rgba(24, 37, 31, 0.09);
-  border-radius: 14px;
-  background: rgba(255, 255, 255, 0.8);
-  box-shadow: 0 8px 22px rgba(32, 54, 43, 0.045);
-}
-
-.store-overview-card.attention {
-  border-top: 4px solid var(--erp-red);
-}
-
-.store-overview-card.data_gap {
-  border-top: 4px solid #c88224;
-}
-
-.store-overview-card.healthy {
-  border-top: 4px solid var(--green);
-}
-
-.store-overview-card.empty {
-  border-style: dashed;
-}
-
-.store-overview-card header {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 12px;
-}
-
-.store-overview-card h4 {
-  margin: 4px 0 0;
-  font-size: 0.92rem;
-  line-height: 1.3;
-}
-
-.store-code,
-.store-overview-card time {
-  color: var(--muted);
-  font-family: "Cascadia Mono", Consolas, monospace;
-  font-size: 0.61rem;
-}
-
-.store-overview-card time {
-  flex: 0 0 auto;
-  padding: 4px 6px;
-  border-radius: 6px;
-  background: #eef3ee;
-}
-
-.store-card-status {
-  display: flex;
-  align-items: flex-end;
-  flex-direction: column;
-  gap: 5px;
-}
-
-.health-badge {
-  padding: 4px 7px;
-  border-radius: 999px;
-  background: rgba(55, 93, 74, 0.1);
-  color: var(--green);
-  font-size: 0.58rem;
-  font-weight: 800;
-}
-
-.store-overview-card.attention .health-badge {
-  background: rgba(180, 64, 52, 0.1);
-  color: var(--erp-red);
-}
-
-.store-overview-card.data_gap .health-badge {
-  background: rgba(200, 130, 36, 0.12);
-  color: #9a6420;
-}
-
-.store-operators {
-  margin-top: 12px;
-  padding: 9px;
-  border-radius: 9px;
-  background: #f4f7f3;
-}
-
-.store-operators > span,
-.store-operators > strong {
-  display: block;
-  color: var(--muted);
-  font-size: 0.59rem;
-}
-
-.store-operators > div {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 5px;
-  margin-top: 6px;
-}
-
-.operator-chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  padding: 4px 6px;
-  border: 1px solid rgba(55, 93, 74, 0.16);
-  border-radius: 999px;
-  background: #fff;
-  color: var(--green);
-  font-size: 0.62rem;
-  font-weight: 750;
-}
-
-.operator-chip small {
-  color: var(--muted);
-  font-size: 0.5rem;
-  font-weight: 500;
-}
-
-.health-reasons {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 5px;
-  margin-top: 9px;
-}
-
-.health-reasons span {
-  padding: 4px 6px;
-  border-radius: 6px;
-  font-size: 0.56rem;
-}
-
-.health-reasons .business-risk {
-  background: rgba(180, 64, 52, 0.09);
-  color: var(--erp-red);
-}
-
-.health-reasons .data-risk {
-  background: rgba(200, 130, 36, 0.1);
-  color: #9a6420;
-}
-
-.health-reasons .healthy-signal {
-  background: rgba(55, 93, 74, 0.09);
-  color: var(--green);
-}
-
-.store-main-kpi {
-  margin: 18px 0 15px;
-}
-
-.store-main-kpi span,
-.store-traffic-kpi span,
-.store-traffic-kpi small {
-  display: block;
-  color: var(--muted);
-  font-size: 0.64rem;
-}
-
-.store-main-kpi strong {
-  display: block;
-  margin-top: 4px;
-  color: var(--green);
-  font-family: "Cascadia Mono", Consolas, monospace;
-  font-size: 1.75rem;
-  letter-spacing: -0.06em;
-}
-
-.store-metrics {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 9px;
-  margin: 0;
-}
-
-.store-metrics div {
-  min-width: 0;
-  padding: 9px;
-  border-radius: 9px;
-  background: #f4f7f3;
-}
-
-.store-metrics dt {
-  color: var(--muted);
-  font-size: 0.6rem;
-}
-
-.store-metrics dd {
-  margin: 4px 0 0;
-  overflow: hidden;
-  font-family: "Cascadia Mono", Consolas, monospace;
-  font-size: 0.75rem;
-  font-weight: 700;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.store-inventory-grid {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 7px;
-  margin: 10px 0 0;
-  padding: 9px;
-  border: 1px solid rgba(55, 93, 74, 0.11);
-  border-radius: 9px;
-  background: rgba(235, 242, 235, 0.68);
-}
-
-.store-inventory-grid div {
-  min-width: 0;
-}
-
-.store-inventory-grid dt {
-  color: var(--muted);
-  font-size: 0.55rem;
-}
-
-.store-inventory-grid dd {
-  margin: 4px 0 0;
-  overflow: hidden;
-  color: var(--green);
-  font-family: "Cascadia Mono", Consolas, monospace;
-  font-size: 0.72rem;
-  font-weight: 800;
-  text-overflow: ellipsis;
-}
-
-.store-traffic-kpi {
-  margin-top: 10px;
-  padding-top: 11px;
-  border-top: 1px solid rgba(24, 37, 31, 0.08);
-}
-
-.store-traffic-kpi strong {
-  display: block;
-  margin: 5px 0 3px;
-  color: var(--green);
-  font-family: "Cascadia Mono", Consolas, monospace;
-  font-size: 1rem;
-}
-
-.store-traffic-kpi.incomplete strong,
-.store-traffic-kpi.incomplete small {
-  color: #9a6420;
-}
-
-.store-drilldown {
-  width: 100%;
-  margin-top: 12px;
-  padding: 8px 10px;
-  border: 1px solid rgba(55, 93, 74, 0.22);
-  border-radius: 8px;
-  background: transparent;
-  color: var(--green);
-  cursor: pointer;
-  font-size: 0.64rem;
-  font-weight: 800;
-}
-
-.store-drilldown:hover,
-.store-drilldown:focus-visible {
-  border-color: var(--green);
-  background: rgba(55, 93, 74, 0.07);
-  outline: none;
 }
 
 .selected-store-heading {
@@ -2750,14 +1501,7 @@ function trafficPointTitle(point: StoreTrafficPoint) {
 }
 
 @media (max-width: 760px) {
-  .multi-total-grid,
-  .logistics-total-grid,
-  .store-overview-grid {
-    grid-template-columns: 1fr;
-  }
 
-  .command-health,
-  .logistics-command-heading,
   .sales-audit-heading,
   .sales-audit-pagination,
   .traffic-heading,
@@ -2771,15 +1515,6 @@ function trafficPointTitle(point: StoreTrafficPoint) {
     grid-template-columns: 1fr;
   }
 
-  .command-health dl {
-    width: 100%;
-  }
-
-  .overseas-breakdown {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-
-  .logistics-command-heading > span,
   .traffic-heading > span {
     text-align: left;
   }
@@ -2789,15 +1524,10 @@ function trafficPointTitle(point: StoreTrafficPoint) {
   }
 }
 
-@media (min-width: 761px) and (max-width: 1100px) {
-  .multi-total-grid,
-  .logistics-total-grid,
-  .store-overview-grid {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
+/* Mobile layout: retain every field and existing action. */
 
-  .overseas-breakdown {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
+@media (max-width: 760px) {
+  .sales-audit-filter input { width: 100%; }
+  .traffic-latest { gap: 6px; }
 }
 </style>

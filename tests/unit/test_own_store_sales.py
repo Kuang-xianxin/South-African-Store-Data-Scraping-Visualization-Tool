@@ -430,6 +430,9 @@ def test_scope_aggregate_combines_visible_stores_and_marks_incomplete_days() -> 
         "30": 5,
         "60": 5,
         "90": 5,
+        "total": 5,
+        "total_partial_days": 1,
+        "total_missing_days": 0,
     }
     bounded_aggregate = aggregate_own_store_sales_series(
         [first_store, second_store],
@@ -439,6 +442,7 @@ def test_scope_aggregate_combines_visible_stores_and_marks_incomplete_days() -> 
     assert bounded_aggregate["listing_date"] == "2026-08-01"
     assert bounded_aggregate["series_start_date"] == "2026-08-02"
     assert bounded_aggregate["total_ordered_units"] == 4
+    assert summarize_own_store_sales_windows(bounded_aggregate)["total"] is None
     assert [point["date"] for point in bounded_aggregate["points"]] == [
         "2026-08-02",
         "2026-08-03",

@@ -24,11 +24,11 @@ test("log viewer renders one aggregate summary per collection round", () => {
   assert.match(apiSource, /selected_round: CompetitorCollectionLogRound \| null/);
   assert.match(viewerSource, /window\.setInterval/);
   assert.match(viewerSource, /3_000/);
-  assert.match(viewerSource, /竞品雷达轮次详情/);
+  assert.match(viewerSource, /选品雷达轮次详情/);
   assert.match(viewerSource, /本轮目标/);
   assert.match(viewerSource, /未解决失败/);
   assert.match(viewerSource, /最近轮次事件/);
-  assert.match(viewerSource, /这里只显示轮次汇总，不展示逐商品爬取行/);
+  assert.doesNotMatch(viewerSource, /这里只显示轮次汇总，不展示逐商品爬取行/);
   assert.doesNotMatch(viewerSource, /<pre/);
   assert.doesNotMatch(viewerSource, /payload\?\.content/);
   assert.doesNotMatch(apiSource, /max_lines/);

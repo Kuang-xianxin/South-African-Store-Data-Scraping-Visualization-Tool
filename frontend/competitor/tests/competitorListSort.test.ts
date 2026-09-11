@@ -3,7 +3,10 @@ import test from "node:test";
 
 import {
   competitorListSortMetricLabel,
+  competitorListSortOptions,
+  effectiveCompetitorSortMetric,
   sortCompetitorItems,
+  type CompetitorListSortMetric,
 } from "../src/competitorListSort.ts";
 import type { CompetitorItem } from "../src/types.ts";
 
@@ -114,4 +117,37 @@ test("new follower seller count is sortable and null metrics always stay last", 
     sortCompetitorItems(items, "全部", "asc").map((row) => row.plid),
     ["A", "B", "C"],
   );
+});
+
+for (const window of ["7", "15", "30", "60", "90", "total"] as const) {
+  for (const source of ["competitor", "own_store", "followers"] as const) {
+    test(`${source} ${window}: sorts the displayed sales globally in both directions, keeping missing last`, () => {
+      const field = source === "competitor" ? "近期观察售出"
+        : source === "own_store" ? "自有官方销量" : "跟卖近期观察售出";
+      const metric: CompetitorListSortMetric = `${source === "followers" ? "follower_sales" : "sales"}_${window}`;
+      const rows = [10, null, 2, 100, 0, undefined, NaN].map((value, i) => ({
+        ...item(String(i), { 周期销售件数: 1000 - i }),
+        来源: source === "competitor" ? "competitor" : "own_store",
+        自有官方销量: { [window]: 9000 - i },
+        跟卖近期观察售出: { [window]: 5000 - i },
+        近期观察售出: { [window]: 3000 - i },
+        [field]: { [window]: value },
+      }) as CompetitorItem);
+      const original = [...rows];
+      for (const signal of ["全部", "库存减少"] as const) {
+        assert.deepEqual(sortCompetitorItems(rows, signal, "asc", metric).map(row => row.plid),
+          ["4", "2", "0", "3", "1", "5", "6"]);
+        assert.deepEqual(sortCompetitorItems(rows, signal, "desc", metric).map(row => row.plid),
+          ["3", "0", "2", "4", "1", "5", "6"]);
+      }
+      assert.deepEqual(rows, original);
+    });
+  }
+}
+
+test("sales options cover every window and preserve the period when switching product source", () => {
+  assert.equal(competitorListSortOptions(false, "全部").length, 7);
+  assert.equal(competitorListSortOptions(true, "库存减少").length, 13);
+  assert.equal(effectiveCompetitorSortMetric("follower_sales_total", false), "sales_total");
+  assert.equal(effectiveCompetitorSortMetric("follower_sales_7", true), "follower_sales_7");
 });

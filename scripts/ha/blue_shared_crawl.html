@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>蓝版 · 双机采集测试</title>
+<style>
+body{font:16px/1.65 system-ui,sans-serif;max-width:1100px;margin:32px auto;padding:0 20px;color:#19324c;background:#f3f6fa}
+section{background:white;padding:20px;margin:18px 0;border:1px solid #cbd5e1;border-radius:10px}h1{font-size:25px}h2{font-size:20px}
+button,a{min-height:44px}button{padding:10px 18px;cursor:pointer;margin:6px;background:#144d91;color:white;border:0;border-radius:6px}button:disabled{opacity:.5;cursor:wait}
+textarea{width:100%;box-sizing:border-box;padding:10px;min-height:105px;font:inherit}table{border-collapse:collapse;width:100%}td,th{padding:10px;text-align:left;border-bottom:1px solid #ddd;overflow-wrap:anywhere}
+.scroll{overflow:auto}#notice{white-space:pre-wrap;color:#912d0a}small{color:#54657a}.worker{display:inline-block;margin:6px 20px 6px 0}code{overflow-wrap:anywhere}
+</style>
+<h1>蓝版 · 双机采集测试</h1>
+<p><a href="/">返回蓝版登录 / 系统首页</a>。请先在同一地址登录 kxx 账号，再返回这里。</p>
+<section><h2>测试边界</h2>
+<p>主机和笔记本共享本轮任务，每台一次处理一条。数据只写蓝库，不更新绿版。</p>
+<p id="delivery-mode">正在核对任务运行模式。</p>
+<p>本入口是可选的双机测试入口，每批1–20条真正竞品。你也可以返回蓝版原页面，手动新建蓝版自己的独立批次，不受这里的20条限制；仅蓝版09:00自动采集停用。主机数据库故障自动接管尚未启用。</p>
+<p>原页面手动批次目前由所访问的蓝版节点执行，尚未接入双机共享队列。两种入口的任务不会自动合并去重，请避免同时提交相同商品。</p>
+<p>两版仍共用部分电脑和网络资源，建议先测试2条。关闭此页不会取消已经提交的任务。</p></section>
+<section><h2>开始小批量测试</h2><label for="plids">纯数字PLID，每行一条</label>
+<textarea id="plids" placeholder="从蓝版监控列表复制PLID" spellcheck="false"></textarea>
+<button id="start" disabled>提交真实采集</button><button id="refresh">只刷新状态</button>
+<p id="notice" role="status" aria-live="polite"></p><small id="request"></small></section>
+<section><h2>两台电脑</h2><div id="workers"></div><small>在线按45秒内心跳判断，不代表外网请求一定成功。时间均按当前浏览器时区显示。</small></section>
+<section><h2>最近批次</h2><div id="batches"></div></section>
+<section><h2>最近100条结果</h2><div class="scroll"><table><thead><tr><th>PLID</th><th>状态</th><th>尝试</th><th>结果</th></tr></thead><tbody id="items"></tbody></table></div></section>
+<script>
+const $=id=>document.getElementById(id);let busy=false,refreshing=false,ready=false;
+function submissionAllowed(data){return data.durable_delivery===true&&data.durable_cluster_ready===true}
+const key='blue-small-crawl-pending-v1';let pending=null;
+try{pending=JSON.parse(sessionStorage.getItem(key)||'null')}catch{}
+if(pending){$('plids').value=pending.plids.join('\n');$('request').textContent='待核对请求：'+pending.request_id}
+function notice(message){$('notice').textContent=message}
+function element(tag,value){const e=document.createElement(tag);e.textContent=value;return e}
+function requestId(){return Array.from(crypto.getRandomValues(new Uint8Array(16)),n=>n.toString(16).padStart(2,'0')).join('')}
+async function api(path,body){
+ const options={credentials:'same-origin',cache:'no-store',headers:{}};
+ if(body){const session=await fetch('/api/auth/session',{credentials:'same-origin',cache:'no-store'});if(!session.ok)throw Error('请先在同一蓝版地址登录');
+ const data=await session.json();options.method='POST';options.headers={'Content-Type':'application/json','X-CSRF-Token':data.csrf_token};options.body=JSON.stringify(body)}
+ const response=await fetch('/api/competitors/distributed/'+path,options);const data=await response.json();
+ if(!response.ok){const error=Error(typeof data.detail==='string'?data.detail:'请求被拒绝，请检查登录、权限或输入');error.status=response.status;throw error}return data;
+}
+const labels={pending:'待领取',leased:'采集中',retry:'待重试',succeeded:'成功',terminal:'失败/需核对',cancelled:'已取消'};
+async function refresh(){if(refreshing)return;refreshing=true;try{
+ const data=await api('status');ready=submissionAllowed(data);$('start').disabled=busy||!ready;$('delivery-mode').textContent=data.durable_delivery?(data.durable_cluster_ready?'已启用断线暂存补交：允许重复执行，失败退避重试；同次结果重复上传只入库一次。仅继续30分钟内已缓存的任务，过期等待重新同步。提交入队不代表已经缓存到两台电脑。':'本机已升级，另一台worker尚未完成加载；新的双机队列暂不接受提交，原页面手动采集不受影响。'):'本机仍运行旧版后端，网页已暂停提交；需完成蓝版进程重载，原页面手动采集不受影响。';$('workers').replaceChildren();for(const w of data.workers){$('workers').append(element('span',`${w.worker_id==='blue-main'?'主机':'笔记本'}：${w.online?'在线':'心跳过期'} / ${w.state==='collecting'?'采集中':w.state==='idle'?'空闲':w.state}${w.current_plid?' · '+w.current_plid:''} ${w.last_error||''}`));$('workers').lastChild.className='worker'}
+ $('batches').replaceChildren();for(const b of data.batches){const row=element('p',`${b.batch_id}：共${b.total}，成功${b.succeeded}，失败${b.failed}，待领取${b.pending}，采集中${b.running}，待重试${b.retry}，取消${b.cancelled} `);
+ if(b.batch_id.startsWith('blue-web-')&&(b.pending||b.retry||b.running)){const button=element('button','停止后续领取');button.onclick=async()=>{if(busy)return;if(!confirm('取消后续领取，已领取商品继续完成；断线节点收到取消前仍可能按30分钟缓存继续采集。已采集数据保留。确定？'))return;busy=true;button.disabled=true;try{const r=await api('stop',{batch_id:b.batch_id});notice(r.message);await refresh()}catch(e){notice(e.message)}finally{busy=false;button.disabled=false}};row.append(button)}$('batches').append(row)}
+ $('items').replaceChildren();for(const item of data.items){const row=document.createElement('tr');for(const value of [item.plid,labels[item.status]||item.status,item.attempt_count,item.message||'等待执行'])row.append(element('td',value));$('items').append(row)}
+ if(pending){const accepted=data.batches.find(b=>b.batch_id==='blue-web-'+pending.request_id);if(accepted){notice('已确认原请求落入队列，无需重复提交：'+accepted.batch_id);sessionStorage.removeItem(key);pending=null;$('request').textContent=''}}
+ }catch(e){ready=false;$('start').disabled=true;notice(e.message)}finally{refreshing=false}}
+$('start').onclick=async()=>{if(busy||!ready)return;const plids=[...new Set($('plids').value.trim().split(/\s+/).filter(Boolean))];
+ if(!plids.length||plids.length>20||plids.some(p=>!/^\d{1,30}$/.test(p))){notice('请输入1–20条纯数字PLID');return}
+ if(pending&&JSON.stringify(pending.plids)!==JSON.stringify(plids)){notice('上次提交结果尚未确认，请先恢复原清单并刷新状态，不要更换请求编号重复派发');return}
+ if(!confirm(`将真实采集${plids.length}条商品并写入蓝库；断线暂存模式允许重复执行和失败退避重试。确定？`))return;
+ busy=true;$('start').disabled=true;try{ready=submissionAllowed(await api('status'));if(!ready)throw Error('蓝版进程版本尚未全部就绪，未提交任务');pending=pending||{request_id:requestId(),plids};sessionStorage.setItem(key,JSON.stringify(pending));$('request').textContent='请求编号：'+pending.request_id;
+ const result=await api('start',pending);notice((result.reused?'已确认原批次：':'已提交：')+result.batch_id);pending=null;sessionStorage.removeItem(key);$('request').textContent='';await refresh()
+ }catch(e){if(e.status>=400&&e.status<500){pending=null;sessionStorage.removeItem(key);$('request').textContent='';notice(e.message)}else{notice(e.message+'。若提交结果不确定，先刷新状态；再次提交会沿用同一请求编号。')}}finally{busy=false;$('start').disabled=!ready}};
+$('refresh').onclick=refresh;refresh();setInterval(()=>{if(!document.hidden)refresh()},10000);
+</script></html>

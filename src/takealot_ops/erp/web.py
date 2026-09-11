@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import random
+import re
 import time
 from collections import defaultdict
+from copy import deepcopy
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
@@ -19,8 +22,9 @@ from urllib.parse import quote, urlsplit
 from zoneinfo import ZoneInfo
 
 import pandas as pd
-from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.concurrency import run_in_threadpool
+from fastapi.encoders import jsonable_encoder
 from fastapi.responses import (
     FileResponse,
     HTMLResponse,
@@ -35,6 +39,14 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 from starlette.middleware.gzip import GZipMiddleware
+
+from takealot_ops.erp.radar_list_query import RadarListQuery
+from takealot_ops.erp.competitor_match_catalog import load_match_catalog, read_precomputed_match_cards
+from takealot_ops.erp.radar_materialized import MaterializedRadar, radar_date_bounds, radar_fingerprints
+from takealot_ops.erp.radar_code_version import materialized_code_fingerprint
+from takealot_ops.erp.radar_warmup import (
+    RadarWarmRequest, RadarWarmup, initial_warm_requests, resolve_warm_request,
+)
 
 from takealot_ops.competitors.api import (
     CompetitorNetworkError,
@@ -61,7 +73,6 @@ from takealot_ops.competitors.listings import (
     preview_competitor_listing,
 )
 from takealot_ops.competitors.own_store_sales import (
-    OWN_STORE_SALES_WINDOW_DAYS,
     aggregate_own_store_sales_series,
     build_own_store_sales_detail,
     build_own_store_sales_series,
@@ -78,6 +89,7 @@ from takealot_ops.competitors.service import (
     CompetitorDiscoveredTarget,
     load_competitor_dataset,
     load_competitor_link_health,
+    load_true_competitor_date_range,
 )
 from takealot_ops.competitors.scheduled import (
     SCHEDULED_CLIENT_ID,
@@ -169,7 +181,10 @@ from takealot_ops.erp.product_images import (
     ProductImageUnavailableError,
     ProductThumbnailCache,
 )
+from takealot_ops.erp.live_updates import DataRevisionReader, MODULE_TOPICS, VersionedReadProjectionCache
 from takealot_ops.erp.read_cache import ReadProjectionCache
+from takealot_ops.search_ranking.title_optimization import enrich_monitored_benchmarks
+from takealot_ops.erp.radar_page_cache import RadarPageCache, radar_code_fingerprint
 from takealot_ops.erp.return_removal import (
     REMOVAL_SNAPSHOT_PROVIDER,
     attach_removal_lifecycles,
@@ -195,6 +210,7 @@ from takealot_ops.erp.service import (
     create_read_only_erp_engine,
     frame_records,
     load_erp_dataset,
+    load_summary_dataset,
     load_product_detail_dataset,
     load_product_list_dataset,
     load_quadrant_dataset,
@@ -246,7 +262,7 @@ from takealot_ops.search_ranking import (
     SearchRankingProviderError,
     SearchRankingService,
 )
-from takealot_ops.settings import DashboardSettings
+from takealot_ops.settings import DashboardSettings, SettingsError
 from takealot_ops.storage.migrations import create_engine_for_settings, create_schema
 from takealot_ops.storage.models import (
     CollectionRun,
@@ -657,6 +673,48 @@ class _LoginLimiter:
             self._failures.pop(source, None)
 
 
+def _competitor_browser_proxy_from_environment() -> str | None:
+    """Return a loopback-only crawler proxy or fail before any collection starts."""
+    raw = os.environ.get("TAKEALOT_COMPETITOR_BROWSER_PROXY", "").strip()
+    if not raw:
+        return None
+    parsed = urlsplit(raw)
+    try:
+        port = parsed.port
+    except ValueError as exc:
+        raise SettingsError("竞品浏览器代理端口必须是1到65535之间的整数") from exc
+    if (
+        parsed.scheme.casefold() != "socks5"
+        or parsed.hostname not in {"127.0.0.1", "localhost"}
+        or port is None
+        or not 1 <= port <= 65535
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.path not in {"", "/"}
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise SettingsError(
+            "竞品浏览器代理必须是无账号密码的本机 socks5://127.0.0.1:端口"
+        )
+    return f"socks5://127.0.0.1:{port}"
+
+
+def _environment_flag_enabled(name: str) -> bool:
+    """Return whether one explicit process-level feature flag is enabled."""
+    return os.environ.get(name, "").strip().casefold() in {"1", "true", "yes", "on"}
+
+
+def _session_cookie_name_from_environment() -> str:
+    """Return one conservative cookie name for an isolated ERP deployment."""
+    name = os.environ.get("TAKEALOT_SESSION_COOKIE_NAME", SESSION_COOKIE).strip()
+    if not re.fullmatch(r"[A-Za-z0-9._-]{1,64}", name):
+        raise SettingsError(
+            "TAKEALOT_SESSION_COOKIE_NAME 只能使用字母、数字、点、下划线和短横线"
+        )
+    return name
+
+
 class _CompetitorPublicClientLease:
     def __init__(self, client: CompetitorPublicClient) -> None:
         self.client = client
@@ -686,6 +744,7 @@ class _SharedCompetitorPublicClient:
         max_uses: int = 25,
         min_link_delay_seconds: float = 2.0,
         max_link_delay_seconds: float = 5.0,
+        client_factory: Callable[[], CompetitorPublicClient] | None = None,
     ) -> None:
         if max_uses < 1:
             raise ValueError("max_uses must be at least 1")
@@ -698,6 +757,7 @@ class _SharedCompetitorPublicClient:
         self._max_uses = max_uses
         self._min_link_delay_seconds = min_link_delay_seconds
         self._max_link_delay_seconds = max_link_delay_seconds
+        self._client_factory = client_factory or CompetitorPublicClient
         self._uses = 0
         self._has_previous_lease = False
         self._client: CompetitorPublicClient | None = None
@@ -720,7 +780,7 @@ class _SharedCompetitorPublicClient:
                 await _sleep_competitor_link_cooldown(delay_seconds)
             if self._client is None or self._uses >= self._max_uses:
                 await self._close_current()
-                self._client = CompetitorPublicClient()
+                self._client = self._client_factory()
             client = self._client
             lease = _CompetitorPublicClientLease(client)
             try:
@@ -1223,15 +1283,58 @@ def _health_rollup(items: Sequence[Mapping[str, Any]]) -> dict[str, int]:
 def create_app(project_root: Path | None = None) -> FastAPI:
     """Create the unified ERP API and attach its built Vue application."""
     root = (project_root or Path(os.environ.get("TAKEALOT_PROJECT_ROOT", Path.cwd()))).resolve()
-    auth = AuthManager(root)
+    web_only = _environment_flag_enabled("TAKEALOT_WEB_ONLY")
+    read_only_test_mode = _environment_flag_enabled("TAKEALOT_READ_ONLY_TEST_MODE")
+    if read_only_test_mode and not web_only:
+        raise SettingsError("TAKEALOT_READ_ONLY_TEST_MODE 必须与 TAKEALOT_WEB_ONLY 一起启用")
+    deployment_label = os.environ.get("TAKEALOT_DEPLOYMENT_LABEL", "").strip()
+    if deployment_label and not re.fullmatch(r"[A-Za-z0-9._-]{1,64}", deployment_label):
+        raise SettingsError("TAKEALOT_DEPLOYMENT_LABEL 只能使用字母、数字、点、下划线和短横线")
+    session_cookie_name = _session_cookie_name_from_environment()
+    auth = AuthManager(root, read_only_test_mode=read_only_test_mode)
     limiter = _LoginLimiter()
     competitor_logger = configure_collection_logger(root)
     collection_coordinator = CollectionRequestCoordinator[CompetitorCollectionResult]()
     collection_stop_lock = asyncio.Lock()
-    competitor_public_client = _SharedCompetitorPublicClient(max_uses=25)
-    database_url = DashboardSettings.from_env(root).database_url
+    dashboard_settings = DashboardSettings.from_env(root)
+    competitor_browser_proxy = _competitor_browser_proxy_from_environment()
+    competitor_public_client = _SharedCompetitorPublicClient(
+        max_uses=25,
+        client_factory=(
+            lambda: CompetitorPublicClient(proxy_server=competitor_browser_proxy)
+            if competitor_browser_proxy is not None
+            else CompetitorPublicClient()
+        ),
+    )
+    database_url = dashboard_settings.database_url
     read_engine = create_read_only_erp_engine(database_url)
-    read_projection_cache = ReadProjectionCache(ttl_seconds=20.0, max_entries=48)
+    data_revisions = DataRevisionReader(read_engine)
+    read_projection_cache = VersionedReadProjectionCache(data_revisions, ttl_seconds=180.0, max_entries=48)
+    radar_component_cache = VersionedReadProjectionCache(data_revisions, ttl_seconds=600.0, max_entries=4)
+    radar_page_cache = RadarPageCache(
+        max_entries=3, max_workers=1,
+        directory=(root / "data" / "runtime-cache" / "radar-pages")
+        if not database_url.startswith("sqlite") else None,
+        namespace=radar_code_fingerprint(root),
+    )
+    radar_materialized = MaterializedRadar(
+        root / "data" / "runtime-cache" / "radar-true-materialized-v2.sqlite3",
+        namespace=materialized_code_fingerprint(root), batch_size=32, max_pages=32768,
+    )
+    radar_own_materialized = MaterializedRadar(
+        root / "data" / "runtime-cache" / "radar-own-materialized-v2.sqlite3",
+        namespace=materialized_code_fingerprint(root), batch_size=32, max_pages=32768,
+    )
+    radar_warmup = RadarWarmup(root / "data" / "runtime-cache" / "radar-warmup.sqlite3")
+    match_catalog_cache = RadarPageCache(
+        max_entries=8, max_bytes=8 * 1024 * 1024, max_workers=1,
+        directory=(root / "data" / "runtime-cache" / "competitor-match-catalog")
+        if not database_url.startswith("sqlite") else None,
+        namespace="matching-v1-" + radar_code_fingerprint(root),
+    )
+    match_cards_cache = RadarPageCache(
+        max_entries=12, max_bytes=12 * 1024 * 1024, max_workers=1, fresh_seconds=60,
+    )
     collection_registry = CollectionBatchRegistry(
         None
         if database_url.startswith("sqlite")
@@ -1244,7 +1347,7 @@ def create_app(project_root: Path | None = None) -> FastAPI:
         cache_path=root / "data" / "runtime-cache" / "exchange-rates" / "cny-zar.json"
     )
     anomaly_product_cache = AnomalyProductPayloadCache()
-    logistics_overview = LogisticsOverviewService(root)
+    logistics_overview = LogisticsOverviewService(root, read_engine=read_engine)
     platform_warehouse = PlatformWarehouseService(root)
     search_ranking = SearchRankingService(root)
     search_ranking_lock = asyncio.Lock()
@@ -1257,8 +1360,10 @@ def create_app(project_root: Path | None = None) -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
-        if scheduled_competitor_runner is not None:
+        if scheduled_competitor_runner is not None and not web_only:
             scheduled_competitor_runner.start()
+        if not database_url.startswith("sqlite") and not read_only_test_mode:
+            radar_warmup.start(dispatch_radar_warmup, seed_radar_warmup)
         try:
             yield
         finally:
@@ -1269,6 +1374,12 @@ def create_app(project_root: Path | None = None) -> FastAPI:
             refresh_coordinator.close()
             product_thumbnails.close()
             cny_zar_rates.close()
+            await run_in_threadpool(radar_warmup.close)
+            await run_in_threadpool(match_catalog_cache.close)
+            await run_in_threadpool(match_cards_cache.close)
+            await run_in_threadpool(radar_page_cache.close)
+            await run_in_threadpool(radar_materialized.close)
+            await run_in_threadpool(radar_own_materialized.close)
             auth.close()
             read_engine.dispose()
 
@@ -1284,10 +1395,55 @@ def create_app(project_root: Path | None = None) -> FastAPI:
     app.state.product_thumbnail_cache = product_thumbnails
     app.state.cny_zar_rate_service = cny_zar_rates
     app.state.anomaly_product_cache = anomaly_product_cache
+    app.state.data_revisions = data_revisions
+    app.state.radar_component_cache = radar_component_cache
+    app.state.radar_page_cache = radar_page_cache
+    app.state.radar_materialized = radar_materialized
+    app.state.radar_own_materialized = radar_own_materialized
+    app.state.radar_warmup = radar_warmup
+    app.state.match_catalog_cache = match_catalog_cache
+    app.state.match_cards_cache = match_cards_cache
     app.state.search_ranking_service = search_ranking
     app.state.search_ranking_batch_controller = search_ranking_batch
     app.state.read_engine = read_engine
     app.state.read_projection_cache = read_projection_cache
+    app.state.read_only_test_mode = read_only_test_mode
+    app.state.session_cookie_name = session_cookie_name
+
+    def renew_app_session_cookie(
+        response: Response,
+        request: Request,
+        token: str | None,
+        *,
+        renewed: bool,
+    ) -> Response:
+        return _renew_session_cookie(
+            response,
+            request,
+            token,
+            renewed=renewed,
+            cookie_name=session_cookie_name,
+        )
+
+    @app.middleware("http")
+    async def enforce_read_only_test_mode(
+        request: Request,
+        call_next: Callable[[Request], Awaitable[Response]],
+    ) -> Response:
+        if not read_only_test_mode:
+            return await call_next(request)
+        if (
+            request.method not in {"GET", "HEAD", "OPTIONS"}
+            and request.url.path not in {"/api/auth/login", "/api/auth/logout"}
+        ):
+            return JSONResponse(
+                status_code=403,
+                content={"detail": "蓝版是只读测试环境，修改和采集操作已禁用"},
+                headers={"X-Takealot-Read-Only": "true"},
+            )
+        response = await call_next(request)
+        response.headers["X-Takealot-Read-Only"] = "true"
+        return response
 
     @app.middleware("http")
     async def cache_fingerprinted_frontend_assets(
@@ -1368,7 +1524,9 @@ def create_app(project_root: Path | None = None) -> FastAPI:
             request.method not in {"GET", "HEAD", "OPTIONS"}
             and response.status_code < 400
         ):
-            read_projection_cache.clear()
+            # Committed data versions invalidate only dependent projections.
+            # Heartbeats, login and other status-only writes must not evict them.
+            data_revisions.invalidate()
         return response
 
     @app.middleware("http")
@@ -1388,7 +1546,7 @@ def create_app(project_root: Path | None = None) -> FastAPI:
         if not path.startswith("/api/") or path in public_paths:
             return await call_next(request)
 
-        session_token = request.cookies.get(SESSION_COOKIE)
+        session_token = request.cookies.get(session_cookie_name)
         session = await run_in_threadpool(
             auth.resolve_session,
             session_token,
@@ -1405,7 +1563,7 @@ def create_app(project_root: Path | None = None) -> FastAPI:
                     status_code=403,
                     content={"detail": "请求校验失败，请刷新页面后重试"},
                 )
-                return _renew_session_cookie(
+                return renew_app_session_cookie(
                     response,
                     request,
                     session_token,
@@ -1422,7 +1580,7 @@ def create_app(project_root: Path | None = None) -> FastAPI:
                     "detail": _permission_denied_message(required_permission),
                 },
             )
-            return _renew_session_cookie(
+            return renew_app_session_cookie(
                 response,
                 request,
                 session_token,
@@ -1458,7 +1616,7 @@ def create_app(project_root: Path | None = None) -> FastAPI:
                     "detail": "当前账号未获授权访问已接入数据的店铺",
                 },
             )
-            return _renew_session_cookie(
+            return renew_app_session_cookie(
                 response,
                 request,
                 session_token,
@@ -1469,7 +1627,7 @@ def create_app(project_root: Path | None = None) -> FastAPI:
                 status_code=403,
                 content={"detail": "当前账号未获授权访问所选店铺"},
             )
-            return _renew_session_cookie(
+            return renew_app_session_cookie(
                 response,
                 request,
                 session_token,
@@ -1480,7 +1638,7 @@ def create_app(project_root: Path | None = None) -> FastAPI:
                 status_code=403,
                 content={"detail": "所选店铺尚未完成数据接入"},
             )
-            return _renew_session_cookie(
+            return renew_app_session_cookie(
                 response,
                 request,
                 session_token,
@@ -1490,7 +1648,7 @@ def create_app(project_root: Path | None = None) -> FastAPI:
         scoped_store_code = accessible_store.code if accessible_store is not None else "current"
         with store_scope(scoped_store_code):
             downstream_response = await call_next(request)
-        return _renew_session_cookie(
+        return renew_app_session_cookie(
             downstream_response,
             request,
             session_token,
@@ -1498,20 +1656,31 @@ def create_app(project_root: Path | None = None) -> FastAPI:
         )
 
     @app.get("/api/health")
-    def health() -> dict[str, str]:
-        return {"status": "ok", "application": "takealot-erp"}
+    def health(response: Response) -> dict[str, object]:
+        if deployment_label:
+            response.headers["X-Takealot-Deployment"] = deployment_label
+        payload: dict[str, object] = {"status": "ok", "application": "takealot-erp"}
+        if read_only_test_mode:
+            response.headers["X-Takealot-Read-Only"] = "true"
+            payload["mode"] = "read-only-test"
+            payload["deployment"] = deployment_label or "blue"
+        return payload
 
     @app.get("/api/auth/status")
     def auth_status(request: Request) -> dict[str, bool]:
         setup_required = auth.user_count() == 0
         return {
             "setup_required": setup_required,
-            "bootstrap_allowed": setup_required and _is_loopback_request(request),
+            "bootstrap_allowed": (
+                setup_required
+                and not read_only_test_mode
+                and _is_loopback_request(request)
+            ),
         }
 
     @app.get("/api/auth/session")
     def auth_session(request: Request) -> Response:
-        session_token = request.cookies.get(SESSION_COOKIE)
+        session_token = request.cookies.get(session_cookie_name)
         resolved = auth.resolve_session(session_token)
         if resolved is None:
             raise HTTPException(status_code=401, detail="请先登录")
@@ -1522,7 +1691,7 @@ def create_app(project_root: Path | None = None) -> FastAPI:
                 "expires_at": resolved.expires_at.isoformat(),
             }
         )
-        return _renew_session_cookie(
+        return renew_app_session_cookie(
             response,
             request,
             session_token,
@@ -1546,7 +1715,7 @@ def create_app(project_root: Path | None = None) -> FastAPI:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         except AuthConflictError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
-        return _session_response(request, issued)
+        return _session_response(request, issued, cookie_name=session_cookie_name)
 
     @app.post("/api/auth/login")
     def auth_login(request: Request, payload: LoginRequest) -> Response:
@@ -1561,13 +1730,13 @@ def create_app(project_root: Path | None = None) -> FastAPI:
             limiter.failure(source)
             raise HTTPException(status_code=401, detail="用户名或密码错误")
         limiter.success(source)
-        return _session_response(request, issued)
+        return _session_response(request, issued, cookie_name=session_cookie_name)
 
     @app.post("/api/auth/logout")
     def auth_logout(request: Request) -> Response:
-        auth.logout(request.cookies.get(SESSION_COOKIE))
+        auth.logout(request.cookies.get(session_cookie_name))
         response = JSONResponse({"ok": True})
-        response.delete_cookie(SESSION_COOKIE, path="/")
+        response.delete_cookie(session_cookie_name, path="/")
         return response
 
     @app.get("/api/auth/users")
@@ -1647,6 +1816,45 @@ def create_app(project_root: Path | None = None) -> FastAPI:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         return {"user": user}
 
+    @app.get("/api/erp/data-updates")
+    def data_updates(
+        request: Request,
+        scope: Literal["current", "all", "operating"] = "current",
+    ) -> dict[str, Any]:
+        """Return only authorized module revision tokens, without history reads."""
+        user = request.state.erp_user
+        codes = _own_store_codes_for_request(request, scope)
+        all_codes = _own_store_codes_for_request(request, "all")
+        versions = {}
+        for module in MODULE_TOPICS:
+            permission = (
+                USERS_MANAGE if module == "users"
+                else COMPETITORS_VIEW if module == "competitors"
+                else STORE_VIEW
+            )
+            if not _can_access_required_permission(user, permission):
+                continue
+            selected_codes = all_codes if module == "container-selection" else codes
+            if module not in {"users", "competitors"} and not selected_codes:
+                continue
+            versions[module] = data_revisions.token(module, selected_codes)
+        if "competitors" in versions:
+            revision_scopes: tuple[Literal["current", "all", "operating"], ...] = (
+                "current", "all", "operating",
+            )
+            for competitor_scope in revision_scopes:
+                versions[f"competitors:{competitor_scope}"] = data_revisions.token(
+                    "competitors", _own_store_codes_for_request(request, competitor_scope),
+                )
+        current_freshness = (
+            freshness() if request.state.erp_store is not None
+            else {"last_collection_at": None, "latest_metric_date": None}
+        )
+        return {
+            "versions": versions, "freshness": current_freshness, "poll_after_ms": 15_000,
+            "session_revision": data_revisions.token("users", []),
+        }
+
     @app.get("/api/erp/freshness")
     def freshness() -> dict[str, str | None]:
         path = sqlite_database_path(database_url)
@@ -1690,7 +1898,7 @@ def create_app(project_root: Path | None = None) -> FastAPI:
         )
 
         def load_projection() -> dict[str, Any]:
-            dataset = load_erp_dataset(settings, as_of, engine=read_engine)
+            dataset = load_summary_dataset(settings, as_of, engine=read_engine)
             payload = (
                 build_summary_payload(dataset, as_of, start_date=start_date)
                 if start_date is not None
@@ -1724,6 +1932,31 @@ def create_app(project_root: Path | None = None) -> FastAPI:
             return payload
 
         return read_projection_cache.get_or_load(cache_key, load_projection)
+
+    @app.get("/api/erp/summary/home")
+    def home_dashboard(
+        request: Request,
+        store_scope: Literal["current", "all", "operating"] = Query(default="current"),
+        start_date: date | None = Query(default=None),
+        end_date: date | None = Query(default=None),
+    ) -> dict[str, Any]:
+        from takealot_ops.erp.home_dashboard import build_home_dashboard
+
+        if start_date and end_date and (start_date > end_date or (end_date - start_date).days > 730):
+            raise HTTPException(status_code=422, detail="请选择不超过两年的有效日期范围")
+        stores = ([request.state.erp_store] if store_scope == "current" else
+                  _multi_store_identities_for_request(request, store_scope))
+        identities = {store.code: store.display_name for store in stores}
+        business_today = sast_date(datetime.now(UTC))
+        actual_end = min(end_date or business_today, business_today)
+        actual_start = start_date or actual_end.replace(day=1)
+        if actual_start > actual_end or (actual_end - actual_start).days > 730:
+            raise HTTPException(status_code=422, detail="请选择不超过两年的有效日期范围")
+        return read_projection_cache.get_or_load(
+            ("home-dashboard-v1", tuple(identities.items()), business_today, start_date, end_date),
+            lambda: build_home_dashboard(read_engine, identities, root, today=business_today,
+                                         start_date=start_date, end_date=end_date),
+        )
 
     @app.get("/api/erp/summary/stores")
     def store_summaries(
@@ -2289,6 +2522,7 @@ def create_app(project_root: Path | None = None) -> FastAPI:
         stores = _read_store_identities_for_request(request, selected_store_scope)
         cache_key = (
             "keyword-traffic-list-v2",
+            selected_store_scope,
             tuple(store.code for store in stores),
             as_of.isoformat(),
         )
@@ -2394,7 +2628,11 @@ def create_app(project_root: Path | None = None) -> FastAPI:
         }
         for store in stores:
             with store_scope(store.code):
-                payload = service.list_payload()
+                # Eligibility ages with the clock even when no source rows change.
+                payload = read_projection_cache.get_or_load(
+                    ("search-ranking-list-v1", store.code, int(time.monotonic() // 15)),
+                    service.list_payload,
+                )
             if status is None:
                 status = payload.get("status", {})
             store_eligibility = payload.get("eligibility", {})
@@ -2544,6 +2782,17 @@ def create_app(project_root: Path | None = None) -> FastAPI:
         payload = service.detail_payload(offer_id)
         if payload is None:
             raise HTTPException(status_code=404, detail="没有找到对应的店铺商品")
+        benchmarks = (payload.get("analysis") or {}).get("title_benchmarks")
+        if benchmarks:
+            if request.state.erp_user.can(COMPETITORS_VIEW):
+                try:
+                    enrich_monitored_benchmarks(read_engine, benchmarks)
+                except (SQLAlchemyError, ValueError):
+                    for item in benchmarks["items"]:
+                        item["monitoring_status"] = "unavailable"
+            else:
+                for item in benchmarks["items"]:
+                    item["monitoring_status"] = "no_access"
         return _decorate_search_ranking_detail(
             root,
             payload,
@@ -2575,6 +2824,20 @@ def create_app(project_root: Path | None = None) -> FastAPI:
             raise HTTPException(status_code=503, detail=str(exc)) from exc
         except (SearchRankingProviderError, CompetitorNetworkError) as exc:
             raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    @app.post("/api/erp/search-ranking/{offer_id}/title-review")
+    async def review_search_ranking_titles(offer_id: str, request: Request) -> dict[str, Any]:
+        if search_ranking_lock.locked():
+            raise HTTPException(status_code=409, detail="另一个标题分析正在运行，请稍后重试")
+        service: SearchRankingService = request.app.state.search_ranking_service
+        try:
+            async with search_ranking_lock:
+                await service.review_title_benchmarks(offer_id)
+                return search_ranking_product_detail(offer_id, request)
+        except SearchRankingInputError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except SearchRankingConfigurationError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
 
     @app.post("/api/erp/search-ranking/{offer_id}/product-facts/confirm")
     async def confirm_search_ranking_product_facts(
@@ -2809,28 +3072,31 @@ def create_app(project_root: Path | None = None) -> FastAPI:
             as_of,
             sast_date(datetime.now(UTC)) - timedelta(days=1),
         )
-        store_payloads: list[tuple[StoreIdentity, dict[str, Any]]] = []
-        for store in stores:
-            with store_scope(store.code), Session(read_engine) as session:
-                store_payload = load_cached_anomaly_product_payload(
-                    session,
-                    cache=anomaly_product_cache,
-                    store_code=store.code,
-                    requested_as_of=as_of,
-                    completed_through=completed_through,
-                )
-            store_payloads.append(
-                (
-                    store,
-                    store_payload,
-                )
+        def load_projection() -> dict[str, Any]:
+            store_payloads: list[tuple[StoreIdentity, dict[str, Any]]] = []
+            for store in stores:
+                with store_scope(store.code), Session(read_engine) as session:
+                    store_payload = load_cached_anomaly_product_payload(
+                        session,
+                        cache=anomaly_product_cache,
+                        store_code=store.code,
+                        requested_as_of=as_of,
+                        completed_through=completed_through,
+                        live_revision=data_revisions.token("anomaly-products", [store.code]),
+                        store_revision=data_revisions.token("overview", [store.code]),
+                    )
+                store_payloads.append((store, store_payload))
+            return _aggregate_anomaly_payloads(
+                root,
+                store_payloads,
+                requested_as_of=as_of,
+                completed_through=completed_through,
+                selected_store_scope=selected_store_scope,
             )
-        return _aggregate_anomaly_payloads(
-            root,
-            store_payloads,
-            requested_as_of=as_of,
-            completed_through=completed_through,
-            selected_store_scope=selected_store_scope,
+        return read_projection_cache.get_or_load(
+            ("anomaly-products-v1", selected_store_scope, tuple(store.code for store in stores),
+             as_of.isoformat(), completed_through.isoformat()),
+            load_projection,
         )
 
     @app.get("/api/erp/logistics")
@@ -2849,11 +3115,21 @@ def create_app(project_root: Path | None = None) -> FastAPI:
                 status_code=422,
                 detail="全部店铺查看只读取各店本地快照；请切换到明确单店后再手动同步",
             )
-        payloads: list[tuple[StoreIdentity, dict[str, Any]]] = []
-        for store in stores:
-            with store_scope(store.code):
-                payloads.append((store, logistics_overview.load(force=refresh)))
-        return _aggregate_logistics_payloads(payloads, selected_store_scope)
+        def load_projection() -> dict[str, Any]:
+            payloads: list[tuple[StoreIdentity, dict[str, Any]]] = []
+            for store in stores:
+                with store_scope(store.code):
+                    payloads.append((store, logistics_overview.load(force=refresh)))
+            return _aggregate_logistics_payloads(payloads, selected_store_scope)
+        if refresh:
+            payload = load_projection()
+            data_revisions.invalidate()
+            read_projection_cache.clear()
+            return payload
+        return read_projection_cache.get_or_load(
+            ("logistics-overview-v1", selected_store_scope, tuple(store.code for store in stores)),
+            load_projection,
+        )
 
     @app.post("/api/erp/logistics/links")
     def confirm_logistics_link(
@@ -3523,32 +3799,125 @@ def create_app(project_root: Path | None = None) -> FastAPI:
             raise HTTPException(status_code=404, detail="文件不存在")
         return FileResponse(path, filename=path.name)
 
+    def matching_scope(request: Request) -> tuple[set[str], str, str]:
+        codes = _own_store_codes_for_request(request, "all")
+        permissions = json.dumps(request.state.erp_user.as_dict(), sort_keys=True)
+        boundary = data_revisions.radar_access_token(codes, permissions=permissions)
+        version = data_revisions._topic_token(
+            frozenset(("store", "competitors", "own-identities", "users")), codes,
+        )
+        return codes, boundary, version
+
+    @app.get("/api/competitors/matching/catalog")
+    def competitor_matching_catalog(request: Request, prefer_cached: bool = False) -> Response:
+        codes, boundary, version = matching_scope(request)
+        prepared, refreshing = match_catalog_cache.get_or_load(
+            tuple(sorted(codes)), boundary=boundary, version=version,
+            loader=lambda: load_match_catalog(read_engine, codes), prefer_cached=prefer_cached,
+        )
+        return prepared.response(request, refreshing=refreshing)
+
+    @app.get("/api/competitors/matching/cards")
+    def competitor_matching_cards(
+        request: Request, plids: str = Query(min_length=1, max_length=619),
+        start_date: date | None = None, end_date: date | None = None,
+        prefer_cached: bool = False,
+    ) -> Response:
+        selected = set(plids.split(","))
+        if len(selected) > 20 or any(not re.fullmatch(r"[0-9]{1,30}", p) for p in selected):
+            raise HTTPException(422, "竞品卡片每次最多读取20个有效PLID")
+        if start_date and end_date and start_date > end_date:
+            raise HTTPException(422, "开始日期不能晚于结束日期")
+        codes, boundary, catalog_version = matching_scope(request)
+        directory, _ = match_catalog_cache.get_or_load(
+            tuple(sorted(codes)), boundary=boundary, version=catalog_version,
+            loader=lambda: load_match_catalog(read_engine, codes),
+        )
+        eligible = {item["plid"]: item for item in json.loads(directory.body)["items"]}
+        if selected - eligible.keys():
+            raise HTTPException(404, "部分商品已不在当前可查询范围，请重新查询")
+        start, end = (d.isoformat() if d else None for d in (start_date, end_date))
+        through = datetime.now(ZoneInfo("Asia/Shanghai")).date()
+        version = data_revisions.token("competitors", codes) + through.isoformat()
+
+        def load_cards() -> dict[str, Any]:
+            cards: dict[str, dict[str, Any]] = {}
+            for own in (False, True):
+                wanted = {p for p in selected if (eligible[p]["来源"] == "own_store") == own}
+                key: tuple[Any, ...] = (
+                    ("competitors-own-store-v6", tuple(sorted(codes)), start, end, None) if own
+                    else ("competitors-list-v9", (), start, end, False)
+                )
+                materialized_version = data_revisions._topic_token(
+                    frozenset(("store", "competitors", "master") if own else ("competitors",)),
+                    codes if own else (),
+                ) + (through.isoformat() if own else "")
+                cards.update(read_precomputed_match_cards(
+                    radar_own_materialized if own else radar_materialized,
+                    key=key, boundary=boundary, version=materialized_version, plids=wanted,
+                ))
+            missing = selected - cards.keys()
+            if missing:
+                dataset = _load_competitor_dataset(
+                    root, start_date=start_date, end_date=end_date, own_store_codes=codes,
+                    plids=missing, include_detail_frames=False, engine=read_engine,
+                    store_history_cache=radar_component_cache, strict_read=True,
+                )
+                public = _competitor_card_category_records(frame_records(dataset.current), dataset.category_paths)
+                private = _competitor_card_category_records(_own_store_sales_comparison_records(
+                    root, _product_master_competitor_store_records(root, frame_records(dataset.store_current), engine=read_engine),
+                    own_store_codes=codes, through=through, engine=read_engine, metadata_cache=radar_component_cache,
+                ), dataset.category_paths)
+                cards.update((item["plid"], item) for item in [*public, *private])
+            return {"items": [cards[p] for p in sorted(selected) if p in cards],
+                    "unavailable_plids": sorted(selected - cards.keys())}
+
+        prepared, refreshing = match_cards_cache.get_or_load(
+            (tuple(sorted(codes)), start, end, tuple(sorted(selected)), through.isoformat()),
+            boundary=boundary, version=version, loader=load_cards, prefer_cached=prefer_cached,
+        )
+        return prepared.response(request, refreshing=refreshing)
+
+    @app.get("/api/competitors/date-range")
+    def competitor_initial_date_range() -> dict[str, str | None]:
+        return load_true_competitor_date_range(read_engine)
+
     @app.get("/api/competitors")
     def competitors(
         request: Request,
+        list_query: Annotated[RadarListQuery, Depends()],
         start_date: date | None = Query(default=None),
         end_date: date | None = Query(default=None),
         own_store_scope: Literal["current", "all", "operating"] = Query(default="current"),
         include_own_store: bool = Query(default=True),
-    ) -> dict[str, object]:
+        prefer_cached: bool = Query(default=False),
+    ) -> Response:
         own_store_codes = _own_store_codes_for_request(request, own_store_scope)
+        if list_query.page is not None and (start_date is None or end_date is None):
+            first, last = radar_date_bounds(read_engine, own=False, store_codes=own_store_codes)
+            start_date, end_date = start_date or first, end_date or last
+        if start_date and end_date and start_date > end_date:
+            raise HTTPException(422, "开始日期不能晚于结束日期")
         cache_key = (
-            "competitors-list-v8",
-            tuple(sorted(own_store_codes)),
+            "competitors-list-v9",
+            tuple(sorted(own_store_codes)) if include_own_store else (),
             start_date.isoformat() if start_date else None,
             end_date.isoformat() if end_date else None,
             include_own_store,
         )
 
-        def load_projection() -> dict[str, object]:
+        def load_projection(plids: set[str] | None = None) -> dict[str, object]:
             dataset = _load_competitor_dataset(
                 root,
                 start_date=start_date,
                 end_date=end_date,
                 own_store_codes=own_store_codes,
+                plids=plids,
+                strict_read=list_query.page is not None,
                 include_detail_frames=False,
                 include_store_projection=include_own_store,
                 engine=read_engine,
+                store_history_cache=radar_component_cache,
             )
             return {
                 "items": _competitor_card_category_records(
@@ -3566,6 +3935,7 @@ def create_app(project_root: Path | None = None) -> FastAPI:
                         own_store_codes=own_store_codes,
                         through=datetime.now(ZoneInfo("Asia/Shanghai")).date(),
                         engine=read_engine,
+                        metadata_cache=radar_component_cache,
                     ),
                     dataset.category_paths,
                 ),
@@ -3573,20 +3943,42 @@ def create_app(project_root: Path | None = None) -> FastAPI:
                 "date_range": dataset.date_range_payload(),
             }
 
-        return read_projection_cache.get_or_load(cache_key, load_projection)
+        if list_query.page is not None:
+            if include_own_store:
+                raise HTTPException(422, "分页必须分别读取真正竞品和自有链接")
+            return materialized_radar_response(
+                request, cache_key, own_store_codes, load_projection,
+                list_query, prefer_cached, own=False, own_scope=own_store_scope,
+            )
+        prepared, refreshing = radar_page_cache.get_or_load(
+            cache_key, loader=load_projection, prefer_cached=prefer_cached,
+            version=data_revisions.cache_token(cache_key),
+            boundary=(data_revisions.radar_access_token(
+                own_store_codes, permissions=json.dumps(request.state.erp_user.as_dict(), sort_keys=True))
+                      + datetime.now(ZoneInfo("Asia/Shanghai")).date().isoformat()),
+        )
+        return prepared.response(request, refreshing=refreshing)
 
     @app.get("/api/competitors/own-store")
     def own_store_competitors(
         request: Request,
+        list_query: Annotated[RadarListQuery, Depends()],
         start_date: date | None = Query(default=None),
         end_date: date | None = Query(default=None),
         plid: str | None = Query(default=None, min_length=1, max_length=30),
         own_store_scope: Literal["current", "all", "operating"] = Query(
             default="current"
         ),
-    ) -> dict[str, object]:
+        prefer_cached: bool = Query(default=False),
+    ) -> Response:
         """Return only the scope-dependent private-store radar partition."""
+        official_through = datetime.now(ZoneInfo("Asia/Shanghai")).date()
         own_store_codes = _own_store_codes_for_request(request, own_store_scope)
+        if list_query.page is not None and (start_date is None or end_date is None):
+            first, last = radar_date_bounds(read_engine, own=True, store_codes=own_store_codes)
+            start_date, end_date = start_date or first, end_date or last
+        if start_date and end_date and start_date > end_date:
+            raise HTTPException(422, "开始日期不能晚于结束日期")
         cache_key = (
             "competitors-own-store-v6",
             tuple(sorted(own_store_codes)),
@@ -3595,16 +3987,18 @@ def create_app(project_root: Path | None = None) -> FastAPI:
             plid,
         )
 
-        def load_projection() -> dict[str, object]:
+        def load_projection(selected_plids: set[str] | None = None) -> dict[str, object]:
             dataset = _load_competitor_dataset(
                 root,
                 start_date=start_date,
                 end_date=end_date,
                 own_store_codes=own_store_codes,
-                plids={plid} if plid else None,
+                plids={plid} if plid else selected_plids,
+                strict_read=list_query.page is not None,
                 include_detail_frames=False,
                 own_store_only=True,
                 engine=read_engine,
+                store_history_cache=radar_component_cache,
             )
             return {
                 "store_items": _competitor_card_category_records(
@@ -3616,15 +4010,118 @@ def create_app(project_root: Path | None = None) -> FastAPI:
                             engine=read_engine,
                         ),
                         own_store_codes=own_store_codes,
-                        through=datetime.now(ZoneInfo("Asia/Shanghai")).date(),
+                        through=official_through,
                         engine=read_engine,
+                        metadata_cache=radar_component_cache,
                     ),
                     dataset.category_paths,
                 ),
                 "date_range": dataset.date_range_payload(),
             }
 
-        return read_projection_cache.get_or_load(cache_key, load_projection)
+        if plid:
+            # Detail lookups must not evict the two large prepared list pages.
+            return JSONResponse(jsonable_encoder(
+                read_projection_cache.get_or_load(cache_key, load_projection)
+            ))
+        if list_query.page is not None:
+            return materialized_radar_response(
+                request, cache_key, own_store_codes, load_projection,
+                list_query, prefer_cached, own=True, own_scope=own_store_scope,
+            )
+        prepared, refreshing = radar_page_cache.get_or_load(
+            cache_key, loader=load_projection, prefer_cached=prefer_cached,
+            version=data_revisions.cache_token(cache_key),
+            boundary=(data_revisions.radar_access_token(
+                own_store_codes, permissions=json.dumps(request.state.erp_user.as_dict(), sort_keys=True))
+                      + datetime.now(ZoneInfo("Asia/Shanghai")).date().isoformat()),
+        )
+        return prepared.response(request, refreshing=refreshing)
+
+    def materialized_radar_response(
+        request: Request, cache_key: tuple[Any, ...], own_store_codes: set[str],
+        loader: Callable[..., Any], query: RadarListQuery, prefer_cached: bool, *, own: bool,
+        own_scope: str,
+    ) -> Response:
+        permissions = json.dumps(request.state.erp_user.as_dict(), sort_keys=True)
+        boundary = data_revisions.radar_access_token(own_store_codes, permissions=permissions)
+        # Day rollover refreshes official sales, but keeps the previous complete
+        # generation available as a timestamped preview under the SAME permissions.
+        sales_day = datetime.now(ZoneInfo("Asia/Shanghai")).date().isoformat() if own else ""
+        watchlist: set[str] = set()
+        if query.watchlist:
+            with Session(read_engine) as session:
+                watchlist = _personal_watchlist_projection_plids(session, user_id=request.state.erp_user.id)
+        # Register even a cold request, so a disconnect/failure does not leave
+        # tomorrow's scope permanently absent from restart warming.
+        remember_radar_warmup(request, own_scope, cache_key[2], cache_key[3],
+                             own=own, available={})
+        prepared = (radar_own_materialized if own else radar_materialized).page(
+            key=cache_key, boundary=boundary,
+            # Access/ownership changes already have their own live boundary.
+            # Do not rebuild unchanged history for other users' configuration
+            # revisions or price-only Offer identity notifications.
+            version=lambda: data_revisions._topic_token(
+                frozenset(("store", "competitors", "master") if own else ("competitors",)),
+                own_store_codes if own else (),
+            ) + sales_day,
+            fingerprints=lambda: radar_fingerprints(
+                read_engine, own=own, store_codes=own_store_codes,
+                store_version=data_revisions._topic_token(frozenset(("store", "master")), own_store_codes) + sales_day,
+            ),
+            loader=loader, field="store_items" if own else "items", query=query,
+            prefer_cached=prefer_cached, watchlist=watchlist,
+            prepare_only=getattr(request.state, "radar_warmup", False),
+        )
+        if prepared is None:
+            return Response(status_code=204)
+        payload, refreshing, generated = prepared
+        remember_radar_warmup(request, own_scope, cache_key[2], cache_key[3],
+                             own=own, available=payload["date_range"])
+        return JSONResponse(payload, headers={
+            "Cache-Control": "private, no-store", "Vary": "Cookie, X-Store-Code",
+            "X-ERP-Refreshing": "1" if refreshing else "0", "X-ERP-Generated-At": str(generated),
+        })
+
+    def remember_radar_warmup(
+        request: Request, scope: str, start: str | None, end: str | None, *, own: bool,
+        available: Mapping[str, Any],
+    ) -> None:
+        if database_url.startswith("sqlite") or read_only_test_mode or getattr(request.state, "radar_warmup", False):
+            return
+        store = request.state.erp_store
+        if store is None:
+            return
+        # Reuse the completed projection's metadata: registration must not perform
+        # another historical date-bound SQL scan on every hot page read.
+        radar_warmup.remember(RadarWarmRequest(
+            request.state.erp_user.id, store.code, own, scope,
+            start if start != available.get("available_start") else None,
+            end if end != available.get("available_end") else None,
+        ))
+
+    def seed_radar_warmup() -> None:
+        for saved in initial_warm_requests(read_engine):
+            radar_warmup.remember(saved)
+
+    def dispatch_radar_warmup(saved: RadarWarmRequest) -> None:
+        identity = resolve_warm_request(read_engine, saved)
+        if identity is None:
+            return
+        user, store = identity
+        request = Request({"type": "http", "method": "GET", "path": "/", "headers": []})
+        request.state.erp_user, request.state.erp_store = user, store
+        request.state.radar_warmup = True
+        query = RadarListQuery(page=1, page_size=20, q="", seller="", stock="全部",
+                               status="全部", follower="全部", signal="全部",
+                               direction="desc", sort="signal", watchlist=False)
+        start = date.fromisoformat(saved.start) if saved.start else None
+        end = date.fromisoformat(saved.end) if saved.end else None
+        with store_scope(store.code):
+            if saved.own:
+                own_store_competitors(request, query, start, end, None, saved.scope, True)  # type: ignore[arg-type]
+            else:
+                competitors(request, query, start, end, saved.scope, False, True)  # type: ignore[arg-type]
 
     @app.get("/api/competitors/link-health")
     def competitor_link_health(
@@ -5437,6 +5934,7 @@ def create_app(project_root: Path | None = None) -> FastAPI:
                             project_root=root,
                             client=public_client_lease.client,
                             progress_callback=report_stage,
+                            browser_proxy_server=competitor_browser_proxy,
                         ) as collector:
                             result = await collector.collect(
                                 payload.url,
@@ -5697,16 +6195,17 @@ def create_app(project_root: Path | None = None) -> FastAPI:
         registry=collection_registry,
         journal_path=(
             None
-            if database_url.startswith("sqlite")
+            if web_only or database_url.startswith("sqlite")
             else root / "logs" / "competitor-scheduled-batch.json"
         ),
-        trigger_dir=root / "logs" / "competitor-scheduled-triggers",
+        trigger_dir=None if web_only else root / "logs" / "competitor-scheduled-triggers",
         load_targets=load_scheduled_competitor_targets,
         collect_target=collect_scheduled_target,
         logger=competitor_logger,
         continuous_rounds=True,
     )
     app.state.scheduled_competitor_runner = scheduled_competitor_runner
+    app.state.web_only = web_only
 
     @app.post("/api/internal/competitors/scheduled-trigger")
     async def trigger_scheduled_competitor_batch(
@@ -5717,6 +6216,11 @@ def create_app(project_root: Path | None = None) -> FastAPI:
             raise HTTPException(
                 status_code=403,
                 detail="竞品自动批次只允许 Windows 计划任务从服务器本机触发",
+            )
+        if web_only:
+            raise HTTPException(
+                status_code=503,
+                detail="蓝绿过渡网页实例不启动竞品自动批次",
             )
         try:
             return await scheduled_competitor_runner.trigger(
@@ -5731,6 +6235,11 @@ def create_app(project_root: Path | None = None) -> FastAPI:
         request: Request,
     ) -> dict[str, object]:
         require_competitor_batch_controller(request)
+        if web_only:
+            raise HTTPException(
+                status_code=503,
+                detail="蓝绿过渡网页实例不恢复竞品自动批次",
+            )
         try:
             runner_status = scheduled_competitor_runner.status()
             if runner_status.get("run_status") == "paused":
@@ -7147,6 +7656,8 @@ def _beijing_date_iso(value: datetime | None) -> str | None:
 def _required_permission(path: str, method: str) -> str | tuple[str, ...] | None:
     """Map every authenticated API route to its server-enforced permission."""
     safe_method = method in {"GET", "HEAD", "OPTIONS"}
+    if path == "/api/erp/data-updates" and safe_method:
+        return None  # Authenticated; the endpoint filters each module by its permission.
     if path == "/api/auth/logout":
         return None
     if path.startswith(("/api/auth/users", "/api/auth/stores")):
@@ -7309,6 +7820,8 @@ def _load_competitor_dataset(
     own_store_only: bool = False,
     include_store_projection: bool = True,
     engine: Engine | None = None,
+    store_history_cache: ReadProjectionCache | None = None,
+    strict_read: bool = False,
 ) -> CompetitorDataset:
     if start_date is not None and end_date is not None and start_date > end_date:
         raise HTTPException(status_code=422, detail="开始日期不能晚于结束日期")
@@ -7336,6 +7849,8 @@ def _load_competitor_dataset(
                 include_detail_frames=include_detail_frames,
                 own_store_only=own_store_only,
                 include_store_projection=include_store_projection,
+                store_history_cache=store_history_cache,
+                strict_read=strict_read,
             )
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -7458,10 +7973,13 @@ def _own_store_sales_comparison_records(
     own_store_codes: set[str],
     through: date,
     engine: Engine | None = None,
+    metadata_cache: ReadProjectionCache | None = None,
 ) -> list[dict[str, Any]]:
-    """Attach fixed official-sales totals to all private-link cards in bulk."""
+    """Attach official sales and platform listing times within the visible scope."""
 
     copied = [dict(record) for record in records]
+    for record in copied:
+        record.update({"自有上架时间": None, "自有上架日期": None})
     plids = {
         str(record.get("plid") or "").strip()
         for record in copied
@@ -7480,8 +7998,30 @@ def _own_store_sales_comparison_records(
             )
         return copied
 
+    if metadata_cache is not None:
+        metadata = metadata_cache.get_or_load(
+            ("radar-official-sales-v1", tuple(sorted(own_store_codes)), tuple(sorted(plids)), through),
+            lambda: _own_store_sales_comparison_records(
+                project_root, [{"plid": plid} for plid in sorted(plids)],
+                own_store_codes=own_store_codes, through=through, engine=engine,
+            ),
+        )
+        by_plid = {str(item["plid"]): item for item in metadata}
+        for record in copied:
+            # Cached metadata never contains another request's card fields.
+            item = by_plid.get(str(record.get("plid") or "").strip(), {
+                "自有官方销量": dict(empty_windows),
+                "自有官方销量截至": None,
+                "自有官方销量店铺数": 0,
+                "自有官方销量Offer数": 0,
+            })
+            record.update({
+                key: deepcopy(value) for key, value in item.items()
+                if key != "plid"
+            })
+        return copied
+
     settings = DashboardSettings.from_env(project_root)
-    window_start = through - timedelta(days=max(OWN_STORE_SALES_WINDOW_DAYS) - 1)
     path = sqlite_database_path(settings.database_url)
     if path is not None and not path.exists():
         series_by_plid: dict[str, list[dict[str, Any]]] = {}
@@ -7495,7 +8035,6 @@ def _own_store_sales_comparison_records(
                     plids=plids,
                     store_codes=own_store_codes,
                     through=through,
-                    start=window_start,
                 )
         except SQLAlchemyError:
             series_by_plid = {}
@@ -7505,9 +8044,25 @@ def _own_store_sales_comparison_records(
 
     for record in copied:
         plid = str(record.get("plid") or "").strip()
+        platform_listings = [
+            series
+            for series in series_by_plid.get(plid, [])
+            if series.get("listing_date_source") == "platform"
+            and series.get("listing_date")
+        ]
+        if platform_listings:
+            earliest = min(
+                platform_listings,
+                key=lambda series: str(series.get("listing_at") or series["listing_date"]),
+            )
+            record.update(
+                {
+                    "自有上架时间": earliest.get("listing_at"),
+                    "自有上架日期": earliest["listing_date"],
+                }
+            )
         aggregate = aggregate_own_store_sales_series(
             series_by_plid.get(plid, []),
-            start=window_start,
         )
         if aggregate is None:
             record.update(
@@ -8624,7 +9179,12 @@ def _raise_platform_warehouse_portal_error(exc: PortalError) -> NoReturn:
     raise HTTPException(status_code=502, detail=str(exc)) from exc
 
 
-def _session_response(request: Request, issued: IssuedSession) -> Response:
+def _session_response(
+    request: Request,
+    issued: IssuedSession,
+    *,
+    cookie_name: str = SESSION_COOKIE,
+) -> Response:
     response = JSONResponse(
         {
             "user": issued.user.as_dict(),
@@ -8632,7 +9192,7 @@ def _session_response(request: Request, issued: IssuedSession) -> Response:
             "expires_at": issued.expires_at.isoformat(),
         }
     )
-    _set_session_cookie(response, request, issued.token)
+    _set_session_cookie(response, request, issued.token, cookie_name=cookie_name)
     return response
 
 
@@ -8640,9 +9200,11 @@ def _set_session_cookie(
     response: Response,
     request: Request,
     token: str,
+    *,
+    cookie_name: str = SESSION_COOKIE,
 ) -> None:
     response.set_cookie(
-        SESSION_COOKIE,
+        cookie_name,
         token,
         max_age=int(SESSION_LIFETIME.total_seconds()),
         httponly=True,
@@ -8658,9 +9220,10 @@ def _renew_session_cookie(
     token: str | None,
     *,
     renewed: bool,
+    cookie_name: str = SESSION_COOKIE,
 ) -> Response:
     if renewed and token:
-        _set_session_cookie(response, request, token)
+        _set_session_cookie(response, request, token, cookie_name=cookie_name)
     return response
 
 

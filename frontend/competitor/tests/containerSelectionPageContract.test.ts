@@ -16,7 +16,7 @@ const observedSalesSource = readFileSync(
 test("container selection separates replenishment decisions from radar monitoring", () => {
   assert.match(pageSource, /补货建议/);
   assert.match(pageSource, /新品监控/);
-  assert.match(pageSource, /缺失日期不补 0/);
+  assert.match(pageSource, /缺失不补0/);
   assert.match(pageSource, /近30天.*前30天/);
   assert.match(pageSource, /90天.*仅作背景/);
   assert.match(pageSource, /公开信号，不等同订单/);
@@ -49,7 +49,8 @@ test("representative rows show all fixed stock-outflow windows only in the targe
   assert.match(observedSalesSource, /const windowDays = \[7, 15, 30, 60, 90\] as const/);
   assert.match(observedSalesSource, /<dt>\{\{ days \}\}天：<\/dt>/);
   assert.match(observedSalesSource, /数据不足/);
-  assert.match(observedSalesSource, /库存观察 · 不等同订单/);
+  assert.match(observedSalesSource, /近期库存观察售出/);
+  assert.doesNotMatch(observedSalesSource, /库存观察 · 不等同订单/);
 });
 
 test("new-product monitoring keeps stacked category cards with independent link toggles", () => {

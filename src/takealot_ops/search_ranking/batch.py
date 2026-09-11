@@ -949,8 +949,10 @@ class SearchRankingBatchController:
         conservative_pacing_hours = (
             eligible_count * max_observed_requests * average_interval / 3_600
         )
-        likely_min_hours = max(pacing_floor_hours * 1.15, pacing_floor_hours + 0.5)
-        likely_max_hours = max(conservative_pacing_hours, pacing_floor_hours * 2)
+        likely_min_hours = (
+            max(pacing_floor_hours * 1.15, pacing_floor_hours + 0.5) if eligible_count else 0.0
+        )
+        likely_max_hours = max(likely_min_hours, conservative_pacing_hours, pacing_floor_hours * 2)
 
         snapshot_material = {
             "provider_signature": self.service.runtime.provider_signature,
@@ -1001,8 +1003,8 @@ class SearchRankingBatchController:
             },
             "estimated_cost": {
                 "currency": "CNY",
-                "pricing_mode": "api_unit_price",
-                "cost_estimate_applicable": True,
+                "pricing_mode": "codex_subscription_quota" if primary.name == "codex_cli" else "api_unit_price",
+                "cost_estimate_applicable": primary.name != "codex_cli",
                 "base_cny": round(base_cost_per_fresh * fresh_count, 2),
                 "typical_low_cny": round(typical_low, 2),
                 "typical_high_cny": round(typical_high, 2),
@@ -1346,7 +1348,7 @@ class SearchRankingBatchController:
             "fallback_model": fallback.model if fallback else None,
             "model_fallback_allowed": fallback is not None,
             "codex_cli_integration_retained": True,
-            "codex_cli_execution_enabled": False,
+            "codex_cli_execution_enabled": primary.name == "codex_cli",
             "public_request_min_interval_seconds": self.service.runtime.page_delay_seconds,
             "public_request_max_interval_seconds": round(
                 self.service.runtime.page_delay_seconds

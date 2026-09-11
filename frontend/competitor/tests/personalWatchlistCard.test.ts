@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
+import { runInNewContext } from "node:vm";
+import { computed, reactive } from "vue";
 
 const pageSource = readFileSync(
   new URL("../src/pages/CompetitorsPage.vue", import.meta.url),
@@ -10,6 +12,28 @@ const styleSource = readFileSync(
   new URL("../src/styles.css", import.meta.url),
   "utf8",
 );
+
+test("only the kxx account can see the global links and batch workspace", () => {
+  const definition = pageSource.match(/const canViewGlobalManagement = computed\(([\s\S]*?)\n\);/);
+  assert.ok(definition, "the workspace must have an account visibility gate");
+  const props = reactive<{ currentUsername?: string; isAdmin: boolean }>({
+    currentUsername: "kxx",
+    isAdmin: true,
+  });
+  const visibility = runInNewContext(`computed(${definition[1]})`, { computed, props });
+  for (const username of ["kxx", "KXX", " kxx ", "admin", "operator", "kxx2", "", undefined]) {
+    props.currentUsername = username;
+    for (const isAdmin of [true, false]) {
+      props.isAdmin = isAdmin;
+      assert.equal(visibility.value, ["kxx", "KXX", " kxx "].includes(username ?? ""),
+        `username=${username}, isAdmin=${isAdmin}`);
+    }
+  }
+  assert.match(pageSource,
+    /if \(canViewGlobalManagement\.value && collectionDeploymentReady\.value && !blueCollectionAvailable\.value\) \{\s*window\.addEventListener\("beforeunload"/);
+  assert.match(pageSource,
+    /if \(canViewGlobalManagement\.value && collectionDeploymentReady\.value\) \{\s*if \(checkpoint\)[\s\S]*?sharedBatchTimer = window\.setInterval/);
+});
 
 test("the personal pool is a standalone top workspace with direct card location", () => {
   const workspaceIndex = pageSource.indexOf("personal-operator-workspace");
@@ -48,7 +72,7 @@ test("the personal pool is a standalone top workspace with direct card location"
   );
   assert.match(
     pageSource,
-    /v-if="props\.isAdmin"\s+class="collector panel shared-management-panel"/,
+    /v-if="canViewGlobalManagement"\s+class="collector panel shared-management-panel"/,
   );
   assert.match(pageSource, /v-if="props\.isAdmin && linkHealth\.length"/);
   assert.match(
@@ -57,7 +81,7 @@ test("the personal pool is a standalone top workspace with direct card location"
   );
   assert.match(
     pageSource,
-    /if \(props\.isAdmin\) initialRequests\.push\(loadSharedBatchStatus\(\)\)/,
+    /if \(canViewGlobalManagement\.value && collectionDeploymentReady\.value\) initialRequests\.push\(loadSharedBatchStatus\(\)\)/,
   );
   assert.match(styleSource, /\.personal-watchlist-summary-card\s*\{/);
   assert.match(styleSource, /\.personal-operator-workspace\.operator-primary/);

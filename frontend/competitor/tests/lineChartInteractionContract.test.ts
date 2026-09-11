@@ -25,31 +25,35 @@ const floatingTooltipSource = readFileSync(
   "utf8",
 );
 const sharedStyles = readFileSync(new URL("../src/styles.css", import.meta.url), "utf8");
+const homeChartSource = readFileSync(new URL("../src/components/HomeMetricChart.vue", import.meta.url), "utf8");
 
-test("overview revenue and traffic details follow the pointer and clear on chart leave", () => {
-  assert.equal(overviewSource.match(/class="trend-hover-card"/g)?.length, 2);
-  assert.equal(overviewSource.match(/@pointermove="handle(?:Revenue|Traffic)Pointer"/g)?.length, 2);
-  assert.equal(overviewSource.match(/@pointerleave="clear(?:Revenue|Traffic)Pointer"/g)?.length, 2);
-  assert.equal(overviewSource.match(/@pointerenter="set(?:Revenue|Traffic)Point\(index, \$event\)"/g)?.length, 2);
-  assert.equal(overviewSource.match(/@focus="set(?:Revenue|Traffic)Point\(index, \$event\)"/g)?.length, 2);
-  assert.equal(overviewSource.match(/floatingChartTooltipStyle\((?:revenue|traffic)TooltipPosition, 310\)/g)?.length, 2);
-  assert.equal(overviewSource.match(/class="trend-crosshair"/g)?.length, 2);
-  assert.equal(overviewSource.match(/class="trend-missing-mark"/g)?.length, 2);
-  assert.equal(overviewSource.match(/missingBridgeSegments/g)?.length >= 6, true);
-  assert.match(overviewSource, /当前金额仅合计已有店铺，缺失店铺未按 0 补齐/);
+test("overview traffic and merged sales charts retain pointer and keyboard details", () => {
+  assert.equal(overviewSource.match(/class="trend-hover-card"/g)?.length, 1);
+  assert.match(overviewSource, /@pointermove="handleTrafficPointer"/);
+  assert.match(overviewSource, /@pointerleave="clearTrafficPointer"/);
+  assert.match(overviewSource, /@pointerenter="setTrafficPoint\(index, \$event\)"/);
+  assert.match(overviewSource, /@focus="setTrafficPoint\(index, \$event\)"/);
+  assert.match(overviewSource, /floatingChartTooltipStyle\(trafficTooltipPosition, 310\)/);
+  assert.match(overviewSource, /class="trend-crosshair"/);
+  assert.match(overviewSource, /class="trend-missing-mark"/);
+  assert.match(overviewSource, /trafficChart\.missingBridgeSegments/);
+  assert.match(homeChartSource, /@pointermove="move"/);
+  assert.match(homeChartSource, /@pointerleave="active = null"/);
+  assert.match(homeChartSource, /@keydown="keyboard"/);
+  assert.match(homeChartSource, /homeCoverageLabel\(current\)/);
+  assert.match(overviewSource, /部分合计 · 缺/);
   assert.match(overviewSource, /橙色虚线为参考值；缺失商品不补 0/);
   assert.match(overviewSource, /周期末失败 · \{\{ trafficSlotLabel/);
 });
 
-test("overview revenue line keeps store alerts separate from date-level audit", () => {
+test("merged overview keeps store alerts separate from the dated source and revision audit", () => {
   assert.match(overviewSource, /storeData\.sales_reconciliation\.pending_store_count/);
-  assert.match(overviewSource, /class="revenue-line reconciliation-pending"/);
-  assert.match(overviewSource, /仅对应失败业务日与来源未建档日以橙色显示/);
-  assert.match(overviewSource, /不把当前店铺级待核验状态铺到全部历史日期/);
-  assert.match(overviewSource, /revenuePendingStatus\(activeRevenueDot\.point\)/);
-  assert.match(overviewSource, /class="revenue-line revised"/);
+  assert.match(overviewSource, /v-for="point in storeData\.sales_revenue_series"/);
+  assert.match(overviewSource, /point\.data_status === 'pending' \? revenuePendingStatus\(point\)/);
+  assert.match(overviewSource, /point\.missing_store_count/);
+  assert.match(overviewSource, /point\.latest_revision_at/);
   assert.match(overviewSource, /销售额日终后历史修订记录/);
-  assert.match(overviewSource, /业务日内正常累计和第一次日终基线不计纠偏/);
+  assert.match(overviewSource, /仅记录日终基线后的变化/);
   assert.match(overviewSource, /更新前来源/);
   assert.match(overviewSource, /更新后来源/);
   assert.match(overviewSource, /fetchSalesRevenueRevisions/);
@@ -68,7 +72,7 @@ test("keyword traffic line keeps hover, keyboard, missing-point and rolling-wind
   assert.match(keywordTrafficSource, /class="point-missing"/);
   assert.match(keywordTrafficSource, /const chartBridgeSegments = computed/);
   assert.match(keywordTrafficSource, /traffic-line missing-bridge/);
-  assert.match(keywordTrafficSource, /这是该日看到的滚动30天值，不是单日浏览量/);
+  assert.match(keywordTrafficSource, /滚动30天值/);
 });
 
 test("competitor three-panel line chart keeps a fixed detail panel with pointer and keyboard selection", () => {
@@ -99,7 +103,8 @@ test("offer charts share a Beijing range selector while official sales keep thei
   assert.match(competitorsSource, /@click="resetOfferTrendDateRange"/);
   assert.match(competitorsSource, /@input="updateOfferTrendRangeStart"/);
   assert.match(competitorsSource, /@input="updateOfferTrendRangeEnd"/);
-  assert.match(competitorsSource, /buildCompetitorOfferTrend\(filteredOfferTrendHistory\.value, selectedOffer\.value\)/);
+  assert.match(competitorsSource, /buildOfferObservationTrend\(filteredOfferTrendHistory\.value, selectedOffer\.value\)/);
+  assert.match(competitorsSource, /<CompetitorHistoryCoverage :points="selectedOfferTrend"/);
   assert.match(competitorsSource, /alignOwnStoreTrafficTrendToOfferTrend\(\s*selectedOwnTrafficTrend\.value,\s*selectedOfferTrend\.value/);
   assert.match(competitorsSource, /watch\(\[selectedOfferKey, filteredOfferTrendHistory\]/);
   const dateHandlers = competitorsSource.slice(
@@ -133,7 +138,7 @@ test("own-store official sales bars sit below comments and preserve zero versus 
   assert.match(ownStoreSalesSource, /国内自然日（北京时间）/);
   assert.match(ownStoreSalesSource, /@pointermove="handlePointer"/);
   assert.match(ownStoreSalesSource, /@keydown\.left\.prevent="stepPoint\(-1\)"/);
-  assert.match(ownStoreSalesSource, /橙色柱为截至采集值；缺失日期不补 0/);
+  assert.match(ownStoreSalesSource, /缺失，不补 0/);
   assert.match(ownStoreSalesSource, /完整 0 件基线/);
   assert.match(ownStoreSalesSource, /按日展示/);
   assert.match(ownStoreSalesSource, /截至采集/);
@@ -143,7 +148,7 @@ test("own-store official sales bars sit below comments and preserve zero versus 
 });
 
 test("overview and keyword details float while the competitor detail panel stays fixed", () => {
-  assert.equal(overviewSource.match(/class="trend-hover-card"/g)?.length, 2);
+  assert.equal(overviewSource.match(/class="trend-hover-card"/g)?.length, 1);
   assert.equal(keywordTrafficSource.match(/class="point-readout"/g)?.length, 1);
   assert.equal(competitorsSource.match(/class="competitor-offer-trend-tooltip"/g)?.length, 1);
   assert.match(floatingTooltipSource, /alignLeft: x > viewport\.width \/ 2/);

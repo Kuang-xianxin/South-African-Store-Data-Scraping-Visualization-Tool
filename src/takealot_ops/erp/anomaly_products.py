@@ -7,7 +7,6 @@ from collections import OrderedDict, defaultdict
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
-from decimal import Decimal
 from threading import Lock
 from typing import Any, TypeGuard, cast
 from zoneinfo import ZoneInfo
@@ -22,6 +21,8 @@ from takealot_ops.erp.returns import (
     load_return_collection_status,
     load_store_return_rows,
 )
+from takealot_ops.erp.read_cache import ReadProjectionCache
+from takealot_ops.erp.service import _query_rows_frame
 from takealot_ops.metrics.service import DashboardDataset
 from takealot_ops.product_master import enrich_product_master_records
 from takealot_ops.storage.models import (
@@ -118,6 +119,7 @@ class AnomalyProductPayloadCache:
         self._lock = Lock()
         self._hits = 0
         self._misses = 0
+        self.datasets = ReadProjectionCache(ttl_seconds=180, max_entries=12)
 
     def get(self, key: tuple[object, ...]) -> dict[str, Any] | None:
         with self._lock:
@@ -139,6 +141,7 @@ class AnomalyProductPayloadCache:
     def clear(self) -> None:
         with self._lock:
             self._entries.clear()
+        self.datasets.clear()
 
     def stats(self) -> dict[str, int]:
         with self._lock:
@@ -156,6 +159,8 @@ def load_cached_anomaly_product_payload(
     store_code: str,
     requested_as_of: date,
     completed_through: date,
+    live_revision: str = "",
+    store_revision: str = "",
 ) -> dict[str, Any]:
     """Load the narrow anomaly projection, reusing it until source data changes."""
 
@@ -169,15 +174,22 @@ def load_cached_anomaly_product_payload(
         requested_as_of,
         completed_through,
         revision,
+        live_revision,
     )
     cached = cache.get(cache_key)
     if cached is not None:
         return cached
 
-    dataset, states = _load_anomaly_product_dataset(
-        session,
-        offer_scope_date=revision.offer_scope_date,
-        completed_through=completed_through,
+    dataset, states = cache.datasets.get_or_load(
+        (store_code, completed_through, revision.offer_scope_date,
+         revision.latest_offer_run_at, revision.offer_run_count,
+         revision.latest_offer_capture_at, revision.offer_snapshot_count,
+         revision.latest_metric_state_at, revision.metric_state_count,
+         revision.product_metric_count, store_revision or live_revision),
+        lambda: _load_anomaly_product_dataset(
+            session, offer_scope_date=revision.offer_scope_date,
+            completed_through=completed_through,
+        ),
     )
     current_plids = {
         normalized
@@ -235,7 +247,8 @@ def verified_sales_metric_dates(
     for state in states:
         if state.source_kind != "takealot_sales_api":
             continue
-        if _state_verified_at(state) is None:
+        verified_at = _state_verified_at(state)
+        if verified_at is None or verified_at.astimezone(SAST).date() <= state.metric_date:
             continue
         result.add(state.metric_date)
     return result
@@ -493,19 +506,7 @@ def _query_frame(
     statement: Any,
     columns: tuple[str, ...],
 ) -> pd.DataFrame:
-    rows = session.execute(statement).mappings().all()
-    values = [
-        {
-            column: (
-                float(value)
-                if isinstance((value := row.get(column)), Decimal)
-                else value
-            )
-            for column in columns
-        }
-        for row in rows
-    ]
-    return pd.DataFrame(values, columns=columns)
+    return _query_rows_frame(session.execute(statement).all(), columns)
 
 
 def build_anomaly_product_payload(
@@ -537,6 +538,7 @@ def build_anomaly_product_payload(
     data_through = max(eligible_dates) if eligible_dates else None
     contiguous_dates = _contiguous_dates(data_through, verified_dates)
     sales_by_offer = _sales_by_offer(product_daily, data_through, eligible_dates)
+    last_recorded_sales = _last_recorded_sale_dates(product_daily, data_through)
     stock_by_offer = _stock_by_offer(dataset.offer_history, data_through)
 
     sudden_sales_stop: list[dict[str, Any]] = []
@@ -555,6 +557,12 @@ def build_anomaly_product_payload(
             continue
         daily_sales = sales_by_offer.get(offer_id, {})
         zero_streak = _zero_sales_streak(daily_sales, contiguous_dates)
+        # A known positive sale does not require a complete day. It may describe
+        # the last recorded sale, but must not turn missing days into zeroes.
+        last_recorded_sale = last_recorded_sales.get(offer_id)
+        zero_streak["last_sale_on"] = (
+            last_recorded_sale.isoformat() if last_recorded_sale else None
+        )
         stocked_zero_streak = _stocked_zero_sales_streak(
             daily_sales,
             stock_by_offer.get(offer_id, {}),
@@ -609,6 +617,12 @@ def build_anomaly_product_payload(
             slow_item["no_sales_days"] = stocked_zero_streak["days"]
             slow_item["no_sales_days_exact"] = stocked_zero_streak["exact"]
             slow_item["slow_moving_started_on"] = stocked_zero_streak["started_on"]
+            slow_item["slow_moving_boundary_reason"] = stocked_zero_streak["boundary_reason"]
+            slow_item["days_since_last_sale"] = (
+                (data_through - last_recorded_sale).days
+                if data_through is not None and last_recorded_sale is not None
+                else None
+            )
             slow_item["anomaly_type"] = "slow_moving"
             slow_item["anomaly_label"] = "有库存滞销"
             slow_moving.append(slow_item)
@@ -1384,6 +1398,29 @@ def _normalized_offer_current(frame: pd.DataFrame) -> pd.DataFrame:
     return result.drop_duplicates("offer_id", keep="last")
 
 
+def _last_recorded_sale_dates(
+    frame: pd.DataFrame,
+    through: date | None,
+) -> dict[str, date]:
+    """Keep observed positive sales separate from evidence of complete zero days."""
+    if through is None or frame.empty:
+        return {}
+    positives = frame.loc[
+        (frame["ordered_units"] > 0) & (frame["_metric_date"] <= through)
+    ]
+    result: dict[str, date] = {}
+    for raw_offer_id, metric_date, units in positives.reindex(
+        columns=["offer_id", "_metric_date", "ordered_units"],
+    ).itertuples(index=False, name=None):
+        offer_id = _text(raw_offer_id)
+        if (
+            offer_id and isinstance(metric_date, date)
+            and _finite_number(units) and float(units).is_integer()
+        ):
+            result[offer_id] = max(result.get(offer_id, metric_date), metric_date)
+    return result
+
+
 def _sales_by_offer(
     frame: pd.DataFrame,
     through: date | None,
@@ -1392,9 +1429,10 @@ def _sales_by_offer(
     if through is None or frame.empty:
         return {}
     result: dict[str, dict[date, int | None]] = {}
-    for row in frame.to_dict(orient="records"):
-        offer_id = _text(row.get("offer_id"))
-        metric_date = row.get("_metric_date")
+    for raw_offer_id, metric_date, units_value in frame.reindex(
+        columns=["offer_id", "_metric_date", "ordered_units"],
+    ).itertuples(index=False, name=None):
+        offer_id = _text(raw_offer_id)
         if (
             not offer_id
             or not isinstance(metric_date, date)
@@ -1402,10 +1440,12 @@ def _sales_by_offer(
             or metric_date not in allowed_dates
         ):
             continue
-        units_value = row.get("ordered_units")
         units = (
-            max(0, int(units_value))
-            if _finite_number(units_value)
+            int(units_value)
+            if (
+                _finite_number(units_value) and units_value >= 0
+                and float(units_value).is_integer()
+            )
             else None
         )
         result.setdefault(offer_id, {})[metric_date] = units
@@ -1431,14 +1471,13 @@ def _stock_by_offer(
         & normalized["_snapshot_date"].notna()
         & (normalized["_snapshot_date"] <= through)
     ].drop_duplicates(["offer_id", "_snapshot_date"], keep="last")
-    for row in normalized.to_dict(orient="records"):
-        offer_id = _text(row.get("offer_id"))
-        snapshot_date = row.get("_snapshot_date")
+    for raw_offer_id, snapshot_date, total, platform, seller in normalized.reindex(columns=[
+        "offer_id", "_snapshot_date", "total_stock", "takealot_available_stock", "seller_available_stock",
+    ]).itertuples(index=False, name=None):
+        offer_id = _text(raw_offer_id)
         if not offer_id or not isinstance(snapshot_date, date):
             continue
-        result.setdefault(offer_id, {})[snapshot_date] = _available_stock_or_none(
-            cast("Mapping[str, Any]", row)
-        )
+        result.setdefault(offer_id, {})[snapshot_date] = _available_stock_values(total, platform, seller)
     return result
 
 
@@ -1491,19 +1530,24 @@ def _stocked_zero_sales_streak(
 
     count = 0
     boundary_observed = False
+    boundary_reason = "sales_gap"
     started_on: date | None = None
     for metric_date in contiguous_dates:
         units = daily_sales.get(metric_date)
         if units is None:
+            boundary_reason = "missing_sales"
             break
         if units > 0:
             boundary_observed = True
+            boundary_reason = "sale"
             break
         stock = daily_stock.get(metric_date)
         if stock is None:
+            boundary_reason = "missing_stock"
             break
         if stock <= 0:
             boundary_observed = True
+            boundary_reason = "out_of_stock"
             break
         count += 1
         started_on = metric_date
@@ -1511,6 +1555,7 @@ def _stocked_zero_sales_streak(
         "days": count,
         "exact": boundary_observed,
         "started_on": started_on.isoformat() if started_on else None,
+        "boundary_reason": boundary_reason,
     }
 
 
@@ -1603,13 +1648,15 @@ def _base_item(
 
 
 def _available_stock_or_none(row: Mapping[str, Any]) -> int | None:
-    total_stock = _optional_non_negative_integer(row.get("total_stock"))
-    takealot_available = _optional_non_negative_integer(
-        row.get("takealot_available_stock")
+    return _available_stock_values(
+        row.get("total_stock"), row.get("takealot_available_stock"), row.get("seller_available_stock"),
     )
-    seller_available = _optional_non_negative_integer(
-        row.get("seller_available_stock")
-    )
+
+
+def _available_stock_values(total: object, platform: object, seller: object) -> int | None:
+    total_stock = _optional_non_negative_integer(total)
+    takealot_available = _optional_non_negative_integer(platform)
+    seller_available = _optional_non_negative_integer(seller)
     if (
         total_stock is None
         and takealot_available is None

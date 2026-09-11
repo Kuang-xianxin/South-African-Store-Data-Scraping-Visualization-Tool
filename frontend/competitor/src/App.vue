@@ -16,7 +16,7 @@ import {
   ApiRequestError,
   fetchAuthSession,
   fetchAuthStatus,
-  fetchFreshness,
+  fetchDataUpdates,
   fetchRefreshStatus,
   logout,
   refreshStoreData,
@@ -25,6 +25,8 @@ import {
   type RefreshStatus,
 } from "./api";
 import LoginPage from "./pages/LoginPage.vue";
+import { useMobileShell } from "./useMobileShell";
+import { DATA_MUTATED_EVENT, liveUpdateMessages, publishDataVersions } from "./liveUpdates";
 import {
   competitorDetailPageHref,
   competitorDetailPlidFromHash,
@@ -104,8 +106,7 @@ const lazyPage = (loader: () => Promise<{ default: Component }>) =>
     timeout: 30_000,
   });
 const OverviewPage = lazyPage(() => import("./pages/OverviewPage.vue"));
-const KeywordTrafficPage = lazyPage(() => import("./pages/KeywordTrafficPage.vue"));
-const SearchRankingPage = lazyPage(() => import("./pages/SearchRankingPage.vue"));
+const SearchRankingPage = lazyPage(() => import("./pages/TitleOptimizationPage.vue"));
 const QuadrantsPage = lazyPage(() => import("./pages/QuadrantsPage.vue"));
 const AnomalyProductsPage = lazyPage(() => import("./pages/AnomalyProductsPage.vue"));
 const ReturnsPage = lazyPage(() => import("./pages/ReturnsPage.vue"));
@@ -116,7 +117,6 @@ const UsersPage = lazyPage(() => import("./pages/UsersPage.vue"));
 
 const storeScopedPages = new Set<PageKey>([
   "overview",
-  "keyword-traffic",
   "search-ranking",
   "quadrants",
   "anomaly-products",
@@ -135,20 +135,19 @@ const refreshStatusIdlePollIntervalMs = 15_000;
 
 const basePages = [
   { key: "overview", label: "经营总览", hint: "今日经营脉搏", mark: "01", permission: "store.view" },
-  { key: "keyword-traffic", label: "关键词流量", hint: "变更节点与趋势对比", mark: "02", permission: "store.view" },
-  { key: "search-ranking", label: "搜索定位", hint: "图片热词与自然排名", mark: "03", permission: "store.view" },
+  { key: "competitors", label: "选品雷达", hint: "库存评论与销量", mark: "02", permission: "competitors.view" },
+  { key: "search-ranking", label: "标题优化", hint: "标题诊断与竞品参考", mark: "03", permission: "store.view" },
   { key: "quadrants", label: "经营坐标", hint: "流量与下单分布", mark: "04", permission: "store.view" },
   { key: "anomaly-products", label: "异常商品", hint: "销量、库存、评论与退货", mark: "05", permission: "store.view" },
   { key: "returns", label: "退货管理", hint: "原因、结果与交易", mark: "06", permission: "store.view" },
   { key: "logistics", label: "物流管理", hint: "长睿与平台货件", mark: "07", permission: "store.view" },
   { key: "container-selection", label: "配柜选品", hint: "大体积非带电快动销", mark: "08", permission: "competitors.view" },
-  { key: "competitors", label: "竞品雷达", hint: "库存评论与销量", mark: "09", permission: "competitors.view" },
 ] as const;
 const adminPage = {
   key: "users",
   label: "用户权限",
   hint: "账号与权限管理",
-  mark: "10",
+  mark: "09",
   permission: "users.manage",
 } as const;
 
@@ -192,11 +191,13 @@ const refreshStatus = ref<RefreshStatus>({
 });
 const refreshClock = ref(Date.now());
 const refreshKey = ref(0);
+const liveUpdatesReady = ref(false);
+const liveUpdateMessage = computed(() => Object.values(liveUpdateMessages.value).find(Boolean) ?? "");
 const competitorRefreshKey = ref(0);
 const refreshing = ref(false);
 const refreshMessage = ref("");
 const permissionNotice = ref("");
-const mobileNavOpen = ref(false);
+const { isMobile, mobileNavOpen, mobileToolsOpen, mobileNav, mobileMenuButton, closeMobileNav } = useMobileShell();
 const authError = ref("");
 
 const hasPermission = (permission: PermissionKey) =>
@@ -299,7 +300,6 @@ const activePage = computed(
 const pageComponent = computed(() => {
   const components = {
     overview: OverviewPage,
-    "keyword-traffic": KeywordTrafficPage,
     "search-ranking": SearchRankingPage,
     quadrants: QuadrantsPage,
     "anomaly-products": AnomalyProductsPage,
@@ -476,6 +476,7 @@ const activePageProps = computed(() => {
       isAdmin: session.value?.user.role === "admin",
       currentUsername: session.value?.user.username ?? "",
       currentStoreCode: selectedStore.value?.code ?? "",
+      currentDisplayName: session.value?.user.display_name ?? "",
       currentStoreName: selectedStore.value?.display_name ?? "当前店铺",
       accessibleConnectedStoreCount: accessibleConnectedStoreCount.value,
       operatingConnectedStoreCount: operatingConnectedStoreCount.value,
@@ -522,7 +523,6 @@ const activePageProps = computed(() => {
       ...scopedCommon,
       rangeStart: dataRangeStart.value,
       rangeEnd: dataRangeEnd.value,
-      canSyncRemovalOrders: canRefresh.value,
     };
   }
   if (key === "logistics") {
@@ -534,6 +534,7 @@ const activePageProps = computed(() => {
   }
   if (key === "search-ranking") {
     return {
+      asOf: asOf.value,
       storeScope: selectedStoreScope.value,
       multiStoreLabel: selectedMultiStoreScopeLabel.value,
       canOperate: canRunSearchRanking.value,
@@ -547,10 +548,9 @@ onMounted(async () => {
   window.addEventListener("erp-auth-expired", handleExpired);
   window.addEventListener("hashchange", handleModuleHashChange);
   document.addEventListener("visibilitychange", handleFreshnessVisibilityChange);
+  window.addEventListener(DATA_MUTATED_EVENT, scheduleMutationCheck);
   await restoreSession();
-  freshnessTimer = window.setInterval(() => {
-    if (document.visibilityState === "visible") void loadFreshness();
-  }, freshnessPollIntervalMs);
+  scheduleFreshnessPoll();
   refreshClockTimer = window.setInterval(() => {
     refreshClock.value = Date.now();
   }, 1_000);
@@ -559,7 +559,10 @@ onBeforeUnmount(() => {
   window.removeEventListener("erp-auth-expired", handleExpired);
   window.removeEventListener("hashchange", handleModuleHashChange);
   document.removeEventListener("visibilitychange", handleFreshnessVisibilityChange);
-  if (freshnessTimer !== null) window.clearInterval(freshnessTimer);
+  window.removeEventListener(DATA_MUTATED_EVENT, scheduleMutationCheck);
+  if (freshnessTimer !== null) window.clearTimeout(freshnessTimer);
+  if (mutationCheckTimer !== null) window.clearTimeout(mutationCheckTimer);
+  freshnessController?.abort();
   if (refreshStatusTimer !== null) window.clearTimeout(refreshStatusTimer);
   if (refreshClockTimer !== null) window.clearInterval(refreshClockTimer);
   if (permissionNoticeTimer !== null) window.clearTimeout(permissionNoticeTimer);
@@ -567,6 +570,10 @@ onBeforeUnmount(() => {
 
 let freshnessTimer: number | null = null;
 let freshnessRequestRevision = 0;
+let freshnessController: AbortController | null = null;
+let freshnessContextInFlight = "";
+let mutationCheckTimer: number | null = null;
+let sessionMetadataRevision = "";
 let refreshStatusTimer: number | null = null;
 let refreshClockTimer: number | null = null;
 let permissionNoticeTimer: number | null = null;
@@ -581,7 +588,27 @@ function showPermissionDenied() {
 }
 
 function handleFreshnessVisibilityChange() {
-  if (document.visibilityState === "visible") void loadFreshness();
+  if (document.visibilityState === "visible") {
+    void loadFreshness();
+    void loadRefreshStatus();
+  } else {
+    if (freshnessTimer !== null) window.clearTimeout(freshnessTimer);
+    freshnessController?.abort();
+  }
+}
+
+function scheduleFreshnessPoll() {
+  if (freshnessTimer !== null) window.clearTimeout(freshnessTimer);
+  if (!session.value || document.visibilityState !== "visible") return;
+  freshnessTimer = window.setTimeout(() => void loadFreshness(), freshnessPollIntervalMs);
+}
+
+function scheduleMutationCheck() {
+  if (mutationCheckTimer !== null) return;
+  mutationCheckTimer = window.setTimeout(() => {
+    mutationCheckTimer = null;
+    void loadFreshness();
+  }, 2_000);
 }
 
 function openPage(event: MouseEvent, page: (typeof allPages)[number]) {
@@ -664,6 +691,9 @@ async function retryAuthentication() {
 }
 
 function acceptSession(next: AuthSession) {
+  liveUpdatesReady.value = false;
+  sessionMetadataRevision = "";
+  publishDataVersions("", {});
   session.value = next;
   setAuthSession(next);
   selectedStoreScope.value = "current";
@@ -725,6 +755,8 @@ function acceptSession(next: AuthSession) {
 
 function handleExpired() {
   window.dispatchEvent(new CustomEvent(AUTH_SESSION_ENDING_EVENT));
+  closeMobileNav();
+  mobileToolsOpen.value = false;
   session.value = null;
   selectedStoreId.value = null;
   selectedStoreScope.value = "current";
@@ -751,28 +783,47 @@ async function signOut() {
 }
 
 async function loadFreshness() {
+  if (!session.value || document.visibilityState !== "visible") return;
+  const context = `${session.value.user.id}:${selectedStore.value?.code ?? ""}:${selectedStoreScope.value}`;
+  if (freshnessController && !freshnessController.signal.aborted && freshnessContextInFlight === context) return;
+  freshnessController?.abort();
+  const controller = new AbortController();
+  freshnessController = controller;
+  freshnessContextInFlight = context;
   const requestRevision = ++freshnessRequestRevision;
-  if (!canAccessConnectedStore.value) {
-    freshness.value = {
-      last_collection_at: null,
-      latest_metric_date: null,
-    };
-    return;
-  }
   try {
-    const nextFreshness = await fetchFreshness();
-    if (requestRevision === freshnessRequestRevision) {
-      freshness.value = nextFreshness;
+    const update = await fetchDataUpdates(selectedStoreScope.value, controller.signal);
+    if (requestRevision === freshnessRequestRevision && !controller.signal.aborted) {
+      if (sessionMetadataRevision && sessionMetadataRevision !== update.session_revision) {
+        const nextSession = await fetchAuthSession();
+        if (requestRevision !== freshnessRequestRevision || controller.signal.aborted) return;
+        session.value = nextSession;
+      }
+      sessionMetadataRevision = update.session_revision;
+      freshness.value = update.freshness;
+      publishDataVersions(context, update.versions);
     }
   } catch {
     // Keep the last known timestamps during a short local-service interruption.
+  } finally {
+    if (requestRevision === freshnessRequestRevision) {
+      freshnessController = null;
+      liveUpdatesReady.value = true;
+      scheduleFreshnessPoll();
+    }
   }
 }
+
+watch(selectedStoreScope, () => void loadFreshness());
 
 async function loadRefreshStatus() {
   if (!session.value || !canAccessConnectedStore.value) {
     if (refreshStatusTimer !== null) window.clearTimeout(refreshStatusTimer);
     refreshStatusTimer = null;
+    return;
+  }
+  if (document.visibilityState !== "visible") {
+    scheduleRefreshStatusPoll();
     return;
   }
   try {
@@ -808,8 +859,6 @@ async function runRefresh() {
     refreshStatus.value = result.refresh_status;
     refreshMessage.value = result.message;
     if (result.succeeded) {
-      refreshKey.value += 1;
-      competitorRefreshKey.value += 1;
       await loadFreshness();
     }
   } catch (error) {
@@ -828,7 +877,10 @@ function formatCooldown(totalSeconds: number): string {
 }
 
 function syncModuleUrl(page: PageKey) {
-  const nextHash = modulePageHref(page);
+  const previous = new URLSearchParams(window.location.hash.replace(/^#/, ""));
+  const historyTab = page === "search-ranking" && (previous.get("module") === "keyword-traffic"
+    || (previous.get("module") === "search-ranking" && previous.get("title_tab") === "history"));
+  const nextHash = modulePageHref(page) + (historyTab ? "&title_tab=history" : "");
   if (window.location.hash === nextHash) return;
   try {
     window.history.replaceState(
@@ -874,6 +926,7 @@ function switchPage(page: PageKey, updateUrl = true) {
   }
   if (updateUrl) syncModuleUrl(page);
   mobileNavOpen.value = false;
+  mobileToolsOpen.value = false;
 }
 
 function initialPage(): PageKey {
@@ -987,6 +1040,7 @@ function localDate() {
     class="standalone-own-detail-shell"
   >
     <CompetitorsPage
+      v-if="liveUpdatesReady"
       :key="standaloneOwnStoreDetailKey"
       detail-only
       :can-operate="false"
@@ -1004,13 +1058,25 @@ function localDate() {
       :requested-detail-end-date="standaloneOwnStoreDetailRequest.endDate"
       :on-permission-denied="showPermissionDenied"
     />
+    <ModuleLoading v-else />
+    <p v-if="liveUpdateMessage" class="global-notice" role="status">{{ liveUpdateMessage }}</p>
   </main>
   <div v-else class="erp-shell">
-    <aside class="erp-sidebar" :class="{ open: mobileNavOpen }">
+    <aside
+      id="erp-navigation"
+      ref="mobileNav"
+      class="erp-sidebar"
+      :class="{ open: mobileNavOpen }"
+      :inert="isMobile && !mobileNavOpen"
+      :role="isMobile && mobileNavOpen ? 'dialog' : undefined"
+      :aria-modal="isMobile && mobileNavOpen ? true : undefined"
+      aria-label="模块导航"
+    >
+      <button class="mobile-nav-close" type="button" aria-label="关闭导航" @click="closeMobileNav">关闭 ×</button>
       <div class="brand">
         <span class="brand-mark">T</span>
         <div>
-          <strong>南非运营 ERP</strong>
+          <strong>昂古古科技有限公司ERP</strong>
           <small>TAKEALOT OPERATIONS</small>
         </div>
       </div>
@@ -1050,11 +1116,15 @@ function localDate() {
       </div>
     </aside>
 
-    <div class="erp-main">
+    <div class="erp-main" :inert="isMobile && mobileNavOpen">
       <header class="erp-topbar">
         <button
           class="mobile-menu"
-          aria-label="打开导航"
+          ref="mobileMenuButton"
+          type="button"
+          :aria-label="mobileNavOpen ? '关闭导航' : '打开导航'"
+          :aria-expanded="mobileNavOpen"
+          aria-controls="erp-navigation"
           @click="mobileNavOpen = !mobileNavOpen"
         >
           菜单
@@ -1062,8 +1132,16 @@ function localDate() {
         <div class="page-identity">
           <p>{{ activePage.mark }} / OPERATIONS</p>
           <h1>{{ activePage.label }}</h1>
+          <small class="mobile-context-summary">{{ multiStoreSelected ? selectedMultiStoreScopeLabel : selectedStore?.display_name || session.user.display_name }}</small>
         </div>
-        <div class="topbar-actions">
+        <button
+          class="mobile-tools-toggle"
+          type="button"
+          :aria-expanded="mobileToolsOpen"
+          aria-controls="erp-context-tools"
+          @click="mobileToolsOpen = !mobileToolsOpen"
+        >{{ mobileToolsOpen ? '收起' : '筛选 / 账户' }}</button>
+        <div id="erp-context-tools" class="topbar-actions" :class="{ 'mobile-tools-open': mobileToolsOpen }">
           <label
             v-if="
               session.user.accessible_stores.length
@@ -1223,6 +1301,7 @@ function localDate() {
       >
         {{ refreshStatusNotice }}
       </p>
+      <p v-if="liveUpdateMessage" class="global-notice" role="status">{{ liveUpdateMessage }}</p>
       <section class="erp-content">
         <div
           v-if="selectedStorePending && currentPage !== 'users'"
@@ -1254,13 +1333,14 @@ function localDate() {
         <!-- Keep one live instance for every ERP module during ordinary navigation. -->
         <KeepAlive v-else :max="ERP_MODULE_KEYS.length">
           <component
-            v-if="pages.length"
+            v-if="pages.length && liveUpdatesReady"
             :is="pageComponent"
             :key="pageComponentKey"
             v-bind="activePageProps"
             @select-store="selectStoreFromOverview"
           />
         </KeepAlive>
+        <ModuleLoading v-if="!liveUpdatesReady" />
         <div v-if="!pages.length" class="state-card">
           当前账号尚未分配任何模块权限，请联系管理员配置。
         </div>
@@ -1269,8 +1349,10 @@ function localDate() {
     <button
       v-if="mobileNavOpen"
       class="nav-backdrop"
+      type="button"
+      tabindex="-1"
       aria-label="关闭导航"
-      @click="mobileNavOpen = false"
+      @click="closeMobileNav"
     ></button>
   </div>
 </template>

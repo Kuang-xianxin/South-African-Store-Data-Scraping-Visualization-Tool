@@ -1,12 +1,18 @@
 <script setup lang="ts">
 import { computed, ref, shallowRef, watch } from "vue";
+import { useLiveUpdates } from "../liveUpdates";
 
 import {
   ANOMALY_PRODUCT_VIEWS,
   ANOMALY_VIEW_LABELS,
   countForAnomalyView,
   itemsForAnomalyView,
+  lastRecordedSaleLabel,
+  slowMovingBoundaryLabel,
+  slowMovingDaysLabel,
+  slowMovingPeriodLabel,
   type AnomalyProductView,
+  type SlowMovingSortDirection,
 } from "../anomalyProducts";
 import { fetchAnomalyProducts } from "../api";
 import { openOwnStoreDetailTab } from "../moduleNavigation";
@@ -29,9 +35,17 @@ const props = defineProps<{
   onPermissionDenied?: () => void;
 }>();
 
+useLiveUpdates("anomaly-products", async () => {
+  await loadAnomalies(true); return !error.value;
+}, {
+  busy: () => loading.value,
+  editing: () => false,
+});
+
 const payload = shallowRef<AnomalyProductPayload | null>(null);
 const activeView = ref<AnomalyProductView>("sudden_sales_stop");
 const slowDays = ref(7);
+const slowSortDirection = ref<SlowMovingSortDirection>("desc");
 const query = ref("");
 const loading = ref(true);
 const error = ref("");
@@ -51,7 +65,7 @@ const slowDayOptions = computed(
   () => payload.value?.rules.slow_day_options ?? [4, 7, 10, 15, 20, 30],
 );
 const viewItems = computed(() =>
-  itemsForAnomalyView(payload.value, activeView.value, slowDays.value),
+  itemsForAnomalyView(payload.value, activeView.value, slowDays.value, slowSortDirection.value),
 );
 const filteredItems = computed(() => {
   if (!query.value.trim()) return viewItems.value;
@@ -92,18 +106,19 @@ watch(
   loadAnomalies,
   { immediate: true },
 );
-watch([activeView, slowDays, query], () => {
+watch([activeView, slowDays, slowSortDirection, query], () => {
   anomalyPage.value = 1;
 });
 watch(anomalyPageCount, (pageCount) => {
   if (anomalyPage.value > pageCount) anomalyPage.value = pageCount;
 });
 
-async function loadAnomalies(): Promise<void> {
+async function loadAnomalies(background: unknown = false): Promise<void> {
+  const preserve = background === true;
   const requestRevision = ++loadRequestRevision;
   const requestedAsOf = props.asOf;
   const requestedStoreScope = props.storeScope ?? "current";
-  loading.value = true;
+  loading.value = !preserve;
   error.value = "";
   try {
     const nextPayload = await fetchAnomalyProducts(
@@ -121,7 +136,7 @@ async function loadAnomalies(): Promise<void> {
     }
   } catch (reason) {
     if (requestRevision !== loadRequestRevision) return;
-    payload.value = null;
+    if (!preserve) payload.value = null;
     error.value = reason instanceof Error ? reason.message : "异常商品读取失败";
   } finally {
     if (requestRevision === loadRequestRevision) loading.value = false;
@@ -214,11 +229,6 @@ function returnCoverageLabel(): string {
   return "退货明细尚未完整采集";
 }
 
-function noSalesLabel(item: AnomalyProductItem): string {
-  const prefix = item.no_sales_days_exact ? "" : "至少 ";
-  return `${prefix}${item.no_sales_days} 天`;
-}
-
 function statusInventoryLabel(item: AnomalyProductItem): string {
   const parts = [
     `可售 ${number(item.available_stock)}`,
@@ -287,8 +297,7 @@ function emptyMessage(): string {
           退货 {{ formatChinaDateTime(payload?.collection_times.returns_at ?? null, "暂无") }}
         </small>
         <small>
-          均为北京时间 · 完整销量证据至 {{ payload?.data_through || "暂无完整业务日" }} · 所选日期
-          {{ payload?.requested_as_of || props.asOf }}（北京时间）
+          北京时间 · 完整销量至 {{ payload?.data_through || "暂无" }} · 查看日期 {{ payload?.requested_as_of || props.asOf }}
         </small>
       </div>
     </section>
@@ -312,16 +321,28 @@ function emptyMessage(): string {
         <template v-if="activeView === 'sudden_sales_stop'">
           <span>当前规则</span>
           <strong>
-            前 7 个完整日中至少 5 天有单、合计至少 7 件，随后连续 3 个完整日零销量
+            完整日：前7天至少5天有单、合计≥7件，随后3天零销量
           </strong>
         </template>
         <template v-else-if="activeView === 'slow_moving'">
           <label for="slow-days">滞销门槛</label>
-          <select id="slow-days" v-model.number="slowDays">
-            <option v-for="days in slowDayOptions" :key="days" :value="days">
-              {{ days }} 天及以上未动销
-            </option>
-          </select>
+          <div class="slow-moving-controls">
+            <select id="slow-days" v-model.number="slowDays">
+              <option v-for="days in slowDayOptions" :key="days" :value="days">
+                {{ days }} 天及以上未动销
+              </option>
+            </select>
+            <button
+              type="button"
+              class="slow-sort-toggle"
+              :aria-label="slowSortDirection === 'desc'
+                ? '当前按有货未动销天数降序，点击切换升序'
+                : '当前按有货未动销天数升序，点击切换降序'"
+              @click="slowSortDirection = slowSortDirection === 'desc' ? 'asc' : 'desc'"
+            >
+              {{ slowSortDirection === "desc" ? "天数降序 ↓" : "天数升序 ↑" }}
+            </button>
+          </div>
         </template>
         <template v-else-if="activeView === 'daily_bad_reviews'">
           <span>当前规则</span>
@@ -363,7 +384,7 @@ function emptyMessage(): string {
       {{ detailTabError }}
     </p>
     <div v-if="loading" class="anomaly-state">正在核对销量、库存、评论与退货证据……</div>
-    <div v-else-if="error" class="anomaly-state error" role="alert">
+    <div v-else-if="error && !payload" class="anomaly-state error" role="alert">
       <strong>异常商品暂时无法读取</strong>
       <span>{{ error }}</span>
       <button type="button" @click="loadAnomalies">重新读取</button>
@@ -430,18 +451,17 @@ function emptyMessage(): string {
           </small>
         </div>
         <div v-else-if="item.anomaly_type === 'slow_moving'" class="primary-signal slow">
-          <span>实际滞销天数</span>
-          <strong>{{ noSalesLabel(item) }}</strong>
-          <small>
-            滞销起算 {{ item.slow_moving_started_on || "库存历史边界待补充" }} ·
-            上次动销 {{ item.last_sale_on || "现有完整历史内未见销量" }}
-          </small>
+          <span>本店本变体 · 有货未动销</span>
+          <strong>{{ slowMovingDaysLabel(item) }}</strong>
+          <small>{{ slowMovingPeriodLabel(item) }}</small>
+          <small>{{ slowMovingBoundaryLabel(item) }}</small>
+          <small>{{ lastRecordedSaleLabel(item) }}</small>
         </div>
         <template v-else-if="item.anomaly_type === 'daily_bad_review'">
           <div class="primary-signal review-signal">
             <span>所选日期新发现</span>
             <strong>{{ number(item.new_bad_review_count) }} 条</strong>
-            <small>低于五星 · 首次抓取基线不计入</small>
+            <small>低于五星 · 不含首次基线</small>
           </div>
           <div class="review-evidence-list">
             <article
@@ -801,6 +821,40 @@ function emptyMessage(): string {
   display: flex;
   align-items: center;
   gap: 10px;
+}
+
+.slow-moving-controls {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.slow-moving-controls select,
+.slow-sort-toggle {
+  min-height: 44px;
+}
+
+.slow-sort-toggle {
+  flex: 0 0 auto;
+  padding: 8px 12px;
+  border: 1px solid #b9c8c0;
+  border-radius: 10px;
+  color: #29493c;
+  background: #f8faf7;
+  font: inherit;
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.slow-sort-toggle:hover {
+  background: #edf3ee;
+}
+
+.slow-sort-toggle:focus-visible {
+  outline: 2px solid #315245;
+  outline-offset: 2px;
 }
 
 .anomaly-search input {
@@ -1296,4 +1350,14 @@ function emptyMessage(): string {
     flex-wrap: wrap;
   }
 }
+
+/* Mobile layout: retain every field and existing action. */
+
+@media (max-width: 760px) {
+  .anomaly-page, .anomaly-toolbar { min-width: 0; }
+  .anomaly-card { min-width: 0; }
+  .anomaly-toolbar { gap: 10px; }
+  .anomaly-toolbar label { min-width: 0; width: 100%; }
+}
+
 </style>

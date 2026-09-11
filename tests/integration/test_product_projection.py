@@ -9,9 +9,11 @@ from sqlalchemy.orm import Session
 from takealot_ops.erp.service import (
     build_product_detail_payload,
     build_products_payload,
+    build_summary_payload,
     load_erp_dataset,
     load_product_detail_dataset,
     load_product_list_dataset,
+    load_summary_dataset,
 )
 from takealot_ops.settings import DashboardSettings
 from takealot_ops.storage.migrations import create_schema
@@ -125,3 +127,12 @@ def test_product_projections_match_the_canonical_dataset(tmp_path: Path) -> None
     assert len(product_detail.product_daily) == 2
     assert product_list.anomalies.empty
     assert product_detail.quality_events.empty
+    for cutoff in (date(2026, 8, 18), date(2026, 8, 19), as_of, date(2026, 8, 25)):
+        baseline = load_erp_dataset(settings, cutoff)
+        summary = load_summary_dataset(settings, cutoff)
+        for start in (None, date(2026, 8, 20)):
+            assert build_summary_payload(summary, cutoff, start_date=start) == build_summary_payload(
+                baseline, cutoff, start_date=start,
+            )
+        assert summary.offer_history.empty
+        assert summary.quality_events.empty

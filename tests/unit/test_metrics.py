@@ -7,7 +7,7 @@ from zoneinfo import ZoneInfo
 
 import pandas as pd
 import pytest
-from sqlalchemy import create_engine, select
+from sqlalchemy import create_engine, event, select
 from sqlalchemy.orm import Session
 
 from takealot_ops.domain import OfferRecord, SaleRecord
@@ -23,6 +23,7 @@ from takealot_ops.metrics.service import (
 from takealot_ops.storage.migrations import create_schema
 from takealot_ops.storage.models import (
     AnomalyEvent,
+    DailyProductMetric,
     DailySalesMetricState,
     DataQualityEvent,
     SalesRevenueRevision,
@@ -172,6 +173,12 @@ def test_project_status_rules_classify_observed_takealot_statuses(tmp_path: Path
             status="Cancelled by Takealot - DC Stock Inquiry",
             quantity=2,
         ),
+        _sale(
+            "cancelled-customer",
+            datetime(2026, 7, 20, 8, tzinfo=UTC),
+            status="Cancelled by Customer",
+            quantity=3,
+        ),
     ]
     engine = create_engine("sqlite://")
     create_schema(engine)
@@ -188,7 +195,7 @@ def test_project_status_rules_classify_observed_takealot_statuses(tmp_path: Path
         dataset = service.dashboard_dataset(as_of)
 
     row = dataset.product_daily.iloc[0]
-    assert row["ordered_units"] == 16
+    assert row["ordered_units"] == 19
     assert row["effective_units"] == 9
     assert "unknown_sale_status" not in dataset.anomalies["anomaly_type"].tolist()
     assert "unknown_sale_status" not in dataset.quality_events["event_type"].tolist()
@@ -245,6 +252,64 @@ def test_sales_are_grouped_by_sast_day(tmp_path: Path) -> None:
 
     assert row["metric_date"] == date(2026, 7, 20)
     assert row["ordered_units"] == 5
+
+
+def test_multi_day_rebuild_commits_each_metric_date_separately(tmp_path: Path) -> None:
+    first_day = date(2026, 7, 20)
+    second_day = first_day + timedelta(days=1)
+    engine = create_engine("sqlite://")
+    create_schema(engine)
+    with Session(engine) as session:
+        _seed(
+            session,
+            sales=[
+                _sale("first", datetime(2026, 7, 20, 8, tzinfo=UTC)),
+                _sale("second", datetime(2026, 7, 21, 8, tzinfo=UTC)),
+            ],
+            offers=[
+                (_offer(captured_at=datetime(2026, 7, 20, 8, tzinfo=UTC)), first_day),
+                (_offer(captured_at=datetime(2026, 7, 21, 8, tzinfo=UTC)), second_day),
+            ],
+        )
+        commit_count = 0
+
+        @event.listens_for(session, "after_commit")
+        def count_commit(_session: Session) -> None:
+            nonlocal commit_count
+            commit_count += 1
+
+        rebuilt = _service(session, tmp_path, included=("included",)).rebuild(
+            first_day,
+            second_day,
+        )
+
+        assert rebuilt == 2
+        assert commit_count == 3
+
+        metric_dates = list(
+            session.scalars(
+                select(DailyProductMetric.metric_date).order_by(
+                    DailyProductMetric.metric_date
+                )
+            )
+        )
+        states = list(
+            session.scalars(
+                select(DailySalesMetricState).order_by(
+                    DailySalesMetricState.metric_date
+                )
+            )
+        )
+
+    assert metric_dates == [first_day, second_day]
+    assert [state.source_details["requested_start"] for state in states] == [
+        first_day.isoformat(),
+        first_day.isoformat(),
+    ]
+    assert [state.source_details["requested_end"] for state in states] == [
+        second_day.isoformat(),
+        second_day.isoformat(),
+    ]
 
 
 def test_ordered_units_include_all_statuses(tmp_path: Path) -> None:

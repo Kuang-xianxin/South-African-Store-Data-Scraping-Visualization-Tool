@@ -1,0 +1,1 @@
+const t=new Map,o=32;function c(e,r){const n=JSON.stringify([e,r]),s=t.get(n);if(s)return s;const a=new Intl.NumberFormat(e,r);return t.size>=o&&t.delete(t.keys().next().value),t.set(n,a),a}export{c};

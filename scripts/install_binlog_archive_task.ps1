@@ -80,13 +80,21 @@ $MaintenanceTask = New-ScheduledTask `
     -Principal $Principal `
     -Description 'Verify closed D-drive binlog archives and remove expired files.'
 try {
-    Register-ScheduledTask -TaskName $ArchiveTaskName -InputObject $ArchiveTask -Force
-    Register-ScheduledTask -TaskName $MaintenanceTaskName -InputObject $MaintenanceTask -Force
-    Start-ScheduledTask -TaskName $ArchiveTaskName
+    Register-ScheduledTask `
+        -TaskName $ArchiveTaskName `
+        -InputObject $ArchiveTask `
+        -Force `
+        -ErrorAction Stop
+    Register-ScheduledTask `
+        -TaskName $MaintenanceTaskName `
+        -InputObject $MaintenanceTask `
+        -Force `
+        -ErrorAction Stop
+    Start-ScheduledTask -TaskName $ArchiveTaskName -ErrorAction Stop
     Write-Host "Installed and started $ArchiveTaskName"
     Write-Host "Installed $MaintenanceTaskName at $MaintenanceAt"
 }
-catch [Microsoft.Management.Infrastructure.CimException] {
+catch {
     Write-Warning 'Scheduled Task registration was denied; using current-user logon startup.'
     $RunKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
     $ArchiveStartup = "powershell.exe -NoProfile -NonInteractive -WindowStyle Hidden " +

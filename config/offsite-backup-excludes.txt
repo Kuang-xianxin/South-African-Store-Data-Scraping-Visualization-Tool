@@ -1,0 +1,13 @@
+# Dependencies and generated caches can be rebuilt from the tracked project files.
+**/.venv/**
+**/node_modules/**
+**/__pycache__/**
+**/.pytest_cache/**
+**/.mypy_cache/**
+**/.ruff_cache/**
+**/.codegraph/**
+
+# Browser profiles and runtime image/cache data are transient and change while crawling.
+**/data/competitor-browser-profile/**
+**/data/own-store-follower-browser-profile/**
+**/data/runtime-cache/**

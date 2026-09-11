@@ -13,7 +13,7 @@ from typing import cast
 from zoneinfo import ZoneInfo
 
 import pandas as pd
-from sqlalchemy import Engine, select
+from sqlalchemy import Engine, func, select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
@@ -56,6 +56,8 @@ from takealot_ops.competitors.own_store import (
     load_connected_store_offers,
     own_store_offer_identity,
 )
+from takealot_ops.competitors.snapshot_reads import SnapshotRow, VariantRow
+from takealot_ops.erp.read_cache import ReadProjectionCache
 from takealot_ops.storage.models import (
     CompetitorLinkHealth,
     CompetitorReview,
@@ -64,7 +66,8 @@ from takealot_ops.storage.models import (
     CompetitorVariantSnapshot,
 )
 
-
+SnapshotRead = CompetitorSnapshot | SnapshotRow
+VariantRead = CompetitorVariantSnapshot | VariantRow
 StoreOfferPoint = ConnectedStoreOfferPoint
 
 
@@ -212,12 +215,14 @@ class CompetitorCollector:
         project_root: Path,
         client: CompetitorPublicClient | None = None,
         progress_callback: Callable[[str], None] | None = None,
+        browser_proxy_server: str | None = None,
     ) -> None:
         self._engine = engine
         self._project_root = project_root
         self._client = client or CompetitorPublicClient()
         self._owns_client = client is None
         self._progress_callback = progress_callback
+        self._browser_proxy_server = (browser_proxy_server or "").strip() or None
         self._collection_logger = configure_collection_logger(project_root)
 
     def _report_stage(self, stage: str) -> None:
@@ -580,6 +585,7 @@ class CompetitorCollector:
                 visible=visible_browser,
                 probe_buyboxes=not followers_only,
                 probe_offer_buyboxes=followers_only,
+                proxy_server=self._browser_proxy_server,
             )
         except (OSError, RuntimeError) as exc:
             failed = StockProbeResult(quantity=None, exact=False, method="failed", note=str(exc))
@@ -725,7 +731,7 @@ def _not_found_message(
 
 def load_competitor_link_health(engine: Engine) -> list[dict[str, object]]:
     """Load suspected/confirmed invalid links for the operator review list."""
-    latest_snapshots: dict[str, CompetitorSnapshot] = {}
+    latest_snapshots: dict[str, SnapshotRead] = {}
     try:
         with Session(engine) as session:
             store_plids = connected_store_plids(session)
@@ -744,10 +750,24 @@ def load_competitor_link_health(engine: Engine) -> list[dict[str, object]]:
             )
             if rows:
                 plids = [row.plid for row in rows]
+                latest_ids = (
+                    select(
+                        CompetitorSnapshot.id,
+                        func.row_number().over(
+                            partition_by=CompetitorSnapshot.plid,
+                            order_by=(
+                                CompetitorSnapshot.collected_at.desc(),
+                                CompetitorSnapshot.id.desc(),
+                            ),
+                        ).label("position"),
+                    )
+                    .where(CompetitorSnapshot.plid.in_(plids))
+                    .subquery()
+                )
                 snapshots = session.scalars(
                     select(CompetitorSnapshot)
-                    .where(CompetitorSnapshot.plid.in_(plids))
-                    .order_by(CompetitorSnapshot.collected_at.desc())
+                    .join(latest_ids, latest_ids.c.id == CompetitorSnapshot.id)
+                    .where(latest_ids.c.position == 1)
                 )
                 for snapshot in snapshots:
                     latest_snapshots.setdefault(snapshot.plid, snapshot)
@@ -774,6 +794,30 @@ def load_competitor_link_health(engine: Engine) -> list[dict[str, object]]:
 
 
 COMPETITOR_DISPLAY_TIMEZONE = ZoneInfo("Asia/Shanghai")
+
+
+def load_true_competitor_date_range(engine: Engine) -> dict[str, str | None]:
+    """Resolve first-load dates without hydrating the radar's historical rows."""
+    with Session(engine) as session:
+        store_plids = connected_store_plids(session)
+        statement = select(
+            func.min(CompetitorSnapshot.collected_at),
+            func.max(CompetitorSnapshot.collected_at),
+        ).where(
+            CompetitorSnapshot.plid.in_(
+                select(CompetitorTarget.plid).where(CompetitorTarget.active.is_(True))
+            ),
+            CompetitorSnapshot.plid.not_in(store_plids),
+        )
+        first, last = session.execute(statement).one()
+    start = _competitor_display_date(first).isoformat() if first is not None else None
+    end = _competitor_display_date(last).isoformat() if last is not None else None
+    return {
+        "available_start": start,
+        "available_end": end,
+        "selected_start": start,
+        "selected_end": end,
+    }
 
 
 def _period_inventory_turnover(
@@ -847,7 +891,7 @@ def _period_inventory_turnover(
 def _recent_observed_sales_units(
     observations: list[_InventoryTurnoverObservation],
 ) -> tuple[dict[str, int | None], date | None]:
-    """Calculate fixed inclusive windows ending on the latest available local date."""
+    """Calculate fixed inclusive windows and the full collected-history total."""
 
     dated_observations = [
         observation
@@ -855,24 +899,34 @@ def _recent_observed_sales_units(
         if observation.display_date is not None
     ]
     if not dated_observations:
-        return ({str(days): None for days in OBSERVED_SALES_WINDOW_DAYS}, None)
+        return ({**{str(days): None for days in OBSERVED_SALES_WINDOW_DAYS}, "total": None}, None)
     through_date = max(
         cast(date, observation.display_date) for observation in dated_observations
     )
     values: dict[str, int | None] = {}
-    for days in OBSERVED_SALES_WINDOW_DAYS:
-        start_date = through_date - timedelta(days=days - 1)
-        window = [
-            observation
-            for observation in dated_observations
-            if start_date <= cast(date, observation.display_date) <= through_date
-        ]
-        values[str(days)] = _period_inventory_turnover(window).sales_units
+    for days in (*OBSERVED_SALES_WINDOW_DAYS, None):
+        start_date = through_date - timedelta(days=days - 1) if days is not None else None
+        # These cards need units only. Keep the same exact-point scope rules
+        # without calculating five sets of Decimal amounts and replenishment.
+        previous_by_scope: dict[tuple[object, ...], int] = {}
+        units: int | None = None
+        for observation in dated_observations:
+            if (
+                not observation.stock_exact
+                or observation.stock_quantity is None
+                or (start_date is not None and cast(date, observation.display_date) < start_date)
+            ):
+                continue
+            previous = previous_by_scope.get(observation.scope)
+            if previous is not None:
+                units = (units or 0) + max(0, previous - observation.stock_quantity)
+            previous_by_scope[observation.scope] = observation.stock_quantity
+        values[str(days) if days is not None else "total"] = units
     return values, through_date
 
 
 def _snapshot_inventory_turnover_observations(
-    snapshots: list[CompetitorSnapshot],
+    snapshots: list[SnapshotRead],
     *,
     variant_signatures: dict[int, frozenset[tuple[str, str, str]]],
 ) -> list[_InventoryTurnoverObservation]:
@@ -894,7 +948,7 @@ def _snapshot_inventory_turnover_observations(
 
 
 def _snapshot_period_inventory_turnover(
-    snapshots: list[CompetitorSnapshot],
+    snapshots: list[SnapshotRead],
     *,
     variant_signatures: dict[int, frozenset[tuple[str, str, str]]],
 ) -> _PeriodInventoryTurnover:
@@ -907,7 +961,7 @@ def _snapshot_period_inventory_turnover(
 
 
 def _snapshot_recent_observed_sales_units(
-    snapshots: list[CompetitorSnapshot],
+    snapshots: list[SnapshotRead],
     *,
     variant_signatures: dict[int, frozenset[tuple[str, str, str]]],
 ) -> tuple[dict[str, int | None], date | None]:
@@ -929,6 +983,8 @@ def load_competitor_dataset(
     include_detail_frames: bool = True,
     own_store_only: bool = False,
     include_store_projection: bool = True,
+    store_history_cache: ReadProjectionCache | None = None,
+    strict_read: bool = False,
 ) -> CompetitorDataset:
     """Load competitor views and recompute signals across the selected interval.
 
@@ -976,13 +1032,15 @@ def load_competitor_dataset(
                 .where(CompetitorTarget.active.is_(True))
                 .order_by(CompetitorTarget.updated_at.desc())
             )
-            snapshot_statement = select(CompetitorSnapshot).order_by(
-                CompetitorSnapshot.collected_at.desc()
-            )
+            snapshot_statement = select(
+                *(CompetitorSnapshot.__table__.c[name] for name in SnapshotRow._fields)
+            ).order_by(CompetitorSnapshot.collected_at.desc())
             review_statement = select(CompetitorReview).order_by(
                 CompetitorReview.review_date.desc()
             )
-            variant_statement = select(CompetitorVariantSnapshot).order_by(
+            variant_statement = select(
+                *(CompetitorVariantSnapshot.__table__.c[name] for name in VariantRow._fields)
+            ).order_by(
                 CompetitorVariantSnapshot.collected_at.desc(),
                 CompetitorVariantSnapshot.id.asc(),
             )
@@ -1034,8 +1092,8 @@ def load_competitor_dataset(
             should_load_projection_rows = (
                 not own_store_only or bool(selected_store_plids_for_query)
             )
-            snapshots = (
-                list(session.scalars(snapshot_statement))
+            snapshots: list[SnapshotRead] = (
+                [SnapshotRow(*row) for row in session.execute(snapshot_statement)]
                 if should_load_projection_rows
                 else []
             )
@@ -1044,21 +1102,35 @@ def load_competitor_dataset(
                 if include_detail_frames and should_load_projection_rows
                 else []
             )
-            variants = (
-                list(session.scalars(variant_statement))
+            variants: list[VariantRead] = (
+                [VariantRow(*row) for row in session.execute(variant_statement)]
                 if should_load_projection_rows
                 else []
             )
-            store_baselines = (
-                load_connected_store_offer_points(
+            def load_store_points() -> list[StoreOfferPoint]:
+                return list(load_connected_store_offer_points(
                     session,
-                    plids=normalized_plids,
+                    plids=selected_store_plids_for_query,
                     store_codes=own_store_codes,
+                ))
+
+            store_baselines = []
+            if include_store_projection:
+                store_baselines = (
+                    store_history_cache.get_or_load(
+                        (
+                            "radar-store-history-v1",
+                            tuple(sorted(own_store_codes)) if own_store_codes is not None else ("*",),
+                            tuple(sorted(selected_store_plids_for_query)),
+                        ),
+                        load_store_points,
+                    )
+                    if store_history_cache is not None
+                    else load_store_points()
                 )
-                if include_store_projection
-                else []
-            )
     except SQLAlchemyError:
+        if strict_read:
+            raise
         return CompetitorDataset(
             current=pd.DataFrame(),
             history=pd.DataFrame(),
@@ -1186,15 +1258,15 @@ def load_competitor_dataset(
         else {}
     )
 
-    latest_by_plid: dict[str, CompetitorSnapshot] = {}
-    snapshots_by_plid: dict[str, list[CompetitorSnapshot]] = {}
+    latest_by_plid: dict[str, SnapshotRead] = {}
+    snapshots_by_plid: dict[str, list[SnapshotRead]] = {}
     for snapshot in interval_snapshots:
         latest_by_plid.setdefault(snapshot.plid, snapshot)
         snapshots_by_plid.setdefault(snapshot.plid, []).append(snapshot)
-    all_snapshots_by_plid: dict[str, list[CompetitorSnapshot]] = {}
+    all_snapshots_by_plid: dict[str, list[SnapshotRead]] = {}
     for snapshot in active_snapshots:
         all_snapshots_by_plid.setdefault(snapshot.plid, []).append(snapshot)
-    variants_by_snapshot: dict[int, list[CompetitorVariantSnapshot]] = {}
+    variants_by_snapshot: dict[int, list[VariantRead]] = {}
     variant_signatures: dict[int, frozenset[tuple[str, str, str]]] = {}
     for variant in variants:
         variants_by_snapshot.setdefault(variant.snapshot_id, []).append(variant)
@@ -1207,13 +1279,13 @@ def load_competitor_dataset(
             )
         }
     seller_api_variant_labels = _seller_api_variant_labels_by_scope(variants)
-    stale_stock_by_plid: dict[str, CompetitorSnapshot] = {}
+    stale_stock_by_plid: dict[str, SnapshotRead] = {}
     for plid, latest in latest_by_plid.items():
         if latest.stock_quantity is not None:
             continue
         latest_signature = variant_signatures.get(latest.id, frozenset())
-        for candidate in interval_snapshots:
-            if candidate.plid != plid or candidate.id == latest.id:
+        for candidate in snapshots_by_plid[plid]:
+            if candidate.id == latest.id:
                 continue
             if candidate.stock_quantity is None:
                 continue
@@ -1333,7 +1405,7 @@ def load_competitor_dataset(
         if include_detail_frames
         else pd.DataFrame()
     )
-    latest_store_snapshots: dict[str, CompetitorSnapshot] = {}
+    latest_store_snapshots: dict[str, SnapshotRead] = {}
     for snapshot in interval_store_snapshots:
         latest_store_snapshots.setdefault(snapshot.plid, snapshot)
     detail_snapshots = [*interval_snapshots, *latest_store_snapshots.values()]
@@ -1412,8 +1484,8 @@ def _competitor_display_date(value: datetime) -> date:
 
 
 def _interval_sales_signal(
-    oldest: CompetitorSnapshot,
-    latest: CompetitorSnapshot,
+    oldest: SnapshotRead,
+    latest: SnapshotRead,
     *,
     variant_signatures: dict[int, frozenset[tuple[str, str, str]]],
 ) -> tuple[SalesSignal, int | None, bool]:
@@ -1486,7 +1558,7 @@ def _interval_sales_signal(
     return signal, stock_change, stock_comparable
 
 
-def _stock_text(row: CompetitorSnapshot) -> str:
+def _stock_text(row: SnapshotRead) -> str:
     stock_text = "未探测"
     if row.stock_method in {"not-platform-stock", "all-variants-out-of-stock"}:
         stock_text = "没货"
@@ -1496,7 +1568,7 @@ def _stock_text(row: CompetitorSnapshot) -> str:
 
 
 def _snapshot_category_path(
-    row: CompetitorSnapshot,
+    row: SnapshotRead,
 ) -> list[dict[str, str | None]]:
     """Return only persisted public breadcrumb evidence in its original order."""
 
@@ -1523,8 +1595,8 @@ def _snapshot_category_path(
 
 
 def _interval_price_signal(
-    oldest: CompetitorSnapshot,
-    latest: CompetitorSnapshot,
+    oldest: SnapshotRead,
+    latest: SnapshotRead,
 ) -> tuple[float | None, float | None, str]:
     """Compare price only across the selected interval's oldest/latest snapshots."""
     start_price = float(oldest.price) if oldest.price is not None else None
@@ -1543,8 +1615,8 @@ def _interval_price_signal(
 
 
 def _interval_review_category_deltas(
-    oldest: CompetitorSnapshot,
-    latest: CompetitorSnapshot,
+    oldest: SnapshotRead,
+    latest: SnapshotRead,
 ) -> tuple[int | None, int | None]:
     """Compare PLID-level positive/negative review buckets across interval endpoints."""
     if oldest.id == latest.id:
@@ -1569,7 +1641,7 @@ def _offer_identity_from_mapping(offer: Mapping[str, object]) -> str | None:
     )
 
 
-def _snapshot_offers(row: CompetitorSnapshot) -> list[Mapping[str, object]]:
+def _snapshot_offers(row: SnapshotRead) -> list[Mapping[str, object]]:
     value: object = row.offers or []
     if isinstance(value, str):
         try:
@@ -1582,7 +1654,7 @@ def _snapshot_offers(row: CompetitorSnapshot) -> list[Mapping[str, object]]:
 
 
 def _follow_selling_opportunity(
-    row: CompetitorSnapshot,
+    row: SnapshotRead,
 ) -> tuple[bool, str | None, str, int | None]:
     """Classify only complete public-offer evidence from a successful snapshot."""
 
@@ -1630,7 +1702,7 @@ def _normalized_offer_scope(value: object) -> str:
     return " ".join(str(value or "").casefold().split())
 
 
-def _variant_offer_identity(variant: CompetitorVariantSnapshot) -> str | None:
+def _variant_offer_identity(variant: VariantRead) -> str | None:
     identity = competitor_offer_identity(
         seller_id=variant.seller_id,
         seller_name=variant.seller_name,
@@ -1646,7 +1718,7 @@ def _variant_offer_identity(variant: CompetitorVariantSnapshot) -> str | None:
     return f"variant-buybox:{sku}|{variant_key}"
 
 
-def _variant_stock_state(variant: CompetitorVariantSnapshot) -> str:
+def _variant_stock_state(variant: VariantRead) -> str:
     exact_quantity = (
         variant.stock_quantity
         if variant.stock_exact
@@ -1661,8 +1733,8 @@ def _variant_stock_state(variant: CompetitorVariantSnapshot) -> str:
 
 
 def _variant_offer_mapping(
-    snapshot: CompetitorSnapshot,
-    variant: CompetitorVariantSnapshot,
+    snapshot: SnapshotRead,
+    variant: VariantRead,
 ) -> dict[str, object]:
     selected = bool(
         _normalized_offer_scope(variant.sku)
@@ -1700,8 +1772,8 @@ def _variant_offer_mapping(
 
 def _matching_offer_variant(
     offer: Mapping[str, object],
-    variants: list[CompetitorVariantSnapshot],
-) -> CompetitorVariantSnapshot | None:
+    variants: list[VariantRead],
+) -> VariantRead | None:
     if not (bool(offer.get("is_buybox")) or bool(offer.get("selected"))):
         return None
     candidates = variants
@@ -1731,8 +1803,8 @@ def _matching_offer_variant(
 
 
 def _snapshot_offers_with_variants(
-    snapshot: CompetitorSnapshot,
-    variants: list[CompetitorVariantSnapshot],
+    snapshot: SnapshotRead,
+    variants: list[VariantRead],
 ) -> list[Mapping[str, object]]:
     offers: list[Mapping[str, object]] = []
     matched_variant_ids: set[int] = set()
@@ -1902,8 +1974,8 @@ def _offer_comparison_signature(offer: Mapping[str, object]) -> tuple[object, ..
 
 
 def _indexed_snapshot_offers(
-    row: CompetitorSnapshot,
-    variants: list[CompetitorVariantSnapshot] | None = None,
+    row: SnapshotRead,
+    variants: list[VariantRead] | None = None,
 ) -> tuple[list[tuple[str, Mapping[str, object]]], set[str]]:
     indexed: dict[str, Mapping[str, object]] = {}
     order: list[str] = []
@@ -1940,9 +2012,9 @@ def _seller_observed_sales_scope_key(
 
 
 def _snapshot_scoped_recent_observed_sales_units(
-    snapshots: list[CompetitorSnapshot],
+    snapshots: list[SnapshotRead],
     *,
-    variants_by_snapshot: Mapping[int, list[CompetitorVariantSnapshot]],
+    variants_by_snapshot: Mapping[int, list[VariantRead]],
     excluded_offer_ids: set[str] | None = None,
     excluded_skus: set[str] | None = None,
 ) -> _ScopedOfferObservedSales | None:
@@ -1951,28 +2023,30 @@ def _snapshot_scoped_recent_observed_sales_units(
     all_observations: list[_InventoryTurnoverObservation] = []
     observations_by_seller: dict[str, list[_InventoryTurnoverObservation]] = {}
     observations_by_offer: dict[str, list[_InventoryTurnoverObservation]] = {}
+    own_offer_ids = excluded_offer_ids or set()
+    own_skus = excluded_skus or set()
     for snapshot in sorted(snapshots, key=lambda row: (row.collected_at, row.id)):
+        display_date = _competitor_display_date(snapshot.collected_at)
         indexed_offers, ambiguous = _indexed_snapshot_offers(
             snapshot,
             variants_by_snapshot.get(snapshot.id, []),
         )
         for offer_key, offer in indexed_offers:
-            if _public_offer_is_own(
+            if (own_offer_ids or own_skus) and _public_offer_is_own(
                 offer,
-                own_offer_ids=excluded_offer_ids or set(),
-                own_skus=excluded_skus or set(),
+                own_offer_ids=own_offer_ids,
+                own_skus=own_skus,
             ):
                 continue
-            identity = _offer_identity_from_mapping(offer)
-            if identity is None:
+            if offer_key.startswith("unidentified:"):
                 continue
-            price = _offer_price(offer)
+            identity = offer_key
             observation = _InventoryTurnoverObservation(
                 scope=(identity,),
                 stock_quantity=_offer_stock_quantity(offer),
                 stock_exact=bool(offer.get("stock_exact")) and offer_key not in ambiguous,
-                price=Decimal(str(price)) if price is not None else None,
-                display_date=_competitor_display_date(snapshot.collected_at),
+                price=None,
+                display_date=display_date,
             )
             seller_key = _seller_observed_sales_scope_key(
                 seller_id=offer.get("seller_id"),
@@ -1985,14 +2059,21 @@ def _snapshot_scoped_recent_observed_sales_units(
 
     if not all_observations:
         return None
+    link = _recent_observed_sales_units(all_observations)
     return _ScopedOfferObservedSales(
-        link=_recent_observed_sales_units(all_observations),
+        link=link,
         sellers={
-            key: _recent_observed_sales_units(observations)
+            key: (
+                link if len(observations_by_seller) == 1
+                else _recent_observed_sales_units(observations)
+            )
             for key, observations in observations_by_seller.items()
         },
         offers={
-            key: _recent_observed_sales_units(observations)
+            key: (
+                link if len(observations_by_offer) == 1
+                else _recent_observed_sales_units(observations)
+            )
             for key, observations in observations_by_offer.items()
         },
     )
@@ -2022,11 +2103,11 @@ def _attach_scoped_recent_observed_sales(
 
 
 def _interval_offer_rows(
-    oldest: CompetitorSnapshot,
-    latest: CompetitorSnapshot,
+    oldest: SnapshotRead,
+    latest: SnapshotRead,
     *,
-    oldest_variants: list[CompetitorVariantSnapshot] | None = None,
-    latest_variants: list[CompetitorVariantSnapshot] | None = None,
+    oldest_variants: list[VariantRead] | None = None,
+    latest_variants: list[VariantRead] | None = None,
     raw_history: bool = False,
 ) -> list[dict[str, object]]:
     """Compare each seller offer by offer_id, never by the shared product PLID."""
@@ -2035,10 +2116,13 @@ def _interval_offer_rows(
         oldest,
         oldest_variants,
     )
-    latest_items, latest_ambiguous = _indexed_snapshot_offers(
-        latest,
-        latest_variants,
-    )
+    if oldest is latest and oldest_variants is latest_variants:
+        latest_items, latest_ambiguous = oldest_items, oldest_ambiguous
+    else:
+        latest_items, latest_ambiguous = _indexed_snapshot_offers(
+            latest,
+            latest_variants,
+        )
     oldest_by_key = dict(oldest_items)
     rows: list[dict[str, object]] = []
     for key, offer in latest_items:
@@ -2126,9 +2210,9 @@ def _interval_offer_rows(
 
 
 def _snapshot_row(
-    row: CompetitorSnapshot,
+    row: SnapshotRead,
     *,
-    stale_stock: CompetitorSnapshot | None = None,
+    stale_stock: SnapshotRead | None = None,
     signal: SalesSignal | None = None,
     signal_start: datetime | None = None,
     signal_end: datetime | None = None,
@@ -2285,6 +2369,13 @@ def _latest_store_baselines(
     return sorted(latest.values(), key=lambda row: (row.store_code, row.offer_id))
 
 
+def _store_offer_price(value: Decimal | None) -> float | None:
+    """Project a usable Seller API quote; keep unpriced source records intact."""
+    if value is None or not value.is_finite() or value <= 0:
+        return None
+    return float(value)
+
+
 def _store_offer_inventory_turnover_observations(
     history: list[StoreOfferPoint],
 ) -> list[_InventoryTurnoverObservation]:
@@ -2421,12 +2512,8 @@ def _seller_api_offer_rows(
         oldest = history[0]
         latest = history[-1]
         has_interval_comparison = len(history) > 1
-        oldest_price = (
-            float(oldest.selling_price) if oldest.selling_price is not None else None
-        )
-        latest_price = (
-            float(latest.selling_price) if latest.selling_price is not None else None
-        )
+        oldest_price = _store_offer_price(oldest.selling_price)
+        latest_price = _store_offer_price(latest.selling_price)
         price_change = (
             latest_price - oldest_price
             if has_interval_comparison
@@ -2555,8 +2642,8 @@ def _public_offer_is_own(
 
 
 def _store_follower_offer_rows(
-    oldest: CompetitorSnapshot,
-    latest: CompetitorSnapshot,
+    oldest: SnapshotRead,
+    latest: SnapshotRead,
     *,
     own_offer_ids: set[str],
     own_skus: set[str],
@@ -2599,7 +2686,7 @@ def _follower_seller_identity(
 
 
 def _follower_seller_timelines(
-    snapshots: list[CompetitorSnapshot],
+    snapshots: list[SnapshotRead],
     *,
     selected_start_date: date | None,
     selected_end_date: date | None,
@@ -2620,23 +2707,26 @@ def _follower_seller_timelines(
         not_before = not_before_by_plid.get(snapshot.plid)
         if not_before is not None and observed_date < not_before:
             continue
-        if own_store_mode:
-            offers = _store_follower_offer_rows(
-                snapshot,
-                snapshot,
-                own_offer_ids=own_offer_ids_by_plid.get(snapshot.plid, set()),
-                own_skus=own_skus_by_plid.get(snapshot.plid, set()),
-                raw_history=True,
-            )
-        else:
-            offers = [
-                offer
-                for offer in _interval_offer_rows(snapshot, snapshot, raw_history=True)
-                if bool(offer.get("是否跟卖"))
-            ]
+        # Seller discovery needs identities only, not the complete price/stock
+        # comparison row for every historical offer. Use the identical indexing
+        # and follower classification used by _interval_offer_rows.
+        indexed_offers, _ = _indexed_snapshot_offers(snapshot)
         sellers_in_snapshot: dict[str, tuple[str, str | None]] = {}
-        for offer in offers:
-            identity = _follower_seller_identity(offer)
+        for _, offer in indexed_offers:
+            if own_store_mode:
+                if _public_offer_is_own(
+                    offer,
+                    own_offer_ids=own_offer_ids_by_plid.get(snapshot.plid, set()),
+                    own_skus=own_skus_by_plid.get(snapshot.plid, set()),
+                ):
+                    continue
+            elif not bool(offer.get("is_follower_offer", not bool(offer.get("is_buybox")))):
+                continue
+            identity = _follower_seller_identity({
+                "卖家": offer.get("seller_name"),
+                "卖家ID": offer.get("seller_id"),
+                "offer_id": offer.get("offer_id"),
+            })
             if identity is None:
                 continue
             key, seller_name, seller_id = identity
@@ -2742,16 +2832,16 @@ def _own_follower_event_rows(
 
 def _store_snapshot_rows(
     baselines: list[StoreOfferPoint],
-    follower_snapshots: list[CompetitorSnapshot],
+    follower_snapshots: list[SnapshotRead],
     *,
-    all_follower_snapshots: list[CompetitorSnapshot],
+    all_follower_snapshots: list[SnapshotRead],
     current_store_offers: list[ConnectedStoreOffer],
     selected_start_date: date | None,
     selected_end_date: date | None,
     store_names_by_code: dict[str, str],
     own_offer_ids_by_plid: dict[str, set[str]],
     own_skus_by_plid: dict[str, set[str]],
-    variants_by_snapshot: Mapping[int, list[CompetitorVariantSnapshot]],
+    variants_by_snapshot: Mapping[int, list[VariantRead]],
     follower_timelines: dict[str, dict[str, object]],
     store_tsin_by_offer: dict[tuple[str, str], str],
     variant_labels_by_scope: Mapping[tuple[str, str], str],
@@ -2782,13 +2872,13 @@ def _store_snapshot_rows(
             baseline_row
         )
 
-    followers_by_plid: dict[str, list[CompetitorSnapshot]] = {}
+    followers_by_plid: dict[str, list[SnapshotRead]] = {}
     for follower_snapshot in follower_snapshots:
         followers_by_plid.setdefault(follower_snapshot.plid, []).append(
             follower_snapshot
         )
 
-    all_followers_by_plid: dict[str, list[CompetitorSnapshot]] = {}
+    all_followers_by_plid: dict[str, list[SnapshotRead]] = {}
     for follower_snapshot in all_follower_snapshots:
         all_followers_by_plid.setdefault(follower_snapshot.plid, []).append(
             follower_snapshot
@@ -2851,10 +2941,13 @@ def _store_snapshot_rows(
                 )
             )
         representative = next(
-            (row for row in own_offers if row.selling_price is not None),
+            (row for row in own_offers if _store_offer_price(row.selling_price) is not None),
             own_offers[0],
         )
-        prices = [float(row.selling_price) for row in own_offers if row.selling_price is not None]
+        prices = [
+            price for row in own_offers
+            if (price := _store_offer_price(row.selling_price)) is not None
+        ]
         stock_values = [row.total_stock for row in own_offers]
         stock_exact = bool(stock_values) and all(value is not None for value in stock_values)
         total_stock = (
@@ -3088,7 +3181,7 @@ def _store_snapshot_rows(
                         "offer_id": row.offer_id,
                         "店铺": store_names_by_code.get(row.store_code, row.store_code),
                         "SKU": row.sku,
-                        "价格": float(row.selling_price) if row.selling_price is not None else None,
+                        "价格": _store_offer_price(row.selling_price),
                         "库存": row.total_stock,
                         "Takealot可售库存": row.takealot_available_stock,
                         "卖家可售库存": row.seller_available_stock,
@@ -3170,9 +3263,7 @@ def _store_baseline_history_row(
         "图片": latest.image_url,
         "采集时间": latest.captured_at,
         "当前卖家": "自有店铺（Seller API）",
-        "价格": (
-            float(latest.selling_price) if latest.selling_price is not None else None
-        ),
+        "价格": _store_offer_price(latest.selling_price),
         "区间起始价格": None,
         "价格变化": None,
         "价格信号": "Seller API刷新",
@@ -3230,7 +3321,7 @@ def _store_baseline_history_row(
 
 def _store_history_rows(
     baselines: list[StoreOfferPoint],
-    follower_snapshots: list[CompetitorSnapshot],
+    follower_snapshots: list[SnapshotRead],
     *,
     selected_start_date: date | None,
     selected_end_date: date | None,
@@ -3285,7 +3376,7 @@ def _store_history_rows(
 
 
 def _variant_row(
-    row: CompetitorVariantSnapshot,
+    row: VariantRead,
     *,
     default_image_url: str | None = None,
 ) -> dict[str, object]:
@@ -3344,7 +3435,7 @@ def _display_variant_label(label: str) -> str:
 
 
 def _seller_api_variant_labels_by_scope(
-    variants: list[CompetitorVariantSnapshot],
+    variants: list[VariantRead],
 ) -> dict[tuple[str, str], str]:
     """Keep the newest readable public variant label for each PLID and offer scope."""
     labels: dict[tuple[str, str], str] = {}
