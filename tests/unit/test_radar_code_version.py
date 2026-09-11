@@ -33,3 +33,20 @@ def test_unrelated_handler_does_not_invalidate_but_projection_dependency_does(tm
 
 def test_real_projection_fingerprint_can_resolve_transitive_imports():
     assert len(materialized_code_fingerprint(Path(__file__).resolve().parents[2])) == 64
+
+
+def test_pinned_release_ignores_worktree_edits_but_keeps_live_model_boundary(tmp_path, monkeypatch):
+    data = tmp_path / "data-root"
+    source = tmp_path / "release" / "src/takealot_ops/erp"
+    source.mkdir(parents=True)
+    (data / "config").mkdir(parents=True)
+    for name in ("radar_materialized", "live_updates", "radar_warmup", "radar_code_version"):
+        (source / f"{name}.py").write_text("VERSION = 1\n")
+    (source / "web.py").write_text("def competitors(): return 1\n")
+    monkeypatch.setenv("TAKEALOT_RELEASE_SOURCE_ROOT", str(tmp_path / "release"))
+    first = materialized_code_fingerprint(data)
+    (data / "src/takealot_ops/erp").mkdir(parents=True)
+    (data / "src/takealot_ops/erp/web.py").write_text("def competitors(): return 'unfinished'\n")
+    assert materialized_code_fingerprint(data) == first
+    (data / "config/nf_profit_model.json").write_text('{"version": 2}')
+    assert materialized_code_fingerprint(data) != first

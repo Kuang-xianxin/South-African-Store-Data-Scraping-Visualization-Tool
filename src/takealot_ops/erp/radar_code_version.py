@@ -4,13 +4,14 @@ from __future__ import annotations
 import ast
 import hashlib
 import importlib.util
+import os
 from pathlib import Path
 
 
 def materialized_code_fingerprint(root: Path) -> str:
-    if not (root / "src/takealot_ops/erp/web.py").is_file():
+    if not (root / "src/takealot_ops/erp/web.py").is_file() and not os.environ.get("TAKEALOT_RELEASE_SOURCE_ROOT"):
         root = Path(__file__).resolve().parents[3]
-    source = root / "src"
+    source = Path(os.environ.get("TAKEALOT_RELEASE_SOURCE_ROOT", str(root))) / "src"
     web_path = source / "takealot_ops/erp/web.py"
     tree = ast.parse(web_path.read_text(encoding="utf-8-sig"))
     # Local helper calls are followed recursively, including nested read handlers.

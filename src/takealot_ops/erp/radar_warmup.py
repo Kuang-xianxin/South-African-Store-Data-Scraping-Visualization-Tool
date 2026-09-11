@@ -14,6 +14,7 @@ from sqlalchemy import Engine, select
 from sqlalchemy.orm import Session
 
 from takealot_ops.erp.auth import StoreIdentity, UserIdentity, _identity
+from takealot_ops.competitors.service import load_true_competitor_date_range
 from takealot_ops.erp.permissions import COMPETITORS_VIEW
 from takealot_ops.storage.models import ErpUser
 
@@ -47,22 +48,34 @@ def resolve_warm_request(engine: Engine, request: RadarWarmRequest) -> tuple[
 
 def initial_warm_requests(engine: Engine) -> list[RadarWarmRequest]:
     requests: list[RadarWarmRequest] = []
+    seen: set[tuple[bool, tuple[str, ...]]] = set()
     with Session(engine) as session:
         for record in session.scalars(select(ErpUser).where(ErpUser.active.is_(True))
                                       .order_by(ErpUser.last_login_at.desc(), ErpUser.id)):
             user = _identity(session, record)
-            store = next((s for s in user.accessible_stores if s.active and s.data_connected), None)
-            if user.can(COMPETITORS_VIEW) and store:
-                requests.extend(RadarWarmRequest(user.id, store.code, own) for own in (False, True))
-                if len(requests) >= 4:
-                    break
-    return requests
+            stores = [s for s in user.accessible_stores if s.active and s.data_connected]
+            if not user.can(COMPETITORS_VIEW) or not stores:
+                continue
+            candidates: list[tuple[bool, str, StoreIdentity, tuple[str, ...]]] = [(False, "all", stores[0], ())]
+            candidates.append((True, "all", stores[0], tuple(sorted(s.code for s in stores))))
+            candidates.append((True, "operating", stores[0], tuple(sorted(
+                s.code for s in stores if s.id in user.assigned_store_ids))))
+            candidates.extend((True, "current", store, (store.code,)) for store in stores)
+            for own, scope, store, codes in candidates:
+                if (own, codes) not in seen:
+                    requests.append(RadarWarmRequest(user.id, store.code, own, scope))
+                    seen.add((own, codes))
+    # The current UI reads the public date-range endpoint before opening either
+    # partition. Prepare that exact explicit interval as well as rolling defaults.
+    dates = load_true_competitor_date_range(engine)
+    start, end = dates.get("selected_start"), dates.get("selected_end")
+    return requests + ([replace(r, start=start, end=end) for r in requests] if start or end else [])
 
 
 class RadarWarmup:
     """One coordinator revalidates each saved user before invoking read handlers."""
 
-    def __init__(self, path: Path, *, max_requests: int = 8, interval: float = 60) -> None:
+    def __init__(self, path: Path, *, max_requests: int = 64, interval: float = 60) -> None:
         self.path = path
         self.max_requests = max_requests
         self.interval = interval
@@ -113,7 +126,7 @@ class RadarWarmup:
     def _scope(request: RadarWarmRequest) -> tuple[int, str, bool, str]:
         return request.user_id, request.store_code, request.own, request.scope
 
-    def run_once(self, dispatch: Callable[[RadarWarmRequest], None]) -> None:
+    def run_once(self, dispatch: Callable[[RadarWarmRequest], object]) -> None:
         saved = self.requests()
         # An old open tab keeps requesting yesterday explicitly. Also prepare
         # the rolling default, without changing that tab's chosen historical dates.
@@ -134,7 +147,7 @@ class RadarWarmup:
                 logger.exception("Radar warmup failed for user=%s own=%s",
                                  request.user_id, request.own)
 
-    def start(self, dispatch: Callable[[RadarWarmRequest], None],
+    def start(self, dispatch: Callable[[RadarWarmRequest], object],
               seed: Callable[[], None]) -> None:
         if self._thread is not None:
             return
@@ -142,8 +155,8 @@ class RadarWarmup:
         def run() -> None:
             while not self._stop.is_set():
                 try:
-                    if not self.requests():
-                        seed()
+                    # Discover new authorized users/scopes before their first visit.
+                    seed()
                     self.run_once(dispatch)
                 except Exception:
                     logger.exception("Radar warmup coordinator failed")

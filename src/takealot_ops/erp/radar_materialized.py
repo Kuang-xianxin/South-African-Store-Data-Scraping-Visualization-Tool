@@ -64,7 +64,8 @@ def radar_date_bounds(engine: Engine, *, own: bool, store_codes: set[str]) -> tu
     return (min(dates), max(dates)) if dates else (None, None)
 
 
-def radar_fingerprints(engine: Engine, *, own: bool, store_codes: set[str], store_version: str) -> dict[str, str]:
+def radar_fingerprints(engine: Engine, *, own: bool, store_codes: set[str], store_version: str,
+                       store_versions: dict[str, str] | None = None) -> dict[str, str]:
     """Read small per-PLID change markers, never hydrate historical JSON rows."""
     with Session(engine) as session:
         offers = load_connected_store_offers(session)
@@ -73,7 +74,29 @@ def radar_fingerprints(engine: Engine, *, own: bool, store_codes: set[str], stor
             select(CompetitorTarget).where(CompetitorTarget.active.is_(True)))}
         plids = ({str(offer.offer.productline_id) for offer in offers if offer.store_code in store_codes and offer.offer.productline_id}
                  if own else targets.keys() - all_owned)
-        markers: dict[str, list[Any]] = {p: [targets.get(p), store_version if own else ""] for p in plids}
+        markers: dict[str, list[Any]] = {p: [targets.get(p), store_version] for p in plids}
+        if own and store_versions is not None:
+            # Private histories can still contribute after an Offer moves stores.
+            # Include historical membership, not just today's current offers.
+            contributors: dict[str, set[str]] = {p: set() for p in plids}
+            identities: dict[str, list[Any]] = {p: [] for p in plids}
+            for entry in offers:
+                offer = entry.offer
+                plid = str(offer.productline_id or "")
+                if plid not in markers:
+                    continue
+                identities[plid].append((entry.store_code, offer.offer_id, offer.sku, offer.tsin_id))
+                if entry.store_code in store_codes:
+                    contributors[plid].add(entry.store_code)
+            for history_model in (StoreOfferBaseline, StoreOfferObservation):
+                table = history_model.__table__
+                for code, plid in session.connection().execute(select(
+                    table.c.store_code, table.c.productline_id,
+                ).distinct().where(table.c.store_code.in_(store_codes), table.c.productline_id.in_(plids))):
+                    contributors[plid].add(code)
+            for plid in plids:
+                markers[plid].extend((sorted(identities[plid], key=str),
+                                     [(code, store_versions[code]) for code in sorted(contributors[plid])]))
         global_markers = []
         for model in (CompetitorSnapshot, CompetitorVariantSnapshot):
             for plid, last_id, count in session.execute(select(
@@ -83,6 +106,12 @@ def radar_fingerprints(engine: Engine, *, own: bool, store_codes: set[str], stor
                 if plid in markers:
                     markers[plid].append((last_id, count))
         markers["__global__"] = global_markers
+        if own and store_versions is not None:
+            # Scope-wide revisions may come from an unrelated store. They must
+            # not trigger the legacy conservative full rebuild fallback.
+            markers["__global__"].append(("store_versions", sorted(store_versions.items()), store_version,
+                sorted((entry.store_code, entry.offer.offer_id, entry.offer.productline_id,
+                        entry.offer.sku, entry.offer.tsin_id) for entry in offers)))
     return {p: hashlib.sha256(json.dumps(v, default=str).encode()).hexdigest() for p, v in markers.items()}
 
 

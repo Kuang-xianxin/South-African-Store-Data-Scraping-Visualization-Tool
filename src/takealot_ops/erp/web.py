@@ -41,6 +41,7 @@ from sqlalchemy.orm import Session
 from starlette.middleware.gzip import GZipMiddleware
 
 from takealot_ops.erp.radar_list_query import RadarListQuery
+from takealot_ops.erp.release_gate import ReleaseDrainMiddleware, ReleaseGate
 from takealot_ops.erp.competitor_match_catalog import load_match_catalog, read_precomputed_match_cards
 from takealot_ops.erp.radar_materialized import MaterializedRadar, radar_date_bounds, radar_fingerprints
 from takealot_ops.erp.radar_code_version import materialized_code_fingerprint
@@ -1282,10 +1283,12 @@ def _health_rollup(items: Sequence[Mapping[str, Any]]) -> dict[str, int]:
     return result
 
 
-def create_app(project_root: Path | None = None) -> FastAPI:
+def create_app(project_root: Path | None = None, *, auth_manager: AuthManager | None = None,
+               radar_directory: Path | None = None) -> FastAPI:
     """Create the unified ERP API and attach its built Vue application."""
     root = (project_root or Path(os.environ.get("TAKEALOT_PROJECT_ROOT", Path.cwd()))).resolve()
     web_only = _environment_flag_enabled("TAKEALOT_WEB_ONLY")
+    release_gate = ReleaseGate(root / "logs" / "erp-release.lease")
     read_only_test_mode = _environment_flag_enabled("TAKEALOT_READ_ONLY_TEST_MODE")
     if read_only_test_mode and not web_only:
         raise SettingsError("TAKEALOT_READ_ONLY_TEST_MODE 必须与 TAKEALOT_WEB_ONLY 一起启用")
@@ -1293,7 +1296,7 @@ def create_app(project_root: Path | None = None) -> FastAPI:
     if deployment_label and not re.fullmatch(r"[A-Za-z0-9._-]{1,64}", deployment_label):
         raise SettingsError("TAKEALOT_DEPLOYMENT_LABEL 只能使用字母、数字、点、下划线和短横线")
     session_cookie_name = _session_cookie_name_from_environment()
-    auth = AuthManager(root, read_only_test_mode=read_only_test_mode)
+    auth = auth_manager or AuthManager(root, read_only_test_mode=read_only_test_mode)
     limiter = _LoginLimiter()
     competitor_logger = configure_collection_logger(root)
     collection_coordinator = CollectionRequestCoordinator[CompetitorCollectionResult]()
@@ -1319,17 +1322,19 @@ def create_app(project_root: Path | None = None) -> FastAPI:
         if not database_url.startswith("sqlite") else None,
         namespace=radar_code_fingerprint(root),
     )
+    radar_namespace = materialized_code_fingerprint(root)
+    radar_storage = radar_directory or root / "data" / "runtime-cache"
     radar_materialized = MaterializedRadar(
-        root / "data" / "runtime-cache" / "radar-true-materialized-v2.sqlite3",
-        namespace=materialized_code_fingerprint(root), batch_size=32, max_pages=32768,
-        max_scopes=8,
+        radar_storage / f"radar-true-{radar_namespace}.sqlite3",
+        namespace=radar_namespace, batch_size=32, max_pages=32768,
+        max_scopes=32,
     )
     radar_own_materialized = MaterializedRadar(
-        root / "data" / "runtime-cache" / "radar-own-materialized-v2.sqlite3",
-        namespace=materialized_code_fingerprint(root), batch_size=32, max_pages=32768,
-        # Four scheduled warm scopes plus foreground single/operating-store views
-        # must coexist; otherwise each warm cycle evicts a recently viewed list.
-        max_scopes=8,
+        radar_storage / f"radar-own-{radar_namespace}.sqlite3",
+        namespace=radar_namespace, batch_size=32, max_pages=32768,
+        # Each release owns its files: a still-running old worker cannot evict
+        # the replacement's prepared scopes during a rolling handover.
+        max_scopes=32,
     )
     radar_warmup = RadarWarmup(root / "data" / "runtime-cache" / "radar-warmup.sqlite3")
     match_catalog_cache = RadarPageCache(
@@ -1397,6 +1402,8 @@ def create_app(project_root: Path | None = None) -> FastAPI:
         lifespan=lifespan,
     )
     app.add_middleware(GZipMiddleware, minimum_size=1024, compresslevel=5)
+    if not web_only:
+        app.add_middleware(ReleaseDrainMiddleware, gate=release_gate)
     app.state.auth_manager = auth
     app.state.product_thumbnail_cache = product_thumbnails
     app.state.cny_zar_rate_service = cny_zar_rates
@@ -1548,6 +1555,7 @@ def create_app(project_root: Path | None = None) -> FastAPI:
             "/api/auth/login",
             "/api/auth/bootstrap",
             "/api/internal/competitors/scheduled-trigger",
+            "/api/internal/release-status",
         }
         if not path.startswith("/api/") or path in public_paths:
             return await call_next(request)
@@ -3869,6 +3877,12 @@ def create_app(project_root: Path | None = None) -> FastAPI:
             cards: dict[str, dict[str, Any]] = {}
             for own in (False, True):
                 wanted = {p for p in selected if (eligible[p]["来源"] == "own_store") == own}
+                if not wanted:
+                    continue
+                interval = (start_date, end_date)
+                if start_date is None or end_date is None:
+                    first, last = radar_date_bounds(read_engine, own=own, store_codes=codes)
+                    interval = (start_date or first, end_date or last)
                 key: tuple[Any, ...] = (
                     ("competitors-own-store-v6", tuple(sorted(codes)), start, end, None) if own
                     else ("competitors-list-v9", (), start, end, False)
@@ -3876,10 +3890,13 @@ def create_app(project_root: Path | None = None) -> FastAPI:
                 materialized_version = data_revisions._topic_token(
                     frozenset(("store", "competitors", "master") if own else ("competitors",)),
                     codes if own else (),
-                ) + (through.isoformat() if own else "")
+                ) + (through.isoformat() if own else "") + repr(interval) + (
+                    data_revisions.radar_access_token(codes, permissions="") if own else "")
+                projection_boundary = data_revisions.radar_access_token(
+                    codes, permissions=json.dumps(sorted(codes)) if own else "", own=own)
                 cards.update(read_precomputed_match_cards(
                     radar_own_materialized if own else radar_materialized,
-                    key=key, boundary=boundary, version=materialized_version, plids=wanted,
+                    key=key, boundary=projection_boundary, version=materialized_version, plids=wanted,
                 ))
             missing = selected - cards.keys()
             if missing:
@@ -3918,6 +3935,7 @@ def create_app(project_root: Path | None = None) -> FastAPI:
         prefer_cached: bool = Query(default=False),
     ) -> Response:
         own_store_codes = _own_store_codes_for_request(request, own_store_scope)
+        default_interval = start_date is None and end_date is None
         if list_query.page is not None and (start_date is None or end_date is None):
             first, last = radar_date_bounds(read_engine, own=False, store_codes=own_store_codes)
             start_date, end_date = start_date or first, end_date or last
@@ -3926,8 +3944,8 @@ def create_app(project_root: Path | None = None) -> FastAPI:
         cache_key = (
             "competitors-list-v9",
             tuple(sorted(own_store_codes)) if include_own_store else (),
-            start_date.isoformat() if start_date else None,
-            end_date.isoformat() if end_date else None,
+            start_date.isoformat() if start_date and not default_interval else None,
+            end_date.isoformat() if end_date and not default_interval else None,
             include_own_store,
         )
 
@@ -3974,6 +3992,7 @@ def create_app(project_root: Path | None = None) -> FastAPI:
             return materialized_radar_response(
                 request, cache_key, own_store_codes, load_projection,
                 list_query, prefer_cached, own=False, own_scope=own_store_scope,
+                interval=(start_date, end_date),
             )
         prepared, refreshing = radar_page_cache.get_or_load(
             cache_key, loader=load_projection, prefer_cached=prefer_cached,
@@ -3999,6 +4018,7 @@ def create_app(project_root: Path | None = None) -> FastAPI:
         """Return only the scope-dependent private-store radar partition."""
         official_through = datetime.now(ZoneInfo("Asia/Shanghai")).date()
         own_store_codes = _own_store_codes_for_request(request, own_store_scope)
+        default_interval = start_date is None and end_date is None
         if list_query.page is not None and (start_date is None or end_date is None):
             first, last = radar_date_bounds(read_engine, own=True, store_codes=own_store_codes)
             start_date, end_date = start_date or first, end_date or last
@@ -4007,8 +4027,8 @@ def create_app(project_root: Path | None = None) -> FastAPI:
         cache_key = (
             "competitors-own-store-v6",
             tuple(sorted(own_store_codes)),
-            start_date.isoformat() if start_date else None,
-            end_date.isoformat() if end_date else None,
+            start_date.isoformat() if start_date and not default_interval else None,
+            end_date.isoformat() if end_date and not default_interval else None,
             plid,
         )
 
@@ -4053,6 +4073,7 @@ def create_app(project_root: Path | None = None) -> FastAPI:
             return materialized_radar_response(
                 request, cache_key, own_store_codes, load_projection,
                 list_query, prefer_cached, own=True, own_scope=own_store_scope,
+                interval=(start_date, end_date),
             )
         prepared, refreshing = radar_page_cache.get_or_load(
             cache_key, loader=load_projection, prefer_cached=prefer_cached,
@@ -4067,13 +4088,17 @@ def create_app(project_root: Path | None = None) -> FastAPI:
     def materialized_radar_response(
         request: Request, cache_key: tuple[Any, ...], own_store_codes: set[str],
         loader: Callable[..., Any], query: RadarListQuery, prefer_cached: bool, *, own: bool,
-        own_scope: str,
+        own_scope: str, interval: tuple[date | None, date | None],
     ) -> Response:
-        permissions = json.dumps(request.state.erp_user.as_dict(), sort_keys=True)
+        # Authentication and effective stores are resolved on every request.
+        # Cards contain no user-specific state; personal pools are filtered below.
+        # Equal authorized data scopes can therefore reuse the same disk projection.
+        permissions = json.dumps(sorted(own_store_codes)) if own else ""
         boundary = data_revisions.radar_access_token(own_store_codes, permissions=permissions, own=own)
         # Day rollover refreshes official sales, but keeps the previous complete
         # generation available as a timestamped preview under the SAME permissions.
         sales_day = datetime.now(ZoneInfo("Asia/Shanghai")).date().isoformat() if own else ""
+        interval_version = repr(interval)
         watchlist: set[str] = set()
         if query.watchlist:
             with Session(read_engine) as session:
@@ -4089,11 +4114,13 @@ def create_app(project_root: Path | None = None) -> FastAPI:
             version=lambda: data_revisions._topic_token(
                 frozenset(("store", "competitors", "master") if own else ("competitors",)),
                 own_store_codes if own else (),
-            ) + sales_day + (data_revisions.radar_access_token(own_store_codes, permissions="") if own else ""),
+            ) + sales_day + interval_version + (data_revisions.radar_access_token(own_store_codes, permissions="") if own else ""),
             fingerprints=lambda: radar_fingerprints(
                 read_engine, own=own, store_codes=own_store_codes,
-                store_version=(data_revisions._topic_token(frozenset(("store", "master")), own_store_codes)
-                               + sales_day + (data_revisions.radar_access_token(own_store_codes, permissions="") if own else "")),
+                store_version=(data_revisions._topic_token(frozenset(("master",)), own_store_codes) + sales_day
+                               if own else "") + interval_version,
+                store_versions={code: data_revisions._topic_token(frozenset(("store",)), (code,))
+                                for code in own_store_codes} if own else None,
             ),
             loader=loader, field="store_items" if own else "items", query=query,
             prefer_cached=prefer_cached, watchlist=watchlist,
@@ -4113,7 +4140,7 @@ def create_app(project_root: Path | None = None) -> FastAPI:
         request: Request, scope: str, start: str | None, end: str | None, *, own: bool,
         available: Mapping[str, Any],
     ) -> None:
-        if database_url.startswith("sqlite") or read_only_test_mode or getattr(request.state, "radar_warmup", False):
+        if database_url.startswith("sqlite") or read_only_test_mode or getattr(request.state, "radar_preparation", False) or getattr(request.state, "radar_warmup", False):
             return
         store = request.state.erp_store
         if store is None:
@@ -4130,14 +4157,15 @@ def create_app(project_root: Path | None = None) -> FastAPI:
         for saved in initial_warm_requests(read_engine):
             radar_warmup.remember(saved)
 
-    def dispatch_radar_warmup(saved: RadarWarmRequest) -> None:
+    def dispatch_radar_warmup(saved: RadarWarmRequest, *, wait: bool = False) -> Response | None:
         identity = resolve_warm_request(read_engine, saved)
         if identity is None:
-            return
+            return None
         user, store = identity
         request = Request({"type": "http", "method": "GET", "path": "/", "headers": []})
         request.state.erp_user, request.state.erp_store = user, store
-        request.state.radar_warmup = True
+        request.state.radar_warmup = not wait
+        request.state.radar_preparation = True
         query = RadarListQuery(page=1, page_size=20, q="", seller="", stock="全部",
                                status="全部", follower="全部", signal="全部",
                                direction="desc", sort="signal", watchlist=False)
@@ -4145,9 +4173,36 @@ def create_app(project_root: Path | None = None) -> FastAPI:
         end = date.fromisoformat(saved.end) if saved.end else None
         with store_scope(store.code):
             if saved.own:
-                own_store_competitors(request, query, start, end, None, saved.scope, True)  # type: ignore[arg-type]
+                return own_store_competitors(request, query, start, end, None, saved.scope, not wait)  # type: ignore[arg-type]
             else:
-                competitors(request, query, start, end, saved.scope, False, True)  # type: ignore[arg-type]
+                return competitors(request, query, start, end, saved.scope, False, not wait)  # type: ignore[arg-type]
+
+    def prepare_radar_release() -> list[dict[str, Any]]:
+        """Local release hook; resolve live identities without creating sessions."""
+        results = []
+        required = initial_warm_requests(read_engine)
+        if any(sum(r.own == own for r in required) > 32 for own in (False, True)):
+            raise RuntimeError("Required radar scopes exceed preparation capacity; old service retained")
+        for saved in required:
+            response = dispatch_radar_warmup(saved, wait=True)
+            if response is None or response.status_code != 200:
+                raise RuntimeError("Radar preparation identity changed; retry before release")
+            payload = json.loads(bytes(response.body))
+            results.append({"user_id": saved.user_id, "store": saved.store_code,
+                            "own": saved.own, "scope": saved.scope, "start": saved.start, "end": saved.end,
+                            "total": payload["pagination"]["total"],
+                            "generated": response.headers["x-erp-generated-at"]})
+        return results
+
+    app.state.prepare_radar_release = prepare_radar_release
+
+    @app.get("/api/internal/release-status")
+    def release_status(request: Request) -> dict[str, Any]:
+        if not _is_loopback_request(request) or request.headers.get("x-forwarded-for"):
+            raise HTTPException(403, "发布状态只允许本机读取")
+        return {"draining": release_gate.held(), "active_requests": release_gate.active_requests,
+                "web_only": web_only, "namespace": radar_namespace,
+                "background_busy": search_ranking_lock.locked() or search_ranking_batch.has_running_task()}
 
     @app.get("/api/competitors/link-health")
     def competitor_link_health(
@@ -6229,6 +6284,7 @@ def create_app(project_root: Path | None = None) -> FastAPI:
         collect_target=collect_scheduled_target,
         logger=competitor_logger,
         continuous_rounds=True,
+        suspend_dispatch=release_gate.held,
     )
     app.state.scheduled_competitor_runner = scheduled_competitor_runner
     app.state.web_only = web_only

@@ -110,6 +110,7 @@ class ScheduledCompetitorBatchRunner:
         pending_retry_delay_seconds: float = PENDING_RETRY_DELAY_SECONDS,
         pending_retry_round_limit: int = PENDING_RETRY_ROUND_LIMIT,
         continuous_rounds: bool = False,
+        suspend_dispatch: Callable[[], bool] | None = None,
     ) -> None:
         self._registry = registry
         self._journal_path = journal_path
@@ -125,6 +126,7 @@ class ScheduledCompetitorBatchRunner:
         self._pending_retry_delay_seconds = max(0.0, pending_retry_delay_seconds)
         self._pending_retry_round_limit = max(0, pending_retry_round_limit)
         self._continuous_rounds = continuous_rounds
+        self._suspend_dispatch = suspend_dispatch or (lambda: False)
         self._lock = asyncio.Lock()
         self._task: asyncio.Task[None] | None = None
         self._closing = False
@@ -823,6 +825,10 @@ class ScheduledCompetitorBatchRunner:
     async def _run_current_queue(self) -> None:
         batch_id = str(self._state.get("batch_id") or "")
         while not self._closing and self._state.get("run_status") == "running":
+            if self._suspend_dispatch():
+                # Finish and persist the active item first; retain queue/revision.
+                await self._sleep(self._busy_poll_seconds)
+                continue
             self._merge_server_queue()
             queue = self._queue()
             if not queue:

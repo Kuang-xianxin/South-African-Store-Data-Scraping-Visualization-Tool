@@ -719,6 +719,10 @@ class SearchRankingBatchController:
             self._state["updated_at"] = _iso_now()
             self._persist_state()
 
+    def has_running_task(self) -> bool:
+        """A release may retain paused work but must not cancel an active call."""
+        return self._task is not None and not self._task.done()
+
     async def close(self) -> None:
         task = self._task
         if task is None or task.done():

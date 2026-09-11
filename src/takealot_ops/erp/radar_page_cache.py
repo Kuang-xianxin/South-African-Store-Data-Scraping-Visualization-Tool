@@ -35,6 +35,7 @@ def _brotli_body(body: bytes) -> bytes | None:
 
 def radar_code_fingerprint(root: Path) -> str:
     """Never reuse a persisted projection across a backend code change."""
+    root = Path(os.environ.get("TAKEALOT_RELEASE_SOURCE_ROOT", str(root)))
     digest = hashlib.sha256(b"radar-page-response-v1")
     for path in sorted((root / "src" / "takealot_ops").rglob("*.py")):
         digest.update(str(path.relative_to(root)).encode())
