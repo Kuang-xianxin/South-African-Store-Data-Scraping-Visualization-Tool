@@ -33,6 +33,9 @@ def test_two_nodes_share_budget_and_rollover_without_rebaselining(tmp_path, monk
         monkeypatch.setattr(module, "CodexAppServerClient", original_client)
     lock = Lock()
     saved = {"state": original_guard(tmp_path / "seed.json").observe(window(31))}
+    saved["state"].update({"budget_percent": 10, "ceiling_used_percent": 41,
+                          "current_used_percent": 91, "status": "exhausted"})
+    saved["state"].pop("system_budget_enforced")
 
     @contextmanager
     def transaction(*, write):
@@ -47,12 +50,13 @@ def test_two_nodes_share_budget_and_rollover_without_rebaselining(tmp_path, monk
     main = cli.CodexWeeklyQuotaGuard(tmp_path / "main-never-created.json")
     laptop = cli.CodexWeeklyQuotaGuard(tmp_path / "laptop-never-created.json")
     assert main.observe(window(35))["baseline_used_percent"] == 31
-    assert laptop.observe(window(40))["remaining_percentage_points"] == 1
-    assert main.observe(window(41))["status"] == "exhausted"
-    assert laptop.status()["ceiling_used_percent"] == 41
+    assert laptop.observe(window(40))["remaining_percentage_points"] == 60
+    assert main.observe(window(91))["status"] == "active"
+    assert laptop.status()["ceiling_used_percent"] == 100
+    assert main.observe(window(100))["status"] == "exhausted"
     with ThreadPoolExecutor(2) as pool:
         states = list(pool.map(lambda guard: guard.observe(window(2, 2_000_604_800)), [main, laptop]))
-    assert all(s["baseline_used_percent"] == 2 and s["ceiling_used_percent"] == 12 for s in states)
+    assert all(s["baseline_used_percent"] == 2 and s["ceiling_used_percent"] == 100 for s in states)
     assert not (tmp_path / "main-never-created.json").exists()
     assert not (tmp_path / "laptop-never-created.json").exists()
 

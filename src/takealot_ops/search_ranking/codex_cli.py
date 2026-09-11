@@ -20,6 +20,8 @@ CODEX_TITLE_MODEL = "gpt-5.6-sol"
 CODEX_TITLE_EFFORT = "high"
 CODEX_RATE_LIMIT_ID = "codex"
 CODEX_WEEKLY_WINDOW_MINUTES = 10_080
+# Historical authorization contract for the retired Terra auto-rerun only.
+# Live title analysis no longer enforces an additional ERP weekly budget.
 CODEX_WEEKLY_BUDGET_PERCENT = 10
 CODEX_QUOTA_STATE_SCHEMA_VERSION = 1
 _PROTOCOL_LINE_LIMIT = 1_048_576
@@ -52,7 +54,7 @@ class CodexCliProviderError(CodexCliError):
 
 
 class CodexCliQuotaExceededError(CodexCliProviderError):
-    """The persisted ten-percentage-point weekly budget is exhausted."""
+    """The account's official weekly quota is exhausted."""
 
 
 @dataclass(frozen=True)
@@ -106,7 +108,7 @@ def resolve_codex_cli_executable(project_root: Path) -> Path | None:
 
 
 class CodexWeeklyQuotaGuard:
-    """Persist at most ten added percentage points in each exact weekly window."""
+    """Track the exact official weekly window without an additional ERP budget."""
 
     def __init__(self, state_path: Path) -> None:
         self.state_path = state_path
@@ -124,22 +126,19 @@ class CodexWeeklyQuotaGuard:
     def evaluate(
         self, window: CodexRateLimitWindow, state: Mapping[str, Any] | None
     ) -> dict[str, Any]:
-        """Apply the same budget rules to a state locked by the caller."""
+        """Preserve historical baselines, including legacy exhausted 10-point states."""
         if state is None or not self._same_window(state, window):
             baseline = window.used_percent
-            ceiling = min(100, baseline + CODEX_WEEKLY_BUDGET_PERCENT)
             started_at = _iso_now()
         else:
             baseline = _bounded_percent(state.get("baseline_used_percent"), "额度基线")
-            ceiling = _bounded_percent(state.get("ceiling_used_percent"), "额度上限")
-            if ceiling != min(100, baseline + CODEX_WEEKLY_BUDGET_PERCENT):
-                raise CodexCliConfigurationError("Codex 周额度状态的10%上限校验失败")
             if window.used_percent < baseline:
                 raise CodexCliConfigurationError(
-                    "Codex 周额度使用率低于已持久化基线，为防止绕过上限已停止调用"
+                    "Codex 周额度使用率低于已持久化基线，请核对账号与官方额度窗口"
                 )
             started_at = str(state.get("started_at") or _iso_now())
 
+        ceiling = 100
         consumed = max(0, window.used_percent - baseline)
         remaining = max(0, ceiling - window.used_percent)
         reached = window.used_percent >= ceiling
@@ -156,11 +155,12 @@ class CodexWeeklyQuotaGuard:
             "current_used_percent": window.used_percent,
             "consumed_percentage_points": consumed,
             "remaining_percentage_points": remaining,
-            "budget_percent": CODEX_WEEKLY_BUDGET_PERCENT,
+            "budget_percent": None,
+            "system_budget_enforced": False,
             "status": "exhausted" if reached else "active",
             "started_at": started_at,
             "updated_at": _iso_now(),
-            "interpretation": "additional_percentage_points_in_same_weekly_window",
+            "interpretation": "official_weekly_window_remaining",
         }
         return payload
 
@@ -718,10 +718,9 @@ def _bounded_percent(value: Any, label: str) -> int:
 
 def _quota_exhausted_message(quota: Mapping[str, Any]) -> str:
     return (
-        "Codex Sol 当前七天额度已触发本系统 10% 硬上限："
-        f"基线 {quota.get('baseline_used_percent')}%，"
-        f"当前 {quota.get('current_used_percent')}%，"
-        f"上限 {quota.get('ceiling_used_percent')}%"
+        "Codex Sol 官方七天额度已用尽："
+        f"当前 {quota.get('current_used_percent')}%；"
+        "本系统未设置额外周额度上限，请等待官方额度恢复"
     )
 
 

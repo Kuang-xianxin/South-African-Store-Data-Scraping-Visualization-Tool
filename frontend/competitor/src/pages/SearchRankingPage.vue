@@ -503,7 +503,7 @@ async function startFullBatch() {
   const accepted = window.confirm([
     `确认串行分析 ${preview.store_count} 个授权店铺的 ${preview.eligible_count} 个商品族（由 ${preview.eligible_offer_count} 条有效 Offer 按同店同 PLID 合并）？`,
     `预计 ${preview.fresh_vision_count} 个商品族需新双阶段模型分析（隔离识图 + 图文融合），约 ${formatWholeNumber(preview.estimated_usage.total_tokens)} Token。`,
-    cost.pricing_mode === "codex_subscription_quota" ? "使用 Codex 登录额度；本系统每周窗口最多新增消耗10个百分点，不按 API 单价估算。" : `常见费用约 ¥${cost.typical_low_cny.toFixed(2)}–¥${cost.typical_high_cny.toFixed(2)}，保守上界约 ¥${cost.conservative_upper_cny.toFixed(2)}。`,
+    cost.pricing_mode === "codex_subscription_quota" ? "使用 Codex 登录额度；本系统不再设置额外周额度上限，仍受官方额度限制，不按 API 单价估算。" : `常见费用约 ¥${cost.typical_low_cny.toFixed(2)}–¥${cost.typical_high_cny.toFixed(2)}，保守上界约 ¥${cost.conservative_upper_cny.toFixed(2)}。`,
     `预计用时约 ${duration.likely_min_hours}–${duration.likely_max_hours} 小时。公开请求全程单并发、每次间隔 ${policy?.public_request_min_interval_seconds ?? 3}–${policy?.public_request_max_interval_seconds ?? 5} 秒；不倒搜、不自动重试，错误后暂停。`,
   ].join("\n\n"));
   if (!accepted) return;
@@ -586,7 +586,7 @@ async function restartFullBatch() {
   const accepted = window.confirm([
     `确认丢弃旧批次的剩余进度，并从第 1 个商品族重新开始 ${preview.store_count} 店 ${preview.eligible_count} 个商品族？`,
     `预计约 ${formatWholeNumber(preview.estimated_usage.total_tokens)} Token。`,
-    preview.estimated_cost.pricing_mode === "codex_subscription_quota" ? "计入 Codex 登录额度，每周窗口最多新增消耗10个百分点。" : `常见费用 ¥${preview.estimated_cost.typical_low_cny.toFixed(2)}–¥${preview.estimated_cost.typical_high_cny.toFixed(2)}。`,
+    preview.estimated_cost.pricing_mode === "codex_subscription_quota" ? "计入 Codex 登录额度，本系统无额外周额度上限，仍受官方额度限制。" : `常见费用 ¥${preview.estimated_cost.typical_low_cny.toFixed(2)}–¥${preview.estimated_cost.typical_high_cny.toFixed(2)}。`,
     "已完成商品族也会重新分析；系统会再次核对快照，仍保持单并发且不自动重试。",
   ].join("\n\n"));
   if (!accepted) return;
@@ -1542,7 +1542,7 @@ function errorMessage(caught: unknown, fallback: string) {
           <article v-if="batchPreview.estimated_cost.pricing_mode === 'codex_subscription_quota'">
             <span>模型用量</span>
             <strong>计入 Codex 额度</strong>
-            <small>每周窗口最多新增10个百分点；人民币费用不适用</small>
+            <small>无系统额外周额度上限；仍受官方额度限制</small>
           </article>
           <article v-else>
             <span>人民币预估</span>

@@ -12,6 +12,7 @@ from takealot_ops.search_ranking.codex_cli import (
     CODEX_TITLE_MODEL,
     CodexCliConfigurationError,
     CodexCliProviderError,
+    CodexCliQuotaExceededError,
     CodexRateLimitWindow,
     CodexWeeklyQuotaGuard,
     _select_weekly_codex_window,
@@ -29,7 +30,7 @@ def _window(*, used_percent: int, resets_at: int = 2_000_000_000) -> CodexRateLi
     )
 
 
-def test_quota_guard_persists_one_ten_point_budget_per_weekly_window(
+def test_quota_guard_tracks_official_quota_without_an_extra_weekly_budget(
     tmp_path: Path,
 ) -> None:
     state_path = tmp_path / "quota.json"
@@ -37,17 +38,22 @@ def test_quota_guard_persists_one_ten_point_budget_per_weekly_window(
 
     baseline = guard.observe(_window(used_percent=43))
     middle = guard.observe(_window(used_percent=49))
-    exhausted = guard.observe(_window(used_percent=53))
+    beyond_old_limit = guard.observe(_window(used_percent=91))
+    exhausted = guard.observe(_window(used_percent=100))
 
     assert baseline["model"] == CODEX_TITLE_MODEL
     assert baseline["baseline_used_percent"] == 43
-    assert baseline["ceiling_used_percent"] == 53
+    assert baseline["ceiling_used_percent"] == 100
+    assert baseline["budget_percent"] is None
+    assert baseline["system_budget_enforced"] is False
     assert middle["baseline_used_percent"] == 43
     assert middle["consumed_percentage_points"] == 6
-    assert middle["remaining_percentage_points"] == 4
+    assert middle["remaining_percentage_points"] == 51
+    assert beyond_old_limit["status"] == "active"
+    assert beyond_old_limit["remaining_percentage_points"] == 9
     assert exhausted["status"] == "exhausted"
     assert exhausted["remaining_percentage_points"] == 0
-    assert json.loads(state_path.read_text(encoding="utf-8"))["ceiling_used_percent"] == 53
+    assert json.loads(state_path.read_text(encoding="utf-8"))["ceiling_used_percent"] == 100
 
 
 def test_quota_guard_opens_a_new_budget_only_after_backend_window_changes(
@@ -59,8 +65,53 @@ def test_quota_guard_opens_a_new_budget_only_after_backend_window_changes(
     refreshed = guard.observe(_window(used_percent=3, resets_at=2_000_604_800))
 
     assert refreshed["baseline_used_percent"] == 3
-    assert refreshed["ceiling_used_percent"] == 13
+    assert refreshed["ceiling_used_percent"] == 100
     assert refreshed["status"] == "active"
+
+
+@pytest.mark.parametrize("used_percent", [91, 99, 100])
+def test_preflight_migrates_legacy_exhaustion_without_resetting_usage(
+    tmp_path: Path, used_percent: int,
+) -> None:
+    path = tmp_path / "quota.json"
+    guard = CodexWeeklyQuotaGuard(path)
+    legacy = guard.observe(_window(used_percent=31))
+    legacy.update({
+        "budget_percent": 10,
+        "ceiling_used_percent": 41,
+        "current_used_percent": 91,
+        "remaining_percentage_points": 0,
+        "status": "exhausted",
+        "interpretation": "additional_percentage_points_in_same_weekly_window",
+    })
+    legacy.pop("system_budget_enforced")
+    path.write_text(json.dumps(legacy), encoding="utf-8")
+
+    class PreflightClient(CodexAppServerClient):
+        async def _request(self, method: str, params: object) -> dict[str, object]:
+            assert method == "account/rateLimits/read"  # No model turn is needed.
+            return {"rateLimits": {"limitId": "codex", "primary": {
+                "usedPercent": used_percent, "windowDurationMins": 10_080,
+                "resetsAt": 2_000_000_000,
+            }}}
+
+    client = PreflightClient(
+        tmp_path / "codex", project_root=tmp_path, quota_guard=guard, timeout_seconds=1,
+    )
+    if used_percent == 100:
+        with pytest.raises(CodexCliQuotaExceededError, match="官方七天额度已用尽"):
+            asyncio.run(client.preflight_quota())
+    else:
+        assert asyncio.run(client.preflight_quota())["status"] == "active"
+    saved = json.loads(path.read_text(encoding="utf-8"))
+    assert saved["baseline_used_percent"] == 31
+    assert saved["started_at"] == legacy["started_at"]
+    assert saved["resets_at"] == legacy["resets_at"]
+    assert saved["current_used_percent"] == used_percent
+    assert saved["consumed_percentage_points"] == used_percent - 31
+    assert saved["remaining_percentage_points"] == 100 - used_percent
+    assert saved["budget_percent"] is None
+    assert saved["system_budget_enforced"] is False
 
 
 def test_quota_guard_fails_closed_if_usage_drops_inside_same_window(tmp_path: Path) -> None:
@@ -268,5 +319,5 @@ def test_model_switch_preserves_shared_weekly_budget(tmp_path: Path) -> None:
 
     assert migrated["model"] == "gpt-5.6-sol"
     assert migrated["baseline_used_percent"] == 43
-    assert migrated["ceiling_used_percent"] == 53
-    assert migrated["remaining_percentage_points"] == 4
+    assert migrated["ceiling_used_percent"] == 100
+    assert migrated["remaining_percentage_points"] == 51
