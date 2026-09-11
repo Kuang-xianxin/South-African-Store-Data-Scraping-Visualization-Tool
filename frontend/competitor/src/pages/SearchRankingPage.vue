@@ -2,8 +2,10 @@
 import { cachedNumberFormatter } from "../numberFormatters";
 import TitleOptimizationReview from "../components/TitleOptimizationReview.vue";
 import TitleProductPicker from "../components/TitleProductPicker.vue";
+import CliUsageDialog from "../components/CliUsageDialog.vue";
 import { useLiveUpdates } from "../liveUpdates";
 import { computed, nextTick, onMounted, onUnmounted, ref, shallowRef, watch } from "vue";
+const showCliUsage = ref(false);
 
 import {
   analyzeSearchRanking,
@@ -1441,6 +1443,8 @@ function errorMessage(caught: unknown, fallback: string) {
 
 <template>
   <div class="ranking-page">
+    <div style="display: flex; justify-content: flex-end; margin-bottom: 8px"><button type="button" @click="showCliUsage = true">我的 CLI 用量</button></div>
+    <CliUsageDialog v-if="showCliUsage" @close="showCliUsage = false" />
     <details class="optimization-auxiliary">
       <summary>分析设置与批量任务</summary>
     <section class="method-banner">

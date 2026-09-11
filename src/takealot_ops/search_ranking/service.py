@@ -2852,6 +2852,11 @@ class SearchRankingService:
         return self.detail_payload(offer_id) or detail
 
     async def review_title_benchmarks(self, offer_id: str) -> dict[str, Any]:
+        from takealot_ops.search_ranking.cli_usage import usage_operation
+        with usage_operation(self.database_url, offer_id):
+            return await self._review_title_benchmarks(offer_id)
+
+    async def _review_title_benchmarks(self, offer_id: str) -> dict[str, Any]:
         """Explicit model operation over saved search evidence; never recollect ranks."""
         detail = self.detail_payload(offer_id)
         if detail is None or not detail.get("analysis"):
@@ -3161,6 +3166,11 @@ class SearchRankingService:
         return detail
 
     async def analyze_offer(self, offer_id: str) -> dict[str, Any]:
+        from takealot_ops.search_ranking.cli_usage import usage_operation
+        with usage_operation(self.database_url, offer_id):
+            return await self._analyze_offer(offer_id)
+
+    async def _analyze_offer(self, offer_id: str) -> dict[str, Any]:
         requested_offer_id = offer_id
         engine = create_engine_for_database_url(self.database_url)
         analysis_id: int | None = None

@@ -32,6 +32,7 @@ from takealot_ops.search_ranking.service import (
 from takealot_ops.storage.migrations import create_read_only_engine
 from takealot_ops.storage.models import SearchRankingAnalysis
 from takealot_ops.storage.store_context import store_scope
+from takealot_ops.search_ranking.cli_usage import batch_usage_actor, current_usage_actor
 
 
 LOGGER = logging.getLogger(__name__)
@@ -532,6 +533,8 @@ class SearchRankingBatchController:
                 "batch_id": str(uuid.uuid4()),
                 "snapshot_id": snapshot_id,
                 "owner_username": actor_username,
+                "owner_user_id": (current_usage_actor().user_id
+                                  if current_usage_actor().username == actor_username else None),
                 "owner_display_name": actor_display_name or actor_username,
                 "status": "queued",
                 "created_at": now,
@@ -1076,8 +1079,10 @@ class SearchRankingBatchController:
                     message: str | None = None
                     pause_after_result = False
                     attempt_started_at = _utcnow().replace(tzinfo=None)
+                    with self._state_lock:
+                        usage_owner = dict(self._state)
                     try:
-                        with store_scope(target["store_code"]):
+                        with store_scope(target["store_code"]), batch_usage_actor(usage_owner):
                             detail = await self.service.analyze_offer(target["offer_id"])
                         analysis_payload = (
                             detail.get("analysis") if isinstance(detail, Mapping) else None

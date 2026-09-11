@@ -221,6 +221,7 @@ class CodexAppServerClient:
         self._stderr_lines: list[str] = []
         self._queued_messages: list[dict[str, Any]] = []
         self._next_request_id = 1
+        self._usage_attempt: Any = None
 
     async def __aenter__(self) -> CodexAppServerClient:
         self.runtime_cwd.mkdir(parents=True, exist_ok=True)
@@ -314,6 +315,35 @@ class CodexAppServerClient:
         image_path: Path | None,
         output_schema: Mapping[str, Any],
     ) -> CodexStructuredTurnResult:
+        from takealot_ops.search_ranking.cli_usage import start_usage_attempt
+
+        attempt = start_usage_attempt(model=CODEX_TITLE_MODEL, stage=stage)
+        self._usage_attempt = attempt
+        error: BaseException | None = None
+        try:
+            return await self._run_structured_turn(
+                stage=stage, system_prompt=system_prompt, user_text=user_text,
+                image_path=image_path, output_schema=output_schema,
+            )
+        except BaseException as exc:
+            error = exc
+            raise
+        finally:
+            try:
+                if attempt is not None:
+                    attempt.finish(error=error)
+            finally:
+                self._usage_attempt = None
+
+    async def _run_structured_turn(
+        self,
+        *,
+        stage: str,
+        system_prompt: str,
+        user_text: str,
+        image_path: Path | None,
+        output_schema: Mapping[str, Any],
+    ) -> CodexStructuredTurnResult:
         await self.preflight_quota()
         thread_response = await self._request(
             "thread/start",
@@ -342,6 +372,8 @@ class CodexAppServerClient:
         if thread.get("modelProvider") not in {None, "openai"}:
             raise CodexCliConfigurationError("Codex CLI 会话模型提供方不是 OpenAI")
         thread_id = str(thread["id"])
+        if self._usage_attempt is not None:
+            self._usage_attempt.dispatch()
         turn_response = await self._request(
             "turn/start",
             {
@@ -364,6 +396,8 @@ class CodexAppServerClient:
         if not isinstance(turn, Mapping) or not str(turn.get("id") or ""):
             raise CodexCliProviderError(f"Codex CLI {stage} 阶段没有启动可用回合")
         turn_id = str(turn["id"])
+        if self._usage_attempt is not None:
+            self._usage_attempt.bind_turn(turn_id)
         text, usage = await self._collect_turn(thread_id=thread_id, turn_id=turn_id, stage=stage)
         try:
             quota = await self._refresh_quota()
@@ -467,6 +501,8 @@ class CodexAppServerClient:
                 token_usage = normalized.get("tokenUsage")
                 last = token_usage.get("last") if isinstance(token_usage, Mapping) else None
                 usage = _normalized_usage(last)
+                if self._usage_attempt is not None and isinstance(last, Mapping):
+                    self._usage_attempt.observe(last)
                 continue
             if method == "item/completed" and normalized.get("turnId") == turn_id:
                 item = normalized.get("item")

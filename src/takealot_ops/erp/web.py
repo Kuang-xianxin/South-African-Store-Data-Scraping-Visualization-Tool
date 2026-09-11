@@ -1652,7 +1652,8 @@ def create_app(project_root: Path | None = None) -> FastAPI:
             )
         request.state.erp_store = accessible_store
         scoped_store_code = accessible_store.code if accessible_store is not None else "current"
-        with store_scope(scoped_store_code):
+        from takealot_ops.search_ranking.cli_usage import usage_actor
+        with store_scope(scoped_store_code), usage_actor(session.user.id, session.user.username):
             downstream_response = await call_next(request)
         return renew_app_session_cookie(
             downstream_response,
@@ -1748,6 +1749,25 @@ def create_app(project_root: Path | None = None) -> FastAPI:
     @app.get("/api/auth/users")
     def auth_users() -> dict[str, Any]:
         return {"items": auth.list_users()}
+
+    @app.get("/api/erp/cli-usage")
+    def cli_usage(
+        request: Request,
+        period: Literal["today", "7d", "30d", "all"] = "30d",
+        user_id: int | None = Query(default=None, ge=1),
+        all_users: bool = False,
+    ) -> dict[str, Any]:
+        from takealot_ops.search_ranking.cli_usage import usage_summary
+        actor = request.state.erp_user
+        target = user_id if user_id is not None else actor.id
+        if (all_users or target != actor.id) and not actor.can(USERS_MANAGE):
+            raise HTTPException(status_code=403, detail="仅管理员可查看其他账号的CLI用量")
+        if all_users and user_id is not None:
+            raise HTTPException(status_code=422, detail="不能同时选择全部账号与单个账号")
+        result = usage_summary(read_engine, user_id=None if all_users else target, period=period)
+        if not all_users and not result["by_user"]:
+            raise HTTPException(status_code=404, detail="未找到这个ERP账号或其用量记录")
+        return result
 
     @app.get("/api/auth/stores")
     def auth_stores() -> dict[str, Any]:
@@ -7684,6 +7704,8 @@ def _required_permission(path: str, method: str) -> str | tuple[str, ...] | None
     safe_method = method in {"GET", "HEAD", "OPTIONS"}
     if path == "/api/erp/data-updates" and safe_method:
         return None  # Authenticated; the endpoint filters each module by its permission.
+    if path == "/api/erp/cli-usage" and safe_method:
+        return None  # Authenticated; only users.manage may select another account.
     if path == "/api/auth/logout":
         return None
     if path.startswith(("/api/auth/users", "/api/auth/stores")):

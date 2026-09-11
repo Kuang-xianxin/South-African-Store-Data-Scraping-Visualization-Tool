@@ -8,6 +8,7 @@ from typing import Any
 
 from sqlalchemy import (
     JSON,
+    BigInteger,
     Boolean,
     CheckConstraint,
     Date,
@@ -157,6 +158,36 @@ class OfferSnapshot(StoreScopedMixin, Base):
     seller_available_stock: Mapped[int | None] = mapped_column(Integer)
     takealot_stock_in_receiving: Mapped[int | None] = mapped_column(Integer)
     takealot_stock_on_way: Mapped[int | None] = mapped_column(Integer)
+
+
+class ErpCliUsageEvent(Base):
+    """One CLI model attempt, attributed at dispatch and updated idempotently."""
+
+    __tablename__ = "erp_cli_usage_events"
+    __table_args__ = (
+        Index("ix_cli_usage_actor_created", "actor_user_id", "created_at"),
+        Index("ix_cli_usage_store_created", "store_code", "created_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    actor_user_id: Mapped[int | None] = mapped_column(Integer)
+    actor_username: Mapped[str | None] = mapped_column(String(64))
+    store_code: Mapped[str] = mapped_column(String(64), nullable=False)
+    offer_id: Mapped[str | None] = mapped_column(String(100))
+    batch_id: Mapped[str | None] = mapped_column(String(64))
+    model: Mapped[str] = mapped_column(String(100), nullable=False)
+    stage: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[str] = mapped_column(String(20), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, index=True)
+    dispatched_at: Mapped[datetime | None] = mapped_column(DateTime)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime)
+    turn_id: Mapped[str | None] = mapped_column(String(100))
+    input_tokens: Mapped[int | None] = mapped_column(BigInteger)
+    cached_input_tokens: Mapped[int | None] = mapped_column(BigInteger)
+    output_tokens: Mapped[int | None] = mapped_column(BigInteger)
+    reasoning_output_tokens: Mapped[int | None] = mapped_column(BigInteger)
+    total_tokens: Mapped[int | None] = mapped_column(BigInteger)
+    error_kind: Mapped[str | None] = mapped_column(String(100))
 
 
 class SearchRankingAnalysis(StoreScopedMixin, Base):

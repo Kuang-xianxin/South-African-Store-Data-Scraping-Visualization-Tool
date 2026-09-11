@@ -1,4 +1,12 @@
 import { DATA_MUTATED_EVENT, type DataVersions } from "./liveUpdates";
+import type { CliUsagePayload, CliUsagePeriod } from "./cliUsage";
+
+export function fetchCliUsage(period: CliUsagePeriod, userId?: number, allUsers = false): Promise<CliUsagePayload> {
+  const query = new URLSearchParams({ period });
+  if (userId !== undefined) query.set("user_id", String(userId));
+  if (allUsers) query.set("all_users", "true");
+  return request<CliUsagePayload>(`/api/erp/cli-usage?${query}`);
+}
 import type {
   AnomalyProductPayload,
   CollectResult,

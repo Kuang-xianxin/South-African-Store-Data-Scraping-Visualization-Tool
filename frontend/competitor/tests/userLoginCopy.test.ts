@@ -35,6 +35,7 @@ async function harness(overrides: Record<string, unknown> = {}) {
     require: (name: string) => {
       if (name === "vue") return { ...vue, onBeforeUnmount: (fn: () => void) => lifecycle.push(fn), onDeactivated: () => {} };
       if (name === "../api") return api;
+      if (name === "../components/CliUsageDialog.vue") return { default: {} };
       if (name === "../permissions") return permissions;
       if (name === "../liveUpdates") return { useLiveUpdates: () => {} };
       if (name === "../userLoginCopy") return { ERP_PUBLIC_LOGIN_URL, formatUserLogin, copyUserLogin: async (text: string) => { copied.push(text); if (overrides.clipboardFails) throw Error("denied"); } };

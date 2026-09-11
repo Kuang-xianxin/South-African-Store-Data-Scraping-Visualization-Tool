@@ -1,5 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onDeactivated, ref } from "vue";
+import CliUsageDialog from "../components/CliUsageDialog.vue";
+const usageSelection = ref<{ userId?: number; allUsers: boolean; title: string } | null>(null);
 import { useLiveUpdates } from "../liveUpdates";
 import { copyUserLogin, ERP_PUBLIC_LOGIN_URL, formatUserLogin } from "../userLoginCopy";
 
@@ -426,6 +428,7 @@ function formatDate(value: string | null) {
 
 <template>
   <div class="erp-page users-page">
+    <CliUsageDialog v-if="usageSelection" :user-id="usageSelection.userId" :all-users="usageSelection.allUsers" :title="usageSelection.title" @close="usageSelection = null" />
     <section class="erp-panel permission-overview">
       <div class="section-title">
         <div>
@@ -617,6 +620,7 @@ function formatDate(value: string | null) {
           <h2>现有账号</h2>
         </div>
         <span>{{ users.length }} 个账号 · 修改后重新登录生效</span>
+        <button type="button" @click="usageSelection = { allUsers: true, title: '全部账号 CLI 用量' }">全部 CLI 用量</button>
       </div>
 
       <div v-if="loading" class="state-card">正在读取用户列表…</div>
@@ -671,6 +675,7 @@ function formatDate(value: string | null) {
               <span>套用会覆盖自定义权限</span>
             </div>
             <div class="account-actions">
+              <button type="button" @click="usageSelection = { userId: user.id, allUsers: false, title: `${user.display_name}的 CLI 用量` }">CLI 用量</button>
               <button
                 type="button"
                 class="copy-login-button"
